@@ -1,0 +1,18 @@
+# Build
+build/
+cmake-build-*/
+
+# IDE
+.idea/
+*.swp
+*~
+
+# Vendored binaries (download locally)
+vendor/onnxruntime*
+vendor/tokenizers-cpp/
+
+# Model files (large, download separately)
+models/model.onnx
+
+# OS
+.DS_Store
