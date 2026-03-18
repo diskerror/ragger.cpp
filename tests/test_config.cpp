@@ -1,7 +1,9 @@
 #include "ragger/config.h"
 #include <cassert>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <filesystem>
 
 int main() {
     // expand_path with ~
@@ -15,9 +17,50 @@ int main() {
     assert(ragger::expand_path("/absolute/path") == "/absolute/path");
     assert(ragger::expand_path("relative/path") == "relative/path");
 
-    // constants
-    assert(ragger::EMBEDDING_DIMENSIONS == 384);
-    assert(ragger::DEFAULT_PORT == 8432);
+    // Test load_config directly with a temp file
+    std::string tmp_conf = "/tmp/ragger_test.conf";
+    {
+        std::ofstream f(tmp_conf);
+        f << "[server]\n"
+          << "host = 0.0.0.0\n"
+          << "port = 9999\n"
+          << "\n"
+          << "[embedding]\n"
+          << "dimensions = 384\n"
+          << "\n"
+          << "[search]\n"
+          << "bm25_enabled = false\n"
+          << "default_min_score = 0.5\n";
+    }
+
+    auto cfg = ragger::load_config(tmp_conf);
+
+    assert(cfg.host == "0.0.0.0");
+    assert(cfg.port == 9999);
+    assert(cfg.embedding_dimensions == 384);
+    assert(cfg.bm25_enabled == false);
+    assert(cfg.default_min_score == 0.5f);
+    // Defaults for unspecified values
+    assert(cfg.default_collection == "memory");
+    assert(cfg.bm25_weight == 0.3f);
+    assert(cfg.normalize_home_path == true);
+
+    std::filesystem::remove(tmp_conf);
+
+    // Test find_config_file — if ~/.ragger/ragger.conf exists, CLI path is ignored
+    // (that's by design: first found wins)
+    auto found = ragger::find_config_file("/nonexistent/ragger.conf");
+    // Should find one of the standard locations, not throw
+    assert(!found.empty());
+
+    // Test load_config with nonexistent file
+    bool threw = false;
+    try {
+        ragger::load_config("/nonexistent/ragger.conf");
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    assert(threw);
 
     std::cout << "test_config: all passed\n";
     return 0;

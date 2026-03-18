@@ -4,6 +4,7 @@
 
 #include "ragger/server.h"
 #include "ragger/memory.h"
+#include "ragger/lang.h"
 #include "nlohmann_json.hpp"
 #include "crow_all.h"
 
@@ -144,7 +145,7 @@ Server::Server(RaggerMemory& memory,
 Server::~Server() = default;
 
 void Server::run() {
-    std::cout << "Starting Ragger server on " 
+    std::cout << lang::MSG_SERVER_STARTING 
               << pImpl->host << ":" << pImpl->port << std::endl;
     
     pImpl->app.bindaddr(pImpl->host)

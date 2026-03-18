@@ -5,6 +5,7 @@
 #include "ragger/embedder.h"
 #include "ragger/bm25.h"
 #include "ragger/config.h"
+#include "ragger/lang.h"
 #include "nlohmann_json.hpp"
 
 #include <sqlite3.h>
@@ -30,7 +31,7 @@ namespace fs = std::filesystem;
 struct SqliteBackend::Impl {
     sqlite3*    db       = nullptr;
     Embedder&   embedder;
-    BM25Index   bm25{BM25_K1, BM25_B};
+    BM25Index   bm25;  // initialized after config loaded
     std::string db_path;
 
     // Embedding cache — invalidated on writes
@@ -42,9 +43,10 @@ struct SqliteBackend::Impl {
     std::vector<std::string>       cached_timestamps;
 
     Impl(Embedder& emb, const std::string& path)
-        : embedder(emb)
+        : embedder(emb), bm25(config().bm25_k1, config().bm25_b)
     {
-        db_path = path.empty() ? sqlite_db_path() : expand_path(path);
+        const auto& cfg = config();
+        db_path = path.empty() ? cfg.resolved_db_path() : expand_path(path);
 
         // Create parent dirs
         fs::create_directories(fs::path(db_path).parent_path());
@@ -54,7 +56,7 @@ struct SqliteBackend::Impl {
             std::string err = sqlite3_errmsg(db);
             sqlite3_close(db);
             db = nullptr;
-            throw std::runtime_error("SQLite open failed: " + err);
+            throw std::runtime_error(std::string(lang::ERR_SQLITE_OPEN) + err);
         }
 
         exec("PRAGMA journal_mode=WAL");
@@ -71,7 +73,7 @@ struct SqliteBackend::Impl {
         if (rc != SQLITE_OK) {
             std::string err = errmsg ? errmsg : "unknown error";
             sqlite3_free(errmsg);
-            throw std::runtime_error("SQL error: " + err);
+            throw std::runtime_error(std::string(lang::ERR_SQL) + err);
         }
     }
 
@@ -111,7 +113,7 @@ struct SqliteBackend::Impl {
 
     // ---- path normalization -------------------------------------------
     static std::string normalize_path(const std::string& text) {
-        if (!NORMALIZE_HOME_PATH) return text;
+        if (!config().normalize_home_path) return text;
         const char* home = std::getenv("HOME");
         if (!home) return text;
         std::string prefix = std::string(home) + "/";
@@ -161,7 +163,7 @@ struct SqliteBackend::Impl {
 
     // ---- load BM25 from storage ---------------------------------------
     void load_bm25_from_storage() {
-        if (!BM25_ENABLED) return;
+        if (!config().bm25_enabled) return;
 
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(db,
@@ -227,7 +229,7 @@ struct SqliteBackend::Impl {
 
         // Pack into Eigen matrix (rows × dims)
         int n = static_cast<int>(emb_rows.size());
-        int dims = n > 0 ? static_cast<int>(emb_rows[0].size()) : EMBEDDING_DIMENSIONS;
+        int dims = n > 0 ? static_cast<int>(emb_rows[0].size()) : config().embedding_dimensions;
         cached_embeddings.resize(n, dims);
         for (int i = 0; i < n; ++i) {
             cached_embeddings.row(i) =
@@ -235,7 +237,7 @@ struct SqliteBackend::Impl {
         }
 
         // Build / load BM25 index
-        if (BM25_ENABLED) {
+        if (config().bm25_enabled) {
             load_bm25_from_storage();
             if (!bm25.is_built() && !cached_texts.empty()) {
                 bm25.build(cached_texts);
@@ -247,7 +249,7 @@ struct SqliteBackend::Impl {
 
     // ---- usage tracking -----------------------------------------------
     void track_usage(const std::vector<int>& ids) {
-        if (!USAGE_TRACKING_ENABLED || ids.empty()) return;
+        if (ids.empty()) return;  // usage tracking always on
         auto ts = now_iso();
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(db,
@@ -267,7 +269,7 @@ struct SqliteBackend::Impl {
     std::string store(const std::string& raw_text, json metadata) {
         // Ensure collection
         if (!metadata.contains("collection")) {
-            metadata["collection"] = DEFAULT_COLLECTION;
+            metadata["collection"] = config().default_collection;
         }
 
         // Normalize paths
@@ -296,8 +298,8 @@ struct SqliteBackend::Impl {
         int rc = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
         if (rc != SQLITE_DONE) {
-            throw std::runtime_error("Failed to store: " +
-                                     std::string(sqlite3_errmsg(db)));
+            throw std::runtime_error(std::string(lang::ERR_STORE_FAILED) +
+                                     sqlite3_errmsg(db));
         }
 
         int memory_id = static_cast<int>(sqlite3_last_insert_rowid(db));
@@ -334,7 +336,7 @@ struct SqliteBackend::Impl {
             } else {
                 for (int i = 0; i < n; ++i) {
                     auto col = cached_metadata[i].value("collection",
-                                                        std::string(DEFAULT_COLLECTION));
+                                                        config().default_collection);
                     for (auto& c : collections)
                         if (col == c) { filtered_idx.push_back(i); break; }
                 }
@@ -360,7 +362,7 @@ struct SqliteBackend::Impl {
         Eigen::VectorXf q_norm = q.normalized();
 
         // Build filtered embedding matrix
-        Eigen::MatrixXf filt_emb(filtered_n, EMBEDDING_DIMENSIONS);
+        Eigen::MatrixXf filt_emb(filtered_n, config().embedding_dimensions);
         for (int i = 0; i < filtered_n; ++i) {
             filt_emb.row(i) = cached_embeddings.row(filtered_idx[i]);
         }
@@ -378,7 +380,7 @@ struct SqliteBackend::Impl {
         // ---- BM25 hybrid -----------------------------------------------
         Eigen::VectorXf combined = similarities;
 
-        if (BM25_ENABLED && bm25.is_built()) {
+        if (config().bm25_enabled && bm25.is_built()) {
             // Map filtered_idx to doc IDs for BM25
             std::vector<int> bm25_ids;
             bm25_ids.reserve(filtered_n);
@@ -400,7 +402,7 @@ struct SqliteBackend::Impl {
             norm_minmax(vec_norm);
             norm_minmax(bm25_norm);
 
-            combined = VECTOR_WEIGHT * vec_norm + BM25_WEIGHT * bm25_norm;
+            combined = config().vector_weight * vec_norm + config().bm25_weight * bm25_norm;
         }
 
         auto t_search_end = clock::now();
@@ -462,6 +464,75 @@ struct SqliteBackend::Impl {
         return c;
     }
 
+    std::vector<SearchResult> load_all(const std::string& collection) {
+        std::vector<SearchResult> results;
+        std::string sql = "SELECT id, text, metadata, timestamp FROM memories";
+        if (!collection.empty()) {
+            sql += " WHERE json_extract(metadata, '$.collection') = ?";
+        }
+        sql += " ORDER BY id";
+
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+        if (!collection.empty()) {
+            sqlite3_bind_text(stmt, 1, collection.c_str(), -1, SQLITE_TRANSIENT);
+        }
+
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int id = sqlite3_column_int(stmt, 0);
+            const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            const char* meta_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+            const char* ts = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+
+            results.push_back({
+                id,
+                text ? text : "",
+                0.0f,
+                meta_str ? json::parse(meta_str) : json::object(),
+                ts ? ts : ""
+            });
+        }
+        sqlite3_finalize(stmt);
+        return results;
+    }
+
+    int rebuild_bm25() {
+        // Clear existing index
+        exec("DELETE FROM bm25_index");
+
+        // Re-index all documents
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db, "SELECT id, text FROM memories",
+                           -1, &stmt, nullptr);
+
+        int doc_count = 0;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int id = sqlite3_column_int(stmt, 0);
+            const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            if (text) {
+                index_bm25_tokens(id, text);
+                ++doc_count;
+            }
+        }
+        sqlite3_finalize(stmt);
+        invalidate_cache();
+        return doc_count;
+    }
+
+    std::vector<std::string> collections() const {
+        std::vector<std::string> result;
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db,
+            "SELECT DISTINCT json_extract(metadata, '$.collection') FROM memories",
+            -1, &stmt, nullptr);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            if (col) result.emplace_back(col);
+        }
+        sqlite3_finalize(stmt);
+        return result;
+    }
+
     void close() {
         if (db) {
             sqlite3_close(db);
@@ -489,6 +560,16 @@ SearchResponse SqliteBackend::search(const std::string& query, int limit,
 }
 
 int SqliteBackend::count() const { return pImpl->count(); }
+
+std::vector<SearchResult> SqliteBackend::load_all(const std::string& collection) {
+    return pImpl->load_all(collection);
+}
+
+int SqliteBackend::rebuild_bm25() { return pImpl->rebuild_bm25(); }
+
+std::vector<std::string> SqliteBackend::collections() const {
+    return pImpl->collections();
+}
 
 void SqliteBackend::close() { pImpl->close(); }
 

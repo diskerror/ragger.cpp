@@ -26,6 +26,16 @@ public:
                           float min_score = 0.0f,
                           std::vector<std::string> collections = {});
     int  count() const;
+
+    /// Load all memories (for export). Optionally filter by collection.
+    std::vector<SearchResult> load_all(const std::string& collection = "");
+
+    /// Rebuild BM25 index. Returns doc count.
+    int rebuild_bm25();
+
+    /// Get distinct collection names.
+    std::vector<std::string> collections() const;
+
     void close();
 
 private:

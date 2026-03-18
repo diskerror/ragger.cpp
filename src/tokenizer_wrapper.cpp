@@ -2,6 +2,7 @@
  * TokenizerWrapper implementation using tokenizers-cpp
  */
 #include "tokenizer_wrapper.h"
+#include "ragger/lang.h"
 #include <tokenizers_cpp.h>
 #include <fstream>
 #include <sstream>
@@ -17,7 +18,7 @@ struct TokenizerWrapper::Impl {
         // Read tokenizer.json into string
         std::ifstream file(tokenizer_json_path);
         if (!file.is_open()) {
-            throw std::runtime_error("Failed to open tokenizer.json: " + tokenizer_json_path);
+            throw std::runtime_error(std::string(ragger::lang::ERR_TOKENIZER_OPEN) + tokenizer_json_path);
         }
         
         std::stringstream buffer;
@@ -25,13 +26,13 @@ struct TokenizerWrapper::Impl {
         std::string json_content = buffer.str();
         
         if (json_content.empty()) {
-            throw std::runtime_error("Empty tokenizer.json file: " + tokenizer_json_path);
+            throw std::runtime_error(std::string(ragger::lang::ERR_TOKENIZER_EMPTY) + tokenizer_json_path);
         }
         
         // Create tokenizer from JSON blob
         tokenizer = tokenizers::Tokenizer::FromBlobJSON(json_content);
         if (!tokenizer) {
-            throw std::runtime_error("Failed to create tokenizer from JSON");
+            throw std::runtime_error(ragger::lang::ERR_TOKENIZER_CREATE);
         }
     }
 };
@@ -44,7 +45,7 @@ TokenizerWrapper::~TokenizerWrapper() = default;
 
 std::vector<int32_t> TokenizerWrapper::encode(const std::string& text) const {
     if (!pImpl->tokenizer) {
-        throw std::runtime_error("Tokenizer not initialized");
+        throw std::runtime_error(ragger::lang::ERR_TOKENIZER_NOT_INIT);
     }
     return pImpl->tokenizer->Encode(text);
 }

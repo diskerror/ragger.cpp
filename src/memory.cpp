@@ -11,9 +11,9 @@ namespace ragger {
 RaggerMemory::RaggerMemory(const std::string& db_path,
                            const std::string& model_dir)
 {
-    // Resolve model directory (default: ~/.ragger/models)
+    // Resolve model directory from config or override
     std::string resolved_model_dir = model_dir.empty()
-        ? expand_path("~/.ragger/models")
+        ? config().resolved_model_dir()
         : expand_path(model_dir);
 
     // Create embedder
@@ -40,6 +40,18 @@ SearchResponse RaggerMemory::search(const std::string& query,
 
 int RaggerMemory::count() const {
     return backend_->count();
+}
+
+std::vector<SearchResult> RaggerMemory::load_all(const std::string& collection) {
+    return backend_->load_all(collection);
+}
+
+int RaggerMemory::rebuild_bm25() {
+    return backend_->rebuild_bm25();
+}
+
+std::vector<std::string> RaggerMemory::collections() const {
+    return backend_->collections();
 }
 
 void RaggerMemory::close() {

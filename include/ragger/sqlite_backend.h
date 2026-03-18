@@ -57,6 +57,15 @@ public:
     /// Number of stored memories.
     int count() const;
 
+    /// Load all memories (for export). Returns vector of SearchResult (score=0).
+    std::vector<SearchResult> load_all(const std::string& collection = "");
+
+    /// Rebuild BM25 index from all stored documents. Returns doc count.
+    int rebuild_bm25();
+
+    /// Get distinct collection names.
+    std::vector<std::string> collections() const;
+
     void close();
 
 private:

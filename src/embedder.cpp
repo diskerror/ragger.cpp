@@ -3,6 +3,7 @@
  */
 #include "ragger/embedder.h"
 #include "ragger/config.h"
+#include "ragger/lang.h"
 #include "tokenizer_wrapper.h"
 #include <onnxruntime_cxx_api.h>
 #include <stdexcept>
@@ -27,10 +28,10 @@ struct Embedder::Impl {
         
         // Check files exist
         if (!std::filesystem::exists(model_path)) {
-            throw std::runtime_error("Model file not found: " + model_path.string());
+            throw std::runtime_error(std::string(lang::ERR_MODEL_NOT_FOUND) + model_path.string());
         }
         if (!std::filesystem::exists(tokenizer_path)) {
-            throw std::runtime_error("Tokenizer file not found: " + tokenizer_path.string());
+            throw std::runtime_error(std::string(lang::ERR_TOKENIZER_NOT_FOUND) + tokenizer_path.string());
         }
         
         // Load tokenizer
@@ -48,7 +49,7 @@ struct Embedder::Impl {
         
         size_t seq_len = input_ids.size();
         if (seq_len == 0) {
-            throw std::runtime_error("Empty tokenization result");
+            throw std::runtime_error(lang::ERR_EMPTY_TOKENIZATION);
         }
         
         // 2. Create ONNX tensors
@@ -92,8 +93,8 @@ struct Embedder::Impl {
         auto output_shape = output_tensors[0].GetTensorTypeAndShapeInfo().GetShape();
         
         // Shape should be {1, seq_len, 384}
-        if (output_shape.size() != 3 || output_shape[0] != 1 || output_shape[2] != EMBEDDING_DIMENSIONS) {
-            throw std::runtime_error("Unexpected output shape from model");
+        if (output_shape.size() != 3 || output_shape[0] != 1 || output_shape[2] != config().embedding_dimensions) {
+            throw std::runtime_error(lang::ERR_OUTPUT_SHAPE);
         }
         
         size_t output_seq_len = output_shape[1];
@@ -146,7 +147,7 @@ std::vector<float> Embedder::encode(const std::string& text) const {
 }
 
 int Embedder::dimensions() const {
-    return EMBEDDING_DIMENSIONS;
+    return config().embedding_dimensions;
 }
 
 } // namespace ragger

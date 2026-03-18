@@ -1,60 +1,71 @@
 /**
  * Configuration for Ragger Memory (C++ port)
  *
- * Mirrors ragger_memory/config.py from the Python version.
- * All values are compile-time defaults; override via config file or CLI.
+ * Loaded from ragger.conf at runtime.
+ * Search order: /etc/ragger.conf → ~/.ragger/ragger.conf → --config-file=
  */
 #pragma once
 
 #include <string>
+#include <stdexcept>
 
 namespace ragger {
 
-// --- Server ---
-constexpr const char* DEFAULT_HOST = "127.0.0.1";
-constexpr int         DEFAULT_PORT = 8432;
+struct Config {
+    // --- Server ---
+    std::string host           = "127.0.0.1";
+    int         port           = 8432;
 
-// --- SQLite backend ---
-// Expanded at runtime; "~" resolved to $HOME
-constexpr const char* SQLITE_PATH           = "~/.ragger/memories.db";
-constexpr const char* SQLITE_MEMORIES_TABLE  = "memories";
-constexpr const char* SQLITE_USAGE_TABLE     = "memory_usage";
+    // --- Storage ---
+    std::string db_path        = "~/.ragger/memories.db";
+    std::string default_collection = "memory";
 
-// --- Embedding model ---
-constexpr const char* EMBEDDING_MODEL      = "all-MiniLM-L6-v2";
-constexpr int         EMBEDDING_DIMENSIONS = 384;
+    // --- Embedding ---
+    std::string embedding_model = "all-MiniLM-L6-v2";
+    int         embedding_dimensions = 384;
+    std::string model_dir;   // empty = default (~/.ragger/models)
 
-// --- Logging ---
-constexpr const char* LOG_DIR             = "~/.ragger";
-constexpr bool        QUERY_LOG_ENABLED   = true;
-constexpr bool        HTTP_LOG_ENABLED    = true;
+    // --- Search ---
+    int   default_search_limit = 5;
+    float default_min_score    = 0.4f;
+    bool  bm25_enabled         = true;
+    float bm25_weight          = 0.3f;
+    float vector_weight        = 0.7f;
+    float bm25_k1              = 1.5f;
+    float bm25_b               = 0.75f;
 
-// --- Usage tracking ---
-constexpr bool USAGE_TRACKING_ENABLED = true;
+    // --- Logging ---
+    std::string log_dir        = "~/.ragger";
+    bool query_log_enabled     = true;
+    bool http_log_enabled      = true;
+    bool mcp_log_enabled       = true;
 
-// --- Path normalization ---
-constexpr bool NORMALIZE_HOME_PATH = true;
+    // --- Paths ---
+    bool normalize_home_path   = true;
 
-// --- Hybrid search (BM25 + vector) ---
-constexpr bool  BM25_ENABLED   = true;
-constexpr float BM25_WEIGHT    = 0.3f;
-constexpr float VECTOR_WEIGHT  = 0.7f;
-constexpr float BM25_K1        = 1.5f;
-constexpr float BM25_B         = 0.75f;
+    // --- Import ---
+    int  minimum_chunk_size    = 300;
 
-// --- Search defaults ---
-constexpr int         DEFAULT_SEARCH_LIMIT = 5;
-constexpr float       DEFAULT_MIN_SCORE    = 0.4f;
-constexpr const char* DEFAULT_COLLECTION   = "memory";
+    /// Resolved paths (~ expanded)
+    std::string resolved_db_path() const;
+    std::string resolved_log_dir() const;
+    std::string resolved_model_dir() const;
+};
 
-// --- Runtime helpers ---
 /// Expand ~ to $HOME in a path string.
 std::string expand_path(const std::string& path);
 
-/// Get the resolved SQLite database path.
-std::string sqlite_db_path();
+/// Find config file using search order. Returns path or throws.
+/// @param cli_path  Path from --config-file (empty if not given)
+std::string find_config_file(const std::string& cli_path = "");
 
-/// Get the resolved log directory.
-std::string log_dir_path();
+/// Load config from an INI file.
+Config load_config(const std::string& path);
+
+/// Global config instance. Must call init_config() before use.
+const Config& config();
+
+/// Initialize global config. Call once at startup.
+void init_config(const std::string& cli_config_path = "");
 
 } // namespace ragger
