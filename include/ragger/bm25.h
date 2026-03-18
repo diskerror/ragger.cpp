@@ -30,9 +30,10 @@ public:
 
     bool is_built() const { return built_; }
 
-private:
     /// Simple whitespace + lowercase tokenizer with stop-word removal.
     static std::vector<std::string> tokenize(const std::string& text);
+
+private:
 
     float k1_, b_;
     bool  built_ = false;

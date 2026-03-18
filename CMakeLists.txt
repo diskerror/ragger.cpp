@@ -10,7 +10,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(RAGGER_BUILD_TESTS "Build test suite" ON)
 
 # ---------------------------------------------------------------------------
-# Boost (for ProgramOptions via c_lib)
+# Boost (for ProgramOptions via c_lib, and Boost.Asio for Crow)
 # ---------------------------------------------------------------------------
 # MacPorts boost188 lives here; adjust if using a different version
 set(BOOST_ROOT "/opt/local/libexec/boost/1.88" CACHE PATH "Boost root")
@@ -44,30 +44,17 @@ find_package(Eigen3 3.4 REQUIRED NO_MODULE
 )
 
 # ---------------------------------------------------------------------------
-# Crow (HTTP framework, fetched at configure time)
-# ---------------------------------------------------------------------------
-include(FetchContent)
-FetchContent_Declare(
-    Crow
-    GIT_REPOSITORY https://github.com/CrowCpp/Crow.git
-    GIT_TAG        v1.2.1.2
-    GIT_SHALLOW    TRUE
-)
-set(CROW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(CROW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(CROW_USE_BOOST ON CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(Crow)
-
-# ---------------------------------------------------------------------------
-# Header-only vendored libs
+# Header-only vendored libs (Crow, nlohmann/json)
 # ---------------------------------------------------------------------------
 add_library(vendor_headers INTERFACE)
 target_include_directories(vendor_headers INTERFACE
-    "${CMAKE_SOURCE_DIR}/vendor"          # nlohmann_json.hpp
+    "${CMAKE_SOURCE_DIR}/vendor"
 )
+# Crow: use Boost.Asio instead of standalone Asio
+target_compile_definitions(vendor_headers INTERFACE CROW_USE_BOOST)
 
 # ---------------------------------------------------------------------------
-# c_lib — ProgramOptions (symlinked)
+# c_lib — ProgramOptions (hard-linked from c_lib)
 # ---------------------------------------------------------------------------
 add_library(c_lib_po STATIC
     ProgramOptions.cpp
@@ -97,9 +84,8 @@ target_link_libraries(ragger_core PUBLIC
     onnxruntime
     tokenizers_cpp
     Eigen3::Eigen
-    Crow::Crow
     vendor_headers
-    Boost::boost           # headers only (for misc utilities)
+    Boost::boost
 )
 
 # ---------------------------------------------------------------------------
