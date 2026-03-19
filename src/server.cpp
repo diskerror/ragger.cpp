@@ -10,6 +10,10 @@
 
 #include <chrono>
 #include <iostream>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
 
 namespace ragger {
 
@@ -144,7 +148,27 @@ Server::Server(RaggerMemory& memory,
 
 Server::~Server() = default;
 
+static bool is_port_available(const std::string& host, int port) {
+    int sock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return false;
+
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_pton(AF_INET, host.c_str(), &addr.sin_addr);
+
+    int result = ::bind(sock, (struct sockaddr*)&addr, sizeof(addr));
+    ::close(sock);
+    return result == 0;
+}
+
 void Server::run() {
+    if (!is_port_available(pImpl->host, pImpl->port)) {
+        std::cerr << lang::ERR_PORT_IN_USE_1 << pImpl->port
+                  << lang::ERR_PORT_IN_USE_2 << std::endl;
+        std::exit(1);
+    }
+
     std::cout << lang::MSG_SERVER_STARTING 
               << pImpl->host << ":" << pImpl->port << std::endl;
     

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(raggerc VERSION 0.1.0 LANGUAGES CXX)
+project(ragger VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -73,6 +73,7 @@ add_library(ragger_core STATIC
     src/tokenizer_wrapper.cpp
     src/sqlite_backend.cpp
     src/bm25.cpp
+    src/import.cpp
     src/memory.cpp
     src/server.cpp
 )
@@ -89,10 +90,10 @@ target_link_libraries(ragger_core PUBLIC
 )
 
 # ---------------------------------------------------------------------------
-# raggerc executable
+# ragger executable
 # ---------------------------------------------------------------------------
-add_executable(raggerc src/main.cpp)
-target_link_libraries(raggerc PRIVATE
+add_executable(ragger src/main.cpp)
+target_link_libraries(ragger PRIVATE
     ragger_core
     c_lib_po
 )
@@ -108,4 +109,5 @@ endif()
 # ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
-install(TARGETS raggerc RUNTIME DESTINATION bin)
+set(CMAKE_INSTALL_PREFIX "/usr/local" CACHE PATH "Install prefix" FORCE)
+install(TARGETS ragger RUNTIME DESTINATION bin)

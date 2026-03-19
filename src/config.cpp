@@ -31,12 +31,85 @@ std::string Config::resolved_model_dir() const {
 }
 
 // -----------------------------------------------------------------------
+// Default config (embedded)
+// -----------------------------------------------------------------------
+static constexpr const char* DEFAULT_CONFIG = R"(# ragger.conf — Ragger Memory configuration
+#
+# Search order:
+#   1. --config-file=<path>    (explicit override)
+#   2. ~/.ragger/ragger.conf   (per-user default)
+#
+# First file found wins. Created automatically on first run.
+
+[server]
+host = 127.0.0.1
+port = 8432
+
+[storage]
+db_path = ~/.ragger/memories.db
+default_collection = memory
+
+[embedding]
+model = all-MiniLM-L6-v2
+dimensions = 384
+# model_dir: path to ONNX model files (default: ~/.ragger/models)
+# model_dir = ~/.ragger/models
+
+[search]
+default_limit = 5
+default_min_score = 0.4
+bm25_enabled = true
+bm25_weight = 0.3
+vector_weight = 0.7
+bm25_k1 = 1.5
+bm25_b = 0.75
+
+[logging]
+log_dir = ~/.ragger
+query_log = true
+http_log = true
+mcp_log = true
+
+[paths]
+normalize_home = true
+
+[import]
+minimum_chunk_size = 300
+)";
+
+// -----------------------------------------------------------------------
+// Bootstrap ~/.ragger/ on first run
+// -----------------------------------------------------------------------
+static std::string bootstrap_user_config() {
+    std::string ragger_dir = expand_path("~/.ragger");
+    std::string conf_path  = ragger_dir + "/ragger.conf";
+
+    fs::create_directories(ragger_dir);
+
+    std::ofstream out(conf_path);
+    if (!out.is_open()) {
+        throw std::runtime_error(
+            std::string(lang::ERR_CONFIG_OPEN) + conf_path);
+    }
+    out << DEFAULT_CONFIG;
+    out.close();
+
+    std::cerr << lang::MSG_CONFIG_CREATED << conf_path << std::endl;
+    return conf_path;
+}
+
+// -----------------------------------------------------------------------
 // Config file search
 // -----------------------------------------------------------------------
 std::string find_config_file(const std::string& cli_path) {
-    // 1. /etc/ragger.conf
-    if (fs::exists("/etc/ragger.conf")) {
-        return "/etc/ragger.conf";
+    // 1. Explicit --config-file= takes highest priority
+    if (!cli_path.empty()) {
+        std::string resolved = expand_path(cli_path);
+        if (!fs::exists(resolved)) {
+            throw std::runtime_error(
+                std::string(lang::ERR_CONFIG_FILE_MISSING) + resolved);
+        }
+        return resolved;
     }
 
     // 2. ~/.ragger/ragger.conf
@@ -45,18 +118,8 @@ std::string find_config_file(const std::string& cli_path) {
         return user_conf;
     }
 
-    // 3. --config-file= (required at this point)
-    if (cli_path.empty()) {
-        throw std::runtime_error(lang::ERR_CONFIG_NOT_FOUND);
-    }
-
-    std::string resolved = expand_path(cli_path);
-    if (!fs::exists(resolved)) {
-        throw std::runtime_error(
-            std::string(lang::ERR_CONFIG_FILE_MISSING) + resolved);
-    }
-
-    return resolved;
+    // 3. First run — bootstrap default config
+    return bootstrap_user_config();
 }
 
 // -----------------------------------------------------------------------

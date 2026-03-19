@@ -47,10 +47,17 @@ int main() {
 
     std::filesystem::remove(tmp_conf);
 
-    // Test find_config_file — if ~/.ragger/ragger.conf exists, CLI path is ignored
-    // (that's by design: first found wins)
-    auto found = ragger::find_config_file("/nonexistent/ragger.conf");
-    // Should find one of the standard locations, not throw
+    // Test find_config_file — explicit path takes priority (and throws if missing)
+    bool threw_find = false;
+    try {
+        ragger::find_config_file("/nonexistent/ragger.conf");
+    } catch (const std::runtime_error&) {
+        threw_find = true;
+    }
+    assert(threw_find);
+
+    // Test find_config_file — no explicit path finds ~/.ragger/ragger.conf (or bootstraps)
+    auto found = ragger::find_config_file("");
     assert(!found.empty());
 
     // Test load_config with nonexistent file
