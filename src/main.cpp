@@ -1,7 +1,7 @@
 /**
- * raggerc — C++ port of Ragger Memory
+ * ragger — C++ port of Ragger Memory
  *
- * Verb-style CLI: raggerc <verb> [options] [args]
+ * Verb-style CLI: ragger <verb> [options] [args]
  * No verb or 'help' prints usage.
  */
 #include <cstdio>
@@ -288,7 +288,7 @@ int main(int argc, char** argv) {
     }
 
     if (opts.count("version")) {
-        std::cout << "raggerc " << "0.1.0" << "\n";
+        std::cout << "ragger " << "0.1.0" << "\n";
         return 0;
     }
 
@@ -376,7 +376,7 @@ int main(int argc, char** argv) {
         } else if (command == "import") {
             auto args = opts.getParams("args");
             if (args.empty()) {
-                std::cerr << "Usage: raggerc import <file> [file...] [--collection name]\n";
+                std::cerr << "Usage: ragger import <file> [file...] [--collection name]\n";
                 return 1;
             }
             ragger::RaggerMemory memory(db_path, model_dir);
@@ -387,7 +387,7 @@ int main(int argc, char** argv) {
         } else if (command == "export") {
             auto args = opts.getParams("args");
             if (args.size() < 2) {
-                std::cerr << "Usage: raggerc export <docs|memories|all> <dest-dir> [--collection name]\n";
+                std::cerr << "Usage: ragger export <docs|memories|all> <dest-dir> [--collection name]\n";
                 return 1;
             }
             std::string mode = args[0];

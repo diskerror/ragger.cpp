@@ -9,7 +9,7 @@
 namespace ragger::lang {
 
 // --- CLI ---
-constexpr const char* CLI_DESCRIPTION         = "raggerc — Ragger Memory (C++)";
+constexpr const char* CLI_DESCRIPTION         = "ragger — Ragger Memory";
 constexpr const char* CLI_HELP                = "Show help";
 constexpr const char* CLI_VERSION             = "Show version";
 constexpr const char* CLI_CONFIG_FILE         = "Path to config file";
@@ -19,8 +19,8 @@ constexpr const char* CLI_DB                  = "SQLite database path (overrides
 constexpr const char* CLI_MODEL_DIR           = "Model directory path (overrides config)";
 constexpr const char* CLI_COMMAND             = "Command";
 constexpr const char* CLI_ARGS                = "Command arguments";
-constexpr const char* CLI_USAGE_SEARCH        = "Usage: raggerc search <query>";
-constexpr const char* CLI_USAGE_STORE         = "Usage: raggerc store <text>";
+constexpr const char* CLI_USAGE_SEARCH        = "Usage: ragger search <query>";
+constexpr const char* CLI_USAGE_STORE         = "Usage: ragger store <text>";
 constexpr const char* CLI_UNKNOWN_COMMAND     = "Unknown command: ";
 
 // --- Status messages ---

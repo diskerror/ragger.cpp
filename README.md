@@ -1,4 +1,4 @@
-# raggerc
+# ragger
 
 C++ port of [Ragger Memory](https://github.com/diskerror/ragger) — a local-first semantic memory store with hybrid vector + BM25 search.
 
@@ -62,36 +62,36 @@ cmake --build build
 
 ```bash
 # Start HTTP server (port 8432)
-raggerc serve
+ragger serve
 
 # Search
-raggerc search "deployment requirements"
-raggerc search "transposition" --collection sibelius
+ragger search "deployment requirements"
+ragger search "transposition" --collection sibelius
 
 # Store a memory
-raggerc store "The deploy script requires Node 18+"
+ragger store "The deploy script requires Node 18+"
 
 # Memory count
-raggerc count
+ragger count
 
 # Import files
-raggerc import notes.md --collection docs
-raggerc import doc1.md doc2.md --collection reference
+ragger import notes.md --collection docs
+ragger import doc1.md doc2.md --collection reference
 
 # Export
-raggerc export docs ./exported/ --collection orchestration
-raggerc export memories ./exported/
-raggerc export all ./exported/
+ragger export docs ./exported/ --collection orchestration
+ragger export memories ./exported/
+ragger export all ./exported/
 
 # MCP server (JSON-RPC over stdin/stdout)
-raggerc mcp
+ragger mcp
 
 # Rebuild BM25 index
-raggerc rebuild-bm25
+ragger rebuild-bm25
 
 # Help
-raggerc help
-raggerc          # no verb = help
+ragger help
+ragger          # no verb = help
 ```
 
 ## HTTP Endpoints
