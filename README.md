@@ -127,6 +127,55 @@ Mirrors the Python version's module structure:
 └── models/             # ONNX model files (model.onnx, tokenizer.json, etc.)
 ```
 
+## Installation
+
+### Per-user install (single user, no sudo)
+
+| Platform | Binary location | Config location |
+|----------|----------------|-----------------|
+| macOS    | `~/.local/bin/ragger` | `~/.ragger/ragger.conf` |
+| Linux    | `~/.local/bin/ragger` | `~/.ragger/ragger.conf` |
+| Windows  | `%LOCALAPPDATA%\ragger\ragger.exe` | `%LOCALAPPDATA%\ragger\ragger.conf` |
+
+On macOS/Linux, ensure `~/.local/bin` is in your `PATH`:
+```bash
+export PATH="$HOME/.local/bin:$PATH"  # add to ~/.zshrc or ~/.bashrc
+```
+
+After building:
+```bash
+mkdir -p ~/.local/bin
+cp build/ragger ~/.local/bin/ragger
+```
+
+### Switching between C++ and Python versions
+
+The Python version can be installed alongside as `ragger-py`:
+```bash
+cat > ~/.local/bin/ragger-py << 'EOF'
+#!/bin/bash
+RAGGER_PY_DIR="${RAGGER_PY_DIR:-$HOME/PyCharmProjects/Ragger}"
+exec python3 "$RAGGER_PY_DIR/ragger_memory/cli.py" "$@"
+EOF
+chmod +x ~/.local/bin/ragger-py
+```
+
+To switch which version `ragger` points to:
+```bash
+# Use Python version
+mv ~/.local/bin/ragger ~/.local/bin/ragger-cpp
+ln -s ~/.local/bin/ragger-py ~/.local/bin/ragger
+
+# Switch back to C++
+rm ~/.local/bin/ragger
+mv ~/.local/bin/ragger-cpp ~/.local/bin/ragger
+```
+
+### System-wide install (future, multi-user)
+
+Reserved for future multi-user support. Will use `/usr/local/bin/ragger`,
+`/etc/ragger.conf`, and `/var/ragger/` for data.
+
 ## macOS Deployment Note
 
 When running Ragger as a LaunchDaemon (i.e., starting at boot before any user logs in),
