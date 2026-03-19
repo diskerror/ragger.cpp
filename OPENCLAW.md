@@ -39,7 +39,7 @@ In `~/.openclaw/openclaw.json`, set the memory plugin slot:
 }
 ```
 
-The `serverCommand` can point to either the C++ binary (`raggerc serve`)
+The `serverCommand` can point to either the C++ binary (`ragger serve`)
 or a startup script that waits for external drives, sets environment,
 etc. The plugin automatically starts the server if it's not already
 running and waits up to 15 seconds for it to become ready.

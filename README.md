@@ -1,10 +1,12 @@
 # ragger
 
-C++ port of [Ragger Memory](https://github.com/diskerror/ragger) — a local-first semantic memory store with hybrid vector + BM25 search.
+C++ port of [Ragger Memory](https://github.com/diskerror/ragger) — a local-first semantic memory store with hybrid
+vector + BM25 search.
 
 ## Status
 
-**Production-ready** — running as the live memory server, all 23 retrieval quality tests passing. Feature parity with the Python version's core functionality.
+**Production-ready** — running as the live memory server, all 23 retrieval quality tests passing. Feature parity with
+the Python version's core functionality.
 
 Same HTTP API, same database format, same embedding model. The C++ and Python versions share a database and config file.
 
@@ -26,23 +28,23 @@ Same HTTP API, same database format, same embedding model. The C++ and Python ve
 
 Ragger uses a shared INI config file. Search order (first found wins):
 
-1. `/etc/ragger.conf`
+1. `--config-file=<path>`
 2. `~/.ragger/ragger.conf`
-3. `--config-file=<path>`
 
-A config file is required — there are no silent defaults. See `example-config.conf` for all options. The same config file works for both the C++ and Python versions.
+A config file is required — there are no silent defaults. See `example-config.conf` for all options. The same config
+file works for both the C++ and Python versions.
 
 ## Dependencies
 
-| Library | Purpose | Source |
-|---------|---------|--------|
-| **SQLite3** | Storage backend | System (MacPorts/apt) |
-| **Eigen3** | Vector math (cosine similarity) | System (MacPorts/apt) |
-| **Boost** | ProgramOptions, Asio (via Crow) | System (MacPorts/apt) |
-| **Crow** | HTTP server + routing | Vendored header (`crow_all.h`) |
-| **ONNX Runtime** | Embedding inference (all-MiniLM-L6-v2) | Vendored pre-built |
-| **tokenizers-cpp** | HuggingFace tokenizer | Vendored (requires Rust) |
-| **nlohmann/json** | JSON serialization | Vendored header-only |
+| Library            | Purpose                                | Source                         |
+|--------------------|----------------------------------------|--------------------------------|
+| **SQLite3**        | Storage backend                        | System (MacPorts/apt)          |
+| **Eigen3**         | Vector math (cosine similarity)        | System (MacPorts/apt)          |
+| **Boost**          | ProgramOptions, Asio (via Crow)        | System (MacPorts/apt)          |
+| **Crow**           | HTTP server + routing                  | Vendored header (`crow_all.h`) |
+| **ONNX Runtime**   | Embedding inference (all-MiniLM-L6-v2) | Vendored pre-built             |
+| **tokenizers-cpp** | HuggingFace tokenizer                  | Vendored (requires Rust)       |
+| **nlohmann/json**  | JSON serialization                     | Vendored header-only           |
 
 ## Building
 
@@ -107,16 +109,16 @@ POST /search  — {"query": "...", "limit": 5, "min_score": 0.0, "collections": 
 
 Mirrors the Python version's module structure:
 
-| C++ | Python equivalent | Purpose |
-|-----|-------------------|---------|
-| `config.h/cpp` | `config.py` | Load INI config file |
-| `embedder.h/cpp` | `embedding.py` | ONNX Runtime inference |
-| `bm25.h/cpp` | `bm25.py` | BM25 keyword index |
+| C++                    | Python equivalent   | Purpose                        |
+|------------------------|---------------------|--------------------------------|
+| `config.h/cpp`         | `config.py`         | Load INI config file           |
+| `embedder.h/cpp`       | `embedding.py`      | ONNX Runtime inference         |
+| `bm25.h/cpp`           | `bm25.py`           | BM25 keyword index             |
 | `sqlite_backend.h/cpp` | `sqlite_backend.py` | SQLite storage + hybrid search |
-| `memory.h/cpp` | `memory.py` | High-level facade |
-| `server.h/cpp` | `server.py` | HTTP server (Crow) |
-| `main.cpp` | `cli.py` | CLI entry point |
-| `lang/en.h` | `lang/en.py` | User-facing strings (i18n) |
+| `memory.h/cpp`         | `memory.py`         | High-level facade              |
+| `server.h/cpp`         | `server.py`         | HTTP server (Crow)             |
+| `main.cpp`             | `cli.py`            | CLI entry point                |
+| `lang/en.h`            | `lang/en.py`        | User-facing strings (i18n)     |
 
 ## File Layout
 
@@ -131,18 +133,20 @@ Mirrors the Python version's module structure:
 
 ### Per-user install (single user, no sudo)
 
-| Platform | Binary location | Config location |
-|----------|----------------|-----------------|
-| macOS    | `~/.local/bin/ragger` | `~/.ragger/ragger.conf` |
-| Linux    | `~/.local/bin/ragger` | `~/.ragger/ragger.conf` |
+| Platform | Binary location                    | Config location                     |
+|----------|------------------------------------|-------------------------------------|
+| macOS    | `~/.local/bin/ragger`              | `~/.ragger/ragger.conf`             |
+| Linux    | `~/.local/bin/ragger`              | `~/.ragger/ragger.conf`             |
 | Windows  | `%LOCALAPPDATA%\ragger\ragger.exe` | `%LOCALAPPDATA%\ragger\ragger.conf` |
 
 On macOS/Linux, ensure `~/.local/bin` is in your `PATH`:
+
 ```bash
 export PATH="$HOME/.local/bin:$PATH"  # add to ~/.zshrc or ~/.bashrc
 ```
 
 After building:
+
 ```bash
 mkdir -p ~/.local/bin
 cp build/ragger ~/.local/bin/ragger
@@ -151,6 +155,7 @@ cp build/ragger ~/.local/bin/ragger
 ### Switching between C++ and Python versions
 
 The Python version can be installed alongside as `ragger-py`:
+
 ```bash
 cat > ~/.local/bin/ragger-py << 'EOF'
 #!/bin/bash
@@ -161,6 +166,7 @@ chmod +x ~/.local/bin/ragger-py
 ```
 
 To switch which version `ragger` points to:
+
 ```bash
 # Use Python version
 mv ~/.local/bin/ragger ~/.local/bin/ragger-cpp
