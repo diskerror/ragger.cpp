@@ -1,0 +1,301 @@
+/**
+ * Inference client implementation
+ */
+#include "ragger/inference.h"
+#include "ragger/config.h"
+#include "ragger/api_formats.h"
+#include "nlohmann_json.hpp"
+
+#include <curl/curl.h>
+#include <fnmatch.h>
+#include <sstream>
+#include <stdexcept>
+#include <iostream>
+
+namespace ragger {
+
+// -----------------------------------------------------------------------
+// Endpoint
+// -----------------------------------------------------------------------
+Endpoint::Endpoint(const std::string& name_,
+                   const std::string& api_url_,
+                   const std::string& api_key_,
+                   const std::string& models_,
+                   const std::string& format_)
+    : name(name_), api_url(api_url_), api_key(api_key_), models(models_), format_name(format_) {
+    // Strip trailing slash from URL
+    if (!api_url.empty() && api_url.back() == '/') {
+        api_url = api_url.substr(0, api_url.size() - 1);
+    }
+    
+    // Auto-detect format if not specified
+    if (format_name.empty()) {
+        format_name = detect_format(api_url);
+    }
+}
+
+bool Endpoint::matches(const std::string& model) const {
+    // Split comma-separated patterns
+    std::vector<std::string> patterns;
+    std::stringstream ss(models);
+    std::string pattern;
+    while (std::getline(ss, pattern, ',')) {
+        // Trim whitespace
+        pattern.erase(0, pattern.find_first_not_of(" \t"));
+        pattern.erase(pattern.find_last_not_of(" \t") + 1);
+        if (!pattern.empty()) {
+            patterns.push_back(pattern);
+        }
+    }
+
+    // Match against any pattern
+    for (const auto& p : patterns) {
+        if (fnmatch(p.c_str(), model.c_str(), 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// -----------------------------------------------------------------------
+// InferenceClient
+// -----------------------------------------------------------------------
+InferenceClient::InferenceClient(const std::vector<Endpoint>& endpoints,
+                                 const std::string& model_,
+                                 int max_tokens_)
+    : model(model_), max_tokens(max_tokens_), _endpoints(endpoints) {}
+
+InferenceClient InferenceClient::from_config(const Config& cfg) {
+    std::vector<Endpoint> endpoints;
+
+    // Multi-endpoint from config
+    for (const auto& ep : cfg.inference_endpoints) {
+        endpoints.push_back(Endpoint(ep.name, ep.api_url, ep.api_key, ep.models, ep.format));
+    }
+
+    // Single endpoint fallback from main [inference] section
+    if (endpoints.empty() && !cfg.inference_api_url.empty()) {
+        endpoints.push_back(Endpoint("default", cfg.inference_api_url,
+                                     cfg.inference_api_key, "*", ""));
+    }
+
+    // If a default is named, move it to the end (fallback position)
+    if (!cfg.inference_default.empty() && endpoints.size() > 1) {
+        std::vector<Endpoint> named, others;
+        for (auto& ep : endpoints) {
+            if (ep.name == cfg.inference_default) {
+                named.push_back(ep);
+            } else {
+                others.push_back(ep);
+            }
+        }
+        endpoints = others;
+        endpoints.insert(endpoints.end(), named.begin(), named.end());
+    }
+
+    return InferenceClient(endpoints, cfg.inference_model, cfg.inference_max_tokens);
+}
+
+Endpoint& InferenceClient::resolve_endpoint(const std::string& model_name) {
+    for (auto& ep : _endpoints) {
+        if (ep.matches(model_name)) {
+            return ep;
+        }
+    }
+    // Fallback to last endpoint if no match
+    if (!_endpoints.empty()) {
+        return _endpoints.back();
+    }
+    throw std::runtime_error("No inference endpoints configured");
+}
+
+// -----------------------------------------------------------------------
+// HTTP helpers with libcurl
+// -----------------------------------------------------------------------
+struct WriteCallbackData {
+    std::string* buffer;
+};
+
+static size_t write_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    size_t total = size * nmemb;
+    auto* data = static_cast<WriteCallbackData*>(userdata);
+    data->buffer->append(ptr, total);
+    return total;
+}
+
+struct StreamCallbackData {
+    std::function<void(const std::string&)>* on_token;
+    std::string buffer;
+    ApiFormat* format;
+};
+
+static size_t stream_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    size_t total = size * nmemb;
+    auto* data = static_cast<StreamCallbackData*>(userdata);
+    data->buffer.append(ptr, total);
+
+    // Process complete lines (SSE format: "data: {...}\n")
+    size_t pos;
+    while ((pos = data->buffer.find('\n')) != std::string::npos) {
+        std::string line = data->buffer.substr(0, pos);
+        data->buffer.erase(0, pos + 1);
+
+        // Trim whitespace
+        line.erase(0, line.find_first_not_of(" \t\r"));
+        line.erase(line.find_last_not_of(" \t\r") + 1);
+
+        if (line.empty()) continue;
+        
+        // Check for stream stop
+        if (is_stream_stop(*data->format, line)) continue;
+        
+        if (line.substr(0, 6) != "data: ") continue;
+
+        std::string json_str = line.substr(6);
+        try {
+            auto chunk = nlohmann::json::parse(json_str);
+            
+            // Extract delta content using format
+            std::string content = extract_stream_delta(*data->format, chunk);
+            if (!content.empty() && data->on_token) {
+                (*data->on_token)(content);
+            }
+        } catch (...) {
+            // Skip malformed JSON
+        }
+    }
+
+    return total;
+}
+
+std::string InferenceClient::chat(const std::vector<Message>& messages,
+                                  const std::string& model_override) {
+    std::string use_model = model_override.empty() ? model : model_override;
+    auto& endpoint = resolve_endpoint(use_model);
+
+    // Load API format for this endpoint
+    ApiFormat fmt = get_format(endpoint.format_name);
+    
+    std::string url = endpoint.api_url + fmt.path;
+
+    // Convert Message to ApiMessage
+    std::vector<ApiMessage> api_messages;
+    for (const auto& msg : messages) {
+        api_messages.push_back({msg.role, msg.content});
+    }
+
+    // Build request payload using format
+    nlohmann::json payload = build_request_body(fmt, api_messages, use_model, max_tokens, false);
+    std::string body = payload.dump();
+
+    // Setup libcurl
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        throw std::runtime_error("Failed to initialize libcurl");
+    }
+
+    std::string response_buffer;
+    WriteCallbackData write_data{&response_buffer};
+
+    // Build headers using format
+    struct curl_slist* headers = nullptr;
+    for (const auto& [key, value] : build_headers(fmt, endpoint.api_key)) {
+        std::string header = key + ": " + value;
+        headers = curl_slist_append(headers, header.c_str());
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, body.size());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_data);
+
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        throw std::runtime_error(std::string("HTTP request failed: ") +
+                                 curl_easy_strerror(res));
+    }
+
+    if (http_code != 200) {
+        throw std::runtime_error("Inference API error " + std::to_string(http_code) +
+                                 ": " + response_buffer);
+    }
+
+    // Parse response using format
+    try {
+        auto response = nlohmann::json::parse(response_buffer);
+        return extract_content(fmt, response);
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::string("Failed to parse response: ") + e.what());
+    }
+}
+
+void InferenceClient::chat_stream(const std::vector<Message>& messages,
+                                  std::function<void(const std::string&)> on_token,
+                                  const std::string& model_override) {
+    std::string use_model = model_override.empty() ? model : model_override;
+    auto& endpoint = resolve_endpoint(use_model);
+
+    // Load API format for this endpoint
+    ApiFormat fmt = get_format(endpoint.format_name);
+    
+    std::string url = endpoint.api_url + fmt.path;
+
+    // Convert Message to ApiMessage
+    std::vector<ApiMessage> api_messages;
+    for (const auto& msg : messages) {
+        api_messages.push_back({msg.role, msg.content});
+    }
+
+    // Build request payload using format
+    nlohmann::json payload = build_request_body(fmt, api_messages, use_model, max_tokens, true);
+    std::string body = payload.dump();
+
+    // Setup libcurl
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        throw std::runtime_error("Failed to initialize libcurl");
+    }
+
+    StreamCallbackData stream_data{&on_token, "", &fmt};
+
+    // Build headers using format
+    struct curl_slist* headers = nullptr;
+    for (const auto& [key, value] : build_headers(fmt, endpoint.api_key)) {
+        std::string header = key + ": " + value;
+        headers = curl_slist_append(headers, header.c_str());
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, body.size());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stream_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &stream_data);
+
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    // CURLE_PARTIAL_FILE is normal for SSE streams — server closes after [DONE]
+    if (res != CURLE_OK && res != CURLE_PARTIAL_FILE) {
+        throw std::runtime_error(std::string("HTTP request failed: ") +
+                                 curl_easy_strerror(res));
+    }
+
+    if (http_code != 200) {
+        throw std::runtime_error("Inference API error " + std::to_string(http_code));
+    }
+}
+
+} // namespace ragger

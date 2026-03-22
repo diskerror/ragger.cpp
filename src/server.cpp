@@ -37,6 +37,7 @@ struct Server::Impl {
         ([this]() {
             json response = {
                 {"status", "ok"},
+                {"version", RAGGER_VERSION},
                 {"memories", memory.count()}
             };
             return crow::response(response.dump());

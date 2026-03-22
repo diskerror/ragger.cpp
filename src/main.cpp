@@ -14,6 +14,7 @@
 #include "ProgramOptions.h"
 #include "ragger/config.h"
 #include "ragger/import.h"
+#include "ragger/inference.h"
 #include "ragger/lang.h"
 #include "ragger/memory.h"
 #include "ragger/server.h"
@@ -164,6 +165,172 @@ static void do_export_all(ragger::RaggerMemory& memory,
 }
 
 // -----------------------------------------------------------------------
+// Chat: simple REPL with memory context injection
+// -----------------------------------------------------------------------
+static std::string load_workspace_files() {
+    /**
+     * Load workspace MD files for the system prompt.
+     * 
+     * SOUL.md: /var/ragger/SOUL.md (common persona) > ~/.ragger/SOUL.md (fallback)
+     * USER.md, AGENTS.md, TOOLS.md: ~/.ragger/ only (per-user)
+     * 
+     * Returns combined text for injection into system prompt.
+     */
+    std::string user_dir = ragger::expand_path("~/.ragger");
+    std::string common_dir = "/var/ragger";
+
+    std::vector<std::string> sections;
+
+    // SOUL.md: common first, user fallback
+    std::string soul_path = common_dir + "/SOUL.md";
+    if (!fs::exists(soul_path)) {
+        soul_path = user_dir + "/SOUL.md";
+    }
+    if (fs::exists(soul_path)) {
+        std::ifstream f(soul_path);
+        std::string content((std::istreambuf_iterator<char>(f)),
+                            std::istreambuf_iterator<char>());
+        // Trim trailing whitespace
+        content.erase(content.find_last_not_of(" \t\r\n") + 1);
+        if (!content.empty()) {
+            sections.push_back(content);
+        }
+    }
+
+    // Per-user files
+    for (const auto& filename : {"USER.md", "AGENTS.md", "TOOLS.md"}) {
+        std::string path = user_dir + "/" + filename;
+        if (fs::exists(path)) {
+            std::ifstream f(path);
+            std::string content((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+            content.erase(content.find_last_not_of(" \t\r\n") + 1);
+            if (!content.empty()) {
+                sections.push_back(content);
+            }
+        }
+    }
+
+    // Join sections with separator
+    std::string result;
+    for (size_t i = 0; i < sections.size(); ++i) {
+        if (i > 0) result += "\n\n---\n\n";
+        result += sections[i];
+    }
+    return result;
+}
+
+static void do_chat(const std::string& db_path, const std::string& model_dir) {
+    const auto& cfg = ragger::config();
+
+    // Build inference client from config
+    ragger::InferenceClient inference = ragger::InferenceClient::from_config(cfg);
+
+    if (inference._endpoints.empty()) {
+        std::cout << "Error: no inference endpoints configured.\n";
+        std::cout << "Add to ragger.ini:\n\n";
+        std::cout << "  [inference]\n";
+        std::cout << "  api_url = http://localhost:1234/v1\n";
+        std::cout << "  api_key = lmstudio-local\n\n";
+        std::cout << "Or for multiple endpoints:\n\n";
+        std::cout << "  [inference.local]\n";
+        std::cout << "  api_url = http://localhost:1234/v1\n";
+        std::cout << "  api_key = lmstudio-local\n";
+        std::cout << "  models = qwen/*, llama/*\n";
+        return;
+    }
+
+    // Load memory for context search
+    ragger::RaggerMemory memory(db_path, model_dir);
+
+    // Load workspace files for persona
+    std::string workspace = load_workspace_files();
+
+    // Conversation history — start with workspace as system prompt
+    std::vector<ragger::Message> messages;
+    if (!workspace.empty()) {
+        messages.push_back({"system", workspace});
+    }
+
+    std::cout << "Ragger Chat (model: " << cfg.inference_model << ")\n";
+    std::cout << "Type '/quit' or Ctrl+D to exit\n\n";
+
+    std::string line;
+    while (true) {
+        std::cout << "You: " << std::flush;
+        if (!std::getline(std::cin, line)) {
+            std::cout << "\nGoodbye!\n";
+            break;
+        }
+
+        // Trim whitespace
+        line.erase(0, line.find_first_not_of(" \t\r\n"));
+        line.erase(line.find_last_not_of(" \t\r\n") + 1);
+
+        if (line.empty()) continue;
+
+        if (line == "/quit" || line == "/exit") {
+            std::cout << "Goodbye!\n";
+            break;
+        }
+
+        // Search memory for context
+        std::vector<std::string> context_chunks;
+        try {
+            auto result = memory.search(line, 3, 0.3f);
+            for (const auto& r : result.results) {
+                context_chunks.push_back(r.text);
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: memory search failed: " << e.what() << "\n";
+        }
+
+        // Build message with context
+        std::vector<ragger::Message> current_messages = messages;
+
+        if (!context_chunks.empty()) {
+            std::string context_text;
+            for (size_t i = 0; i < context_chunks.size(); ++i) {
+                if (i > 0) context_text += "\n\n---\n\n";
+                context_text += context_chunks[i];
+            }
+            std::string memory_block = "\n\n## Relevant memories:\n\n" + context_text;
+
+            // Append to existing system message or create one
+            if (!current_messages.empty() && current_messages[0].role == "system") {
+                current_messages[0].content += memory_block;
+            } else {
+                current_messages.insert(current_messages.begin(),
+                                       {"system", memory_block});
+            }
+        }
+
+        current_messages.push_back({"user", line});
+
+        // Send to inference API (streaming)
+        std::cout << "Assistant: " << std::flush;
+        std::string response_text;
+
+        try {
+            inference.chat_stream(current_messages, [&](const std::string& token) {
+                std::cout << token << std::flush;
+                response_text += token;
+            });
+            std::cout << "\n";
+        } catch (const std::exception& e) {
+            std::cout << "\nError: " << e.what() << "\n";
+            continue;
+        }
+
+        // Update conversation history
+        messages.push_back({"user", line});
+        messages.push_back({"assistant", response_text});
+
+        std::cout << "\n";  // blank line between exchanges
+    }
+}
+
+// -----------------------------------------------------------------------
 // MCP: JSON-RPC server over stdin/stdout
 // -----------------------------------------------------------------------
 static void do_mcp(ragger::RaggerMemory& memory) {
@@ -256,8 +423,8 @@ int main(int argc, char** argv) {
     Diskerror::ProgramOptions opts(CLI_DESCRIPTION);
     opts.add_options()
         ("help,h", CLI_HELP)
-        ("version,v", CLI_VERSION)
-        ("config-file", Diskerror::po::value<std::string>()->default_value(""), CLI_CONFIG_FILE)
+        ("version,V", CLI_VERSION)
+        ("config", Diskerror::po::value<std::string>()->default_value(""), CLI_CONFIG_FILE)
         ("host", Diskerror::po::value<std::string>(), CLI_HOST)
         ("port,p", Diskerror::po::value<int>(), CLI_PORT)
         ("db", Diskerror::po::value<std::string>(), CLI_DB)
@@ -283,18 +450,19 @@ int main(int argc, char** argv) {
     auto command = opts["command"].as<std::string>();
 
     if (opts.count("help") || command == "help") {
+        std::cout << "ragger " << RAGGER_VERSION << "\n\n";
         std::cout << opts.to_string() << "\n";
         return 0;
     }
 
-    if (opts.count("version")) {
-        std::cout << "ragger " << "0.1.0" << "\n";
+    if (opts.count("version") || command == "version") {
+        std::cout << "ragger " << RAGGER_VERSION << "\n";
         return 0;
     }
 
     // Load config file
     try {
-        ragger::init_config(opts["config-file"].as<std::string>());
+        ragger::init_config(opts["config"].as<std::string>());
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return 1;
@@ -322,6 +490,9 @@ int main(int argc, char** argv) {
 
             ragger::Server server(memory, host, port);
             server.run();
+
+        } else if (command == "chat") {
+            do_chat(db_path, model_dir);
 
         } else if (command == "search") {
             auto args = opts.getParams("args");

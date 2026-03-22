@@ -42,28 +42,28 @@ int main() {
     assert(cfg.default_min_score == 0.5f);
     // Defaults for unspecified values
     assert(cfg.default_collection == "memory");
-    assert(cfg.bm25_weight == 0.3f);
+    assert(cfg.bm25_weight == 3.0f);
     assert(cfg.normalize_home_path == true);
 
     std::filesystem::remove(tmp_conf);
 
-    // Test find_config_file — explicit path takes priority (and throws if missing)
+    // Test find_system_config — explicit path takes priority (and throws if missing)
     bool threw_find = false;
     try {
-        ragger::find_config_file("/nonexistent/ragger.conf");
+        ragger::find_system_config("/nonexistent/ragger.ini");
     } catch (const std::runtime_error&) {
         threw_find = true;
     }
     assert(threw_find);
 
-    // Test find_config_file — no explicit path finds ~/.ragger/ragger.conf (or bootstraps)
-    auto found = ragger::find_config_file("");
+    // Test find_system_config — no explicit path finds /etc/ragger.ini or ~/.ragger/ragger.ini (or bootstraps)
+    auto found = ragger::find_system_config("");
     assert(!found.empty());
 
     // Test load_config with nonexistent file
     bool threw = false;
     try {
-        ragger::load_config("/nonexistent/ragger.conf");
+        ragger::load_config("/nonexistent/ragger.ini");
     } catch (const std::runtime_error&) {
         threw = true;
     }

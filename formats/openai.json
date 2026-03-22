@@ -1,0 +1,13 @@
+{
+    "path": "/chat/completions",
+    "auth": "bearer",
+    "auth_header": "Authorization",
+    "auth_prefix": "Bearer ",
+    "auth_extra": {},
+    "request_transform": "openai",
+    "response_content": "choices[0].message.content",
+    "stream_content": "choices[0].delta.content",
+    "stream_type_field": null,
+    "stream_type_value": null,
+    "stream_stop": "[DONE]"
+}

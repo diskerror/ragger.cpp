@@ -29,9 +29,9 @@ Same HTTP API, same database format, same embedding model. The C++ and Python ve
 Ragger uses a shared INI config file. Search order (first found wins):
 
 1. `--config-file=<path>`
-2. `~/.ragger/ragger.conf`
+2. `~/.ragger/ragger.ini`
 
-A config file is required — there are no silent defaults. See `example-config.conf` for all options. The same config
+A config file is required — there are no silent defaults. See `example-system.ini` and `example-user.ini` for all options. The same config
 file works for both the C++ and Python versions.
 
 ## Dependencies
@@ -124,7 +124,7 @@ Mirrors the Python version's module structure:
 
 ```
 ~/.ragger/
-├── ragger.conf         # Config file
+├── ragger.ini          # Config file
 ├── memories.db         # SQLite database
 └── models/             # ONNX model files (model.onnx, tokenizer.json, etc.)
 ```
@@ -135,9 +135,9 @@ Mirrors the Python version's module structure:
 
 | Platform | Binary location                    | Config location                     |
 |----------|------------------------------------|-------------------------------------|
-| macOS    | `~/.local/bin/ragger`              | `~/.ragger/ragger.conf`             |
-| Linux    | `~/.local/bin/ragger`              | `~/.ragger/ragger.conf`             |
-| Windows  | `%LOCALAPPDATA%\ragger\ragger.exe` | `%LOCALAPPDATA%\ragger\ragger.conf` |
+| macOS    | `~/.local/bin/ragger`              | `~/.ragger/ragger.ini`              |
+| Linux    | `~/.local/bin/ragger`              | `~/.ragger/ragger.ini`              |
+| Windows  | `%LOCALAPPDATA%\ragger\ragger.exe` | `%LOCALAPPDATA%\ragger\ragger.ini`  |
 
 On macOS/Linux, ensure `~/.local/bin` is in your `PATH`:
 
@@ -180,7 +180,7 @@ mv ~/.local/bin/ragger-cpp ~/.local/bin/ragger
 ### System-wide install (future, multi-user)
 
 Reserved for future multi-user support. Will use `/usr/local/bin/ragger`,
-`/etc/ragger.conf`, and `/var/ragger/` for data.
+`/etc/ragger.ini`, and `/var/ragger/` for data.
 
 ## macOS Deployment Note
 

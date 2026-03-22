@@ -33,11 +33,11 @@ std::string Config::resolved_model_dir() const {
 // -----------------------------------------------------------------------
 // Default config (embedded)
 // -----------------------------------------------------------------------
-static constexpr const char* DEFAULT_CONFIG = R"(# ragger.conf — Ragger Memory configuration
+static constexpr const char* DEFAULT_CONFIG = R"(# ragger.ini — Ragger Memory configuration
 #
 # Search order:
-#   1. --config-file=<path>    (explicit override)
-#   2. ~/.ragger/ragger.conf   (per-user default)
+#   1. --config=<path>          (explicit override)
+#   2. ~/.ragger/ragger.ini    (per-user default)
 #
 # First file found wins. Created automatically on first run.
 
@@ -48,6 +48,7 @@ port = 8432
 [storage]
 db_path = ~/.ragger/memories.db
 default_collection = memory
+formats_dir = /var/ragger/formats
 
 [embedding]
 model = all-MiniLM-L6-v2
@@ -59,10 +60,33 @@ dimensions = 384
 default_limit = 5
 default_min_score = 0.4
 bm25_enabled = true
-bm25_weight = 0.3
-vector_weight = 0.7
+bm25_weight = 3
+vector_weight = 7
 bm25_k1 = 1.5
 bm25_b = 0.75
+
+[inference]
+# Default model for chat
+model = claude-sonnet-4-5
+max_tokens = 4096
+
+# Single endpoint (simple setup):
+# api_url = http://localhost:1234/v1
+# api_key = lmstudio-local
+
+# Multiple endpoints (advanced setup):
+# Use [inference.<name>] sections for multiple endpoints
+# Model routing: first matching glob pattern wins
+
+# [inference.local]
+# api_url = http://localhost:1234/v1
+# api_key = lmstudio-local
+# models = qwen/*, llama/*, mistral/*
+
+# [inference.anthropic]
+# api_url = https://api.anthropic.com/v1
+# api_key = sk-ant-...
+# models = claude-*
 
 [logging]
 log_dir = ~/.ragger
@@ -82,7 +106,7 @@ minimum_chunk_size = 300
 // -----------------------------------------------------------------------
 static std::string bootstrap_user_config() {
     std::string ragger_dir = expand_path("~/.ragger");
-    std::string conf_path  = ragger_dir + "/ragger.conf";
+    std::string conf_path  = ragger_dir + "/ragger.ini";
 
     fs::create_directories(ragger_dir);
 
@@ -101,8 +125,8 @@ static std::string bootstrap_user_config() {
 // -----------------------------------------------------------------------
 // Config file search
 // -----------------------------------------------------------------------
-std::string find_config_file(const std::string& cli_path) {
-    // 1. Explicit --config-file= takes highest priority
+std::string find_system_config(const std::string& cli_path) {
+    // 1. Explicit --config= takes highest priority
     if (!cli_path.empty()) {
         std::string resolved = expand_path(cli_path);
         if (!fs::exists(resolved)) {
@@ -112,14 +136,82 @@ std::string find_config_file(const std::string& cli_path) {
         return resolved;
     }
 
-    // 2. ~/.ragger/ragger.conf
-    std::string user_conf = expand_path("~/.ragger/ragger.conf");
+    // 2. /etc/ragger.ini
+    if (fs::exists("/etc/ragger.ini")) {
+        return "/etc/ragger.ini";
+    }
+
+    // 3. First run — bootstrap default user config (acts as system config)
+    return bootstrap_user_config();
+}
+
+std::string find_user_config() {
+    std::string user_conf = expand_path("~/.ragger/ragger.ini");
     if (fs::exists(user_conf)) {
         return user_conf;
     }
+    return "";
+}
 
-    // 3. First run — bootstrap default config
-    return bootstrap_user_config();
+// Server infrastructure keys — system config always wins (blacklist)
+// Match the Python SERVER_LOCKED set
+struct ServerLockedKey {
+    const char* section;
+    const char* key;
+};
+
+static const ServerLockedKey SERVER_LOCKED[] = {
+    {"server", "host"},
+    {"server", "port"},
+    {"storage", "db_path"},
+    {"storage", "formats_dir"},
+    {"logging", "log_dir"},
+    {"embedding", "model"},
+    {"embedding", "dimensions"},
+    {"embedding", "model_dir"},
+};
+
+void apply_user_overrides(Config& cfg, const Config& user) {
+    // New pattern: user config overrides everything EXCEPT server-locked fields
+    // Server-locked fields stay as loaded from system config
+    
+    // User can override everything except SERVER_LOCKED:
+    // ✗ server.host, server.port
+    // ✗ storage.db_path, storage.formats_dir
+    // ✗ logging.log_dir
+    // ✗ embedding.model, embedding.dimensions, embedding.model_dir
+    // ✓ Everything else
+    
+    // Storage (non-locked)
+    cfg.default_collection = user.default_collection;
+    
+    // Search (all user-overridable)
+    cfg.default_search_limit = user.default_search_limit;
+    cfg.default_min_score = user.default_min_score;
+    cfg.bm25_enabled = user.bm25_enabled;
+    cfg.bm25_weight = user.bm25_weight;
+    cfg.vector_weight = user.vector_weight;
+    cfg.bm25_k1 = user.bm25_k1;
+    cfg.bm25_b = user.bm25_b;
+    
+    // Inference (all user-overridable)
+    cfg.inference_model = user.inference_model;
+    cfg.inference_default = user.inference_default;
+    cfg.inference_api_url = user.inference_api_url;
+    cfg.inference_api_key = user.inference_api_key;
+    cfg.inference_max_tokens = user.inference_max_tokens;
+    cfg.inference_endpoints = user.inference_endpoints;
+    
+    // Logging (query_log, http_log, mcp_log are user-overridable)
+    cfg.query_log_enabled = user.query_log_enabled;
+    cfg.http_log_enabled = user.http_log_enabled;
+    cfg.mcp_log_enabled = user.mcp_log_enabled;
+    
+    // Paths (all user-overridable)
+    cfg.normalize_home_path = user.normalize_home_path;
+    
+    // Import (all user-overridable)
+    cfg.minimum_chunk_size = user.minimum_chunk_size;
 }
 
 // -----------------------------------------------------------------------
@@ -147,6 +239,9 @@ Config load_config(const std::string& path) {
     Config cfg;
     std::string section;
     std::string line;
+
+    // Temporary storage for inference endpoint sections
+    std::map<std::string, Config::InferenceEndpointConfig> endpoint_map;
 
     while (std::getline(file, line)) {
         line = trim(line);
@@ -183,6 +278,7 @@ Config load_config(const std::string& path) {
         else if (section == "storage") {
             if      (key == "db_path")            cfg.db_path = val;
             else if (key == "default_collection") cfg.default_collection = val;
+            else if (key == "formats_dir")        cfg.formats_dir = val;
         }
         else if (section == "embedding") {
             if      (key == "model")      cfg.embedding_model = val;
@@ -198,6 +294,24 @@ Config load_config(const std::string& path) {
             else if (key == "bm25_k1")          cfg.bm25_k1 = std::stof(val);
             else if (key == "bm25_b")           cfg.bm25_b = std::stof(val);
         }
+        else if (section == "inference") {
+            if      (key == "model")      cfg.inference_model = val;
+            else if (key == "api_url")    cfg.inference_api_url = val;
+            else if (key == "api_key")    cfg.inference_api_key = val;
+            else if (key == "max_tokens") cfg.inference_max_tokens = std::stoi(val);
+            else if (key == "default")    cfg.inference_default = val;
+        }
+        else if (section.substr(0, 10) == "inference.") {
+            // Named endpoint section: [inference.local], [inference.anthropic], etc.
+            std::string ep_name = section.substr(10);
+            auto& ep = endpoint_map[ep_name];
+            ep.name = ep_name;
+
+            if      (key == "api_url") ep.api_url = val;
+            else if (key == "api_key") ep.api_key = val;
+            else if (key == "models")  ep.models = val;
+            else if (key == "format")  ep.format = val;
+        }
         else if (section == "logging") {
             if      (key == "log_dir")   cfg.log_dir = val;
             else if (key == "query_log") cfg.query_log_enabled = parse_bool(val);
@@ -210,6 +324,11 @@ Config load_config(const std::string& path) {
         else if (section == "import") {
             if (key == "minimum_chunk_size") cfg.minimum_chunk_size = std::stoi(val);
         }
+    }
+
+    // Convert endpoint map to vector
+    for (auto& [name, ep] : endpoint_map) {
+        cfg.inference_endpoints.push_back(ep);
     }
 
     return cfg;
@@ -228,10 +347,20 @@ const Config& config() {
 }
 
 void init_config(const std::string& cli_config_path) {
-    std::string path = find_config_file(cli_config_path);
-    static Config cfg = load_config(path);
+    // Load system config first
+    std::string system_path = find_system_config(cli_config_path);
+    static Config cfg = load_config(system_path);
+    std::cerr << lang::MSG_CONFIG_LOADED << system_path << std::endl;
+    
+    // Then overlay user-specific overrides
+    std::string user_path = find_user_config();
+    if (!user_path.empty() && user_path != system_path) {
+        Config user_cfg = load_config(user_path);
+        apply_user_overrides(cfg, user_cfg);
+        std::cerr << "Applied user overrides from " << user_path << std::endl;
+    }
+    
     g_config = &cfg;
-    std::cerr << lang::MSG_CONFIG_LOADED << path << std::endl;
 }
 
 } // namespace ragger

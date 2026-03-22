@@ -1,5 +1,22 @@
 cmake_minimum_required(VERSION 3.24)
-project(ragger VERSION 0.1.0 LANGUAGES CXX)
+project(ragger VERSION 0.6.1 LANGUAGES CXX)
+
+# Build version: tag or date suffix
+execute_process(
+    COMMAND git describe --tags --exact-match
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    OUTPUT_VARIABLE GIT_TAG
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE GIT_TAG_RESULT
+)
+if(GIT_TAG_RESULT EQUAL 0)
+    set(RAGGER_BUILD_VERSION "${PROJECT_VERSION}")
+else()
+    string(TIMESTAMP BUILD_TIMESTAMP "%Y-%m-%d_%H:%M:%S")
+    set(RAGGER_BUILD_VERSION "${PROJECT_VERSION}-${BUILD_TIMESTAMP}")
+endif()
+message(STATUS "VERSION: ${RAGGER_BUILD_VERSION}")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -65,6 +82,11 @@ target_include_directories(c_lib_po PUBLIC
 target_link_libraries(c_lib_po PUBLIC Boost::program_options)
 
 # ---------------------------------------------------------------------------
+# libcurl (for inference client)
+# ---------------------------------------------------------------------------
+find_package(CURL REQUIRED)
+
+# ---------------------------------------------------------------------------
 # ragger library (core logic, no main())
 # ---------------------------------------------------------------------------
 add_library(ragger_core STATIC
@@ -76,9 +98,14 @@ add_library(ragger_core STATIC
     src/import.cpp
     src/memory.cpp
     src/server.cpp
+    src/inference.cpp
+    src/api_formats.cpp
 )
 target_include_directories(ragger_core PUBLIC
     "${CMAKE_SOURCE_DIR}/include"
+)
+target_compile_definitions(ragger_core PUBLIC
+    RAGGER_VERSION="${RAGGER_BUILD_VERSION}"
 )
 target_link_libraries(ragger_core PUBLIC
     SQLite::SQLite3
@@ -87,6 +114,7 @@ target_link_libraries(ragger_core PUBLIC
     Eigen3::Eigen
     vendor_headers
     Boost::boost
+    CURL::libcurl
 )
 
 # ---------------------------------------------------------------------------

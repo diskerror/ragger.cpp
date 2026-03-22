@@ -1,0 +1,12 @@
+{
+    "path": "/messages",
+    "auth": "header",
+    "auth_header": "x-api-key",
+    "auth_extra": { "anthropic-version": "2023-06-01" },
+    "request_transform": "anthropic",
+    "response_content": "content[0].text",
+    "stream_content": "delta.text",
+    "stream_type_field": "type",
+    "stream_type_value": "content_block_delta",
+    "stream_stop": "message_stop"
+}

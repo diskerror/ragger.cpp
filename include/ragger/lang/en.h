@@ -31,13 +31,13 @@ constexpr const char* ERR_PORT_IN_USE_1       = "Error: port ";
 constexpr const char* ERR_PORT_IN_USE_2       =
     " is already in use. Another instance may be running.\n"
     "To run multiple instances, set a different port in your config file\n"
-    "(~/.ragger/ragger.conf) and update the OpenClaw plugin's serverUrl to match.";
+    "(~/.ragger/ragger.ini) and update the OpenClaw plugin's serverUrl to match.";
 constexpr const char* MSG_CONFIG_LOADED       = "Config loaded from ";
 constexpr const char* MSG_CONFIG_CREATED      = "Created default config: ";
 
 // --- Errors: config ---
 constexpr const char* ERR_CONFIG_NOT_FOUND    = "No config file found.\n"
-                                                 "Searched: /etc/ragger.conf, ~/.ragger/ragger.conf\n"
+                                                 "Searched: /etc/ragger.ini, ~/.ragger/ragger.ini\n"
                                                  "Use --config-file=<path> to specify one.";
 constexpr const char* ERR_CONFIG_FILE_MISSING = "Config file not found: ";
 constexpr const char* ERR_CONFIG_OPEN         = "Cannot open config file: ";
