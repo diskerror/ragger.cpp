@@ -9,25 +9,35 @@
 namespace ragger {
 
 RaggerMemory::RaggerMemory(const std::string& db_path,
-                           const std::string& model_dir)
+                           const std::string& model_dir,
+                           const std::string& user_db_path)
 {
     // Resolve model directory from config or override
     std::string resolved_model_dir = model_dir.empty()
         ? config().resolved_model_dir()
         : expand_path(model_dir);
 
-    // Create embedder
+    // Create embedder (shared across backends)
     embedder_ = std::make_unique<Embedder>(resolved_model_dir);
 
-    // Create SQLite backend with embedder reference
+    // Create primary backend (common DB in multi-user, only DB in single-user)
     backend_ = std::make_unique<SqliteBackend>(*embedder_, db_path);
+
+    // Multi-user: create user backend
+    if (!user_db_path.empty()) {
+        user_backend_ = std::make_unique<SqliteBackend>(*embedder_, user_db_path);
+    }
 }
 
 RaggerMemory::~RaggerMemory() {
     close();
 }
 
-std::string RaggerMemory::store(const std::string& text, json metadata) {
+std::string RaggerMemory::store(const std::string& text, json metadata,
+                                 bool common) {
+    if (user_backend_ && !common) {
+        return user_backend_->store(text, std::move(metadata));
+    }
     return backend_->store(text, std::move(metadata));
 }
 
@@ -35,11 +45,37 @@ SearchResponse RaggerMemory::search(const std::string& query,
                                     int limit,
                                     float min_score,
                                     std::vector<std::string> collections) {
-    return backend_->search(query, limit, min_score, std::move(collections));
+    if (!user_backend_) {
+        return backend_->search(query, limit, min_score, std::move(collections));
+    }
+
+    // Multi-DB: query both, merge by score
+    auto common_result = backend_->search(query, limit, min_score, collections);
+    auto user_result = user_backend_->search(query, limit, min_score, std::move(collections));
+
+    // Merge results
+    auto& all = common_result.results;
+    all.insert(all.end(), user_result.results.begin(), user_result.results.end());
+    std::sort(all.begin(), all.end(),
+              [](const SearchResult& a, const SearchResult& b) {
+                  return a.score > b.score;
+              });
+    if ((int)all.size() > limit) all.resize(limit);
+
+    // Merge timing
+    auto& ct = common_result.timing;
+    auto& ut = user_result.timing;
+    ct["search_ms"] = ct.value("search_ms", 0) + ut.value("search_ms", 0);
+    ct["total_ms"] = ct.value("total_ms", 0) + ut.value("total_ms", 0);
+    ct["corpus_size"] = ct.value("corpus_size", 0) + ut.value("corpus_size", 0);
+
+    return common_result;
 }
 
 int RaggerMemory::count() const {
-    return backend_->count();
+    int total = backend_->count();
+    if (user_backend_) total += user_backend_->count();
+    return total;
 }
 
 std::vector<SearchResult> RaggerMemory::load_all(const std::string& collection) {
@@ -55,9 +91,8 @@ std::vector<std::string> RaggerMemory::collections() const {
 }
 
 void RaggerMemory::close() {
-    if (backend_) {
-        backend_->close();
-    }
+    if (backend_) backend_->close();
+    if (user_backend_) user_backend_->close();
 }
 
 } // namespace ragger
