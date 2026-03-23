@@ -201,6 +201,35 @@ relevant user account to ensure the volume is available at boot.
 A start script that waits for the volume to mount (with a timeout) can help, but is not
 a substitute for the volume actually being mounted by the system.
 
+## Test Coverage
+
+4 test suites, ~35 test functions, ~95 assertions:
+
+| Suite              | Functions | Assertions | Coverage                                |
+|--------------------|----------:|-----------:|-----------------------------------------|
+| `test_import`      |        13 |         28 | Chunking, heading detection, edge cases |
+| `test_bm25`        |        12 |         28 | Indexing, scoring, tokenization         |
+| `test_sqlite_backend` |     10 |         22 | CRUD, search, metadata, migration       |
+| `test_config`      |        ~5 |         17 | INI parsing, defaults, layering         |
+
+### Untested modules
+
+| Module             | Priority | Notes                                         |
+|--------------------|----------|-----------------------------------------------|
+| `server`           | **High** | Production binary — no HTTP endpoint tests    |
+| `auth` (planned)   | **High** | Security-critical, not yet implemented in C++ |
+| `api_formats`      | Medium   | Format schema validation                      |
+| `inference`        | Medium   | Endpoint routing, streaming                   |
+| `embedder`         | Low      | Thin ONNX wrapper, tested indirectly          |
+| `memory`           | Low      | Facade over backend, tested indirectly        |
+| `tokenizer_wrapper`| Low      | Thin wrapper, tested via embedder             |
+
+### Comparison with Python version
+
+The Python version has 203 tests across 13 test files covering all core modules
+plus HTTP API, MCP server, chat context, and client. See the Python
+[README](https://github.com/diskerror/ragger) for details.
+
 ## License
 
 GPL v3 — same as the Python version.

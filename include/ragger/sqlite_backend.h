@@ -84,6 +84,15 @@ public:
     /// Look up user by username. Returns nullopt if not found.
     std::optional<UserInfo> get_user_by_username(const std::string& username);
 
+    /// Delete a memory by ID. Returns true if deleted.
+    bool delete_memory(int memory_id);
+
+    /// Delete multiple memories by ID. Returns count deleted.
+    int delete_batch(const std::vector<int>& memory_ids);
+
+    /// Search by metadata field matching. Returns vector of results.
+    std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit = 0);
+
     void close();
 
 private:

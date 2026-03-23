@@ -16,6 +16,7 @@
 #include "ragger/import.h"
 #include "ragger/inference.h"
 #include "ragger/lang.h"
+#include "ragger/logs.h"
 #include "ragger/memory.h"
 #include "ragger/server.h"
 #include "nlohmann_json.hpp"
@@ -483,6 +484,7 @@ int main(int argc, char** argv) {
 
     try {
         if (command == "serve") {
+            ragger::setup_logging(false, true);
             ragger::RaggerMemory memory(db_path, model_dir);
             char buf[128];
             std::snprintf(buf, sizeof(buf), MSG_LOADED_MEMORIES, memory.count());
@@ -492,9 +494,11 @@ int main(int argc, char** argv) {
             server.run();
 
         } else if (command == "chat") {
+            ragger::setup_logging(false, false);
             do_chat(db_path, model_dir);
 
         } else if (command == "search") {
+            ragger::setup_logging(false, false);
             auto args = opts.getParams("args");
             if (args.empty()) {
                 std::cerr << CLI_USAGE_SEARCH << "\n";
@@ -522,6 +526,7 @@ int main(int argc, char** argv) {
             std::cout << output.dump(2) << "\n";
 
         } else if (command == "store") {
+            ragger::setup_logging(false, false);
             auto args = opts.getParams("args");
             if (args.empty()) {
                 std::cerr << CLI_USAGE_STORE << "\n";
@@ -541,10 +546,12 @@ int main(int argc, char** argv) {
             std::cout << MSG_STORED_WITH_ID << id << "\n";
 
         } else if (command == "count") {
+            ragger::setup_logging(false, false);
             ragger::RaggerMemory memory(db_path, model_dir);
             std::cout << memory.count() << "\n";
 
         } else if (command == "import") {
+            ragger::setup_logging(false, false);
             auto args = opts.getParams("args");
             if (args.empty()) {
                 std::cerr << "Usage: ragger import <file> [file...] [--collection name]\n";
@@ -556,6 +563,7 @@ int main(int argc, char** argv) {
             }
 
         } else if (command == "export") {
+            ragger::setup_logging(false, false);
             auto args = opts.getParams("args");
             if (args.size() < 2) {
                 std::cerr << "Usage: ragger export <docs|memories|all> <dest-dir> [--collection name]\n";
@@ -581,10 +589,12 @@ int main(int argc, char** argv) {
             }
 
         } else if (command == "mcp") {
+            ragger::setup_logging(false, false);
             ragger::RaggerMemory memory(db_path, model_dir);
             do_mcp(memory);
 
         } else if (command == "rebuild-bm25") {
+            ragger::setup_logging(false, false);
             ragger::RaggerMemory memory(db_path, model_dir);
             int count = memory.rebuild_bm25();
             std::cout << "✓ BM25 index rebuilt: " << count << " documents\n";

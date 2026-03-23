@@ -575,6 +575,94 @@ struct SqliteBackend::Impl {
         return result;
     }
 
+    bool delete_memory(int memory_id) {
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db, "DELETE FROM memories WHERE id = ?",
+                           -1, &stmt, nullptr);
+        sqlite3_bind_int(stmt, 1, memory_id);
+        sqlite3_step(stmt);
+        int changes = sqlite3_changes(db);
+        sqlite3_finalize(stmt);
+        
+        if (changes > 0) {
+            invalidate_cache();
+            return true;
+        }
+        return false;
+    }
+
+    int delete_batch(const std::vector<int>& memory_ids) {
+        if (memory_ids.empty()) return 0;
+
+        // Build SQL: DELETE FROM memories WHERE id IN (?,?,...)
+        std::string sql = "DELETE FROM memories WHERE id IN (";
+        for (size_t i = 0; i < memory_ids.size(); ++i) {
+            if (i > 0) sql += ",";
+            sql += "?";
+        }
+        sql += ")";
+
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+        for (size_t i = 0; i < memory_ids.size(); ++i) {
+            sqlite3_bind_int(stmt, static_cast<int>(i + 1), memory_ids[i]);
+        }
+        sqlite3_step(stmt);
+        int changes = sqlite3_changes(db);
+        sqlite3_finalize(stmt);
+
+        if (changes > 0) {
+            invalidate_cache();
+        }
+        return changes;
+    }
+
+    std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit) {
+        std::vector<SearchResult> results;
+        
+        // Get all memories
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db,
+            "SELECT id, text, metadata, timestamp FROM memories ORDER BY id",
+            -1, &stmt, nullptr);
+
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int id = sqlite3_column_int(stmt, 0);
+            const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            const char* meta_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+            const char* ts = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+
+            // Parse metadata
+            json metadata = meta_str ? json::parse(meta_str) : json::object();
+
+            // Check if all filter fields match
+            bool match = true;
+            for (auto it = metadata_filter.begin(); it != metadata_filter.end(); ++it) {
+                if (!metadata.contains(it.key()) || metadata[it.key()] != it.value()) {
+                    match = false;
+                    break;
+                }
+            }
+
+            if (match) {
+                results.push_back({
+                    id,
+                    text ? text : "",
+                    0.0f,  // score not applicable for metadata search
+                    metadata,
+                    ts ? ts : ""
+                });
+
+                // Check limit
+                if (limit > 0 && (int)results.size() >= limit) {
+                    break;
+                }
+            }
+        }
+        sqlite3_finalize(stmt);
+        return results;
+    }
+
     void close() {
         if (db) {
             sqlite3_close(db);
@@ -614,6 +702,18 @@ std::vector<std::string> SqliteBackend::collections() const {
 }
 
 void SqliteBackend::close() { pImpl->close(); }
+
+bool SqliteBackend::delete_memory(int memory_id) {
+    return pImpl->delete_memory(memory_id);
+}
+
+int SqliteBackend::delete_batch(const std::vector<int>& memory_ids) {
+    return pImpl->delete_batch(memory_ids);
+}
+
+std::vector<SearchResult> SqliteBackend::search_by_metadata(const json& metadata_filter, int limit) {
+    return pImpl->search_by_metadata(metadata_filter, limit);
+}
 
 int SqliteBackend::create_user(const std::string& username,
                                 const std::string& token_hash,

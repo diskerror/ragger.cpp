@@ -100,6 +100,8 @@ add_library(ragger_core STATIC
     src/server.cpp
     src/inference.cpp
     src/api_formats.cpp
+    src/logs.cpp
+    src/auth.cpp
 )
 target_include_directories(ragger_core PUBLIC
     "${CMAKE_SOURCE_DIR}/include"

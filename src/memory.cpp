@@ -90,6 +90,52 @@ std::vector<std::string> RaggerMemory::collections() const {
     return backend_->collections();
 }
 
+bool RaggerMemory::delete_memory(int memory_id) {
+    // In multi-DB mode: try user DB first, then common
+    if (user_backend_) {
+        if (user_backend_->delete_memory(memory_id)) {
+            return true;
+        }
+    }
+    return backend_->delete_memory(memory_id);
+}
+
+int RaggerMemory::delete_batch(const std::vector<int>& memory_ids) {
+    int total = 0;
+    // In multi-DB mode: try both DBs
+    if (user_backend_) {
+        total += user_backend_->delete_batch(memory_ids);
+    }
+    total += backend_->delete_batch(memory_ids);
+    return total;
+}
+
+std::vector<SearchResult> RaggerMemory::search_by_metadata(const json& metadata_filter, int limit) {
+    if (!user_backend_) {
+        return backend_->search_by_metadata(metadata_filter, limit);
+    }
+
+    // Multi-DB: query both, merge results
+    auto common_results = backend_->search_by_metadata(metadata_filter, limit);
+    auto user_results = user_backend_->search_by_metadata(metadata_filter, limit);
+
+    // Merge results
+    common_results.insert(common_results.end(), user_results.begin(), user_results.end());
+    
+    // Sort by ID for consistency
+    std::sort(common_results.begin(), common_results.end(),
+              [](const SearchResult& a, const SearchResult& b) {
+                  return a.id < b.id;
+              });
+
+    // Apply limit if specified
+    if (limit > 0 && (int)common_results.size() > limit) {
+        common_results.resize(limit);
+    }
+
+    return common_results;
+}
+
 void RaggerMemory::close() {
     if (backend_) backend_->close();
     if (user_backend_) user_backend_->close();

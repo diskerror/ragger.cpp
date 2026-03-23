@@ -46,6 +46,17 @@ public:
     /// Get distinct collection names.
     std::vector<std::string> collections() const;
 
+    /// Delete a memory by ID. In multi-DB mode, tries user DB first, then common.
+    /// Returns true if deleted from either DB.
+    bool delete_memory(int memory_id);
+
+    /// Delete multiple memories by ID. In multi-DB mode, tries user DB first, then common.
+    /// Returns total count deleted from both DBs.
+    int delete_batch(const std::vector<int>& memory_ids);
+
+    /// Search by metadata field matching. In multi-DB mode, merges results from both DBs.
+    std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit = 0);
+
     /// Access primary backend (for user management, etc.)
     SqliteBackend* backend() { return backend_.get(); }
 

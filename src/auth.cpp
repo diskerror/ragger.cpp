@@ -1,0 +1,128 @@
+/**
+ * Authentication utilities implementation
+ */
+#include "ragger/auth.h"
+#include "ragger/config.h"
+
+#include <CommonCrypto/CommonDigest.h>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <filesystem>
+#include <random>
+#include <cstdio>
+#include <sys/stat.h>
+
+namespace ragger {
+
+namespace fs = std::filesystem;
+
+// Base64url encoding (RFC 4648 section 5)
+static std::string base64url_encode(const unsigned char* data, size_t len) {
+    static const char* base64_chars =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    
+    std::string result;
+    result.reserve((len * 4 / 3) + 3);
+    
+    for (size_t i = 0; i < len; ) {
+        uint32_t octet_a = i < len ? data[i++] : 0;
+        uint32_t octet_b = i < len ? data[i++] : 0;
+        uint32_t octet_c = i < len ? data[i++] : 0;
+        uint32_t triple = (octet_a << 16) + (octet_b << 8) + octet_c;
+        
+        result.push_back(base64_chars[(triple >> 18) & 0x3F]);
+        result.push_back(base64_chars[(triple >> 12) & 0x3F]);
+        result.push_back(base64_chars[(triple >> 6) & 0x3F]);
+        result.push_back(base64_chars[triple & 0x3F]);
+    }
+    
+    // Remove padding (base64url doesn't use padding)
+    size_t padding = (3 - (len % 3)) % 3;
+    if (padding > 0) {
+        result.resize(result.size() - padding);
+    }
+    
+    return result;
+}
+
+std::string hash_token(const std::string& token) {
+    unsigned char hash[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(token.c_str(), static_cast<CC_LONG>(token.size()), hash);
+    
+    // Convert to hex string
+    std::ostringstream oss;
+    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; ++i) {
+        oss << std::hex << std::setw(2) << std::setfill('0')
+            << static_cast<int>(hash[i]);
+    }
+    return oss.str();
+}
+
+std::string token_path() {
+    return expand_path("~/.ragger/token");
+}
+
+std::string load_token() {
+    std::string path = token_path();
+    std::ifstream f(path);
+    if (!f.is_open()) return "";
+    
+    std::string token;
+    std::getline(f, token);
+    
+    // Trim whitespace
+    size_t start = token.find_first_not_of(" \t\r\n");
+    size_t end = token.find_last_not_of(" \t\r\n");
+    if (start == std::string::npos) return "";
+    return token.substr(start, end - start + 1);
+}
+
+std::string generate_token() {
+    unsigned char random_bytes[32];
+    
+    // Read from /dev/urandom
+    FILE* f = fopen("/dev/urandom", "rb");
+    if (!f) {
+        throw std::runtime_error("Failed to open /dev/urandom");
+    }
+    size_t read_count = fread(random_bytes, 1, 32, f);
+    fclose(f);
+    
+    if (read_count != 32) {
+        throw std::runtime_error("Failed to read enough random bytes");
+    }
+    
+    return base64url_encode(random_bytes, 32);
+}
+
+std::string ensure_token() {
+    std::string path = token_path();
+    
+    // Check if token file exists
+    if (fs::exists(path)) {
+        std::string token = load_token();
+        if (!token.empty()) return token;
+    }
+    
+    // Create parent directory
+    fs::create_directories(fs::path(path).parent_path());
+    
+    // Generate new token
+    std::string token = generate_token();
+    
+    // Write to file
+    std::ofstream f(path);
+    if (!f.is_open()) {
+        throw std::runtime_error("Failed to write token file: " + path);
+    }
+    f << token << std::endl;
+    f.close();
+    
+    // Set permissions to 0660
+    chmod(path.c_str(), 0660);
+    
+    return token;
+}
+
+} // namespace ragger
