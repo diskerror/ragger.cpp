@@ -64,6 +64,21 @@ struct Config {
     // --- Import ---
     int  minimum_chunk_size    = 300;
 
+    // --- Chat ---
+    std::string chat_store_turns = "true";  // "true", "session", "false"
+    bool chat_summarize_on_pause = true;
+    int  chat_pause_minutes      = 10;
+    bool chat_summarize_on_quit  = true;
+    int  chat_max_turn_retention_minutes = 60;
+    int  chat_max_turns_stored   = 100;
+    int  chat_max_persona_chars  = 0;   // 0 = unlimited
+    int  chat_max_memory_results = 3;
+
+    // --- System ceilings (0 = no limit) ---
+    int  max_search_limit             = 0;
+    int  chat_max_persona_chars_limit = 0;
+    int  chat_max_memory_results_limit = 0;
+
     /// Resolved paths (~ expanded)
     std::string resolved_db_path() const;
     std::string resolved_log_dir() const;

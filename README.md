@@ -5,10 +5,14 @@ vector + BM25 search.
 
 ## Status
 
-**Production-ready** — running as the live memory server, all 23 retrieval quality tests passing. Feature parity with
-the Python version's core functionality.
+**Version 0.7.0** — Single-user, production-ready.
 
-Same HTTP API, same database format, same embedding model. The C++ and Python versions share a database and config file.
+Same HTTP API, same database format, same embedding model, same config files.
+The C++ and Python versions are interchangeable — swap the binary, restart.
+
+Multi-user framework is in place (layered config with system/user INI files,
+SERVER_LOCKED keys, system ceilings on user settings) but the data layer is
+still single-user. Multi-user data support is planned for a future release.
 
 ## Features
 
@@ -26,13 +30,17 @@ Same HTTP API, same database format, same embedding model. The C++ and Python ve
 
 ## Configuration
 
-Ragger uses a shared INI config file. Search order (first found wins):
+Ragger uses layered INI config files:
 
-1. `--config-file=<path>`
-2. `~/.ragger/ragger.ini`
+1. **System config:** `/etc/ragger.ini` (or `--config=<path>` to override)
+2. **User config:** `~/.ragger/ragger.ini` (always read on top)
 
-A config file is required — there are no silent defaults. See `example-system.ini` and `example-user.ini` for all options. The same config
-file works for both the C++ and Python versions.
+System config sets infrastructure (host, port, DB path, embedding model,
+inference endpoints). User config sets personal preferences. SERVER_LOCKED
+keys can't be overridden; system ceilings cap user values.
+
+See `example-system.ini` and `example-user.ini` for all options. The same
+config format works for both the C++ and Python versions.
 
 ## Dependencies
 

@@ -169,7 +169,25 @@ static const ServerLockedKey SERVER_LOCKED[] = {
     {"embedding", "model"},
     {"embedding", "dimensions"},
     {"embedding", "model_dir"},
+    // System ceilings
+    {"chat", "max_turn_retention_minutes"},
+    {"chat", "max_turns_stored"},
+    {"chat", "max_persona_chars_limit"},
+    {"chat", "max_memory_results_limit"},
+    {"search", "max_search_limit"},
+    // Inference endpoints (user can only pick model)
+    {"inference", "api_url"},
+    {"inference", "api_key"},
+    {"inference", "provider"},
+    {"inference", "max_tokens"},
 };
+
+/// Clamp a value to a ceiling. Ceiling of 0 = no limit.
+/// Value of 0 = "unlimited" — ceiling applies (becomes ceiling).
+static void clamp_to_ceiling(int& value, int ceiling) {
+    if (ceiling <= 0) return;
+    if (value <= 0 || value > ceiling) value = ceiling;
+}
 
 void apply_user_overrides(Config& cfg, const Config& user) {
     // New pattern: user config overrides everything EXCEPT server-locked fields
@@ -194,13 +212,9 @@ void apply_user_overrides(Config& cfg, const Config& user) {
     cfg.bm25_k1 = user.bm25_k1;
     cfg.bm25_b = user.bm25_b;
     
-    // Inference (all user-overridable)
+    // Inference (user can only pick model)
     cfg.inference_model = user.inference_model;
     cfg.inference_default = user.inference_default;
-    cfg.inference_api_url = user.inference_api_url;
-    cfg.inference_api_key = user.inference_api_key;
-    cfg.inference_max_tokens = user.inference_max_tokens;
-    cfg.inference_endpoints = user.inference_endpoints;
     
     // Logging (query_log, http_log, mcp_log are user-overridable)
     cfg.query_log_enabled = user.query_log_enabled;
@@ -212,6 +226,21 @@ void apply_user_overrides(Config& cfg, const Config& user) {
     
     // Import (all user-overridable)
     cfg.minimum_chunk_size = user.minimum_chunk_size;
+
+    // Chat (user-overridable, but ceilings apply)
+    cfg.chat_store_turns = user.chat_store_turns;
+    cfg.chat_summarize_on_pause = user.chat_summarize_on_pause;
+    cfg.chat_pause_minutes = user.chat_pause_minutes;
+    cfg.chat_summarize_on_quit = user.chat_summarize_on_quit;
+    cfg.chat_max_persona_chars = user.chat_max_persona_chars;
+    cfg.chat_max_memory_results = user.chat_max_memory_results;
+    // Note: max_turn_retention_minutes, max_turns_stored, and all *_limit
+    // keys are SERVER_LOCKED — they stay as loaded from system config.
+
+    // Apply system ceilings
+    clamp_to_ceiling(cfg.default_search_limit, cfg.max_search_limit);
+    clamp_to_ceiling(cfg.chat_max_memory_results, cfg.chat_max_memory_results_limit);
+    clamp_to_ceiling(cfg.chat_max_persona_chars, cfg.chat_max_persona_chars_limit);
 }
 
 // -----------------------------------------------------------------------
@@ -293,6 +322,7 @@ Config load_config(const std::string& path) {
             else if (key == "vector_weight")    cfg.vector_weight = std::stof(val);
             else if (key == "bm25_k1")          cfg.bm25_k1 = std::stof(val);
             else if (key == "bm25_b")           cfg.bm25_b = std::stof(val);
+            else if (key == "max_search_limit") cfg.max_search_limit = std::stoi(val);
         }
         else if (section == "inference") {
             if      (key == "model")      cfg.inference_model = val;
@@ -323,6 +353,18 @@ Config load_config(const std::string& path) {
         }
         else if (section == "import") {
             if (key == "minimum_chunk_size") cfg.minimum_chunk_size = std::stoi(val);
+        }
+        else if (section == "chat") {
+            if (key == "store_turns") cfg.chat_store_turns = val;
+            else if (key == "summarize_on_pause") cfg.chat_summarize_on_pause = parse_bool(val);
+            else if (key == "pause_minutes") cfg.chat_pause_minutes = std::stoi(val);
+            else if (key == "summarize_on_quit") cfg.chat_summarize_on_quit = parse_bool(val);
+            else if (key == "max_turn_retention_minutes") cfg.chat_max_turn_retention_minutes = std::stoi(val);
+            else if (key == "max_turns_stored") cfg.chat_max_turns_stored = std::stoi(val);
+            else if (key == "max_persona_chars") cfg.chat_max_persona_chars = std::stoi(val);
+            else if (key == "max_memory_results") cfg.chat_max_memory_results = std::stoi(val);
+            else if (key == "max_persona_chars_limit") cfg.chat_max_persona_chars_limit = std::stoi(val);
+            else if (key == "max_memory_results_limit") cfg.chat_max_memory_results_limit = std::stoi(val);
         }
     }
 
