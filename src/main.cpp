@@ -320,6 +320,20 @@ int main(int argc, char** argv) {
 
     if (opts.count("help") || command == "help") {
         std::cout << "ragger " << RAGGER_VERSION << "\n\n";
+        std::cout << "Usage: ragger <command> [options] [args]\n\n";
+        std::cout << "Commands:\n";
+        std::cout << "  serve              Start the HTTP server (default: 127.0.0.1:8432)\n";
+        std::cout << "  search <query>     Search memories by meaning\n";
+        std::cout << "  store <text>       Store a new memory\n";
+        std::cout << "  count              Show number of stored memories\n";
+        std::cout << "  import <file...>   Import files (paragraph-aware chunking)\n";
+        std::cout << "  export <mode> <dir>  Export docs|memories|all to directory\n";
+        std::cout << "  chat               Interactive chat with memory context\n";
+        std::cout << "  mcp                Start MCP server (JSON-RPC over stdin/stdout)\n";
+        std::cout << "  rebuild-bm25       Rebuild the BM25 keyword index\n";
+        std::cout << "  help               Show this help\n";
+        std::cout << "  version            Show version\n";
+        std::cout << "\nOptions:\n";
         std::cout << opts.to_string() << "\n";
         return 0;
     }
