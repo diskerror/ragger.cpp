@@ -211,6 +211,143 @@ void test_search_timing(ragger::Embedder& emb) {
     cleanup();
 }
 
+void test_delete_memory(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    // Store a memory
+    std::string id1 = db.store("Memory to delete.");
+    std::string id2 = db.store("Memory to keep.");
+    assert(db.count() == 2);
+
+    // Delete the first memory
+    bool deleted = db.delete_memory(std::stoi(id1));
+    assert(deleted);
+    assert(db.count() == 1);
+
+    // Verify the correct one was deleted
+    auto all = db.load_all();
+    assert(all.size() == 1);
+    assert(all[0].text == "Memory to keep.");
+
+    // Try deleting non-existent ID
+    deleted = db.delete_memory(99999);
+    assert(!deleted);
+    assert(db.count() == 1);
+
+    db.close();
+    cleanup();
+}
+
+void test_delete_batch(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    // Store 3 memories
+    std::string id1 = db.store("First memory.");
+    std::string id2 = db.store("Second memory.");
+    std::string id3 = db.store("Third memory.");
+    assert(db.count() == 3);
+
+    // Delete 2 by ID
+    std::vector<int> to_delete = {std::stoi(id1), std::stoi(id3)};
+    int deleted_count = db.delete_batch(to_delete);
+    assert(deleted_count == 2);
+    assert(db.count() == 1);
+
+    // Verify the correct one remains
+    auto all = db.load_all();
+    assert(all.size() == 1);
+    assert(all[0].text == "Second memory.");
+
+    // Empty vector → returns 0
+    deleted_count = db.delete_batch({});
+    assert(deleted_count == 0);
+
+    // Delete with non-existent IDs
+    deleted_count = db.delete_batch({99999, 88888});
+    assert(deleted_count == 0);
+
+    db.close();
+    cleanup();
+}
+
+void test_search_by_metadata(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    // Store memories with different metadata
+    db.store("Apple document.", {{"category", "fruit"}, {"color", "red"}});
+    db.store("Banana document.", {{"category", "fruit"}, {"color", "yellow"}});
+    db.store("Car document.", {{"category", "vehicle"}, {"color", "red"}});
+    db.store("Sky document.", {{"category", "nature"}, {"color", "blue"}});
+
+    // Search by single field → correct results
+    auto results = db.search_by_metadata({{"category", "fruit"}});
+    assert(results.size() == 2);
+    for (auto& r : results) {
+        assert(r.metadata["category"] == "fruit");
+    }
+
+    // Search by multiple fields (AND) → correct results
+    results = db.search_by_metadata({{"category", "fruit"}, {"color", "yellow"}});
+    assert(results.size() == 1);
+    assert(results[0].text == "Banana document.");
+
+    // Search with limit → respects limit
+    results = db.search_by_metadata({{"color", "red"}}, 1);
+    assert(results.size() == 1);
+
+    // Search with no matches → empty
+    results = db.search_by_metadata({{"category", "nonexistent"}});
+    assert(results.empty());
+
+    // Search with no limit (0) → returns all matches
+    results = db.search_by_metadata({{"color", "red"}}, 0);
+    assert(results.size() == 2);
+
+    db.close();
+    cleanup();
+}
+
+void test_user_management(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    // create_user → returns valid ID
+    int user_id = db.create_user("testuser", "abc123hash", false);
+    assert(user_id > 0);
+
+    int admin_id = db.create_user("adminuser", "def456hash", true);
+    assert(admin_id > 0);
+    assert(admin_id != user_id);
+
+    // get_user_by_token_hash → finds created user
+    auto user_opt = db.get_user_by_token_hash("abc123hash");
+    assert(user_opt.has_value());
+    assert(user_opt->username == "testuser");
+    assert(user_opt->is_admin == false);
+    assert(user_opt->token_hash == "abc123hash");
+
+    // get_user_by_username → finds created user
+    user_opt = db.get_user_by_username("adminuser");
+    assert(user_opt.has_value());
+    assert(user_opt->username == "adminuser");
+    assert(user_opt->is_admin == true);
+    assert(user_opt->token_hash == "def456hash");
+
+    // get_user_by_token_hash with wrong hash → nullopt
+    user_opt = db.get_user_by_token_hash("wronghash");
+    assert(!user_opt.has_value());
+
+    // get_user_by_username with wrong name → nullopt
+    user_opt = db.get_user_by_username("nonexistent");
+    assert(!user_opt.has_value());
+
+    db.close();
+    cleanup();
+}
+
 // -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
@@ -238,6 +375,10 @@ int main() {
     test_load_all(emb);
     test_rebuild_bm25(emb);
     test_search_timing(emb);
+    test_delete_memory(emb);
+    test_delete_batch(emb);
+    test_search_by_metadata(emb);
+    test_user_management(emb);
 
     std::cout << "test_sqlite_backend: all passed\n";
     return 0;

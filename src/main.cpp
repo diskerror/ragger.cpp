@@ -12,6 +12,7 @@
 #include <sstream>
 
 #include "ProgramOptions.h"
+#include "ragger/chat.h"
 #include "ragger/config.h"
 #include "ragger/import.h"
 #include "ragger/inference.h"
@@ -168,59 +169,6 @@ static void do_export_all(ragger::RaggerMemory& memory,
 // -----------------------------------------------------------------------
 // Chat: simple REPL with memory context injection
 // -----------------------------------------------------------------------
-static std::string load_workspace_files() {
-    /**
-     * Load workspace MD files for the system prompt.
-     * 
-     * SOUL.md: /var/ragger/SOUL.md (common persona) > ~/.ragger/SOUL.md (fallback)
-     * USER.md, AGENTS.md, TOOLS.md: ~/.ragger/ only (per-user)
-     * 
-     * Returns combined text for injection into system prompt.
-     */
-    std::string user_dir = ragger::expand_path("~/.ragger");
-    std::string common_dir = "/var/ragger";
-
-    std::vector<std::string> sections;
-
-    // SOUL.md: common first, user fallback
-    std::string soul_path = common_dir + "/SOUL.md";
-    if (!fs::exists(soul_path)) {
-        soul_path = user_dir + "/SOUL.md";
-    }
-    if (fs::exists(soul_path)) {
-        std::ifstream f(soul_path);
-        std::string content((std::istreambuf_iterator<char>(f)),
-                            std::istreambuf_iterator<char>());
-        // Trim trailing whitespace
-        content.erase(content.find_last_not_of(" \t\r\n") + 1);
-        if (!content.empty()) {
-            sections.push_back(content);
-        }
-    }
-
-    // Per-user files
-    for (const auto& filename : {"USER.md", "AGENTS.md", "TOOLS.md"}) {
-        std::string path = user_dir + "/" + filename;
-        if (fs::exists(path)) {
-            std::ifstream f(path);
-            std::string content((std::istreambuf_iterator<char>(f)),
-                                std::istreambuf_iterator<char>());
-            content.erase(content.find_last_not_of(" \t\r\n") + 1);
-            if (!content.empty()) {
-                sections.push_back(content);
-            }
-        }
-    }
-
-    // Join sections with separator
-    std::string result;
-    for (size_t i = 0; i < sections.size(); ++i) {
-        if (i > 0) result += "\n\n---\n\n";
-        result += sections[i];
-    }
-    return result;
-}
-
 static void do_chat(const std::string& db_path, const std::string& model_dir) {
     const auto& cfg = ragger::config();
 
@@ -244,91 +192,9 @@ static void do_chat(const std::string& db_path, const std::string& model_dir) {
     // Load memory for context search
     ragger::RaggerMemory memory(db_path, model_dir);
 
-    // Load workspace files for persona
-    std::string workspace = load_workspace_files();
-
-    // Conversation history — start with workspace as system prompt
-    std::vector<ragger::Message> messages;
-    if (!workspace.empty()) {
-        messages.push_back({"system", workspace});
-    }
-
-    std::cout << "Ragger Chat (model: " << cfg.inference_model << ")\n";
-    std::cout << "Type '/quit' or Ctrl+D to exit\n\n";
-
-    std::string line;
-    while (true) {
-        std::cout << "You: " << std::flush;
-        if (!std::getline(std::cin, line)) {
-            std::cout << "\nGoodbye!\n";
-            break;
-        }
-
-        // Trim whitespace
-        line.erase(0, line.find_first_not_of(" \t\r\n"));
-        line.erase(line.find_last_not_of(" \t\r\n") + 1);
-
-        if (line.empty()) continue;
-
-        if (line == "/quit" || line == "/exit") {
-            std::cout << "Goodbye!\n";
-            break;
-        }
-
-        // Search memory for context
-        std::vector<std::string> context_chunks;
-        try {
-            auto result = memory.search(line, 3, 0.3f);
-            for (const auto& r : result.results) {
-                context_chunks.push_back(r.text);
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "Warning: memory search failed: " << e.what() << "\n";
-        }
-
-        // Build message with context
-        std::vector<ragger::Message> current_messages = messages;
-
-        if (!context_chunks.empty()) {
-            std::string context_text;
-            for (size_t i = 0; i < context_chunks.size(); ++i) {
-                if (i > 0) context_text += "\n\n---\n\n";
-                context_text += context_chunks[i];
-            }
-            std::string memory_block = "\n\n## Relevant memories:\n\n" + context_text;
-
-            // Append to existing system message or create one
-            if (!current_messages.empty() && current_messages[0].role == "system") {
-                current_messages[0].content += memory_block;
-            } else {
-                current_messages.insert(current_messages.begin(),
-                                       {"system", memory_block});
-            }
-        }
-
-        current_messages.push_back({"user", line});
-
-        // Send to inference API (streaming)
-        std::cout << "Assistant: " << std::flush;
-        std::string response_text;
-
-        try {
-            inference.chat_stream(current_messages, [&](const std::string& token) {
-                std::cout << token << std::flush;
-                response_text += token;
-            });
-            std::cout << "\n";
-        } catch (const std::exception& e) {
-            std::cout << "\nError: " << e.what() << "\n";
-            continue;
-        }
-
-        // Update conversation history
-        messages.push_back({"user", line});
-        messages.push_back({"assistant", response_text});
-
-        std::cout << "\n";  // blank line between exchanges
-    }
+    // Create and run chat session
+    ragger::Chat chat(memory, inference, cfg.inference_model);
+    chat.run();
 }
 
 // -----------------------------------------------------------------------

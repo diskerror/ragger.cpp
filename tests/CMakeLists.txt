@@ -16,3 +16,11 @@ add_test(NAME test_sqlite_backend COMMAND test_sqlite_backend)
 add_executable(test_import test_import.cpp)
 target_link_libraries(test_import PRIVATE ragger_core)
 add_test(NAME test_import COMMAND test_import)
+
+add_executable(test_auth test_auth.cpp)
+target_link_libraries(test_auth PRIVATE ragger_core)
+add_test(NAME test_auth COMMAND test_auth)
+
+add_executable(test_server test_server.cpp)
+target_link_libraries(test_server PRIVATE ragger_core)
+add_test(NAME test_server COMMAND test_server)

@@ -1,0 +1,565 @@
+/**
+ * Chat implementation — conversation REPL with persistence
+ */
+#include "ragger/chat.h"
+#include "ragger/config.h"
+#include "ragger/lang.h"
+#include <algorithm>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <regex>
+#include "nlohmann_json.hpp"
+
+namespace fs = std::filesystem;
+using json = nlohmann::json;
+using namespace ragger::lang;
+
+namespace ragger {
+
+// Persona sizing threshold — below this context size, apply percentage-based sizing
+static const int PERSONA_SIZING_THRESHOLD = 32768;
+
+Chat::Chat(RaggerMemory& memory, InferenceClient& inference, const std::string& model)
+    : memory_(memory)
+    , inference_(inference)
+    , model_(model)
+{
+    const auto& cfg = config();
+    
+    // Load config
+    store_turns_ = cfg.chat_store_turns;
+    summarize_on_pause_ = cfg.chat_summarize_on_pause;
+    pause_minutes_ = cfg.chat_pause_minutes;
+    summarize_on_quit_ = cfg.chat_summarize_on_quit;
+    max_turn_retention_minutes_ = cfg.chat_max_turn_retention_minutes;
+    max_turns_stored_ = cfg.chat_max_turns_stored;
+    max_memory_results_ = cfg.chat_max_memory_results;
+    
+    // Initialize activity timestamp
+    update_activity();
+}
+
+std::string Chat::load_workspace_files(int max_context) {
+    /**
+     * Load workspace MD files with priority-based truncation.
+     * 
+     * Priority order: SOUL.md > USER.md > AGENTS.md > TOOLS.md > MEMORY.md
+     * 
+     * For small contexts (< 32768 tokens):
+     *   - Calculate persona budget: max_context * chars_per_token * (persona_pct / 100)
+     *   - Apply user ceiling (chat_max_persona_chars) if set and smaller
+     *   - Load files in priority order
+     *   - Paragraph-aware truncation for last file that doesn't fit
+     * 
+     * For large/unknown contexts:
+     *   - Load everything, apply user ceiling only
+     */
+    const auto& cfg = config();
+    
+    std::string user_dir = expand_path("~/.ragger");
+    std::string common_dir = "/var/ragger";
+    
+    // Calculate persona budget
+    int max_persona_chars = 0;
+    if (max_context > 0 && max_context < PERSONA_SIZING_THRESHOLD) {
+        // Small context — apply percentage-based sizing
+        int persona_budget = static_cast<int>(
+            max_context * cfg.chat_chars_per_token * (cfg.chat_persona_pct / 100.0f)
+        );
+        persona_budget = std::max(persona_budget, 500);  // minimum budget
+        
+        // Apply user ceiling if set and smaller
+        if (cfg.chat_max_persona_chars > 0) {
+            max_persona_chars = std::min(cfg.chat_max_persona_chars, persona_budget);
+        } else {
+            max_persona_chars = persona_budget;
+        }
+    } else {
+        // Large or unknown context — user ceiling only (0 = unlimited)
+        max_persona_chars = cfg.chat_max_persona_chars;
+    }
+    
+    // File list with priority order and search locations
+    struct FileSpec {
+        std::string filename;
+        bool search_common;  // true = common dir first, false = user only
+    };
+    std::vector<FileSpec> file_list = {
+        {"SOUL.md", true},
+        {"USER.md", false},
+        {"AGENTS.md", true},
+        {"TOOLS.md", true},
+        {"MEMORY.md", false},
+    };
+    
+    std::vector<std::string> sections;
+    int total_chars = 0;
+    
+    for (const auto& spec : file_list) {
+        // Find file path
+        std::string path;
+        if (spec.search_common) {
+            std::string candidate = common_dir + "/" + spec.filename;
+            if (fs::exists(candidate)) {
+                path = candidate;
+            }
+        }
+        if (path.empty()) {
+            std::string candidate = user_dir + "/" + spec.filename;
+            if (fs::exists(candidate)) {
+                path = candidate;
+            }
+        }
+        if (path.empty()) {
+            continue;  // file not found
+        }
+        
+        // Read file
+        std::ifstream file(path);
+        if (!file) continue;
+        std::string content((std::istreambuf_iterator<char>(file)),
+                           std::istreambuf_iterator<char>());
+        
+        // Trim trailing whitespace
+        size_t end = content.find_last_not_of(" \t\r\n");
+        if (end != std::string::npos) {
+            content = content.substr(0, end + 1);
+        } else {
+            content.clear();
+        }
+        
+        if (content.empty()) continue;
+        
+        // Check if we need to truncate
+        if (max_persona_chars > 0) {
+            // Account for separator size (sections.size() gives count of separators needed)
+            int separator_overhead = static_cast<int>(sections.size()) * 8;  // "\n\n---\n\n" = 8 chars
+            int remaining = max_persona_chars - total_chars - separator_overhead;
+            
+            if (remaining <= 0) {
+                break;  // No space left
+            }
+            
+            if (static_cast<int>(content.size()) > remaining) {
+                // Paragraph-aware truncation
+                std::vector<std::string> paragraphs;
+                std::istringstream stream(content);
+                std::string para;
+                std::string buffer;
+                
+                // Split by double newline
+                for (std::string line; std::getline(stream, line); ) {
+                    if (line.empty() && !buffer.empty()) {
+                        paragraphs.push_back(buffer);
+                        buffer.clear();
+                    } else {
+                        if (!buffer.empty()) buffer += "\n";
+                        buffer += line;
+                    }
+                }
+                if (!buffer.empty()) {
+                    paragraphs.push_back(buffer);
+                }
+                
+                // Keep as many complete paragraphs as fit
+                std::string truncated;
+                for (const auto& p : paragraphs) {
+                    if (static_cast<int>(truncated.size() + p.size() + 2) > remaining) {
+                        break;
+                    }
+                    if (!truncated.empty()) truncated += "\n\n";
+                    truncated += p;
+                }
+                
+                // If we got at least some content, use it
+                if (!truncated.empty()) {
+                    truncated += "\n\n[... " + spec.filename + " truncated ...]";
+                    sections.push_back(truncated);
+                    total_chars += static_cast<int>(truncated.size());
+                }
+                // If even first paragraph doesn't fit, skip this file entirely
+                break;  // Stop loading more files
+            }
+        }
+        
+        sections.push_back(content);
+        total_chars += static_cast<int>(content.size());
+    }
+    
+    // Join sections with separator
+    std::string result;
+    for (size_t i = 0; i < sections.size(); ++i) {
+        if (i > 0) result += "\n\n---\n\n";
+        result += sections[i];
+    }
+    
+    return result;
+}
+
+void Chat::store_turn(const std::string& user_text, const std::string& assistant_text) {
+    if (store_turns_ == "false") {
+        return;  // No raw turn storage
+    }
+    
+    try {
+        std::string turn_text = "User: " + user_text + "\n\nAssistant: " + assistant_text;
+        
+        if (store_turns_ == "true") {
+            // Per-turn mode: each exchange is a separate memory
+            json meta = {
+                {"collection", "memory"},
+                {"category", "conversation"},
+                {"source", "ragger-chat"},
+                {"role", "exchange"}
+            };
+            memory_.store(turn_text, meta);
+            
+        } else if (store_turns_ == "session") {
+            // Session mode: one growing memory entry
+            if (session_memory_id_ >= 0) {
+                // Delete old session entry
+                memory_.delete_memory(session_memory_id_);
+            }
+            
+            // Build full session text from unsummarized turns
+            std::string session_text;
+            for (const auto& turn : unsummarized_turns_) {
+                if (!session_text.empty()) session_text += "\n\n---\n\n";
+                session_text += "User: " + turn.first + "\n\nAssistant: " + turn.second;
+            }
+            if (!session_text.empty()) session_text += "\n\n---\n\n";
+            session_text += turn_text;
+            
+            json meta = {
+                {"collection", "memory"},
+                {"category", "conversation"},
+                {"source", "ragger-chat"},
+                {"mode", "session"}
+            };
+            auto id_str = memory_.store(session_text, meta);
+            session_memory_id_ = std::stoi(id_str);
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: failed to store turn: " << e.what() << "\n";
+    }
+}
+
+void Chat::expire_old_turns() {
+    if (store_turns_ == "false" || store_turns_ == "session") {
+        return;  // Only applies to per-turn mode
+    }
+    
+    try {
+        // Find all conversation turns
+        json filter = {
+            {"category", "conversation"},
+            {"source", "ragger-chat"}
+        };
+        auto turns = memory_.search_by_metadata(filter);
+        
+        // Filter out session-mode entries
+        std::vector<SearchResult> per_turn_results;
+        for (const auto& turn : turns) {
+            if (turn.metadata.value("mode", "") != "session") {
+                per_turn_results.push_back(turn);
+            }
+        }
+        
+        if (per_turn_results.empty()) {
+            return;
+        }
+        
+        // Calculate cutoff time
+        auto now = std::chrono::system_clock::now();
+        auto cutoff = now - std::chrono::minutes(max_turn_retention_minutes_);
+        
+        // Parse timestamps and find expired
+        std::vector<int> expired_ids;
+        for (const auto& turn : per_turn_results) {
+            // Parse ISO timestamp
+            std::tm tm = {};
+            std::istringstream ss(turn.timestamp);
+            ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
+            
+            if (ss.fail()) continue;  // couldn't parse
+            
+            auto tp = std::chrono::system_clock::from_time_t(std::mktime(&tm));
+            if (tp < cutoff) {
+                expired_ids.push_back(turn.id);
+            }
+        }
+        
+        // Check count limit
+        if (per_turn_results.size() > static_cast<size_t>(max_turns_stored_)) {
+            // Sort by timestamp (oldest first)
+            std::sort(per_turn_results.begin(), per_turn_results.end(),
+                     [](const SearchResult& a, const SearchResult& b) {
+                         return a.timestamp < b.timestamp;
+                     });
+            
+            size_t excess = per_turn_results.size() - max_turns_stored_;
+            for (size_t i = 0; i < excess && i < per_turn_results.size(); ++i) {
+                int id = per_turn_results[i].id;
+                if (std::find(expired_ids.begin(), expired_ids.end(), id) == expired_ids.end()) {
+                    expired_ids.push_back(id);
+                }
+            }
+        }
+        
+        if (expired_ids.empty()) {
+            return;
+        }
+        
+        // Batch delete
+        int deleted = memory_.delete_batch(expired_ids);
+        if (deleted > 0) {
+            std::cerr << "Expired " << deleted << " old conversation turns\n";
+        }
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: failed to expire old turns: " << e.what() << "\n";
+    }
+}
+
+void Chat::check_pause_summary() {
+    if (!summarize_on_pause_ || unsummarized_turns_.empty()) {
+        return;
+    }
+    
+    int idle = idle_seconds();
+    if (idle < pause_minutes_ * 60) {
+        return;
+    }
+    
+    // Generate and store summary
+    std::string summary = summarize_conversation(unsummarized_turns_);
+    if (!summary.empty()) {
+        try {
+            json meta = {
+                {"collection", "memory"},
+                {"category", "session-summary"},
+                {"source", "ragger-chat"},
+                {"turns", unsummarized_turns_.size()}
+            };
+            memory_.store(summary, meta);
+            std::cerr << "Stored pause summary (" << unsummarized_turns_.size() << " turns)\n";
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: failed to store pause summary: " << e.what() << "\n";
+        }
+    }
+    
+    unsummarized_turns_.clear();
+}
+
+void Chat::quit_summary() {
+    if (!summarize_on_quit_ || unsummarized_turns_.empty()) {
+        return;
+    }
+    
+    std::cout << "Summarizing conversation..." << std::flush;
+    
+    std::string summary = summarize_conversation(unsummarized_turns_);
+    if (!summary.empty()) {
+        try {
+            json meta = {
+                {"collection", "memory"},
+                {"category", "session-summary"},
+                {"source", "ragger-chat"},
+                {"turns", unsummarized_turns_.size()}
+            };
+            memory_.store(summary, meta);
+            std::cout << " stored.\n";
+        } catch (const std::exception& e) {
+            std::cout << " failed: " << e.what() << "\n";
+        }
+    } else {
+        std::cout << " skipped (empty).\n";
+    }
+}
+
+std::string Chat::summarize_conversation(const std::vector<std::pair<std::string, std::string>>& turns) {
+    if (turns.empty()) {
+        return "";
+    }
+    
+    // Build conversation text
+    std::string conversation_text;
+    for (const auto& turn : turns) {
+        conversation_text += "**User:** " + turn.first + "\n\n";
+        conversation_text += "**Assistant:** " + turn.second + "\n\n";
+    }
+    
+    // Build summary request
+    std::vector<Message> summary_messages = {
+        {"system", "Summarize this conversation into a concise memory entry. "
+                   "Extract: key facts, decisions, questions asked, topics discussed. "
+                   "Write in third person past tense. Be brief — this will be stored "
+                   "as a memory chunk for future retrieval."},
+        {"user", conversation_text}
+    };
+    
+    try {
+        return inference_.chat(summary_messages, model_);
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: summary generation failed: " << e.what() << "\n";
+        return "";
+    }
+}
+
+void Chat::run() {
+    const auto& cfg = config();
+    
+    // Get endpoint to determine context size
+    auto& endpoint = inference_._endpoints[0];  // Assume first endpoint for now
+    int max_context = 0;
+    
+    // Find matching endpoint for model
+    for (auto& ep : inference_._endpoints) {
+        if (ep.matches(model_)) {
+            endpoint = ep;
+            max_context = endpoint.name == "local" ? 0 : 0;  // TODO: get from config
+            break;
+        }
+    }
+    
+    // Load from config
+    for (const auto& ep_cfg : cfg.inference_endpoints) {
+        if (ep_cfg.name == endpoint.name) {
+            max_context = ep_cfg.max_context;
+            break;
+        }
+    }
+    
+    // Load workspace files with context sizing
+    std::string workspace = load_workspace_files(max_context);
+    
+    // Initialize conversation
+    if (!workspace.empty()) {
+        messages_.push_back({"system", workspace});
+    }
+    
+    // Print startup banner
+    std::cout << "Ragger Chat (model: " << model_ << ")\n";
+    std::cout << "Turn storage: " << store_turns_ << "\n";
+    
+    if (max_context > 0 && max_context < PERSONA_SIZING_THRESHOLD) {
+        int persona_chars = cfg.chat_max_persona_chars;
+        if (persona_chars == 0) {
+            persona_chars = static_cast<int>(
+                max_context * cfg.chat_chars_per_token * (cfg.chat_persona_pct / 100.0f)
+            );
+        }
+        std::cout << "Context: " << max_context << " tokens (" << endpoint.name 
+                  << ") → " << cfg.chat_persona_pct << "% = " << persona_chars << " chars persona\n";
+    } else {
+        std::string ctx_info = max_context > 0 ? std::to_string(max_context) + " tokens" : "unknown";
+        std::string persona_info = cfg.chat_max_persona_chars > 0 
+            ? std::to_string(cfg.chat_max_persona_chars) + " chars" 
+            : "unlimited";
+        std::cout << "Context: " << ctx_info << " (" << endpoint.name 
+                  << ") | Persona: " << persona_info << "\n";
+    }
+    
+    std::cout << "Type '/quit' or Ctrl+D to exit\n\n";
+    
+    // Clean up old turns at startup
+    expire_old_turns();
+    
+    // Main REPL loop
+    std::string line;
+    while (true) {
+        // Check for pause summary before waiting for input
+        check_pause_summary();
+        
+        std::cout << "You: " << std::flush;
+        if (!std::getline(std::cin, line)) {
+            std::cout << "\nGoodbye!\n";
+            break;
+        }
+        
+        // Trim whitespace
+        line.erase(0, line.find_first_not_of(" \t\r\n"));
+        line.erase(line.find_last_not_of(" \t\r\n") + 1);
+        
+        if (line.empty()) continue;
+        
+        if (line == "/quit" || line == "/exit") {
+            std::cout << "Goodbye!\n";
+            break;
+        }
+        
+        update_activity();
+        
+        // Search memory for context
+        std::vector<std::string> context_chunks;
+        try {
+            auto result = memory_.search(line, max_memory_results_, 0.3f);
+            for (const auto& r : result.results) {
+                context_chunks.push_back(r.text);
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Warning: memory search failed: " << e.what() << "\n";
+        }
+        
+        // Build message with context
+        std::vector<Message> current_messages = messages_;
+        
+        if (!context_chunks.empty()) {
+            std::string context_text;
+            for (size_t i = 0; i < context_chunks.size(); ++i) {
+                if (i > 0) context_text += "\n\n---\n\n";
+                context_text += context_chunks[i];
+            }
+            std::string memory_block = "\n\n## Relevant memories:\n\n" + context_text;
+            
+            // Append to existing system message or create one
+            if (!current_messages.empty() && current_messages[0].role == "system") {
+                current_messages[0].content += memory_block;
+            } else {
+                current_messages.insert(current_messages.begin(),
+                                       {"system", memory_block});
+            }
+        }
+        
+        current_messages.push_back({"user", line});
+        
+        // Send to inference API (streaming)
+        std::cout << "Assistant: " << std::flush;
+        std::string response_text;
+        
+        try {
+            inference_.chat_stream(current_messages, [&](const std::string& token) {
+                std::cout << token << std::flush;
+                response_text += token;
+            }, model_);
+            std::cout << "\n";
+        } catch (const std::exception& e) {
+            std::cout << "\nError: " << e.what() << "\n";
+            continue;
+        }
+        
+        // Update conversation history
+        messages_.push_back({"user", line});
+        messages_.push_back({"assistant", response_text});
+        
+        // Store turn and track for summary
+        store_turn(line, response_text);
+        unsummarized_turns_.push_back({line, response_text});
+        update_activity();
+        
+        // Check for expired turns after each exchange
+        expire_old_turns();
+        
+        std::cout << "\n";  // blank line between exchanges
+    }
+    
+    // Final cleanup and summary
+    expire_old_turns();
+    quit_summary();
+}
+
+} // namespace ragger
