@@ -12,7 +12,9 @@
 #include <sstream>
 
 #include "ProgramOptions.h"
+#include "ragger/auth.h"
 #include "ragger/chat.h"
+#include "ragger/client.h"
 #include "ragger/config.h"
 #include "ragger/import.h"
 #include "ragger/inference.h"
@@ -376,11 +378,23 @@ int main(int argc, char** argv) {
                 query += args[i];
             }
 
-            ragger::RaggerMemory memory(db_path, model_dir);
             std::vector<std::string> colls;
             if (!collection.empty()) colls.push_back(collection);
-            auto response = memory.search(query, cfg.default_search_limit,
-                                           cfg.default_min_score, colls);
+
+            // Try daemon first (thin client — no model loading)
+            auto token = ragger::load_token();
+            ragger::RaggerClient client(cfg.host, cfg.port, token);
+            ragger::SearchResponse response;
+
+            if (client.is_available()) {
+                response = client.search(query, cfg.default_search_limit,
+                                        cfg.default_min_score, colls);
+            } else {
+                // Fall back to direct DB access
+                ragger::RaggerMemory memory(db_path, model_dir);
+                response = memory.search(query, cfg.default_search_limit,
+                                        cfg.default_min_score, colls);
+            }
 
             nlohmann::json output = nlohmann::json::array();
             for (const auto& r : response.results) {
@@ -407,14 +421,36 @@ int main(int argc, char** argv) {
             nlohmann::json meta = {};
             if (!collection.empty()) meta["collection"] = collection;
 
-            ragger::RaggerMemory memory(db_path, model_dir);
-            auto id = memory.store(text, meta);
+            // Try daemon first (thin client — no model loading)
+            auto token = ragger::load_token();
+            ragger::RaggerClient client(cfg.host, cfg.port, token);
+            std::string id;
+
+            if (client.is_available()) {
+                id = client.store(text, meta);
+            } else {
+                // Fall back to direct DB access
+                ragger::RaggerMemory memory(db_path, model_dir);
+                id = memory.store(text, meta);
+            }
             std::cout << MSG_STORED_WITH_ID << id << "\n";
 
         } else if (command == "count") {
             ragger::setup_logging(false, false);
-            ragger::RaggerMemory memory(db_path, model_dir);
-            std::cout << memory.count() << "\n";
+            
+            // Try daemon first (thin client — no model loading)
+            auto token = ragger::load_token();
+            ragger::RaggerClient client(cfg.host, cfg.port, token);
+            int count;
+
+            if (client.is_available()) {
+                count = client.count();
+            } else {
+                // Fall back to direct DB access
+                ragger::RaggerMemory memory(db_path, model_dir);
+                count = memory.count();
+            }
+            std::cout << count << "\n";
 
         } else if (command == "import") {
             ragger::setup_logging(false, false);

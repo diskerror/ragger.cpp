@@ -24,3 +24,7 @@ add_test(NAME test_auth COMMAND test_auth)
 add_executable(test_server test_server.cpp)
 target_link_libraries(test_server PRIVATE ragger_core)
 add_test(NAME test_server COMMAND test_server)
+
+add_executable(test_client test_client.cpp)
+target_link_libraries(test_client PRIVATE ragger_core)
+add_test(NAME test_client COMMAND test_client)

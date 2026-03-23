@@ -91,6 +91,7 @@ find_package(CURL REQUIRED)
 # ---------------------------------------------------------------------------
 add_library(ragger_core STATIC
     src/chat.cpp
+    src/client.cpp
     src/config.cpp
     src/embedder.cpp
     src/tokenizer_wrapper.cpp
