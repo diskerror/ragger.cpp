@@ -248,6 +248,98 @@ void Chat::store_turn(const std::string& user_text, const std::string& assistant
     }
 }
 
+void Chat::check_orphaned_turns() {
+    if (store_turns_ == "false" || store_turns_ == "session") {
+        return;  // Only applies to per-turn mode
+    }
+    
+    try {
+        // Find all conversation turns
+        json filter = {
+            {"category", "conversation"},
+            {"source", "ragger-chat"}
+        };
+        auto turns = memory_.search_by_metadata(filter);
+        
+        if (turns.empty()) {
+            return;
+        }
+        
+        // Filter out session-mode entries
+        std::vector<SearchResult> orphaned_turns;
+        for (const auto& turn : turns) {
+            if (turn.metadata.value("mode", "") != "session") {
+                // Check if timestamp is old (> 5 minutes means from previous session)
+                std::tm tm = {};
+                std::istringstream ss(turn.timestamp);
+                ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
+                
+                if (ss.fail()) continue;  // couldn't parse
+                
+                auto tp = std::chrono::system_clock::from_time_t(std::mktime(&tm));
+                auto now = std::chrono::system_clock::now();
+                auto age_minutes = std::chrono::duration_cast<std::chrono::minutes>(now - tp).count();
+                
+                // Consider orphaned if > 5 minutes old (from previous session)
+                if (age_minutes > 5) {
+                    orphaned_turns.push_back(turn);
+                }
+            }
+        }
+        
+        if (orphaned_turns.empty()) {
+            return;
+        }
+        
+        std::cout << "Found " << orphaned_turns.size() << " orphaned turns from previous session...\n";
+        
+        // Build conversation text from orphaned turns
+        std::vector<std::pair<std::string, std::string>> turn_pairs;
+        for (const auto& turn : orphaned_turns) {
+            // Parse turn text (format: "User: ...\n\nAssistant: ...")
+            std::string text = turn.text;
+            size_t user_pos = text.find("User: ");
+            size_t asst_pos = text.find("\n\nAssistant: ");
+            
+            if (user_pos != std::string::npos && asst_pos != std::string::npos) {
+                std::string user_text = text.substr(user_pos + 6, asst_pos - 6);
+                std::string asst_text = text.substr(asst_pos + 14);
+                turn_pairs.push_back({user_text, asst_text});
+            }
+        }
+        
+        if (!turn_pairs.empty()) {
+            // Summarize orphaned turns
+            std::string summary = summarize_conversation(turn_pairs);
+            
+            if (!summary.empty()) {
+                // Store summary
+                json meta = {
+                    {"collection", "memory"},
+                    {"category", "session-summary"},
+                    {"source", "ragger-chat"},
+                    {"turns", turn_pairs.size()},
+                    {"recovered", true}
+                };
+                memory_.store(summary, meta);
+                
+                // Delete orphaned raw turns (delete_batch will respect keep tags)
+                std::vector<int> orphaned_ids;
+                for (const auto& turn : orphaned_turns) {
+                    orphaned_ids.push_back(turn.id);
+                }
+                int deleted = memory_.delete_batch(orphaned_ids);
+                
+                std::cout << "Recovered " << turn_pairs.size() << " orphaned turns (deleted " 
+                         << deleted << " raw entries)\n";
+            }
+        }
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: orphan check failed: " << e.what() << "\n";
+    }
+}
+
 void Chat::expire_old_turns() {
     if (store_turns_ == "false" || store_turns_ == "session") {
         return;  // Only applies to per-turn mode
@@ -347,6 +439,10 @@ void Chat::check_pause_summary() {
             };
             memory_.store(summary, meta);
             std::cerr << "Stored pause summary (" << unsummarized_turns_.size() << " turns)\n";
+            
+            // Now delete the raw turns that were just summarized
+            expire_old_turns();
+            
         } catch (const std::exception& e) {
             std::cerr << "Warning: failed to store pause summary: " << e.what() << "\n";
         }
@@ -373,6 +469,10 @@ void Chat::quit_summary() {
             };
             memory_.store(summary, meta);
             std::cout << " stored.\n";
+            
+            // Now delete the raw turns that were just summarized
+            expire_old_turns();
+            
         } catch (const std::exception& e) {
             std::cout << " failed: " << e.what() << "\n";
         }
@@ -466,6 +566,9 @@ void Chat::run() {
     
     std::cout << "Type '/quit' or Ctrl+D to exit\n\n";
     
+    // Check for orphaned turns from previous session (crash recovery)
+    check_orphaned_turns();
+    
     // Clean up old turns at startup
     expire_old_turns();
     
@@ -551,14 +654,10 @@ void Chat::run() {
         unsummarized_turns_.push_back({line, response_text});
         update_activity();
         
-        // Check for expired turns after each exchange
-        expire_old_turns();
-        
         std::cout << "\n";  // blank line between exchanges
     }
     
-    // Final cleanup and summary
-    expire_old_turns();
+    // Final summary (will also call expire_old_turns internally)
     quit_summary();
 }
 

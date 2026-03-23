@@ -35,6 +35,11 @@ RaggerMemory::~RaggerMemory() {
 
 std::string RaggerMemory::store(const std::string& text, json metadata,
                                  bool common) {
+    // Auto-set "keep" tag when storing to common DB
+    if (common) {
+        metadata["keep"] = true;
+    }
+    
     if (user_backend_ && !common) {
         return user_backend_->store(text, std::move(metadata));
     }

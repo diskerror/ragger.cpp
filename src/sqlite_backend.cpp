@@ -576,6 +576,23 @@ struct SqliteBackend::Impl {
     }
 
     bool delete_memory(int memory_id) {
+        // Check if memory has keep tag
+        sqlite3_stmt* check_stmt;
+        sqlite3_prepare_v2(db, "SELECT metadata FROM memories WHERE id = ?", -1, &check_stmt, nullptr);
+        sqlite3_bind_int(check_stmt, 1, memory_id);
+        if (sqlite3_step(check_stmt) == SQLITE_ROW) {
+            const char* meta_str = reinterpret_cast<const char*>(sqlite3_column_text(check_stmt, 0));
+            if (meta_str) {
+                auto meta = json::parse(meta_str);
+                if (meta.value("keep", false)) {
+                    sqlite3_finalize(check_stmt);
+                    return false;  // protected
+                }
+            }
+        }
+        sqlite3_finalize(check_stmt);
+        
+        // Not protected, proceed with deletion
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(db, "DELETE FROM memories WHERE id = ?",
                            -1, &stmt, nullptr);
@@ -594,9 +611,34 @@ struct SqliteBackend::Impl {
     int delete_batch(const std::vector<int>& memory_ids) {
         if (memory_ids.empty()) return 0;
 
+        // Filter out IDs with keep tag
+        std::vector<int> deletable_ids;
+        for (int memory_id : memory_ids) {
+            sqlite3_stmt* check_stmt;
+            sqlite3_prepare_v2(db, "SELECT metadata FROM memories WHERE id = ?", -1, &check_stmt, nullptr);
+            sqlite3_bind_int(check_stmt, 1, memory_id);
+            bool has_keep = false;
+            if (sqlite3_step(check_stmt) == SQLITE_ROW) {
+                const char* meta_str = reinterpret_cast<const char*>(sqlite3_column_text(check_stmt, 0));
+                if (meta_str) {
+                    auto meta = json::parse(meta_str);
+                    if (meta.value("keep", false)) {
+                        has_keep = true;
+                    }
+                }
+            }
+            sqlite3_finalize(check_stmt);
+            
+            if (!has_keep) {
+                deletable_ids.push_back(memory_id);
+            }
+        }
+        
+        if (deletable_ids.empty()) return 0;
+
         // Build SQL: DELETE FROM memories WHERE id IN (?,?,...)
         std::string sql = "DELETE FROM memories WHERE id IN (";
-        for (size_t i = 0; i < memory_ids.size(); ++i) {
+        for (size_t i = 0; i < deletable_ids.size(); ++i) {
             if (i > 0) sql += ",";
             sql += "?";
         }
@@ -604,8 +646,8 @@ struct SqliteBackend::Impl {
 
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
-        for (size_t i = 0; i < memory_ids.size(); ++i) {
-            sqlite3_bind_int(stmt, static_cast<int>(i + 1), memory_ids[i]);
+        for (size_t i = 0; i < deletable_ids.size(); ++i) {
+            sqlite3_bind_int(stmt, static_cast<int>(i + 1), deletable_ids[i]);
         }
         sqlite3_step(stmt);
         int changes = sqlite3_changes(db);

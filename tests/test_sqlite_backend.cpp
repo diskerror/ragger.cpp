@@ -348,6 +348,71 @@ void test_user_management(ragger::Embedder& emb) {
     cleanup();
 }
 
+void test_delete_respects_keep(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    int initial_count = db.count();
+    
+    // Store a memory with {"keep": true} in metadata
+    ragger::json meta = {{"keep", true}, {"collection", "memory"}};
+    auto id = db.store("protected memory", meta);
+    
+    // Try to delete — should return false
+    assert(!db.delete_memory(std::stoi(id)));
+    
+    // Memory should still exist
+    assert(db.count() == initial_count + 1);
+    
+    // Store without keep
+    auto id2 = db.store("deletable memory", {{"collection", "memory"}});
+    
+    // Delete should work
+    assert(db.delete_memory(std::stoi(id2)));
+    
+    // Only the protected one should remain
+    assert(db.count() == initial_count + 1);
+    
+    db.close();
+    cleanup();
+}
+
+void test_delete_batch_respects_keep(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    // Store mix of keep and non-keep
+    ragger::json keep_meta = {{"keep", true}, {"collection", "memory"}};
+    ragger::json normal_meta = {{"collection", "memory"}};
+    
+    auto id1 = db.store("keep me", keep_meta);
+    auto id2 = db.store("delete me", normal_meta);
+    auto id3 = db.store("delete me too", normal_meta);
+    
+    int initial_count = db.count();
+    
+    // Batch delete all three
+    int deleted = db.delete_batch({std::stoi(id1), std::stoi(id2), std::stoi(id3)});
+    
+    // Only 2 should be deleted (not the keep one)
+    assert(deleted == 2);
+    assert(db.count() == initial_count - 2);
+    
+    // Verify the protected one remains
+    auto all = db.load_all();
+    bool found_protected = false;
+    for (const auto& mem : all) {
+        if (mem.text == "keep me") {
+            found_protected = true;
+            break;
+        }
+    }
+    assert(found_protected);
+    
+    db.close();
+    cleanup();
+}
+
 // -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
@@ -379,6 +444,8 @@ int main() {
     test_delete_batch(emb);
     test_search_by_metadata(emb);
     test_user_management(emb);
+    test_delete_respects_keep(emb);
+    test_delete_batch_respects_keep(emb);
 
     std::cout << "test_sqlite_backend: all passed\n";
     return 0;

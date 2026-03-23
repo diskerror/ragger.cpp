@@ -52,6 +52,9 @@ private:
     /// Store a single exchange to memory
     void store_turn(const std::string& user_text, const std::string& assistant_text);
     
+    /// Check for orphaned turns from previous session (crash recovery)
+    void check_orphaned_turns();
+    
     /// Expire old turns based on age and count limits
     void expire_old_turns();
     
