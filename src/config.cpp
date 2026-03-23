@@ -337,10 +337,11 @@ Config load_config(const std::string& path) {
             auto& ep = endpoint_map[ep_name];
             ep.name = ep_name;
 
-            if      (key == "api_url") ep.api_url = val;
-            else if (key == "api_key") ep.api_key = val;
-            else if (key == "models")  ep.models = val;
-            else if (key == "format")  ep.format = val;
+            if      (key == "api_url")     ep.api_url = val;
+            else if (key == "api_key")     ep.api_key = val;
+            else if (key == "models")      ep.models = val;
+            else if (key == "format")      ep.format = val;
+            else if (key == "max_context") ep.max_context = std::stoi(val);
         }
         else if (section == "logging") {
             if      (key == "log_dir")   cfg.log_dir = val;
