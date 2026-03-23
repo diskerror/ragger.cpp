@@ -66,6 +66,24 @@ public:
     /// Get distinct collection names.
     std::vector<std::string> collections() const;
 
+    /// User management
+    struct UserInfo {
+        int         id;
+        std::string username;
+        bool        is_admin;
+        std::string token_hash;
+    };
+
+    /// Create a user. Returns user id.
+    int create_user(const std::string& username, const std::string& token_hash,
+                    bool is_admin = false);
+
+    /// Look up user by token hash. Returns nullopt if not found.
+    std::optional<UserInfo> get_user_by_token_hash(const std::string& token_hash);
+
+    /// Look up user by username. Returns nullopt if not found.
+    std::optional<UserInfo> get_user_by_username(const std::string& username);
+
     void close();
 
 private:
