@@ -234,6 +234,8 @@ void apply_user_overrides(Config& cfg, const Config& user) {
     cfg.chat_summarize_on_quit = user.chat_summarize_on_quit;
     cfg.chat_max_persona_chars = user.chat_max_persona_chars;
     cfg.chat_max_memory_results = user.chat_max_memory_results;
+    cfg.chat_persona_pct = user.chat_persona_pct;
+    cfg.chat_chars_per_token = user.chat_chars_per_token;
     // Note: max_turn_retention_minutes, max_turns_stored, and all *_limit
     // keys are SERVER_LOCKED — they stay as loaded from system config.
 
@@ -364,6 +366,8 @@ Config load_config(const std::string& path) {
             else if (key == "max_turns_stored") cfg.chat_max_turns_stored = std::stoi(val);
             else if (key == "max_persona_chars") cfg.chat_max_persona_chars = std::stoi(val);
             else if (key == "max_memory_results") cfg.chat_max_memory_results = std::stoi(val);
+            else if (key == "persona_pct") cfg.chat_persona_pct = std::stoi(val);
+            else if (key == "chars_per_token") cfg.chat_chars_per_token = std::stof(val);
             else if (key == "max_persona_chars_limit") cfg.chat_max_persona_chars_limit = std::stoi(val);
             else if (key == "max_memory_results_limit") cfg.chat_max_memory_results_limit = std::stoi(val);
         }

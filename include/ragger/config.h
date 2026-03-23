@@ -74,6 +74,8 @@ struct Config {
     int  chat_max_turns_stored   = 100;
     int  chat_max_persona_chars  = 0;   // 0 = unlimited
     int  chat_max_memory_results = 3;
+    int  chat_persona_pct        = 25;  // % of context for persona
+    float chat_chars_per_token   = 4.0f;
 
     // --- System ceilings (0 = no limit) ---
     int  max_search_limit             = 0;
