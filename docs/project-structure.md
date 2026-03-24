@@ -54,11 +54,14 @@ Stores documents with embeddings and metadata.
 ```sql
 CREATE TABLE memories
 (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    text      TEXT NOT NULL,
-    embedding BLOB NOT NULL, -- 384 × float32 = 1536 bytes
-    timestamp TEXT NOT NULL, -- ISO 8601
-    metadata  TEXT           -- JSON (includes "collection" field)
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    text       TEXT NOT NULL,
+    embedding  BLOB NOT NULL, -- 384 × float32 = 1536 bytes
+    timestamp  TEXT NOT NULL, -- ISO 8601
+    collection TEXT NOT NULL DEFAULT 'memory',
+    category   TEXT NOT NULL DEFAULT '',
+    tags       TEXT NOT NULL DEFAULT '',  -- comma-separated
+    metadata   TEXT           -- JSON (remaining fields: source, keep, etc.)
 );
 ```
 
@@ -68,14 +71,15 @@ CREATE TABLE memories
 - `text` — Document text (original content)
 - `embedding` — Binary blob containing 384 float32 values (1536 bytes)
 - `timestamp` — ISO 8601 timestamp (e.g., `2024-03-20T15:23:45`)
-- `metadata` — JSON-encoded dictionary with collection, category, source, etc.
+- `collection` — Memory collection (indexed, e.g., `memory`, `reference`, `docs`)
+- `category` — Classification within collection (indexed, e.g., `fact`, `decision`)
+- `tags` — Comma-separated tag list (e.g., `ragger,architecture`)
+- `metadata` — JSON-encoded dictionary for remaining fields (source, keep, section, etc.)
 
-**Metadata structure:**
+**Metadata structure (JSON column):**
 
 ```json
 {
-  "collection": "memory",
-  "category": "fact",
   "source": "notes.md",
   "section": "API Reference » Authentication",
   "keep": false
