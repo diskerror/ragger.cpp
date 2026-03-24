@@ -108,12 +108,17 @@ metadata flag rather than being deleted. This preserves institutional
 memory of anti-patterns — knowing what *not* to do is as valuable as
 knowing what to do.
 
-## The "Keep" Tag
+## Boolean Flags Are Tags, Not Key-Value Pairs
 
-Memories with `"keep": true` in metadata are protected from deletion
-(both single and batch). This is auto-set when memories are moved to
-the common database, preventing accidental loss of curated shared
-knowledge. Users can also set it manually for important personal memories.
+`keep`, `bad`, `important`, and similar flags are stored as tags in the
+comma-separated `tags` column — not as `"keep": true` in JSON metadata.
+This simplifies the schema: tags are a flat list of labels, not a mix
+of strings and booleans scattered across two storage locations.
+
+The `keep` tag prevents deletion (both single and batch). It's auto-set
+when memories are stored to the common database, preventing accidental
+loss of curated shared knowledge. The `bad` tag marks wrong or harmful
+memories — preserved as institutional memory of anti-patterns.
 
 ## Token-Based Auth, Not Passwords (for API)
 
