@@ -8,10 +8,10 @@ This is the default for personal use. No `sudo` required.
 
 ### Installation Locations
 
-| Platform | Executable | Config | Database |
-|----------|-----------|--------|----------|
-| macOS    | `~/.local/bin/ragger` | `~/.ragger/ragger.ini` | `~/.ragger/memories.db` |
-| Linux    | `~/.local/bin/ragger` | `~/.ragger/ragger.ini` | `~/.ragger/memories.db` |
+| Platform | Executable                         | Config                             | Database                            |
+|----------|------------------------------------|------------------------------------|-------------------------------------|
+| macOS    | `~/.local/bin/ragger`              | `~/.ragger/ragger.ini`             | `~/.ragger/memories.db`             |
+| Linux    | `~/.local/bin/ragger`              | `~/.ragger/ragger.ini`             | `~/.ragger/memories.db`             |
 | Windows  | `%LOCALAPPDATA%\ragger\ragger.exe` | `%LOCALAPPDATA%\ragger\ragger.ini` | `%LOCALAPPDATA%\ragger\memories.db` |
 
 ### Install Script
@@ -53,11 +53,11 @@ system ceilings, token auth) but the data layer is still single-user
 
 **Planned locations:**
 
-| Component | Path |
-|-----------|------|
-| Executable | `/usr/local/bin/ragger` |
-| System config | `/etc/ragger.ini` |
-| Data directory | `/var/ragger/` |
+| Component      | Path                                       |
+|----------------|--------------------------------------------|
+| Executable     | `/usr/local/bin/ragger`                    |
+| System config  | `/etc/ragger.ini`                          |
+| Data directory | `/var/ragger/`                             |
 | User databases | `/var/ragger/users/<username>/memories.db` |
 
 See [ROADMAP.md](../ROADMAP.md) for multi-user data layer plans.
@@ -77,35 +77,35 @@ a specific user):
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.ragger.server</string>
-    
-    <key>ProgramArguments</key>
-    <array>
-        <string>/Users/reid/.local/bin/ragger</string>
-        <string>serve</string>
-        <string>--host</string>
-        <string>127.0.0.1</string>
-        <string>--port</string>
-        <string>8432</string>
-    </array>
-    
-    <key>UserName</key>
-    <string>reid</string>
-    
-    <key>RunAtLoad</key>
-    <true/>
-    
-    <key>KeepAlive</key>
-    <true/>
-    
-    <key>StandardOutPath</key>
-    <string>/Users/reid/.ragger/server.log</string>
-    
-    <key>StandardErrorPath</key>
-    <string>/Users/reid/.ragger/server.err</string>
-</dict>
+    <dict>
+        <key>Label</key>
+        <string>com.ragger.server</string>
+
+        <key>ProgramArguments</key>
+        <array>
+            <string>/Users/reid/.local/bin/ragger</string>
+            <string>serve</string>
+            <string>--host</string>
+            <string>127.0.0.1</string>
+            <string>--port</string>
+            <string>8432</string>
+        </array>
+
+        <key>UserName</key>
+        <string>reid</string>
+
+        <key>RunAtLoad</key>
+        <true/>
+
+        <key>KeepAlive</key>
+        <true/>
+
+        <key>StandardOutPath</key>
+        <string>/Users/reid/.ragger/server.log</string>
+
+        <key>StandardErrorPath</key>
+        <string>/Users/reid/.ragger/server.err</string>
+    </dict>
 </plist>
 ```
 
@@ -152,12 +152,12 @@ LaunchDaemon tries to start at boot.
 **Solutions:**
 
 1. **Enable auto-login** for the relevant user:
-   - **System Settings → Users & Groups → Automatically log in as…**
-   - This ensures the volume is mounted early in the boot process
+	- **System Settings → Users & Groups → Automatically log in as…**
+	- This ensures the volume is mounted early in the boot process
 
 2. **Add a wait-for-volume script:**
-   - Wrap `ragger serve` in a shell script that waits for the volume
-   - Set a timeout (e.g., 60 seconds) to avoid hanging forever
+	- Wrap `ragger serve` in a shell script that waits for the volume
+	- Set a timeout (e.g., 60 seconds) to avoid hanging forever
 
 **Example wait script:**
 
@@ -281,19 +281,19 @@ For Linux deployments, use systemd to run Ragger as a service.
 
 ```ini
 [Unit]
-Description=Ragger Memory Server
-After=network.target
+Description = Ragger Memory Server
+After = network.target
 
 [Service]
-Type=simple
-User=reid
-ExecStart=/home/reid/.local/bin/ragger serve --host 127.0.0.1 --port 8432
-Restart=on-failure
-StandardOutput=journal
-StandardError=journal
+Type = simple
+User = reid
+ExecStart = /home/reid/.local/bin/ragger serve --host 127.0.0.1 --port 8432
+Restart = on-failure
+StandardOutput = journal
+StandardError = journal
 
 [Install]
-WantedBy=multi-user.target
+WantedBy = multi-user.target
 ```
 
 **Enable and start:**

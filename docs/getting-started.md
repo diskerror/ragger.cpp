@@ -13,10 +13,10 @@ After that, all operations are offline.
 
 ### Per-user Install (single user, no sudo)
 
-| Platform | Executable location | Config location |
-|----------|---------------------|-----------------|
-| macOS    | `~/.local/bin/ragger` | `~/.ragger/ragger.ini` |
-| Linux    | `~/.local/bin/ragger` | `~/.ragger/ragger.ini` |
+| Platform | Executable location                | Config location                    |
+|----------|------------------------------------|------------------------------------|
+| macOS    | `~/.local/bin/ragger`              | `~/.ragger/ragger.ini`             |
+| Linux    | `~/.local/bin/ragger`              | `~/.ragger/ragger.ini`             |
 | Windows  | `%LOCALAPPDATA%\ragger\ragger.exe` | `%LOCALAPPDATA%\ragger\ragger.ini` |
 
 On macOS/Linux, ensure `~/.local/bin` is in your `PATH`:

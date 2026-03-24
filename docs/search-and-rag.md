@@ -97,10 +97,10 @@ bm25_enabled = false
 
 BM25 has two tuning parameters:
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `k1` | `1.5` | Term frequency saturation (higher = more weight to repeated terms) |
-| `b` | `0.75` | Document length normalization (0 = ignore length, 1 = full penalty) |
+| Parameter | Default | Description                                                         |
+|-----------|---------|---------------------------------------------------------------------|
+| `k1`      | `1.5`   | Term frequency saturation (higher = more weight to repeated terms)  |
+| `b`       | `0.75`  | Document length normalization (0 = ignore length, 1 = full penalty) |
 
 **Typical values:**
 
@@ -233,7 +233,16 @@ entries with timing, result scores, and quality metrics.
 **Example log entry:**
 
 ```json
-{"timestamp": "2024-03-20T15:23:45", "query": "API authentication", "limit": 5, "min_score": 0.4, "results": 3, "top_score": 0.82, "elapsed_ms": 12.3, "total_docs": 10614}
+{
+  "timestamp": "2024-03-20T15:23:45",
+  "query": "API authentication",
+  "limit": 5,
+  "min_score": 0.4,
+  "results": 3,
+  "top_score": 0.82,
+  "elapsed_ms": 12.3,
+  "total_docs": 10614
+}
 ```
 
 **Fields:**

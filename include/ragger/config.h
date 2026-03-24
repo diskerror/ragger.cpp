@@ -17,6 +17,7 @@ struct Config {
     // --- Server ---
     std::string host           = "127.0.0.1";
     int         port           = 8432;
+    bool        single_user    = true;
 
     // --- Storage ---
     std::string db_path        = "~/.ragger/memories.db";

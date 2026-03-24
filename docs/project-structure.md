@@ -50,12 +50,13 @@ Ragger uses a simple SQLite schema optimized for hybrid search.
 Stores documents with embeddings and metadata.
 
 ```sql
-CREATE TABLE memories (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    text        TEXT NOT NULL,
-    embedding   BLOB NOT NULL,    -- 384 × float32 = 1536 bytes
-    timestamp   TEXT NOT NULL,     -- ISO 8601
-    metadata    TEXT              -- JSON (includes "collection" field)
+CREATE TABLE memories
+(
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    text      TEXT NOT NULL,
+    embedding BLOB NOT NULL, -- 384 × float32 = 1536 bytes
+    timestamp TEXT NOT NULL, -- ISO 8601
+    metadata  TEXT           -- JSON (includes "collection" field)
 );
 ```
 
@@ -84,11 +85,12 @@ CREATE TABLE memories (
 Tracks access patterns for usage-based ranking.
 
 ```sql
-CREATE TABLE memory_usage (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    memory_id   INTEGER NOT NULL REFERENCES memories(id)
-                ON DELETE CASCADE ON UPDATE CASCADE,
-    timestamp   TEXT NOT NULL
+CREATE TABLE memory_usage
+(
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id INTEGER NOT NULL REFERENCES memories (id)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+    timestamp TEXT    NOT NULL
 );
 ```
 
@@ -107,12 +109,13 @@ cleaning up stale content.
 BM25 term index for keyword search.
 
 ```sql
-CREATE TABLE bm25_index (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    memory_id   INTEGER NOT NULL REFERENCES memories(id)
-                ON DELETE CASCADE ON UPDATE CASCADE,
-    token       TEXT NOT NULL,
-    term_freq   INTEGER NOT NULL
+CREATE TABLE bm25_index
+(
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id INTEGER NOT NULL REFERENCES memories (id)
+        ON DELETE CASCADE ON UPDATE CASCADE,
+    token     TEXT    NOT NULL,
+    term_freq INTEGER NOT NULL
 );
 ```
 
@@ -284,19 +287,19 @@ Future languages can be added by creating `es.py`, `fr.py`, etc.
 A [C++ port](https://github.com/diskerror/ragger.cpp) is also available with
 the same HTTP API, database format, and config file.
 
-| Component | Python | C++ |
-|-----------|--------|-----|
-| **Language** | Python 3.10+ | C++20 |
-| **Embedding** | sentence-transformers (PyTorch) | ONNX Runtime (ONNXRuntime C++ API) |
-| **HTTP server** | Flask | cpp-httplib |
-| **SQLite** | Python stdlib `sqlite3` | SQLite3 C API |
-| **BM25** | Pure Python | Pure C++ |
-| **Vector search** | NumPy | Eigen (matrix library) |
-| **Config** | Python `configparser` | inih (C INI parser) |
-| **JSON** | Python stdlib `json` | nlohmann/json |
-| **Performance** | ~10-50ms for 50K docs | ~5-20ms for 50K docs |
-| **Binary size** | N/A (interpreter + packages) | ~3MB static binary |
-| **Dependencies** | ~500MB (Python + packages + model) | ~150MB (binary + model) |
+| Component         | Python                             | C++                                |
+|-------------------|------------------------------------|------------------------------------|
+| **Language**      | Python 3.10+                       | C++20                              |
+| **Embedding**     | sentence-transformers (PyTorch)    | ONNX Runtime (ONNXRuntime C++ API) |
+| **HTTP server**   | Flask                              | cpp-httplib                        |
+| **SQLite**        | Python stdlib `sqlite3`            | SQLite3 C API                      |
+| **BM25**          | Pure Python                        | Pure C++                           |
+| **Vector search** | NumPy                              | Eigen (matrix library)             |
+| **Config**        | Python `configparser`              | inih (C INI parser)                |
+| **JSON**          | Python stdlib `json`               | nlohmann/json                      |
+| **Performance**   | ~10-50ms for 50K docs              | ~5-20ms for 50K docs               |
+| **Binary size**   | N/A (interpreter + packages)       | ~3MB static binary                 |
+| **Dependencies**  | ~500MB (Python + packages + model) | ~150MB (binary + model)            |
 
 **Compatibility:**
 

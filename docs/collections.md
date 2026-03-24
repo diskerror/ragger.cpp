@@ -21,9 +21,9 @@ You pull from the right bookshelf based on what you're looking for.
 
 ## Built-in Collections
 
-| Collection | Purpose |
-|------------|---------|
-| `memory` | Agent-stored memories: facts, decisions, preferences, session summaries (default) |
+| Collection | Purpose                                                                           |
+|------------|-----------------------------------------------------------------------------------|
+| `memory`   | Agent-stored memories: facts, decisions, preferences, session summaries (default) |
 
 When you use `ragger store` without `--collection`, memories go into
 the default collection (configurable via `default_collection` in the
@@ -46,13 +46,13 @@ Collections are created on first use — no setup needed.
 
 ### Example Custom Collections
 
-| Collection | Purpose |
-|------------|---------|
-| `docs` | Project documentation, API references |
-| `reference` | Technical manuals, specifications |
+| Collection      | Purpose                                 |
+|-----------------|-----------------------------------------|
+| `docs`          | Project documentation, API references   |
+| `reference`     | Technical manuals, specifications       |
 | `orchestration` | Orchestration guides, instrument ranges |
-| `notes` | Meeting notes, research, bookmarks |
-| `work` | Work-specific context, procedures |
+| `notes`         | Meeting notes, research, bookmarks      |
+| `work`          | Work-specific context, procedures       |
 
 ## Collections vs Categories
 
@@ -99,7 +99,10 @@ ragger search "my notes about deployment" --collections memory
 ```json
 {
   "query": "API authentication",
-  "collections": ["docs", "reference"]
+  "collections": [
+    "docs",
+    "reference"
+  ]
 }
 ```
 
@@ -179,11 +182,13 @@ Don't dump everything into one collection. Narrow collections produce
 better search results because the semantic space is more coherent.
 
 **Good:**
+
 - `docs` — API references, project documentation
 - `notes` — Meeting notes, research
 - `memory` — Personal facts, decisions, preferences
 
 **Less good:**
+
 - `stuff` — Everything mixed together
 
 ### Use Descriptive Names

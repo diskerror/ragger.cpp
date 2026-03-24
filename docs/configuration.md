@@ -57,13 +57,13 @@ For single-user setups, `SERVER_LOCKED` has no effect (no system config).
 System config can set hard limits on user-configurable values. Ceilings
 are named with a `_limit` suffix:
 
-| User Setting | System Ceiling | Default Ceiling |
-|--------------|----------------|-----------------|
-| `default_limit` | `max_search_limit` | 0 (no limit) |
-| `max_persona_chars` | `max_persona_chars_limit` | 0 (no limit) |
-| `max_memory_results` | `max_memory_results_limit` | 0 (no limit) |
-| `max_turn_retention_minutes` | — (hard-set in system config) | — |
-| `max_turns_stored` | — (hard-set in system config) | — |
+| User Setting                 | System Ceiling                | Default Ceiling |
+|------------------------------|-------------------------------|-----------------|
+| `default_limit`              | `max_search_limit`            | 0 (no limit)    |
+| `max_persona_chars`          | `max_persona_chars_limit`     | 0 (no limit)    |
+| `max_memory_results`         | `max_memory_results_limit`    | 0 (no limit)    |
+| `max_turn_retention_minutes` | — (hard-set in system config) | —               |
+| `max_turns_stored`           | — (hard-set in system config) | —               |
 
 **How it works:**
 
@@ -86,40 +86,40 @@ Below is a complete reference with defaults and descriptions. See also
 
 ### `[server]`
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `host` | `127.0.0.1` | Bind address for HTTP server |
-| `port` | `8432` | Port for HTTP server |
-| `auth_token` | (none) | Bearer token for HTTP auth (optional) |
+| Key          | Default     | Description                           |
+|--------------|-------------|---------------------------------------|
+| `host`       | `127.0.0.1` | Bind address for HTTP server          |
+| `port`       | `8432`      | Port for HTTP server                  |
+| `auth_token` | (none)      | Bearer token for HTTP auth (optional) |
 
 ### `[storage]`
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `db_path` | `~/.ragger/memories.db` | SQLite database path |
-| `default_collection` | `memory` | Default collection for new memories |
+| Key                  | Default                 | Description                         |
+|----------------------|-------------------------|-------------------------------------|
+| `db_path`            | `~/.ragger/memories.db` | SQLite database path                |
+| `default_collection` | `memory`                | Default collection for new memories |
 
 ### `[embedding]`
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `model` | `all-MiniLM-L6-v2` | HuggingFace model name |
-| `dimensions` | `384` | Embedding vector size |
-| `device` | `cpu` | Device for inference (`cpu`, `cuda`, `mps`) |
+| Key          | Default            | Description                                 |
+|--------------|--------------------|---------------------------------------------|
+| `model`      | `all-MiniLM-L6-v2` | HuggingFace model name                      |
+| `dimensions` | `384`              | Embedding vector size                       |
+| `device`     | `cpu`              | Device for inference (`cpu`, `cuda`, `mps`) |
 
 ### `[search]`
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `default_limit` | `5` | Default number of results |
-| `default_min_score` | `0.4` | Minimum cosine similarity score |
-| `bm25_enabled` | `true` | Enable BM25 hybrid search |
-| `bm25_weight` | `3` | BM25 score weight (ratio, not percentage) |
-| `vector_weight` | `7` | Vector score weight (ratio, not percentage) |
-| `bm25_k1` | `1.5` | BM25 term frequency saturation |
-| `bm25_b` | `0.75` | BM25 document length normalization |
-| `query_log` | `true` | Enable query logging to `~/.ragger/query.log` |
-| `max_search_limit` | `0` | Ceiling for user `default_limit` (0 = no ceiling) |
+| Key                 | Default | Description                                       |
+|---------------------|---------|---------------------------------------------------|
+| `default_limit`     | `5`     | Default number of results                         |
+| `default_min_score` | `0.4`   | Minimum cosine similarity score                   |
+| `bm25_enabled`      | `true`  | Enable BM25 hybrid search                         |
+| `bm25_weight`       | `3`     | BM25 score weight (ratio, not percentage)         |
+| `vector_weight`     | `7`     | Vector score weight (ratio, not percentage)       |
+| `bm25_k1`           | `1.5`   | BM25 term frequency saturation                    |
+| `bm25_b`            | `0.75`  | BM25 document length normalization                |
+| `query_log`         | `true`  | Enable query logging to `~/.ragger/query.log`     |
+| `max_search_limit`  | `0`     | Ceiling for user `default_limit` (0 = no ceiling) |
 
 **Note on weights:** `bm25_weight = 3` and `vector_weight = 7` means
 30% BM25, 70% vector (the ratio is normalized). Using integers avoids
@@ -127,26 +127,26 @@ floating-point config parsing issues.
 
 ### `[chat]`
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `store_turns` | `true` | Turn storage mode (`true`, `session`, `false`) |
-| `summarize_on_pause` | `true` | Summarize buffered turns after inactivity |
-| `summarize_on_quit` | `true` | Summarize buffered turns on exit |
-| `pause_minutes` | `10` | Inactivity threshold for pause summarization |
-| `max_turn_retention_minutes` | `60` | Delete turns older than this (0 = no limit) |
-| `max_turns_stored` | `100` | Keep at most this many recent turns (0 = no limit) |
-| `max_persona_chars` | `0` | Limit persona file size (0 = no limit) |
-| `max_memory_results` | `0` | Limit memory search results in chat (0 = no limit) |
-| `max_persona_chars_limit` | `0` | System ceiling for `max_persona_chars` (0 = no ceiling) |
-| `max_memory_results_limit` | `0` | System ceiling for `max_memory_results` (0 = no ceiling) |
+| Key                          | Default | Description                                              |
+|------------------------------|---------|----------------------------------------------------------|
+| `store_turns`                | `true`  | Turn storage mode (`true`, `session`, `false`)           |
+| `summarize_on_pause`         | `true`  | Summarize buffered turns after inactivity                |
+| `summarize_on_quit`          | `true`  | Summarize buffered turns on exit                         |
+| `pause_minutes`              | `10`    | Inactivity threshold for pause summarization             |
+| `max_turn_retention_minutes` | `60`    | Delete turns older than this (0 = no limit)              |
+| `max_turns_stored`           | `100`   | Keep at most this many recent turns (0 = no limit)       |
+| `max_persona_chars`          | `0`     | Limit persona file size (0 = no limit)                   |
+| `max_memory_results`         | `0`     | Limit memory search results in chat (0 = no limit)       |
+| `max_persona_chars_limit`    | `0`     | System ceiling for `max_persona_chars` (0 = no ceiling)  |
+| `max_memory_results_limit`   | `0`     | System ceiling for `max_memory_results` (0 = no ceiling) |
 
 ### `[inference]`
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `model` | (none) | Default LLM model for `ragger chat` |
-| `api_base` | (none) | OpenAI-compatible API base URL |
-| `api_key` | (none) | API key for inference endpoint |
+| Key        | Default | Description                         |
+|------------|---------|-------------------------------------|
+| `model`    | (none)  | Default LLM model for `ragger chat` |
+| `api_base` | (none)  | OpenAI-compatible API base URL      |
+| `api_key`  | (none)  | API key for inference endpoint      |
 
 ## Example Configs
 

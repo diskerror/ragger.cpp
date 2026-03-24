@@ -305,6 +305,7 @@ Config load_config(const std::string& path) {
         if (section == "server") {
             if      (key == "host") cfg.host = val;
             else if (key == "port") cfg.port = std::stoi(val);
+            else if (key == "single_user") cfg.single_user = parse_bool(val);
         }
         else if (section == "storage") {
             if      (key == "db_path")            cfg.db_path = val;
@@ -405,6 +406,11 @@ void init_config(const std::string& cli_config_path) {
         Config user_cfg = load_config(user_path);
         apply_user_overrides(cfg, user_cfg);
         std::cerr << "Applied user overrides from " << user_path << std::endl;
+    }
+
+    // single_user mode: force logs to user directory
+    if (cfg.single_user) {
+        cfg.log_dir = "~/.ragger";
     }
     
     g_config = &cfg;

@@ -148,7 +148,10 @@ Search memories using hybrid vector + BM25 search.
   "query": "deployment requirements",
   "limit": 5,
   "min_score": 0.4,
-  "collections": ["memory", "docs"]
+  "collections": [
+    "memory",
+    "docs"
+  ]
 }
 ```
 
@@ -266,7 +269,10 @@ ragger search "API authentication" --limit 3
     "arguments": {
       "query": "deployment requirements",
       "limit": 5,
-      "collections": ["memory", "docs"]
+      "collections": [
+        "memory",
+        "docs"
+      ]
     }
   }
 }
