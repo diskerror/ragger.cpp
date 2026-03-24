@@ -196,7 +196,7 @@ void apply_user_overrides(Config& cfg, const Config& user) {
     // User can override everything except SERVER_LOCKED:
     // ✗ server.host, server.port
     // ✗ storage.db_path, storage.formats_dir
-    // ✗ logging.log_dir (locked in shared mode, unlocked in single_user)
+    // ✗ logging.log_dir (always locked — one server, one log location)
     // ✗ embedding.model, embedding.dimensions, embedding.model_dir
     // ✓ Everything else
     
@@ -216,11 +216,7 @@ void apply_user_overrides(Config& cfg, const Config& user) {
     cfg.inference_model = user.inference_model;
     cfg.inference_default = user.inference_default;
     
-    // Logging (query_log, http_log, mcp_log are user-overridable)
-    // In single_user mode, log_dir is also user-overridable
-    if (cfg.single_user) {
-        cfg.log_dir = user.log_dir;
-    }
+    // Logging (query_log, http_log, mcp_log are user-overridable; log_dir is SERVER_LOCKED)
     cfg.query_log_enabled = user.query_log_enabled;
     cfg.http_log_enabled = user.http_log_enabled;
     cfg.mcp_log_enabled = user.mcp_log_enabled;
