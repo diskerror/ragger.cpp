@@ -8,7 +8,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <regex>
+#include <set>
 #include <sstream>
 
 #include "ProgramOptions.h"
@@ -63,8 +65,92 @@ static void do_import(ragger::RaggerMemory& memory,
 }
 
 // -----------------------------------------------------------------------
-// Export: reassemble chunks into files or grouped markdown
+// Export: reassemble chunks into files with heading deduplication
 // -----------------------------------------------------------------------
+
+/// Split a chunk's text into heading lines and body text.
+/// During import, the full heading chain is prepended to each chunk.
+static std::pair<std::vector<std::string>, std::string>
+split_heading_body(const std::string& text) {
+    std::vector<std::string> headings;
+    std::istringstream stream(text);
+    std::string line;
+    std::vector<std::string> all_lines;
+
+    while (std::getline(stream, line)) {
+        all_lines.push_back(line);
+    }
+
+    size_t i = 0;
+    while (i < all_lines.size()) {
+        // Trim whitespace for matching
+        std::string trimmed = all_lines[i];
+        auto start = trimmed.find_first_not_of(" \t");
+        if (start != std::string::npos) trimmed = trimmed.substr(start);
+        auto end = trimmed.find_last_not_of(" \t\r\n");
+        if (end != std::string::npos) trimmed = trimmed.substr(0, end + 1);
+
+        // Check if line starts with # followed by space
+        if (!trimmed.empty() && trimmed[0] == '#') {
+            auto space_pos = trimmed.find(' ');
+            bool is_heading = space_pos != std::string::npos;
+            if (is_heading) {
+                // Verify all chars before space are #
+                bool all_hash = true;
+                for (size_t j = 0; j < space_pos; j++) {
+                    if (trimmed[j] != '#') { all_hash = false; break; }
+                }
+                if (all_hash && space_pos <= 6) {
+                    headings.push_back(trimmed);
+                    i++;
+                    // Skip blank lines between headings
+                    while (i < all_lines.size()) {
+                        std::string t = all_lines[i];
+                        auto s = t.find_first_not_of(" \t\r\n");
+                        if (s == std::string::npos) { i++; continue; }
+                        break;
+                    }
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+
+    // Build body from remaining lines
+    std::string body;
+    for (size_t j = i; j < all_lines.size(); j++) {
+        if (!body.empty()) body += '\n';
+        body += all_lines[j];
+    }
+    // Trim trailing whitespace
+    auto last = body.find_last_not_of(" \t\r\n");
+    if (last != std::string::npos) body = body.substr(0, last + 1);
+
+    return {headings, body};
+}
+
+/// Check if a line is a markdown heading (# through ######)
+static bool is_heading_line(const std::string& line) {
+    auto start = line.find_first_not_of(" \t");
+    if (start == std::string::npos) return false;
+    std::string trimmed = line.substr(start);
+    if (trimmed.empty() || trimmed[0] != '#') return false;
+    auto space = trimmed.find(' ');
+    if (space == std::string::npos || space > 6) return false;
+    for (size_t i = 0; i < space; i++) {
+        if (trimmed[i] != '#') return false;
+    }
+    return true;
+}
+
+static std::string trim_line(const std::string& s) {
+    auto start = s.find_first_not_of(" \t");
+    if (start == std::string::npos) return "";
+    auto end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
+}
+
 static void do_export_docs(ragger::RaggerMemory& memory,
                            const std::string& collection,
                            const std::string& dest_dir) {
@@ -86,16 +172,86 @@ static void do_export_docs(ragger::RaggerMemory& memory,
     std::cout << "Exporting " << files.size() << " documents from '" << collection << "'...\n";
 
     for (auto& [source, chunks] : files) {
-        std::string content;
+        std::set<std::string> seen_headings;
+        std::vector<std::string> output_parts;
+
         for (auto* chunk : chunks) {
+            auto [headings, body] = split_heading_body(chunk->text);
+
+            // Emit only new headings
+            std::vector<std::string> new_headings;
+            for (const auto& h : headings) {
+                if (seen_headings.find(h) == seen_headings.end()) {
+                    seen_headings.insert(h);
+                    new_headings.push_back(h);
+                }
+            }
+
+            if (!new_headings.empty()) {
+                std::string heading_block;
+                for (const auto& h : new_headings) {
+                    if (!heading_block.empty()) heading_block += "\n\n";
+                    heading_block += h;
+                }
+                output_parts.push_back(heading_block);
+            }
+
+            if (!body.empty()) {
+                // Filter duplicate headings from body
+                std::istringstream bs(body);
+                std::string bline;
+                std::vector<std::string> filtered;
+                while (std::getline(bs, bline)) {
+                    std::string trimmed = trim_line(bline);
+                    if (is_heading_line(trimmed) &&
+                        seen_headings.find(trimmed) != seen_headings.end()) {
+                        continue;  // skip duplicate heading in body
+                    }
+                    if (is_heading_line(trimmed)) {
+                        seen_headings.insert(trimmed);
+                    }
+                    filtered.push_back(bline);
+                }
+                std::string filtered_body;
+                for (const auto& fl : filtered) {
+                    if (!filtered_body.empty()) filtered_body += '\n';
+                    filtered_body += fl;
+                }
+                // Trim
+                auto last = filtered_body.find_last_not_of(" \t\r\n");
+                if (last != std::string::npos) {
+                    filtered_body = filtered_body.substr(0, last + 1);
+                }
+                if (!filtered_body.empty()) {
+                    output_parts.push_back(filtered_body);
+                }
+            }
+        }
+
+        // Join with double newlines
+        std::string content;
+        for (const auto& part : output_parts) {
             if (!content.empty()) content += "\n\n";
-            content += chunk->text;
+            content += part;
         }
         content += "\n";
 
+        // Collapse triple+ newlines
+        std::string collapsed;
+        int newline_count = 0;
+        for (char c : content) {
+            if (c == '\n') {
+                newline_count++;
+                if (newline_count <= 2) collapsed += c;
+            } else {
+                newline_count = 0;
+                collapsed += c;
+            }
+        }
+
         auto out_path = fs::path(dest_dir) / fs::path(source).filename();
         std::ofstream f(out_path);
-        f << content;
+        f << collapsed;
         std::cout << "  " << fs::path(source).filename().string()
                   << " (" << chunks.size() << " chunks)\n";
     }
