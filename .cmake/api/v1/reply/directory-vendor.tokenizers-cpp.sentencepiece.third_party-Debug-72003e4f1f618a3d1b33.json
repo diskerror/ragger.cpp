@@ -1,0 +1,14 @@
+{
+	"backtraceGraph" : 
+	{
+		"commands" : [],
+		"files" : [],
+		"nodes" : []
+	},
+	"installers" : [],
+	"paths" : 
+	{
+		"build" : "vendor/tokenizers-cpp/sentencepiece/third_party",
+		"source" : "vendor/tokenizers-cpp/sentencepiece/third_party"
+	}
+}

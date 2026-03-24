@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(ragger VERSION 0.7.1 LANGUAGES CXX)
+project(ragger VERSION 0.7.2 LANGUAGES CXX)
 
 # Build version: tag or date suffix
 execute_process(

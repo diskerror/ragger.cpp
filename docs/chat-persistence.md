@@ -8,16 +8,18 @@ performance and database size.
 
 Set via the `store_turns` config key in `[chat]`:
 
-| Mode | Value | Behavior | Use Case |
-|------|-------|----------|----------|
-| **Always** | `true` | Store every turn in the database | Long-term projects, reference conversations |
-| **Session-only** | `session` | Keep turns in memory during the session, discard on exit | Privacy-sensitive chats, ephemeral work |
-| **Off** | `false` | No turn storage at all | Stateless use, testing |
+| Mode             | Value     | Behavior                                                 | Use Case                                    |
+|------------------|-----------|----------------------------------------------------------|---------------------------------------------|
+| **Always**       | `true`    | Store every turn in the database                         | Long-term projects, reference conversations |
+| **Session-only** | `session` | Keep turns in memory during the session, discard on exit | Privacy-sensitive chats, ephemeral work     |
+| **Off**          | `false`   | No turn storage at all                                   | Stateless use, testing                      |
 
 **Pros and cons:**
 
-- **Always (`true`):** Full history survives crashes and provides rich context for future sessions, but grows the database over time. Requires periodic cleanup via expiration settings.
-- **Session (`session`):** No database growth, no privacy concerns, but context is lost if the process crashes or exits unexpectedly.
+- **Always (`true`):** Full history survives crashes and provides rich context for future sessions, but grows the
+  database over time. Requires periodic cleanup via expiration settings.
+- **Session (`session`):** No database growth, no privacy concerns, but context is lost if the process crashes or exits
+  unexpectedly.
 - **Off (`false`):** Fastest and smallest, but the chat has no memory of prior turns within the same session.
 
 ## Summary Timing
@@ -26,11 +28,11 @@ Summaries extract decisions, facts, and lessons from raw conversation turns
 and store them as structured memories. Raw turns are deleted after
 summarization to keep the database lean.
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `summarize_on_pause` | `true` | Summarize buffered turns after inactivity |
-| `summarize_on_quit` | `true` | Summarize buffered turns on graceful exit |
-| `pause_minutes` | `10` | Inactivity threshold for pause-based summarization |
+| Setting              | Default | Description                                        |
+|----------------------|---------|----------------------------------------------------|
+| `summarize_on_pause` | `true`  | Summarize buffered turns after inactivity          |
+| `summarize_on_quit`  | `true`  | Summarize buffered turns on graceful exit          |
+| `pause_minutes`      | `10`    | Inactivity threshold for pause-based summarization |
 
 **Best practice:** Enable both. Pause-based summarization happens
 automatically during long pauses (e.g., lunch break, end of workday).
@@ -76,10 +78,10 @@ This ensures no context is permanently lost due to unexpected termination.
 To prevent unbounded database growth, old turns can be automatically
 deleted based on age or count.
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `max_turn_retention_minutes` | `60` | Delete turns older than this (0 = no age limit) |
-| `max_turns_stored` | `100` | Keep at most this many recent turns (0 = no count limit) |
+| Setting                      | Default | Description                                              |
+|------------------------------|---------|----------------------------------------------------------|
+| `max_turn_retention_minutes` | `60`    | Delete turns older than this (0 = no age limit)          |
+| `max_turns_stored`           | `100`   | Keep at most this many recent turns (0 = no count limit) |
 
 Turns with the `keep` tag are always exempt from expiration.
 

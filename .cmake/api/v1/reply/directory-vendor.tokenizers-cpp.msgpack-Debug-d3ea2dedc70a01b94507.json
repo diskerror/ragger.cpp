@@ -1,0 +1,87 @@
+{
+	"backtraceGraph" : 
+	{
+		"commands" : 
+		[
+			"INSTALL"
+		],
+		"files" : 
+		[
+			"vendor/tokenizers-cpp/msgpack/CMakeLists.txt"
+		],
+		"nodes" : 
+		[
+			{
+				"file" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 221,
+				"parent" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 249,
+				"parent" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 257,
+				"parent" : 0
+			}
+		]
+	},
+	"installers" : 
+	[
+		{
+			"backtrace" : 1,
+			"component" : "msgpack-cxx",
+			"destination" : "include",
+			"paths" : 
+			[
+				{
+					"from" : "vendor/tokenizers-cpp/msgpack/include",
+					"to" : "."
+				}
+			],
+			"type" : "directory"
+		},
+		{
+			"backtrace" : 2,
+			"component" : "msgpack-cxx",
+			"destination" : "lib/cmake/msgpack-cxx",
+			"paths" : 
+			[
+				"vendor/tokenizers-cpp/msgpack/msgpack-cxx-config.cmake",
+				"vendor/tokenizers-cpp/msgpack/msgpack-cxx-config-version.cmake"
+			],
+			"type" : "file"
+		},
+		{
+			"backtrace" : 3,
+			"component" : "msgpack-cxx",
+			"destination" : "lib/cmake/msgpack-cxx",
+			"exportName" : "msgpack-cxx-targets",
+			"exportTargets" : 
+			[
+				{
+					"id" : "msgpack-cxx::@63b2c5bddbbc971cd2ca",
+					"index" : 0
+				}
+			],
+			"paths" : 
+			[
+				"vendor/tokenizers-cpp/msgpack/CMakeFiles/Export/353205f37a5d77f0286a6688ca4aa3f8/msgpack-cxx-targets.cmake"
+			],
+			"type" : "export"
+		}
+	],
+	"paths" : 
+	{
+		"build" : "vendor/tokenizers-cpp/msgpack",
+		"source" : "vendor/tokenizers-cpp/msgpack"
+	}
+}

@@ -1,0 +1,264 @@
+{
+	"artifacts" : 
+	[
+		{
+			"path" : "tests/test_config"
+		}
+	],
+	"backtrace" : 1,
+	"backtraceGraph" : 
+	{
+		"commands" : 
+		[
+			"add_executable",
+			"target_link_libraries",
+			"set_property",
+			"find_package"
+		],
+		"files" : 
+		[
+			"tests/CMakeLists.txt",
+			"CMakeLists.txt",
+			"vendor/tokenizers-cpp/CMakeLists.txt",
+			"/Applications/CLion.app/Contents/bin/cmake/mac/aarch64/share/cmake-4.1/Modules/FindCURL.cmake"
+		],
+		"nodes" : 
+		[
+			{
+				"file" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 4,
+				"parent" : 0
+			},
+			{
+				"command" : 1,
+				"file" : 0,
+				"line" : 5,
+				"parent" : 0
+			},
+			{
+				"file" : 1
+			},
+			{
+				"command" : 1,
+				"file" : 1,
+				"line" : 114,
+				"parent" : 3
+			},
+			{
+				"file" : 2
+			},
+			{
+				"command" : 1,
+				"file" : 2,
+				"line" : 197,
+				"parent" : 5
+			},
+			{
+				"command" : 1,
+				"file" : 2,
+				"line" : 199,
+				"parent" : 5
+			},
+			{
+				"command" : 3,
+				"file" : 1,
+				"line" : 87,
+				"parent" : 3
+			},
+			{
+				"file" : 3,
+				"parent" : 8
+			},
+			{
+				"command" : 2,
+				"file" : 3,
+				"line" : 325,
+				"parent" : 9
+			}
+		]
+	},
+	"compileGroups" : 
+	[
+		{
+			"compileCommandFragments" : 
+			[
+				{
+					"fragment" : "-g -std=gnu++17 -arch arm64 -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk -fcolor-diagnostics"
+				}
+			],
+			"defines" : 
+			[
+				{
+					"backtrace" : 2,
+					"define" : "CROW_USE_BOOST"
+				},
+				{
+					"backtrace" : 2,
+					"define" : "MLC_ENABLE_SENTENCEPIECE_TOKENIZER"
+				},
+				{
+					"backtrace" : 2,
+					"define" : "RAGGER_VERSION=\"0.7.2\""
+				}
+			],
+			"includes" : 
+			[
+				{
+					"backtrace" : 2,
+					"path" : "/Volumes/WDBlack2/CLionProjects/Ragger/include"
+				},
+				{
+					"backtrace" : 2,
+					"path" : "/Volumes/WDBlack2/CLionProjects/Ragger/vendor/tokenizers-cpp/include"
+				},
+				{
+					"backtrace" : 2,
+					"path" : "/Volumes/WDBlack2/CLionProjects/Ragger/vendor"
+				},
+				{
+					"backtrace" : 2,
+					"isSystem" : true,
+					"path" : "/opt/local/include"
+				},
+				{
+					"backtrace" : 2,
+					"isSystem" : true,
+					"path" : "/Volumes/WDBlack2/CLionProjects/Ragger/vendor/onnxruntime/include"
+				},
+				{
+					"backtrace" : 2,
+					"isSystem" : true,
+					"path" : "/opt/local/include/eigen3"
+				},
+				{
+					"backtrace" : 2,
+					"isSystem" : true,
+					"path" : "/opt/local/libexec/boost/1.88/include"
+				}
+			],
+			"language" : "CXX",
+			"languageStandard" : 
+			{
+				"backtraces" : 
+				[
+					1
+				],
+				"standard" : "17"
+			},
+			"sourceIndexes" : 
+			[
+				0
+			]
+		}
+	],
+	"dependencies" : 
+	[
+		{
+			"backtrace" : 2,
+			"id" : "ragger_core::@6890427a1f51a3e7e1df"
+		},
+		{
+			"backtrace" : 2,
+			"id" : "tokenizers_cpp::@eea00e14be5c6fc9db1b"
+		},
+		{
+			"backtrace" : 2,
+			"id" : "tokenizers_c::@eea00e14be5c6fc9db1b"
+		},
+		{
+			"backtrace" : 2,
+			"id" : "sentencepiece-static::@96650d18ec4aa1756f3c"
+		}
+	],
+	"id" : "test_config::@a44f0ac069e85531cdee",
+	"link" : 
+	{
+		"commandFragments" : 
+		[
+			{
+				"fragment" : "-g",
+				"role" : "flags"
+			},
+			{
+				"fragment" : "-Wl,-search_paths_first -Wl,-headerpad_max_install_names",
+				"role" : "flags"
+			},
+			{
+				"fragment" : "-Wl,-rpath,/Volumes/WDBlack2/CLionProjects/Ragger/vendor/onnxruntime/lib",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 2,
+				"fragment" : "../libragger_core.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 4,
+				"fragment" : "/opt/local/lib/libsqlite3.dylib",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 4,
+				"fragment" : "../vendor/onnxruntime/lib/libonnxruntime.dylib",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 4,
+				"fragment" : "../vendor/tokenizers-cpp/libtokenizers_cpp.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 6,
+				"fragment" : "../vendor/tokenizers-cpp/aarch64-apple-darwin/debug/libtokenizers_c.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 7,
+				"fragment" : "../vendor/tokenizers-cpp/sentencepiece/src/libsentencepiece.a",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 4,
+				"fragment" : "/opt/local/lib/libcurl.dylib",
+				"role" : "libraries"
+			},
+			{
+				"backtrace" : 10,
+				"fragment" : "/opt/local/lib/libcurl.dylib",
+				"role" : "libraries"
+			}
+		],
+		"language" : "CXX"
+	},
+	"name" : "test_config",
+	"nameOnDisk" : "test_config",
+	"paths" : 
+	{
+		"build" : "tests",
+		"source" : "tests"
+	},
+	"sourceGroups" : 
+	[
+		{
+			"name" : "Source Files",
+			"sourceIndexes" : 
+			[
+				0
+			]
+		}
+	],
+	"sources" : 
+	[
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "tests/test_config.cpp",
+			"sourceGroupIndex" : 0
+		}
+	],
+	"type" : "EXECUTABLE"
+}
