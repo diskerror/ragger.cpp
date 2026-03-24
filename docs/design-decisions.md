@@ -149,6 +149,24 @@ need updating, that's done outside the chat session.
 
 Priority order: SOUL > USER > AGENTS > TOOLS > MEMORY.
 
+## Raw vs Digested Conversation Storage
+
+For semantic memory retrieval, summarized/digested turns are almost
+always more useful than raw transcripts. When you search "what did we
+decide about logging," you want the decision, not 15 back-and-forth
+messages that led to it.
+
+However, some environments legally require raw conversation records
+(compliance, legal discovery, customer support, audit trails). The
+`permanent` storage mode addresses this: raw turns are kept forever
+with `keep: true` auto-set, while summaries are still created
+alongside for efficient search. Both exist in the database — raw for
+the record, summarized for retrieval.
+
+Default recommendation: store raw turns briefly for active context,
+then summarize and discard. Use `permanent` only when retention
+requirements demand it.
+
 ## Schema-Driven API Formats
 
 Inference proxy format definitions live in JSON files (`formats/`),

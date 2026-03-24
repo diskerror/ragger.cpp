@@ -8,16 +8,21 @@ performance and database size.
 
 Set via the `store_turns` config key in `[chat]`:
 
-| Mode             | Value     | Behavior                                                 | Use Case                                    |
-|------------------|-----------|----------------------------------------------------------|---------------------------------------------|
-| **Always**       | `true`    | Store every turn in the database                         | Long-term projects, reference conversations |
-| **Session-only** | `session` | Keep turns in memory during the session, discard on exit | Privacy-sensitive chats, ephemeral work     |
-| **Off**          | `false`   | No turn storage at all                                   | Stateless use, testing                      |
+| Mode             | Value       | Behavior                                                 | Use Case                                         |
+|------------------|-------------|----------------------------------------------------------|--------------------------------------------------|
+| **Always**       | `true`      | Store every turn, summarize, delete raw after expiration | Long-term projects, reference conversations      |
+| **Permanent**    | `permanent` | Store every turn, summarize, but keep raw turns forever  | Compliance, legal, audit trails, support records |
+| **Session-only** | `session`   | Keep turns in memory during the session, discard on exit | Privacy-sensitive chats, ephemeral work          |
+| **Off**          | `false`     | No turn storage at all                                   | Stateless use, testing                           |
 
 **Pros and cons:**
 
 - **Always (`true`):** Full history survives crashes and provides rich context for future sessions, but grows the
   database over time. Requires periodic cleanup via expiration settings.
+- **Permanent (`permanent`):** Like `true`, but raw turns are never deleted — only summarized alongside.
+  Raw turns automatically get `keep: true` metadata, protecting them from both expiration and
+  manual deletion. The database grows indefinitely; plan storage accordingly. Essential for
+  regulated environments where conversation records must be retained.
 - **Session (`session`):** No database growth, no privacy concerns, but context is lost if the process crashes or exits
   unexpectedly.
 - **Off (`false`):** Fastest and smallest, but the chat has no memory of prior turns within the same session.
@@ -135,6 +140,20 @@ summarize_on_pause = true
 summarize_on_quit = true
 pause_minutes = 30
 ```
+
+### Permanent Record (compliance, audit)
+
+```ini
+[chat]
+store_turns = permanent
+summarize_on_pause = true
+summarize_on_quit = true
+pause_minutes = 10
+```
+
+Raw turns are kept forever with `keep: true`. Summaries are still
+created for efficient search. Expiration settings are ignored in this
+mode since raw turns are never deleted.
 
 ### Session-only (no persistence)
 
