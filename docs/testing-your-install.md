@@ -1,4 +1,4 @@
-# README_USER_TEST.md — Verify Your Installation
+# Verify Your Installation
 
 ## What This Is
 

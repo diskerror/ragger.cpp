@@ -27,6 +27,9 @@ Ragger/
 │   ├── python-api.md           # Library usage
 │   ├── chat-persistence.md     # Turn storage and summarization
 │   ├── deployment.md           # Production setup
+│   ├── agent-integration.md    # AI agent best practices
+│   ├── testing-your-install.md # Verify with your own data
+│   ├── design-decisions.md     # Why things are the way they are
 │   ├── project-structure.md    # This file
 │   ├── conceptual.dot          # Architecture diagram (Graphviz)
 │   ├── dataflow.dot            # Data flow diagram
@@ -36,7 +39,6 @@ Ragger/
 ├── ragger.py                   # Entry point (chmod +x)
 ├── requirements.txt            # Python dependencies
 ├── OPENCLAW.md                 # OpenClaw plugin guide
-├── README_TO_AGENT.md          # AI agent best practices
 ├── ROADMAP.md                  # Future plans
 └── README.md                   # This is now the landing page
 ```
