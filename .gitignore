@@ -1,6 +1,17 @@
 # Build
 build/
 cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CMakeDoxyfile.in
+CMakeDoxygenDefaults.cmake
+CPackConfig.cmake
+CPackSourceConfig.cmake
+CTestTestfile.cmake
+Makefile
+cmake_install.cmake
+Testing/
+.cmake/
 
 # IDE
 .idea/
