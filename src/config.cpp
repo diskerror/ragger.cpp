@@ -196,7 +196,7 @@ void apply_user_overrides(Config& cfg, const Config& user) {
     // User can override everything except SERVER_LOCKED:
     // ✗ server.host, server.port
     // ✗ storage.db_path, storage.formats_dir
-    // ✗ logging.log_dir
+    // ✗ logging.log_dir (locked in shared mode, unlocked in single_user)
     // ✗ embedding.model, embedding.dimensions, embedding.model_dir
     // ✓ Everything else
     
@@ -217,6 +217,10 @@ void apply_user_overrides(Config& cfg, const Config& user) {
     cfg.inference_default = user.inference_default;
     
     // Logging (query_log, http_log, mcp_log are user-overridable)
+    // In single_user mode, log_dir is also user-overridable
+    if (cfg.single_user) {
+        cfg.log_dir = user.log_dir;
+    }
     cfg.query_log_enabled = user.query_log_enabled;
     cfg.http_log_enabled = user.http_log_enabled;
     cfg.mcp_log_enabled = user.mcp_log_enabled;
@@ -408,11 +412,6 @@ void init_config(const std::string& cli_config_path) {
         std::cerr << "Applied user overrides from " << user_path << std::endl;
     }
 
-    // single_user mode: force logs to user directory
-    if (cfg.single_user) {
-        cfg.log_dir = "~/.ragger";
-    }
-    
     g_config = &cfg;
 }
 
