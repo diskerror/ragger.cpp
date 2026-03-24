@@ -65,18 +65,13 @@ memory.store(
 )
 ```
 
-## Launch-time Orphan Recovery
+## Startup Recovery
 
-If `ragger chat` crashes or is killed (SIGKILL), buffered turns may be
-left in the database without summarization. On the next launch, Ragger
-checks for orphaned turns (turns stored since the last summary timestamp)
-and offers to:
-
-1. Summarize them now
-2. Keep them as-is
-3. Delete them
-
-This ensures no context is permanently lost due to unexpected termination.
+If `ragger chat` crashes or is killed, raw turns remain in the database
+without summarization. On the next startup, Ragger checks for unsummarized
+turns and summarizes them automatically. Since raw turns are always stored
+to the database (in `true` or `permanent` mode), a summary can always be
+created later — no background summarizer process is needed.
 
 ## Turn Expiration
 
