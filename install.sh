@@ -160,12 +160,9 @@ chmod 0755 /usr/local/bin/ragger
 
 # --- Restart daemon ---
 if [ "$OS" = "Darwin" ]; then
-    if launchctl list com.diskerror.ragger &>/dev/null; then
-        info "Restarting daemon"
-        launchctl kickstart -k system/com.diskerror.ragger
-    else
-        info "Daemon not loaded — run: sudo launchctl load $PLIST"
-    fi
+    info "Loading daemon"
+    launchctl unload "$PLIST" 2>/dev/null || true
+    launchctl load "$PLIST"
 elif [ "$OS" = "Linux" ]; then
     if systemctl is-active --quiet ragger; then
         info "Restarting daemon"
