@@ -182,6 +182,8 @@ static const ServerLockedKey SERVER_LOCKED[] = {
     {"inference", "api_key"},
     {"inference", "provider"},
     {"inference", "max_tokens"},
+    // Auth (server-controlled)
+    {"auth", "token_rotation_minutes"},
 };
 
 /// Clamp a value to a ceiling. Ceiling of 0 = no limit.
@@ -374,6 +376,9 @@ Config load_config(const std::string& path) {
             else if (key == "chars_per_token") cfg.chat_chars_per_token = std::stof(val);
             else if (key == "max_persona_chars_limit") cfg.chat_max_persona_chars_limit = std::stoi(val);
             else if (key == "max_memory_results_limit") cfg.chat_max_memory_results_limit = std::stoi(val);
+        }
+        else if (section == "auth") {
+            if (key == "token_rotation_minutes") cfg.token_rotation_minutes = std::stoi(val);
         }
     }
 

@@ -7,6 +7,7 @@
 #include "ragger/lang.h"
 #include "ragger/logs.h"
 #include "ragger/auth.h"
+#include "ragger/config.h"
 #include "nlohmann_json.hpp"
 #include "crow_all.h"
 
@@ -17,6 +18,7 @@
 #include <optional>
 #include <pwd.h>
 #include <sstream>
+#include <thread>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -54,7 +56,7 @@ struct Server::Impl {
                 // Create default user
                 std::string username = "default";
                 int user_id = memory.backend()->create_user(username, token_hash, true);
-                user = SqliteBackend::UserInfo{user_id, username, true, token_hash};
+                user = SqliteBackend::UserInfo{user_id, username, true, token_hash, ""};
                 std::cerr << "Created default user: " << username << " (id=" << user_id << ")\n";
             }
             default_user_ = user;
@@ -64,7 +66,7 @@ struct Server::Impl {
     std::optional<SqliteBackend::UserInfo> _check_auth(const crow::request& req) {
         // If no token configured, auth is disabled
         if (server_token_.empty()) {
-            return SqliteBackend::UserInfo{0, "anonymous", false, ""};
+            return SqliteBackend::UserInfo{0, "anonymous", false, "", ""};
         }
 
         // Extract Authorization header
@@ -84,6 +86,8 @@ struct Server::Impl {
         std::string token_hash = hash_token(token);
         auto user = memory.backend()->get_user_by_token_hash(token_hash);
         if (user) {
+            // Check if token rotation is needed (async, after this request)
+            _check_token_rotation(*user);
             return user;
         }
 
@@ -93,6 +97,60 @@ struct Server::Impl {
         }
 
         return std::nullopt;
+    }
+
+    void _check_token_rotation(const SqliteBackend::UserInfo& user) {
+        const auto& cfg = config();
+        if (cfg.token_rotation_minutes <= 0) return;  // Rotation disabled
+
+        auto* backend = memory.backend();
+        auto rotated_at_opt = backend->get_user_token_rotated_at(user.username);
+        
+        // Get current time as ISO timestamp
+        auto now = std::chrono::system_clock::now();
+        auto now_tt = std::chrono::system_clock::to_time_t(now);
+        std::tm now_gm{};
+        gmtime_r(&now_tt, &now_gm);
+        char now_buf[32];
+        std::strftime(now_buf, sizeof(now_buf), "%Y-%m-%dT%H:%M:%SZ", &now_gm);
+        std::string now_str(now_buf);
+        
+        bool needs_rotation = false;
+        if (!rotated_at_opt) {
+            // Never rotated — initialize with current time
+            backend->update_user_token_rotated_at(user.username, now_str);
+            return;
+        }
+        
+        // Parse rotated_at timestamp
+        std::string rotated_at = *rotated_at_opt;
+        std::tm rotated_tm{};
+        strptime(rotated_at.c_str(), "%Y-%m-%dT%H:%M:%SZ", &rotated_tm);
+        auto rotated_tp = std::chrono::system_clock::from_time_t(timegm(&rotated_tm));
+        
+        auto age_minutes = std::chrono::duration_cast<std::chrono::minutes>(now - rotated_tp).count();
+        
+        // Grace window: skip rotation if rotated within last 60 seconds
+        if (age_minutes < 1) return;
+        
+        if (age_minutes >= cfg.token_rotation_minutes) {
+            needs_rotation = true;
+        }
+        
+        if (needs_rotation) {
+            // Rotate in background thread to not block this request
+            std::thread([this, username = user.username, now_str]() {
+                try {
+                    auto [new_token, new_hash] = rotate_token_for_user(username);
+                    auto* backend = memory.backend();
+                    backend->update_user_token(username, new_hash);
+                    backend->update_user_token_rotated_at(username, now_str);
+                    std::cerr << "Rotated token for user: " << username << std::endl;
+                } catch (const std::exception& e) {
+                    log_error(std::string("Token rotation failed for ") + username + ": " + e.what());
+                }
+            }).detach();
+        }
     }
 
     void setup_routes() {
@@ -358,6 +416,99 @@ struct Server::Impl {
             } catch (const std::exception& e) {
                 log_http("POST /search_by_metadata 500");
                 log_error(std::string("POST /search_by_metadata failed: ") + e.what());
+                return crow::response(500, std::string("Error: ") + e.what());
+            }
+        });
+
+        // PUT /user/model — set preferred model
+        CROW_ROUTE(app, "/user/model").methods(crow::HTTPMethod::PUT)
+        ([this](const crow::request& req) {
+            auto user = _check_auth(req);
+            if (!user) {
+                log_http("PUT /user/model 401");
+                return crow::response(401, "Unauthorized");
+            }
+            try {
+                auto body = json::parse(req.body);
+                std::string model = body.value("model", "");
+                if (model.empty()) {
+                    log_http("PUT /user/model 400");
+                    return crow::response(400, "Missing 'model' field");
+                }
+                
+                auto* backend = memory.backend();
+                backend->update_user_preferred_model(user->username, model);
+                
+                json response = {
+                    {"status", "updated"},
+                    {"model", model}
+                };
+                log_http("PUT /user/model 200");
+                return crow::response(200, response.dump());
+                
+            } catch (const json::exception& e) {
+                log_http("PUT /user/model 400");
+                return crow::response(400, std::string("JSON error: ") + e.what());
+            } catch (const std::exception& e) {
+                log_http("PUT /user/model 500");
+                log_error(std::string("PUT /user/model failed: ") + e.what());
+                return crow::response(500, std::string("Error: ") + e.what());
+            }
+        });
+
+        // GET /user/model — get preferred model
+        CROW_ROUTE(app, "/user/model").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            auto user = _check_auth(req);
+            if (!user) {
+                log_http("GET /user/model 401");
+                return crow::response(401, "Unauthorized");
+            }
+            try {
+                auto* backend = memory.backend();
+                auto model_opt = backend->get_user_preferred_model(user->username);
+                
+                json response;
+                if (model_opt) {
+                    response = {
+                        {"model", *model_opt}
+                    };
+                } else {
+                    response = {
+                        {"model", nullptr}
+                    };
+                }
+                log_http("GET /user/model 200");
+                return crow::response(200, response.dump());
+                
+            } catch (const std::exception& e) {
+                log_http("GET /user/model 500");
+                log_error(std::string("GET /user/model failed: ") + e.what());
+                return crow::response(500, std::string("Error: ") + e.what());
+            }
+        });
+
+        // DELETE /user/model — clear preferred model
+        CROW_ROUTE(app, "/user/model").methods(crow::HTTPMethod::DELETE)
+        ([this](const crow::request& req) {
+            auto user = _check_auth(req);
+            if (!user) {
+                log_http("DELETE /user/model 401");
+                return crow::response(401, "Unauthorized");
+            }
+            try {
+                auto* backend = memory.backend();
+                backend->update_user_preferred_model(user->username, "");
+                
+                json response = {
+                    {"status", "cleared"}
+                };
+                log_http("DELETE /user/model 200");
+                return crow::response(200, response.dump());
+                
+            } catch (const std::exception& e) {
+                log_http("DELETE /user/model 500");
+                log_error(std::string("DELETE /user/model failed: ") + e.what());
                 return crow::response(500, std::string("Error: ") + e.what());
             }
         });

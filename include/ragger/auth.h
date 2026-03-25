@@ -25,4 +25,8 @@ std::string generate_token();
 /// Load existing token or generate new one. Creates ~/.ragger/ if needed.
 std::string ensure_token();
 
+/// Rotate token for a user. Generates new token, writes to ~user/.ragger/token,
+/// returns (new_token, new_hash). Does NOT update database — caller handles that.
+std::pair<std::string, std::string> rotate_token_for_user(const std::string& username);
+
 } // namespace ragger

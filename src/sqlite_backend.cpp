@@ -137,6 +137,8 @@ struct SqliteBackend::Impl {
         // Migrations
         migrate_add_user_id();
         migrate_dedicated_columns();
+        migrate_add_token_rotated_at();
+        migrate_add_preferred_model();
     }
 
     void migrate_add_user_id() {
@@ -267,6 +269,40 @@ struct SqliteBackend::Impl {
         sqlite3_finalize(update_stmt);
 
         std::cerr << "Migrated " << updated << " rows: collection/category/tags extracted\n";
+    }
+
+    void migrate_add_token_rotated_at() {
+        // Check if column exists
+        sqlite3_stmt* stmt;
+        sqlite3_prepare_v2(db, "PRAGMA table_info(users)", -1, &stmt, nullptr);
+        bool has_token_rotated_at = false;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            std::string col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            if (col == "token_rotated_at") has_token_rotated_at = true;
+        }
+        sqlite3_finalize(stmt);
+
+        if (!has_token_rotated_at) {
+            exec("ALTER TABLE users ADD COLUMN token_rotated_at TEXT");
+            std::cerr << "Migrated users: added token_rotated_at column\n";
+        }
+    }
+
+    void migrate_add_preferred_model() {
+        // Check if column exists
+        sqlite3_stmt* stmt;
+        sqlite3_prepare_v2(db, "PRAGMA table_info(users)", -1, &stmt, nullptr);
+        bool has_preferred_model = false;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            std::string col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            if (col == "preferred_model") has_preferred_model = true;
+        }
+        sqlite3_finalize(stmt);
+
+        if (!has_preferred_model) {
+            exec("ALTER TABLE users ADD COLUMN preferred_model TEXT");
+            std::cerr << "Migrated users: added preferred_model column\n";
+        }
     }
 
     // ---- path normalization -------------------------------------------
@@ -973,7 +1009,7 @@ std::optional<SqliteBackend::UserInfo> SqliteBackend::get_user_by_token_hash(
         const std::string& token_hash) {
     sqlite3_stmt* stmt;
     sqlite3_prepare_v2(pImpl->db,
-        "SELECT id, username, is_admin FROM users WHERE token_hash = ?",
+        "SELECT id, username, is_admin, preferred_model FROM users WHERE token_hash = ?",
         -1, &stmt, nullptr);
     sqlite3_bind_text(stmt, 1, token_hash.c_str(), -1, SQLITE_TRANSIENT);
     if (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -982,6 +1018,8 @@ std::optional<SqliteBackend::UserInfo> SqliteBackend::get_user_by_token_hash(
         u.username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
         u.is_admin = sqlite3_column_int(stmt, 2) != 0;
         u.token_hash = token_hash;
+        const char* pref_model = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        u.preferred_model = (pref_model && pref_model[0] != '\0') ? std::string(pref_model) : "";
         sqlite3_finalize(stmt);
         return u;
     }
@@ -993,7 +1031,7 @@ std::optional<SqliteBackend::UserInfo> SqliteBackend::get_user_by_username(
         const std::string& username) {
     sqlite3_stmt* stmt;
     sqlite3_prepare_v2(pImpl->db,
-        "SELECT id, username, is_admin, token_hash FROM users WHERE username = ?",
+        "SELECT id, username, is_admin, token_hash, preferred_model FROM users WHERE username = ?",
         -1, &stmt, nullptr);
     sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
     if (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -1002,6 +1040,8 @@ std::optional<SqliteBackend::UserInfo> SqliteBackend::get_user_by_username(
         u.username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
         u.is_admin = sqlite3_column_int(stmt, 2) != 0;
         u.token_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        const char* pref_model = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        u.preferred_model = (pref_model && pref_model[0] != '\0') ? std::string(pref_model) : "";
         sqlite3_finalize(stmt);
         return u;
     }
@@ -1018,6 +1058,80 @@ void SqliteBackend::update_user_token(const std::string& username,
     sqlite3_bind_text(stmt, 1, token_hash.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+std::optional<std::string> SqliteBackend::get_user_token_rotated_at(
+        const std::string& username) {
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(pImpl->db,
+        "SELECT token_rotated_at FROM users WHERE username = ?",
+        -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* val = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        sqlite3_finalize(stmt);
+        if (val) return std::string(val);
+    }
+    sqlite3_finalize(stmt);
+    return std::nullopt;
+}
+
+void SqliteBackend::update_user_token_rotated_at(const std::string& username,
+                                                   const std::string& timestamp) {
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(pImpl->db,
+        "UPDATE users SET token_rotated_at = ? WHERE username = ?",
+        -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, timestamp.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+std::optional<std::string> SqliteBackend::get_user_preferred_model(
+        const std::string& username) {
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(pImpl->db,
+        "SELECT preferred_model FROM users WHERE username = ?",
+        -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* val = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        sqlite3_finalize(stmt);
+        if (val && val[0] != '\0') return std::string(val);
+    }
+    sqlite3_finalize(stmt);
+    return std::nullopt;
+}
+
+void SqliteBackend::update_user_preferred_model(const std::string& username,
+                                                  const std::string& model) {
+    sqlite3_stmt* stmt = nullptr;
+    if (model.empty()) {
+        // Clear preferred model (set to NULL)
+        int rc = sqlite3_prepare_v2(pImpl->db,
+            "UPDATE users SET preferred_model = NULL WHERE username = ?",
+            -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) {
+            throw std::runtime_error("Failed to prepare statement");
+        }
+        sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    } else {
+        int rc = sqlite3_prepare_v2(pImpl->db,
+            "UPDATE users SET preferred_model = ? WHERE username = ?",
+            -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) {
+            throw std::runtime_error("Failed to prepare statement");
+        }
+        sqlite3_bind_text(stmt, 1, model.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
+    }
+    int rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        throw std::runtime_error("Failed to execute statement");
+    }
     sqlite3_finalize(stmt);
 }
 

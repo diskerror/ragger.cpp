@@ -67,6 +67,9 @@ struct Config {
     // --- Import ---
     int  minimum_chunk_size    = 300;
 
+    // --- Auth ---
+    int  token_rotation_minutes = 1440;  // 1440 = 24h, 0 = never
+
     // --- Chat ---
     std::string chat_store_turns = "true";  // "true", "session", "false"
     bool chat_summarize_on_pause = true;

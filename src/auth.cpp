@@ -11,7 +11,9 @@
 #include <filesystem>
 #include <random>
 #include <cstdio>
+#include <pwd.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 namespace ragger {
 
@@ -124,6 +126,47 @@ std::string ensure_token() {
     chmod(path.c_str(), 0640);
     
     return token;
+}
+
+std::pair<std::string, std::string> rotate_token_for_user(const std::string& username) {
+    // Generate new token
+    std::string new_token = generate_token();
+    std::string new_hash = hash_token(new_token);
+    
+    // Determine token file path for the user
+    // For multi-user setup, tokens live in each user's home directory
+    // Get user's home directory
+    std::string user_home;
+    struct passwd* pw = getpwnam(username.c_str());
+    if (pw) {
+        user_home = pw->pw_dir;
+    } else {
+        // Fallback: assume current user if username lookup fails
+        const char* home = std::getenv("HOME");
+        if (home) user_home = home;
+    }
+    
+    if (user_home.empty()) {
+        throw std::runtime_error("Cannot determine home directory for user: " + username);
+    }
+    
+    std::string token_file = user_home + "/.ragger/token";
+    
+    // Ensure .ragger directory exists
+    fs::create_directories(fs::path(token_file).parent_path());
+    
+    // Write new token
+    std::ofstream f(token_file);
+    if (!f.is_open()) {
+        throw std::runtime_error("Failed to write token file: " + token_file);
+    }
+    f << new_token << std::endl;
+    f.close();
+    
+    // Set permissions to 0640
+    chmod(token_file.c_str(), 0640);
+    
+    return {new_token, new_hash};
 }
 
 } // namespace ragger

@@ -72,6 +72,7 @@ public:
         std::string username;
         bool        is_admin;
         std::string token_hash;
+        std::string preferred_model;  // empty = system default
     };
 
     /// Create a user. Returns user id.
@@ -86,6 +87,18 @@ public:
 
     /// Update a user's token hash.
     void update_user_token(const std::string& username, const std::string& token_hash);
+
+    /// Get when a user's token was last rotated. Returns nullopt if not set.
+    std::optional<std::string> get_user_token_rotated_at(const std::string& username);
+
+    /// Update when a user's token was last rotated (ISO timestamp).
+    void update_user_token_rotated_at(const std::string& username, const std::string& timestamp);
+
+    /// Get a user's preferred model. Returns nullopt if not set.
+    std::optional<std::string> get_user_preferred_model(const std::string& username);
+
+    /// Update a user's preferred model.
+    void update_user_preferred_model(const std::string& username, const std::string& model);
 
     /// Delete a memory by ID. Returns true if deleted.
     bool delete_memory(int memory_id);
