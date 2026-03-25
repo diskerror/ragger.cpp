@@ -515,6 +515,7 @@ int main(int argc, char** argv) {
         ("min-chunk-size", Diskerror::po::value<int>(), "Min chunk size for import")
         ("group-by", Diskerror::po::value<std::string>()->default_value("date"), "Grouping for export (date|category|collection)")
         ("admin", "Grant admin privileges (for add-user)")
+        ("yes,y", "Skip confirmation prompts (for scripting)")
     ;
     opts.add_hidden_options()
         ("command", Diskerror::po::value<std::string>()->default_value("help"), CLI_COMMAND)
@@ -749,6 +750,43 @@ int main(int argc, char** argv) {
 
         } else if (command == "rebuild-embeddings") {
             ragger::setup_logging(false, false);
+            
+            // Get count first (before loading full memory)
+            ragger::RaggerMemory memory_temp(db_path, model_dir);
+            int total_count = memory_temp.count();
+            memory_temp.close();
+            
+            // Warning + confirmation prompt
+            std::cout << "This will re-embed all " << total_count 
+                      << " memories. The server should be stopped first.\n";
+            
+            bool proceed = false;
+            if (opts.count("yes")) {
+                proceed = true;
+            } else {
+                std::cout << "Continue? [y/N] ";
+                std::string answer;
+                std::getline(std::cin, answer);
+                proceed = (answer == "y" || answer == "Y");
+            }
+            
+            if (!proceed) {
+                std::cout << "Aborted.\n";
+                return 0;
+            }
+            
+            // Backup the database file
+            std::string actual_db_path = db_path.empty() ? cfg.resolved_db_path() : db_path;
+            std::string backup_path = actual_db_path + ".bak";
+            try {
+                fs::copy_file(actual_db_path, backup_path, 
+                             fs::copy_options::overwrite_existing);
+                std::cout << "Database backed up to: " << backup_path << "\n";
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Failed to create backup: " << e.what() << "\n";
+            }
+            
+            // Rebuild embeddings
             ragger::RaggerMemory memory(db_path, model_dir);
             int count = memory.rebuild_embeddings();
             std::cout << "✓ Embeddings rebuilt: " << count << " documents\n";

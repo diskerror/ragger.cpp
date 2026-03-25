@@ -773,6 +773,16 @@ struct SqliteBackend::Impl {
     }
 
     int rebuild_embeddings(Embedder& embedder) {
+        // Get total count first
+        sqlite3_stmt* count_stmt = nullptr;
+        sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM memories",
+                           -1, &count_stmt, nullptr);
+        int total_count = 0;
+        if (sqlite3_step(count_stmt) == SQLITE_ROW) {
+            total_count = sqlite3_column_int(count_stmt, 0);
+        }
+        sqlite3_finalize(count_stmt);
+        
         // Re-embed all documents
         sqlite3_stmt* select_stmt = nullptr;
         sqlite3_prepare_v2(db, "SELECT id, text FROM memories",
@@ -802,14 +812,17 @@ struct SqliteBackend::Impl {
 
             ++doc_count;
 
-            // Log progress every 1000 docs
-            if (doc_count % 1000 == 0) {
-                std::cerr << "Rebuilt embeddings for " << doc_count << " documents...\n";
-            }
+            // Print progress counter
+            std::cout << "\rRebuilding embeddings: " << doc_count << "/" << total_count;
+            std::cout.flush();
         }
 
         sqlite3_finalize(select_stmt);
         sqlite3_finalize(update_stmt);
+        
+        // Print final newline
+        std::cout << "\n";
+        
         invalidate_cache();
         return doc_count;
     }
