@@ -60,8 +60,6 @@ system ceilings, token auth) but the data layer is still single-user
 | Data directory | `/var/ragger/`                             |
 | User databases | `/var/ragger/users/<username>/memories.db` |
 
-See [ROADMAP.md](../ROADMAP.md) for multi-user data layer plans.
-
 ---
 
 ## macOS LaunchDaemon Setup
@@ -230,44 +228,25 @@ No data loss — both versions read the same database.
 
 ---
 
-## Deploy Script (`deploy.sh`)
+## Install Script (`install.sh`)
 
-The Python version includes a `deploy.sh` script for automated deployment.
-This is typically used for:
+Both Python and C++ versions include an idempotent `install.sh` script that:
 
-- Copying the Python package to `~/.local/lib/ragger`
-- Creating the wrapper script in `~/.local/bin/ragger`
-- Setting up config files
+- Creates system user (`_ragger` on macOS, `ragger` on Linux) and group if needed
+- Creates `/var/ragger/` and `/var/log/ragger/` with correct permissions
+- Installs `/etc/ragger.ini` system config if missing
+- Installs LaunchDaemon (macOS) or systemd unit (Linux) if missing
+- Builds and installs the binary to `/usr/local/bin/ragger`
+- Restarts the daemon if running
 
 **Usage:**
 
 ```bash
 cd /path/to/Ragger
-./deploy.sh
+sudo ./install.sh
 ```
 
-(Details depend on the script's implementation — check the script itself
-for options.)
-
----
-
-## System-wide Install Script (`install-system.sh`)
-
-For multi-user deployments (when data layer support is added), use
-`install-system.sh` to:
-
-- Install to `/usr/local/bin/ragger`
-- Create `/etc/ragger.ini`
-- Set up `/var/ragger/` with correct permissions
-
-**Usage:**
-
-```bash
-sudo ./install-system.sh
-```
-
-**Note:** This is planned for future releases. The current version is
-single-user only.
+The script is idempotent — safe to run multiple times. It creates system resources on first run and updates the binary on subsequent runs.
 
 ---
 

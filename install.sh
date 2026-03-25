@@ -144,10 +144,6 @@ EOF
     fi
 fi
 
-# --- Build ---
-info "Building..."
-./build.sh
-
 # --- Install binary ---
 BINARY="build/ragger"
 if [ ! -x "$BINARY" ]; then

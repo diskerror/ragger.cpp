@@ -36,10 +36,9 @@ Ragger/
 │   └── er.dot                  # Entity-relationship diagram
 ├── example-system.ini          # System config example
 ├── example-user.ini            # User config example
+├── install.sh                  # Idempotent install script
 ├── ragger.py                   # Entry point (chmod +x)
 ├── requirements.txt            # Python dependencies
-├── OPENCLAW.md                 # OpenClaw plugin guide
-├── ROADMAP.md                  # Future plans
 └── README.md                   # This is now the landing page
 ```
 

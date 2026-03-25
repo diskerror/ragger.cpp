@@ -47,7 +47,7 @@ the source of truth.
   reference material, `work` for project-specific context
 
 **Team / shared server:**
-- Ragger runs as a system service (see ROADMAP.md for multi-user plans)
+- Ragger runs as a system service with multi-user support
 - Per-user memory via auth token → user isolation
 - Shared reference collections available to all users
 - Private memories stay private
