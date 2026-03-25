@@ -119,8 +119,9 @@ std::string ensure_token() {
     f << token << std::endl;
     f.close();
     
-    // Set permissions to 0600 (owner only)
-    chmod(path.c_str(), 0600);
+    // Set permissions to 0640 (owner read/write + group read)
+    // Group read allows the daemon (_ragger) to read user tokens
+    chmod(path.c_str(), 0640);
     
     return token;
 }
