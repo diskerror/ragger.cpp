@@ -45,6 +45,8 @@ cmake --build build
 | **SQLite3** | Storage backend | System (MacPorts/apt) |
 | **Eigen3** | Vector math (cosine similarity) | System (MacPorts/apt) |
 | **Boost** | ProgramOptions, Asio (via Crow) | System (MacPorts/apt) |
+| **OpenSSL** | SHA-256 hashing (token auth) | System (MacPorts/apt) |
+| **libcurl** | HTTP client (inference proxy) | System (MacPorts/apt) |
 | **Rust** | Required by tokenizers-cpp | System (MacPorts/apt) |
 | **Crow** | HTTP server + routing | Vendored (`crow_all.h`) |
 | **ONNX Runtime** | Embedding inference | Vendored (pre-built) |
@@ -53,11 +55,18 @@ cmake --build build
 
 ```bash
 # macOS (MacPorts)
-sudo port install boost eigen3 sqlite3 rust
+sudo port install boost eigen3 sqlite3 rust openssl
 
 # Linux (apt)
-sudo apt install libboost-all-dev libeigen3-dev libsqlite3-dev rustc cargo
+sudo apt install libboost-all-dev libeigen3-dev libsqlite3-dev rustc cargo libssl-dev libcurl4-openssl-dev
 ```
+
+**Platforms:** macOS and Linux are tested and supported. Windows should work (all libraries cross-compile) but needs porting:
+- Replace `fork()` in background summarization with threads or `CreateProcess()`
+- Build with MSVC or MinGW (CMake generates Visual Studio projects)
+- Create PowerShell install script (current script uses bash, dscl, launchctl)
+
+Contributions welcome.
 
 ## Documentation
 
