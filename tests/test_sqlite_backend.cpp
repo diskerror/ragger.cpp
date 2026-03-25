@@ -414,6 +414,71 @@ void test_delete_batch_respects_keep(ragger::Embedder& emb) {
     cleanup();
 }
 
+void test_timestamp_format(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    db.store("Timestamp format test.");
+    auto all = db.load_all();
+    assert(all.size() == 1);
+
+    // Verify YYYY-MM-DDTHH:MM:SSZ pattern
+    auto& ts = all[0].timestamp;
+    assert(ts.length() == 20);
+    assert(ts[4] == '-');
+    assert(ts[7] == '-');
+    assert(ts[10] == 'T');
+    assert(ts[13] == ':');
+    assert(ts[16] == ':');
+    assert(ts[19] == 'Z');
+
+    db.close();
+    cleanup();
+}
+
+void test_dedicated_columns_stored(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    ragger::json meta = {
+        {"collection", "reference"},
+        {"category", "fact"},
+        {"tags", {"alpha", "beta"}}
+    };
+    db.store("Dedicated columns test.", meta);
+
+    auto all = db.load_all();
+    assert(all.size() == 1);
+    assert(all[0].metadata["collection"] == "reference");
+    assert(all[0].metadata["category"] == "fact");
+    // Tags stored as comma-separated in dedicated column
+    std::string tags = all[0].metadata["tags"];
+    assert(tags.find("alpha") != std::string::npos);
+    assert(tags.find("beta") != std::string::npos);
+
+    db.close();
+    cleanup();
+}
+
+void test_path_normalization(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    const char* home = std::getenv("HOME");
+    assert(home != nullptr);
+    std::string text = std::string("File at ") + home + "/Documents/test.txt is important.";
+    db.store(text);
+
+    auto all = db.load_all();
+    assert(all.size() == 1);
+    // Should be normalized to ~/
+    assert(all[0].text.find("~/Documents/test.txt") != std::string::npos);
+    assert(all[0].text.find(home) == std::string::npos);
+
+    db.close();
+    cleanup();
+}
+
 // -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
@@ -447,6 +512,9 @@ int main() {
     test_user_management(emb);
     test_delete_respects_keep(emb);
     test_delete_batch_respects_keep(emb);
+    test_timestamp_format(emb);
+    test_dedicated_columns_stored(emb);
+    test_path_normalization(emb);
 
     std::cout << "test_sqlite_backend: all passed\n";
     return 0;

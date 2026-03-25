@@ -28,3 +28,11 @@ add_test(NAME test_server COMMAND test_server)
 add_executable(test_client test_client.cpp)
 target_link_libraries(test_client PRIVATE ragger_core)
 add_test(NAME test_client COMMAND test_client)
+
+add_executable(test_memory test_memory.cpp)
+target_link_libraries(test_memory PRIVATE ragger_core)
+add_test(NAME test_memory COMMAND test_memory)
+
+add_executable(test_export test_export.cpp)
+target_link_libraries(test_export PRIVATE ragger_core)
+add_test(NAME test_export COMMAND test_export)
