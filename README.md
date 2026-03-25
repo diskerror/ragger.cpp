@@ -98,9 +98,9 @@ cd build && ctest --output-on-failure
 
 ## Status
 
-**v0.7.1** — Single-user, production-ready. Full feature parity with the Python version.
+**v0.8.0** — Multi-user with token auth, token rotation, and per-user model selection.
 
-Multi-user framework in place (layered config, SERVER_LOCKED, system ceilings, token auth). Multi-user data support planned for a future release.
+Features: multi-user with per-user databases and search merging, common shared memory DB, bearer token authentication (enabled by default), automatic token rotation, per-user inference model selection, rebuild-embeddings verb, schema-driven API formats, chat persistence with background summarization, and user provisioning CLI.
 
 ## License
 
