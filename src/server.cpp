@@ -160,6 +160,8 @@ struct Server::Impl {
             json response = {
                 {"status", "ok"},
                 {"version", RAGGER_VERSION},
+                {"commit", RAGGER_COMMIT},
+                {"built", RAGGER_BUILD_DATE},
                 {"memories", memory.count()}
             };
             log_http("GET /health 200");

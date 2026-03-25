@@ -1,7 +1,23 @@
 cmake_minimum_required(VERSION 3.24)
 project(ragger VERSION 0.7.2 LANGUAGES CXX)
 
-# Build version: tag or date suffix
+# Build metadata: version, commit, build date
+string(TIMESTAMP RAGGER_BUILD_DATE "%Y-%m-%d %H:%M:%S")
+
+# Git commit (short hash)
+execute_process(
+    COMMAND git rev-parse --short=7 HEAD
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    OUTPUT_VARIABLE RAGGER_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE GIT_HASH_RESULT
+)
+if(NOT GIT_HASH_RESULT EQUAL 0)
+    set(RAGGER_COMMIT "unknown")
+endif()
+
+# Use tag as version if on a tagged commit, otherwise version+commit
 execute_process(
     COMMAND git describe --tags --exact-match
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
@@ -13,8 +29,7 @@ execute_process(
 if(GIT_TAG_RESULT EQUAL 0)
     set(RAGGER_BUILD_VERSION "${PROJECT_VERSION}")
 else()
-    string(TIMESTAMP BUILD_TIMESTAMP "%Y-%m-%d_%H:%M:%S")
-    set(RAGGER_BUILD_VERSION "${PROJECT_VERSION}-${BUILD_TIMESTAMP}")
+    set(RAGGER_BUILD_VERSION "${PROJECT_VERSION}+${RAGGER_COMMIT}")
 endif()
 message(STATUS "VERSION: ${RAGGER_BUILD_VERSION}")
 
@@ -109,7 +124,9 @@ target_include_directories(ragger_core PUBLIC
     "${CMAKE_SOURCE_DIR}/include"
 )
 target_compile_definitions(ragger_core PUBLIC
-    RAGGER_VERSION="${RAGGER_BUILD_VERSION}"
+    RAGGER_VERSION="${PROJECT_VERSION}"
+    RAGGER_COMMIT="${RAGGER_COMMIT}"
+    RAGGER_BUILD_DATE="${RAGGER_BUILD_DATE}"
 )
 target_link_libraries(ragger_core PUBLIC
     SQLite::SQLite3

@@ -557,7 +557,9 @@ int main(int argc, char** argv) {
     }
 
     if (opts.count("version") || command == "version") {
-        std::cout << "ragger " << RAGGER_VERSION << "\n";
+        std::cout << "ragger " << RAGGER_VERSION << "\n"
+                  << "commit " << RAGGER_COMMIT << "\n"
+                  << "built  " << RAGGER_BUILD_DATE << "\n";
         return 0;
     }
 
