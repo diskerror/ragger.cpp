@@ -116,6 +116,10 @@ struct Server::Impl {
             json response = {
                 {"count", memory.count()}
             };
+            if (memory.is_multi_db()) {
+                response["user"] = memory.user_backend()->count();
+                response["common"] = memory.backend()->count();
+            }
             log_http("GET /count 200");
             return crow::response(response.dump());
         });

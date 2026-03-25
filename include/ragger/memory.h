@@ -59,6 +59,7 @@ public:
 
     /// Access primary backend (for user management, etc.)
     SqliteBackend* backend() { return backend_.get(); }
+    SqliteBackend* user_backend() { return user_backend_.get(); }
 
     void close();
 
