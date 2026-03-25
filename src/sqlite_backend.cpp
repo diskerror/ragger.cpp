@@ -17,6 +17,7 @@
 #include <cstring>
 #include <filesystem>
 #include <numeric>
+#include <set>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -41,6 +42,7 @@ struct SqliteBackend::Impl {
     std::vector<std::string>       cached_texts;
     Eigen::MatrixXf                cached_embeddings;   // rows × 384
     std::vector<json>              cached_metadata;
+    std::vector<std::string>       cached_collections;
     std::vector<std::string>       cached_timestamps;
 
     Impl(Embedder& emb, const std::string& path)
@@ -132,8 +134,9 @@ struct SqliteBackend::Impl {
         exec("CREATE INDEX IF NOT EXISTS idx_bm25_memory_id ON bm25_index(memory_id)");
         exec("CREATE INDEX IF NOT EXISTS idx_bm25_token ON bm25_index(token)");
 
-        // Migration: add user_id to existing memories table
+        // Migrations
         migrate_add_user_id();
+        migrate_dedicated_columns();
     }
 
     void migrate_add_user_id() {
@@ -151,6 +154,119 @@ struct SqliteBackend::Impl {
             exec("ALTER TABLE memories ADD COLUMN user_id INTEGER REFERENCES users(id)");
             std::cerr << "Migrated memories: added user_id column\n";
         }
+    }
+
+    void migrate_dedicated_columns() {
+        // Check if collection column already exists
+        sqlite3_stmt* stmt;
+        sqlite3_prepare_v2(db, "PRAGMA table_info(memories)", -1, &stmt, nullptr);
+        bool has_collection = false;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            std::string col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            if (col == "collection") has_collection = true;
+        }
+        sqlite3_finalize(stmt);
+
+        if (has_collection) return;
+
+        std::cerr << "Migrating: adding collection, category, tags columns...\n";
+
+        exec("ALTER TABLE memories ADD COLUMN collection TEXT NOT NULL DEFAULT 'memory'");
+        exec("ALTER TABLE memories ADD COLUMN category TEXT NOT NULL DEFAULT ''");
+        exec("ALTER TABLE memories ADD COLUMN tags TEXT NOT NULL DEFAULT ''");
+        exec("CREATE INDEX IF NOT EXISTS idx_memories_collection ON memories(collection)");
+        exec("CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category)");
+
+        // Backfill from JSON metadata
+        stmt = nullptr;
+        sqlite3_prepare_v2(db,
+            "SELECT id, metadata FROM memories WHERE metadata IS NOT NULL",
+            -1, &stmt, nullptr);
+
+        sqlite3_stmt* update_stmt = nullptr;
+        sqlite3_prepare_v2(db,
+            "UPDATE memories SET collection = ?, category = ?, tags = ?, metadata = ? WHERE id = ?",
+            -1, &update_stmt, nullptr);
+
+        int updated = 0;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int id = sqlite3_column_int(stmt, 0);
+            const char* meta_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            if (!meta_str) continue;
+
+            json meta;
+            try { meta = json::parse(meta_str); }
+            catch (...) { continue; }
+
+            // Extract dedicated fields
+            std::string collection = meta.value("collection", "memory");
+            std::string category = meta.value("category", "");
+            meta.erase("collection");
+            meta.erase("category");
+
+            // Tags: array → comma-separated, string kept as-is
+            std::vector<std::string> tag_list;
+            if (meta.contains("tags")) {
+                auto& tags_val = meta["tags"];
+                if (tags_val.is_array()) {
+                    for (auto& t : tags_val) tag_list.push_back(t.get<std::string>());
+                } else if (tags_val.is_string() && !tags_val.get<std::string>().empty()) {
+                    // Split comma-separated
+                    std::string s = tags_val.get<std::string>();
+                    size_t pos = 0;
+                    while (pos < s.size()) {
+                        size_t comma = s.find(',', pos);
+                        if (comma == std::string::npos) comma = s.size();
+                        std::string t = s.substr(pos, comma - pos);
+                        // trim
+                        size_t start = t.find_first_not_of(" \t");
+                        size_t end = t.find_last_not_of(" \t");
+                        if (start != std::string::npos)
+                            tag_list.push_back(t.substr(start, end - start + 1));
+                        pos = comma + 1;
+                    }
+                }
+                meta.erase("tags");
+            }
+
+            // Boolean flags → tags
+            if (meta.value("keep", false)) {
+                if (std::find(tag_list.begin(), tag_list.end(), "keep") == tag_list.end())
+                    tag_list.push_back("keep");
+            }
+            meta.erase("keep");
+            if (meta.value("bad", false)) {
+                if (std::find(tag_list.begin(), tag_list.end(), "bad") == tag_list.end())
+                    tag_list.push_back("bad");
+            }
+            meta.erase("bad");
+
+            // Join tags
+            std::string tags_str;
+            for (size_t i = 0; i < tag_list.size(); ++i) {
+                if (i > 0) tags_str += ",";
+                tags_str += tag_list[i];
+            }
+
+            // Clean metadata JSON
+            std::string cleaned = meta.empty() ? "" : meta.dump();
+
+            sqlite3_bind_text(update_stmt, 1, collection.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(update_stmt, 2, category.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(update_stmt, 3, tags_str.c_str(), -1, SQLITE_TRANSIENT);
+            if (cleaned.empty())
+                sqlite3_bind_null(update_stmt, 4);
+            else
+                sqlite3_bind_text(update_stmt, 4, cleaned.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(update_stmt, 5, id);
+            sqlite3_step(update_stmt);
+            sqlite3_reset(update_stmt);
+            ++updated;
+        }
+        sqlite3_finalize(stmt);
+        sqlite3_finalize(update_stmt);
+
+        std::cerr << "Migrated " << updated << " rows: collection/category/tags extracted\n";
     }
 
     // ---- path normalization -------------------------------------------
@@ -239,10 +355,11 @@ struct SqliteBackend::Impl {
         cached_texts.clear();
         cached_metadata.clear();
         cached_timestamps.clear();
+        cached_collections.clear();
 
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(db,
-            "SELECT id, text, embedding, metadata, timestamp FROM memories",
+            "SELECT id, text, embedding, metadata, timestamp, collection, category, tags FROM memories",
             -1, &stmt, nullptr);
 
         std::vector<std::vector<float>> emb_rows;
@@ -259,10 +376,25 @@ struct SqliteBackend::Impl {
             std::memcpy(emb.data(), blob, blob_bytes);
             emb_rows.push_back(std::move(emb));
 
+            // Reconstruct full metadata from columns + JSON blob
             const char* meta_str =
                 reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-            cached_metadata.push_back(
-                meta_str ? json::parse(meta_str) : json::object());
+            json meta = meta_str ? json::parse(meta_str) : json::object();
+
+            const char* col_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
+            const char* cat_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
+            const char* tag_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 7));
+
+            std::string collection = col_str ? col_str : "memory";
+            std::string category = cat_str ? cat_str : "";
+            std::string tags = tag_str ? tag_str : "";
+
+            meta["collection"] = collection;
+            if (!category.empty()) meta["category"] = category;
+            if (!tags.empty()) meta["tags"] = tags;
+
+            cached_metadata.push_back(std::move(meta));
+            cached_collections.push_back(collection);
 
             cached_timestamps.emplace_back(
                 reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4)));
@@ -309,10 +441,40 @@ struct SqliteBackend::Impl {
     // ---- public API ---------------------------------------------------
 
     std::string store(const std::string& raw_text, json metadata) {
-        // Ensure collection
-        if (!metadata.contains("collection")) {
-            metadata["collection"] = config().default_collection;
+        // Ensure metadata is an object (default param may be null)
+        if (metadata.is_null()) metadata = json::object();
+
+        // Extract dedicated columns from metadata
+        std::string collection = metadata.value("collection", config().default_collection);
+        std::string category = metadata.value("category", "");
+        metadata.erase("collection");
+        metadata.erase("category");
+
+        // Extract tags
+        std::string tags_str;
+        if (metadata.contains("tags")) {
+            auto& tv = metadata["tags"];
+            if (tv.is_array()) {
+                for (size_t i = 0; i < tv.size(); ++i) {
+                    if (i > 0) tags_str += ",";
+                    tags_str += tv[i].get<std::string>();
+                }
+            } else if (tv.is_string()) {
+                tags_str = tv.get<std::string>();
+            }
+            metadata.erase("tags");
         }
+        // Boolean flags → tags
+        if (metadata.value("keep", false)) {
+            if (tags_str.find("keep") == std::string::npos)
+                tags_str += (tags_str.empty() ? "" : ",") + std::string("keep");
+        }
+        metadata.erase("keep");
+        if (metadata.value("bad", false)) {
+            if (tags_str.find("bad") == std::string::npos)
+                tags_str += (tags_str.empty() ? "" : ",") + std::string("bad");
+        }
+        metadata.erase("bad");
 
         // Normalize paths
         std::string text = normalize_path(raw_text);
@@ -323,19 +485,26 @@ struct SqliteBackend::Impl {
         // Timestamp
         auto ts = now_iso();
 
-        // Insert
+        // Insert with dedicated columns
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(db,
-            "INSERT INTO memories (text, embedding, metadata, timestamp) VALUES (?,?,?,?)",
+            "INSERT INTO memories (text, embedding, metadata, timestamp, collection, category, tags) "
+            "VALUES (?,?,?,?,?,?,?)",
             -1, &stmt, nullptr);
 
         sqlite3_bind_text(stmt, 1, text.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_blob(stmt, 2, emb.data(),
                           static_cast<int>(emb.size() * sizeof(float)),
                           SQLITE_TRANSIENT);
-        std::string meta_str = metadata.dump();
-        sqlite3_bind_text(stmt, 3, meta_str.c_str(), -1, SQLITE_TRANSIENT);
+        std::string meta_str = metadata.empty() ? "" : metadata.dump();
+        if (meta_str.empty())
+            sqlite3_bind_null(stmt, 3);
+        else
+            sqlite3_bind_text(stmt, 3, meta_str.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 4, ts.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, collection.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 6, category.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 7, tags_str.c_str(), -1, SQLITE_TRANSIENT);
 
         int rc = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
@@ -377,10 +546,8 @@ struct SqliteBackend::Impl {
                 std::iota(filtered_idx.begin(), filtered_idx.end(), 0);
             } else {
                 for (int i = 0; i < n; ++i) {
-                    auto col = cached_metadata[i].value("collection",
-                                                        config().default_collection);
                     for (auto& c : collections)
-                        if (col == c) { filtered_idx.push_back(i); break; }
+                        if (cached_collections[i] == c) { filtered_idx.push_back(i); break; }
                 }
             }
         }
@@ -508,9 +675,9 @@ struct SqliteBackend::Impl {
 
     std::vector<SearchResult> load_all(const std::string& collection) {
         std::vector<SearchResult> results;
-        std::string sql = "SELECT id, text, metadata, timestamp FROM memories";
+        std::string sql = "SELECT id, text, metadata, timestamp, collection, category, tags FROM memories";
         if (!collection.empty()) {
-            sql += " WHERE json_extract(metadata, '$.collection') = ?";
+            sql += " WHERE collection = ?";
         }
         sql += " ORDER BY id";
 
@@ -525,12 +692,20 @@ struct SqliteBackend::Impl {
             const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
             const char* meta_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
             const char* ts = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+            const char* col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+            const char* cat = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
+            const char* tag = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
+
+            json meta = meta_str ? json::parse(meta_str) : json::object();
+            meta["collection"] = col ? col : "memory";
+            if (cat && cat[0]) meta["category"] = cat;
+            if (tag && tag[0]) meta["tags"] = tag;
 
             results.push_back({
                 id,
                 text ? text : "",
                 0.0f,
-                meta_str ? json::parse(meta_str) : json::object(),
+                std::move(meta),
                 ts ? ts : ""
             });
         }
@@ -565,7 +740,7 @@ struct SqliteBackend::Impl {
         std::vector<std::string> result;
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(db,
-            "SELECT DISTINCT json_extract(metadata, '$.collection') FROM memories",
+            "SELECT DISTINCT collection FROM memories",
             -1, &stmt, nullptr);
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             const char* col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
@@ -576,18 +751,15 @@ struct SqliteBackend::Impl {
     }
 
     bool delete_memory(int memory_id) {
-        // Check if memory has keep tag
+        // Check if memory has keep tag in dedicated column
         sqlite3_stmt* check_stmt;
-        sqlite3_prepare_v2(db, "SELECT metadata FROM memories WHERE id = ?", -1, &check_stmt, nullptr);
+        sqlite3_prepare_v2(db, "SELECT tags FROM memories WHERE id = ?", -1, &check_stmt, nullptr);
         sqlite3_bind_int(check_stmt, 1, memory_id);
         if (sqlite3_step(check_stmt) == SQLITE_ROW) {
-            const char* meta_str = reinterpret_cast<const char*>(sqlite3_column_text(check_stmt, 0));
-            if (meta_str) {
-                auto meta = json::parse(meta_str);
-                if (meta.value("keep", false)) {
-                    sqlite3_finalize(check_stmt);
-                    return false;  // protected
-                }
+            const char* tags = reinterpret_cast<const char*>(sqlite3_column_text(check_stmt, 0));
+            if (tags && std::string(tags).find("keep") != std::string::npos) {
+                sqlite3_finalize(check_stmt);
+                return false;  // protected
             }
         }
         sqlite3_finalize(check_stmt);
@@ -615,16 +787,13 @@ struct SqliteBackend::Impl {
         std::vector<int> deletable_ids;
         for (int memory_id : memory_ids) {
             sqlite3_stmt* check_stmt;
-            sqlite3_prepare_v2(db, "SELECT metadata FROM memories WHERE id = ?", -1, &check_stmt, nullptr);
+            sqlite3_prepare_v2(db, "SELECT tags FROM memories WHERE id = ?", -1, &check_stmt, nullptr);
             sqlite3_bind_int(check_stmt, 1, memory_id);
             bool has_keep = false;
             if (sqlite3_step(check_stmt) == SQLITE_ROW) {
-                const char* meta_str = reinterpret_cast<const char*>(sqlite3_column_text(check_stmt, 0));
-                if (meta_str) {
-                    auto meta = json::parse(meta_str);
-                    if (meta.value("keep", false)) {
-                        has_keep = true;
-                    }
+                const char* tags = reinterpret_cast<const char*>(sqlite3_column_text(check_stmt, 0));
+                if (tags && std::string(tags).find("keep") != std::string::npos) {
+                    has_keep = true;
                 }
             }
             sqlite3_finalize(check_stmt);
@@ -661,25 +830,54 @@ struct SqliteBackend::Impl {
 
     std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit) {
         std::vector<SearchResult> results;
-        
-        // Get all memories
+
+        // Build SQL WHERE using dedicated columns where possible
+        std::string sql = "SELECT id, text, metadata, timestamp, collection, category, tags FROM memories";
+        std::string where;
+        std::vector<std::string> binds;
+        // Track which keys are handled by SQL so we skip them in C++ filtering
+        std::set<std::string> sql_keys;
+
+        for (auto it = metadata_filter.begin(); it != metadata_filter.end(); ++it) {
+            if (it.key() == "collection" || it.key() == "category") {
+                where += (where.empty() ? " WHERE " : " AND ") + it.key() + " = ?";
+                binds.push_back(it.value().get<std::string>());
+                sql_keys.insert(it.key());
+            } else if (it.key() == "tags") {
+                where += (where.empty() ? " WHERE " : " AND ") + std::string("tags LIKE ?");
+                binds.push_back("%" + it.value().get<std::string>() + "%");
+                sql_keys.insert(it.key());
+            }
+        }
+
+        sql += where + " ORDER BY id";
+        if (limit > 0) sql += " LIMIT " + std::to_string(limit * 2);  // over-fetch for C++ filtering
+
         sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db,
-            "SELECT id, text, metadata, timestamp FROM memories ORDER BY id",
-            -1, &stmt, nullptr);
+        sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+        for (size_t i = 0; i < binds.size(); ++i) {
+            sqlite3_bind_text(stmt, static_cast<int>(i + 1), binds[i].c_str(), -1, SQLITE_TRANSIENT);
+        }
 
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             int id = sqlite3_column_int(stmt, 0);
             const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
             const char* meta_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
             const char* ts = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+            const char* col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+            const char* cat = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
+            const char* tag = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
 
-            // Parse metadata
+            // Reconstruct full metadata
             json metadata = meta_str ? json::parse(meta_str) : json::object();
+            metadata["collection"] = col ? col : "memory";
+            if (cat && cat[0]) metadata["category"] = cat;
+            if (tag && tag[0]) metadata["tags"] = tag;
 
-            // Check if all filter fields match
+            // Check remaining (non-SQL) filter fields in C++
             bool match = true;
             for (auto it = metadata_filter.begin(); it != metadata_filter.end(); ++it) {
+                if (sql_keys.count(it.key())) continue;  // already filtered by SQL
                 if (!metadata.contains(it.key()) || metadata[it.key()] != it.value()) {
                     match = false;
                     break;
@@ -690,15 +888,11 @@ struct SqliteBackend::Impl {
                 results.push_back({
                     id,
                     text ? text : "",
-                    0.0f,  // score not applicable for metadata search
-                    metadata,
+                    0.0f,
+                    std::move(metadata),
                     ts ? ts : ""
                 });
-
-                // Check limit
-                if (limit > 0 && (int)results.size() >= limit) {
-                    break;
-                }
+                if (limit > 0 && (int)results.size() >= limit) break;
             }
         }
         sqlite3_finalize(stmt);

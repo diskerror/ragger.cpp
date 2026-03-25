@@ -60,7 +60,8 @@ void test_store_with_metadata(ragger::Embedder& emb) {
     assert(all.size() == 1);
     assert(all[0].metadata["category"] == "fact");
     assert(all[0].metadata["collection"] == "memory");
-    assert(all[0].metadata["tags"].size() == 2);
+    // Tags stored as comma-separated string in dedicated column
+    assert(all[0].metadata["tags"] == "test,unit");
 
     db.close();
     cleanup();
