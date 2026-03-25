@@ -4,6 +4,9 @@
 #include "ragger/chat.h"
 #include "ragger/config.h"
 #include "ragger/lang.h"
+#include "ragger/memory.h"
+#include "ragger/inference.h"
+#include <unistd.h>  // fork, _exit
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -456,29 +459,54 @@ void Chat::quit_summary() {
         return;
     }
     
-    std::cout << "Summarizing conversation..." << std::flush;
+    // Capture turns before forking
+    auto turns_copy = unsummarized_turns_;
     
-    std::string summary = summarize_conversation(unsummarized_turns_);
-    if (!summary.empty()) {
-        try {
+    pid_t pid = fork();
+    if (pid != 0) {
+        // Parent: return immediately
+        std::cout << "Summarizing in background...\n";
+        return;
+    }
+    
+    // Child process: fresh connections (SQLite not fork-safe)
+    try {
+        const auto& cfg = config();
+        RaggerMemory child_memory(cfg.resolved_db_path(), cfg.resolved_model_dir());
+        InferenceClient child_inference = InferenceClient::from_config(cfg);
+        
+        // Build conversation text and summarize
+        std::string conversation_text;
+        for (const auto& turn : turns_copy) {
+            conversation_text += "**User:** " + turn.first + "\n\n";
+            conversation_text += "**Assistant:** " + turn.second + "\n\n";
+        }
+        
+        std::vector<Message> summary_messages = {
+            {"system", "Summarize this conversation into a concise memory entry. "
+                       "Extract: key facts, decisions, questions asked, topics discussed. "
+                       "Write in third person past tense. Be brief — this will be stored "
+                       "as a memory chunk for future retrieval."},
+            {"user", conversation_text}
+        };
+        
+        std::string summary = child_inference.chat(summary_messages, model_);
+        
+        if (!summary.empty()) {
             json meta = {
                 {"collection", "memory"},
                 {"category", "session-summary"},
                 {"source", "ragger-chat"},
-                {"turns", unsummarized_turns_.size()}
+                {"turns", turns_copy.size()}
             };
-            memory_.store(summary, meta);
-            std::cout << " stored.\n";
-            
-            // Now delete the raw turns that were just summarized
-            expire_old_turns();
-            
-        } catch (const std::exception& e) {
-            std::cout << " failed: " << e.what() << "\n";
+            child_memory.store(summary, meta);
         }
-    } else {
-        std::cout << " skipped (empty).\n";
+        
+        child_memory.close();
+    } catch (...) {
+        // Silent failure in background child
     }
+    _exit(0);
 }
 
 std::string Chat::summarize_conversation(const std::vector<std::pair<std::string, std::string>>& turns) {
