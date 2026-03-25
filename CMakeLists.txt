@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(ragger VERSION 0.8.0 LANGUAGES CXX)
+project(ragger VERSION 0.8.1 LANGUAGES CXX)
 
 # Build metadata: version, commit, build date
 string(TIMESTAMP RAGGER_BUILD_DATE "%Y-%m-%d %H:%M:%S")
