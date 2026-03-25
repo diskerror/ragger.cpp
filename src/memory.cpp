@@ -91,6 +91,10 @@ int RaggerMemory::rebuild_bm25() {
     return backend_->rebuild_bm25();
 }
 
+int RaggerMemory::rebuild_embeddings() {
+    return backend_->rebuild_embeddings(*embedder_);
+}
+
 std::vector<std::string> RaggerMemory::collections() const {
     return backend_->collections();
 }

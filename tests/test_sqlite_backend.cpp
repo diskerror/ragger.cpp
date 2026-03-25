@@ -199,6 +199,59 @@ void test_rebuild_bm25(ragger::Embedder& emb) {
     cleanup();
 }
 
+void test_rebuild_embeddings(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    // Store some test documents
+    db.store("Embedding rebuild test document one.");
+    db.store("Embedding rebuild test document two.");
+    db.store("Something completely different here.");
+
+    // Rebuild all embeddings
+    int count = db.rebuild_embeddings(emb);
+    assert(count == 3);
+
+    // Search should still work after rebuild
+    auto resp = db.search("embedding test", 5, 0.0f);
+    assert(!resp.results.empty());
+
+    db.close();
+    cleanup();
+}
+
+void test_rebuild_embeddings_empty_db(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    // Rebuild on empty DB should return 0
+    int count = db.rebuild_embeddings(emb);
+    assert(count == 0);
+
+    db.close();
+    cleanup();
+}
+
+void test_rebuild_embeddings_count_matches(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    // Store various numbers of documents
+    for (int i = 0; i < 7; ++i) {
+        db.store("Test document number " + std::to_string(i));
+    }
+
+    int total_count = db.count();
+    int rebuild_count = db.rebuild_embeddings(emb);
+    
+    // Rebuild count should match total count
+    assert(rebuild_count == total_count);
+    assert(rebuild_count == 7);
+
+    db.close();
+    cleanup();
+}
+
 void test_search_timing(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
@@ -559,6 +612,9 @@ int main() {
     test_collections_list(emb);
     test_load_all(emb);
     test_rebuild_bm25(emb);
+    test_rebuild_embeddings(emb);
+    test_rebuild_embeddings_empty_db(emb);
+    test_rebuild_embeddings_count_matches(emb);
     test_search_timing(emb);
     test_delete_memory(emb);
     test_delete_batch(emb);

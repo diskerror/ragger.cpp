@@ -548,6 +548,7 @@ int main(int argc, char** argv) {
         std::cout << "  add-user <name>    Provision a user (requires sudo)\n";
         std::cout << "  add-all            Provision all users (requires sudo)\n";
         std::cout << "  rebuild-bm25       Rebuild the BM25 keyword index\n";
+        std::cout << "  rebuild-embeddings Rebuild embeddings for all memories\n";
         std::cout << "  help               Show this help\n";
         std::cout << "  version            Show version\n";
         std::cout << "\nOptions:\n";
@@ -743,6 +744,12 @@ int main(int argc, char** argv) {
             ragger::RaggerMemory memory(db_path, model_dir);
             int count = memory.rebuild_bm25();
             std::cout << "✓ BM25 index rebuilt: " << count << " documents\n";
+
+        } else if (command == "rebuild-embeddings") {
+            ragger::setup_logging(false, false);
+            ragger::RaggerMemory memory(db_path, model_dir);
+            int count = memory.rebuild_embeddings();
+            std::cout << "✓ Embeddings rebuilt: " << count << " documents\n";
 
         } else if (command == "add-self") {
             ragger::setup_logging(false, false);

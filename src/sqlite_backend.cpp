@@ -772,6 +772,48 @@ struct SqliteBackend::Impl {
         return doc_count;
     }
 
+    int rebuild_embeddings(Embedder& embedder) {
+        // Re-embed all documents
+        sqlite3_stmt* select_stmt = nullptr;
+        sqlite3_prepare_v2(db, "SELECT id, text FROM memories",
+                           -1, &select_stmt, nullptr);
+
+        sqlite3_stmt* update_stmt = nullptr;
+        sqlite3_prepare_v2(db,
+            "UPDATE memories SET embedding = ? WHERE id = ?",
+            -1, &update_stmt, nullptr);
+
+        int doc_count = 0;
+        while (sqlite3_step(select_stmt) == SQLITE_ROW) {
+            int id = sqlite3_column_int(select_stmt, 0);
+            const char* text = reinterpret_cast<const char*>(sqlite3_column_text(select_stmt, 1));
+            if (!text) continue;
+
+            // Generate new embedding
+            auto emb = embedder.encode(text);
+
+            // Update database
+            sqlite3_bind_blob(update_stmt, 1, emb.data(),
+                            static_cast<int>(emb.size() * sizeof(float)),
+                            SQLITE_TRANSIENT);
+            sqlite3_bind_int(update_stmt, 2, id);
+            sqlite3_step(update_stmt);
+            sqlite3_reset(update_stmt);
+
+            ++doc_count;
+
+            // Log progress every 1000 docs
+            if (doc_count % 1000 == 0) {
+                std::cerr << "Rebuilt embeddings for " << doc_count << " documents...\n";
+            }
+        }
+
+        sqlite3_finalize(select_stmt);
+        sqlite3_finalize(update_stmt);
+        invalidate_cache();
+        return doc_count;
+    }
+
     std::vector<std::string> collections() const {
         std::vector<std::string> result;
         sqlite3_stmt* stmt = nullptr;
@@ -968,6 +1010,10 @@ std::vector<SearchResult> SqliteBackend::load_all(const std::string& collection)
 }
 
 int SqliteBackend::rebuild_bm25() { return pImpl->rebuild_bm25(); }
+
+int SqliteBackend::rebuild_embeddings(Embedder& embedder) {
+    return pImpl->rebuild_embeddings(embedder);
+}
 
 std::vector<std::string> SqliteBackend::collections() const {
     return pImpl->collections();

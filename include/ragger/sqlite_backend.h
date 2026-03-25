@@ -63,6 +63,9 @@ public:
     /// Rebuild BM25 index from all stored documents. Returns doc count.
     int rebuild_bm25();
 
+    /// Rebuild embeddings for all stored documents. Returns doc count.
+    int rebuild_embeddings(Embedder& embedder);
+
     /// Get distinct collection names.
     std::vector<std::string> collections() const;
 
