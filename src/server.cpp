@@ -630,7 +630,8 @@ void Server::run() {
     std::cout << lang::MSG_SERVER_STARTING 
               << pImpl->host << ":" << pImpl->port << std::endl;
     
-    pImpl->app.bindaddr(pImpl->host)
+    pImpl->app.loglevel(crow::LogLevel::Warning)
+              .bindaddr(pImpl->host)
               .port(pImpl->port)
               .multithreaded()
               .run();
