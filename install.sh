@@ -1,13 +1,17 @@
 #!/bin/bash
 # install.sh — Build and install Ragger C++ to this machine
 #
-# Usage: ./install.sh
+# Usage: sudo ./install.sh
 #
 # Builds if needed, copies binary to /usr/local/bin/ragger,
-# and restarts the daemon if it's running.
-# Requires sudo for the install step.
+# creates log directory, and restarts the daemon if it's running.
 
 set -euo pipefail
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "[!] This script must be run as root: sudo ./install.sh" >&2
+    exit 1
+fi
 
 cd "$(dirname "$0")"
 BINARY="build/ragger"
@@ -22,24 +26,40 @@ if [ ! -x "$BINARY" ]; then
 fi
 
 echo ""
-echo "[+] Installing to $DEST (requires sudo)"
-sudo cp "$BINARY" "$DEST"
-sudo chmod 0755 "$DEST"
+echo "[+] Installing to $DEST"
+cp "$BINARY" "$DEST"
+chmod 0755 "$DEST"
 
-# Restart daemon if running (macOS)
+# Detect OS and user/group
 OS="$(uname -s)"
+case "$OS" in
+    Darwin) RAGGER_USER="_ragger"; RAGGER_GROUP="ragger" ;;
+    Linux)  RAGGER_USER="ragger";  RAGGER_GROUP="ragger" ;;
+    *)      RAGGER_USER="ragger";  RAGGER_GROUP="ragger" ;;
+esac
+
+# Create log directory if needed
+LOG_DIR="/var/log/ragger"
+if [ ! -d "$LOG_DIR" ]; then
+    echo "[+] Creating $LOG_DIR"
+    mkdir -p "$LOG_DIR"
+    chown "$RAGGER_USER:$RAGGER_GROUP" "$LOG_DIR"
+    chmod 0750 "$LOG_DIR"
+fi
+
+# Restart daemon if running
 if [ "$OS" = "Darwin" ]; then
     PLIST="com.diskerror.ragger"
-    if sudo launchctl list "$PLIST" &>/dev/null; then
+    if launchctl list "$PLIST" &>/dev/null; then
         echo "[+] Restarting daemon..."
-        sudo launchctl kickstart -k "system/$PLIST"
+        launchctl kickstart -k "system/$PLIST"
     else
         echo "[*] Daemon not loaded — skipping restart"
     fi
 elif [ "$OS" = "Linux" ]; then
     if systemctl is-active --quiet ragger; then
         echo "[+] Restarting daemon..."
-        sudo systemctl restart ragger
+        systemctl restart ragger
     else
         echo "[*] Service not active — skipping restart"
     fi

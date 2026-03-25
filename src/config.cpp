@@ -90,7 +90,7 @@ max_tokens = 4096
 # models = claude-*
 
 [logging]
-log_dir = ~/.ragger
+log_dir = /var/log/ragger
 query_log = true
 http_log = true
 mcp_log = true
