@@ -810,15 +810,28 @@ int main(int argc, char** argv) {
                 std::cerr << "Error: add-all requires sudo\n";
                 return 1;
             }
+            // Non-login shells — service accounts use these
+            static const std::set<std::string> nologin_shells = {
+                "/usr/bin/false", "/bin/false",
+                "/sbin/nologin", "/usr/sbin/nologin",
+            };
+            static const std::set<std::string> skip_users = {
+                "root", "nobody", "nfsnobody",
+            };
+            static const std::set<std::string> skip_homes = {
+                "/", "/var", "/var/empty", "/dev/null", "/nonexistent",
+            };
             int count = 0;
             setpwent();
             while (struct passwd* pw = getpwent()) {
-                // Skip system users (uid < 500 on macOS)
-                if (pw->pw_uid < 500) continue;
+                // Skip users with non-login shells
+                if (pw->pw_shell && nologin_shells.count(pw->pw_shell)) continue;
                 // Skip users without home directories
                 if (!fs::is_directory(pw->pw_dir)) continue;
-                // Skip nobody
-                if (std::string(pw->pw_name) == "nobody") continue;
+                // Skip root, nobody, etc.
+                if (skip_users.count(pw->pw_name)) continue;
+                // Skip system home directories
+                if (skip_homes.count(pw->pw_dir)) continue;
 
                 std::string uname(pw->pw_name);
                 try {
