@@ -20,22 +20,35 @@ Faster startup, lower memory footprint, single static binary. Everything else â€
 
 ## Quick Start
 
+**Production install** (creates system user/group, installs as service):
 ```bash
-# Build
-cmake -B build -DBOOST_ROOT=/opt/local/libexec/boost/1.88
-cmake --build build
+cd /path/to/ragger.cpp
+./build.sh                # Check dependencies, build binary
+sudo ./install.sh         # Install to /usr/local/bin, restart daemon
+```
 
+**Development build** (manual cmake):
+```bash
+cmake -B build -DBOOST_ROOT=/opt/local/libexec/boost/1.88
+cmake --build build -j8
+
+# Test the build
+./build/ragger version
+```
+
+**Usage:**
+```bash
 # Store a memory
-./build/ragger store "The deploy script requires Node 18+"
+ragger store "The deploy script requires Node 18+"
 
 # Search
-./build/ragger search "deployment requirements"
+ragger search "deployment requirements"
 
 # Import a document
-./build/ragger import notes.md --collection docs
+ragger import notes.md --collection docs
 
 # Start HTTP server
-./build/ragger serve
+ragger serve
 ```
 
 ## Build Dependencies
