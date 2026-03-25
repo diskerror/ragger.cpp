@@ -119,8 +119,8 @@ std::string ensure_token() {
     f << token << std::endl;
     f.close();
     
-    // Set permissions to 0660
-    chmod(path.c_str(), 0660);
+    // Set permissions to 0600 (owner only)
+    chmod(path.c_str(), 0600);
     
     return token;
 }

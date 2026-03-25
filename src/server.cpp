@@ -39,8 +39,8 @@ struct Server::Impl {
     }
 
     void bootstrap_auth() {
-        // Load server token
-        server_token_ = load_token();
+        // Ensure token exists (create if needed)
+        server_token_ = ensure_token();
         
         if (!server_token_.empty()) {
             // Hash token and check if user exists
