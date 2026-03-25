@@ -1009,4 +1009,16 @@ std::optional<SqliteBackend::UserInfo> SqliteBackend::get_user_by_username(
     return std::nullopt;
 }
 
+void SqliteBackend::update_user_token(const std::string& username,
+                                       const std::string& token_hash) {
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(pImpl->db,
+        "UPDATE users SET token_hash = ? WHERE username = ?",
+        -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, token_hash.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
 } // namespace ragger

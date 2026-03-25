@@ -9,13 +9,17 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <pwd.h>
 #include <regex>
 #include <set>
 #include <sstream>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "ProgramOptions.h"
 #include "ragger/auth.h"
 #include "ragger/chat.h"
+#include "ragger/embedder.h"
 #include "ragger/client.h"
 #include "ragger/config.h"
 #include "ragger/import.h"
@@ -442,6 +446,103 @@ static void do_mcp(ragger::RaggerMemory& memory) {
 }
 
 // -----------------------------------------------------------------------
+// User provisioning
+// -----------------------------------------------------------------------
+
+/// Provision a user: create ~/.ragger/ and token file.
+/// Returns {token, created}. If token already exists, returns {existing, false}.
+static std::pair<std::string, bool> provision_user(
+        const std::string& username,
+        const std::string& home_override = "") {
+    std::string home_dir = home_override;
+    if (home_dir.empty()) {
+        struct passwd* pw = getpwnam(username.c_str());
+        if (!pw) throw std::runtime_error("User not found: " + username);
+        home_dir = pw->pw_dir;
+    }
+
+    std::string ragger_dir = home_dir + "/.ragger";
+    std::string tok_path = ragger_dir + "/token";
+
+    // Check existing
+    if (fs::exists(tok_path)) {
+        std::ifstream f(tok_path);
+        std::string token;
+        std::getline(f, token);
+        // trim
+        size_t s = token.find_first_not_of(" \t\r\n");
+        size_t e = token.find_last_not_of(" \t\r\n");
+        if (s != std::string::npos) {
+            token = token.substr(s, e - s + 1);
+            if (!token.empty()) return {token, false};
+        }
+    }
+
+    // Create directory and token
+    fs::create_directories(ragger_dir);
+    std::string token = ragger::generate_token();
+    {
+        std::ofstream f(tok_path);
+        f << token << "\n";
+    }
+    chmod(tok_path.c_str(), 0640);
+
+    // Set ownership if running as root
+    if (getuid() == 0) {
+        struct passwd* pw = getpwnam(username.c_str());
+        if (pw) {
+            chown(ragger_dir.c_str(), pw->pw_uid, pw->pw_gid);
+            chown(tok_path.c_str(), pw->pw_uid, pw->pw_gid);
+        }
+    }
+
+    return {token, true};
+}
+
+/// Register user in DB (common DB if multi-user, else user DB).
+/// Returns user_id.
+static int register_user_in_db(
+        const std::string& username,
+        const std::string& token,
+        bool is_admin,
+        const std::string& db_path_override = "") {
+    const auto& cfg = ragger::config();
+    std::string db_path = db_path_override;
+    if (db_path.empty()) {
+        db_path = cfg.single_user
+            ? cfg.resolved_db_path()
+            : cfg.resolved_common_db_path();
+    }
+
+    // SqliteBackend requires an embedder, but user management never embeds.
+    ragger::Embedder embedder(cfg.resolved_model_dir());
+    ragger::SqliteBackend backend(embedder, db_path);
+
+    std::string hashed = ragger::hash_token(token);
+
+    // Check existing
+    auto existing = backend.get_user_by_username(username);
+    if (existing) {
+        if (existing->token_hash != hashed) {
+            // Token changed — update
+            backend.update_user_token(username, hashed);
+        }
+        int id = existing->id;
+        backend.close();
+        return id;
+    }
+
+    try {
+        int user_id = backend.create_user(username, hashed, is_admin);
+        backend.close();
+        return user_id;
+    } catch (...) {
+        backend.close();
+        throw;
+    }
+}
+
+// -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
 int main(int argc, char** argv) {
@@ -457,6 +558,7 @@ int main(int argc, char** argv) {
         ("collection", Diskerror::po::value<std::string>()->default_value(""), "Collection name")
         ("min-chunk-size", Diskerror::po::value<int>(), "Min chunk size for import")
         ("group-by", Diskerror::po::value<std::string>()->default_value("date"), "Grouping for export (date|category|collection)")
+        ("admin", "Grant admin privileges (for add-user)")
     ;
     opts.add_hidden_options()
         ("command", Diskerror::po::value<std::string>()->default_value("help"), CLI_COMMAND)
@@ -486,6 +588,9 @@ int main(int argc, char** argv) {
         std::cout << "  export <mode> <dir>  Export docs|memories|all to directory\n";
         std::cout << "  chat               Interactive chat with memory context\n";
         std::cout << "  mcp                Start MCP server (JSON-RPC over stdin/stdout)\n";
+        std::cout << "  add-self           Provision yourself (create token)\n";
+        std::cout << "  add-user <name>    Provision a user (requires sudo)\n";
+        std::cout << "  add-all            Provision all users (requires sudo)\n";
         std::cout << "  rebuild-bm25       Rebuild the BM25 keyword index\n";
         std::cout << "  help               Show this help\n";
         std::cout << "  version            Show version\n";
@@ -682,6 +787,84 @@ int main(int argc, char** argv) {
             ragger::RaggerMemory memory(db_path, model_dir);
             int count = memory.rebuild_bm25();
             std::cout << "✓ BM25 index rebuilt: " << count << " documents\n";
+
+        } else if (command == "add-self") {
+            ragger::setup_logging(false, false);
+            // getpwuid is more reliable than getlogin in non-TTY contexts
+            struct passwd* self_pw = getpwuid(getuid());
+            char* login = self_pw ? self_pw->pw_name : nullptr;
+            if (!login) {
+                std::cerr << "Error: cannot determine username\n";
+                return 1;
+            }
+            std::string username(login);
+            auto [token, created] = provision_user(username);
+            if (created)
+                std::cout << "✓ Created ~/.ragger/token for " << username << "\n";
+            else
+                std::cout << "Token already exists for " << username << "\n";
+            // Try DB registration — will fail if common DB isn't writable (normal for non-root)
+            try {
+                int user_id = register_user_in_db(username, token, true);
+                if (user_id > 0)
+                    std::cout << "✓ Registered in database (user_id: " << user_id << ")\n";
+                else
+                    std::cout << "Server will auto-register on first authenticated request.\n";
+            } catch (const std::exception& e) {
+                std::cout << "Server will auto-register on first authenticated request.\n";
+            }
+
+        } else if (command == "add-user") {
+            ragger::setup_logging(false, false);
+            auto args = opts.getParams("args");
+            if (args.empty()) {
+                std::cerr << "Usage: ragger add-user <username> [--admin]\n";
+                return 1;
+            }
+            std::string username = args[0];
+            bool is_admin = opts.count("admin") > 0;
+            try {
+                auto [token, created] = provision_user(username);
+                if (created)
+                    std::cout << "✓ Created token for " << username << "\n";
+                else
+                    std::cout << "Token already exists for " << username << "\n";
+                int user_id = register_user_in_db(username, token, is_admin);
+                std::cout << "✓ Registered in database (user_id: " << user_id << ")\n";
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << "\n";
+                return 1;
+            }
+
+        } else if (command == "add-all") {
+            ragger::setup_logging(false, false);
+            if (getuid() != 0) {
+                std::cerr << "Error: add-all requires sudo\n";
+                return 1;
+            }
+            int count = 0;
+            setpwent();
+            while (struct passwd* pw = getpwent()) {
+                // Skip system users (uid < 500 on macOS)
+                if (pw->pw_uid < 500) continue;
+                // Skip users without home directories
+                if (!fs::is_directory(pw->pw_dir)) continue;
+                // Skip nobody
+                if (std::string(pw->pw_name) == "nobody") continue;
+
+                std::string uname(pw->pw_name);
+                try {
+                    auto [token, created] = provision_user(uname, pw->pw_dir);
+                    std::string status = created ? "created" : "exists";
+                    register_user_in_db(uname, token, false);
+                    std::cout << "  " << uname << ": " << status << "\n";
+                    ++count;
+                } catch (const std::exception& e) {
+                    std::cout << "  " << uname << ": error (" << e.what() << ")\n";
+                }
+            }
+            endpwent();
+            std::cout << "✓ Processed " << count << " users\n";
 
         } else {
             std::cerr << CLI_UNKNOWN_COMMAND << command << "\n";

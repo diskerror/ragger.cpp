@@ -84,6 +84,9 @@ public:
     /// Look up user by username. Returns nullopt if not found.
     std::optional<UserInfo> get_user_by_username(const std::string& username);
 
+    /// Update a user's token hash.
+    void update_user_token(const std::string& username, const std::string& token_hash);
+
     /// Delete a memory by ID. Returns true if deleted.
     bool delete_memory(int memory_id);
 
