@@ -24,8 +24,9 @@ std::string expand_path(const std::string& path) {
     return std::string(home) + path.substr(1);
 }
 
-std::string Config::resolved_db_path()   const { return expand_path(db_path); }
-std::string Config::resolved_log_dir()   const { return expand_path(log_dir); }
+std::string Config::resolved_db_path()        const { return expand_path(db_path); }
+std::string Config::resolved_common_db_path() const { return expand_path(common_db_path); }
+std::string Config::resolved_log_dir()        const { return expand_path(log_dir); }
 std::string Config::resolved_model_dir() const {
     return expand_path(model_dir.empty() ? "~/.ragger/models" : model_dir);
 }
@@ -164,6 +165,7 @@ static const ServerLockedKey SERVER_LOCKED[] = {
     {"server", "host"},
     {"server", "port"},
     {"storage", "db_path"},
+    {"storage", "common_db_path"},
     {"storage", "formats_dir"},
     {"logging", "log_dir"},
     {"embedding", "model"},
@@ -309,6 +311,7 @@ Config load_config(const std::string& path) {
         }
         else if (section == "storage") {
             if      (key == "db_path")            cfg.db_path = val;
+            else if (key == "common_db_path")     cfg.common_db_path = val;
             else if (key == "default_collection") cfg.default_collection = val;
             else if (key == "formats_dir")        cfg.formats_dir = val;
         }

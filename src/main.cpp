@@ -523,7 +523,19 @@ int main(int argc, char** argv) {
     try {
         if (command == "serve") {
             ragger::setup_logging(false, true);
-            ragger::RaggerMemory memory(db_path, model_dir);
+            const auto& cfg = ragger::config();
+            std::unique_ptr<ragger::RaggerMemory> mem_ptr;
+            if (!cfg.single_user) {
+                auto common_path = cfg.resolved_common_db_path();
+                auto user_path = cfg.resolved_db_path();
+                mem_ptr = std::make_unique<ragger::RaggerMemory>(
+                    common_path, model_dir, user_path);
+                std::cout << "Multi-user mode: common=" << common_path
+                          << ", user=" << user_path << "\n";
+            } else {
+                mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path, model_dir);
+            }
+            auto& memory = *mem_ptr;
             char buf[128];
             std::snprintf(buf, sizeof(buf), MSG_LOADED_MEMORIES, memory.count());
             std::cout << buf << "\n";

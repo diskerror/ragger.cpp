@@ -21,6 +21,7 @@ struct Config {
 
     // --- Storage ---
     std::string db_path        = "~/.ragger/memories.db";
+    std::string common_db_path = "/var/ragger/memories.db";
     std::string default_collection = "memory";
     std::string formats_dir    = "/var/ragger/formats";
 
@@ -85,6 +86,7 @@ struct Config {
 
     /// Resolved paths (~ expanded)
     std::string resolved_db_path() const;
+    std::string resolved_common_db_path() const;
     std::string resolved_log_dir() const;
     std::string resolved_model_dir() const;
 };

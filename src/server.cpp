@@ -141,7 +141,8 @@ struct Server::Impl {
                     return crow::response(400, "Missing 'text' field");
                 }
 
-                std::string id = memory.store(text, metadata);
+                bool common = body.value("common", false);
+                std::string id = memory.store(text, metadata, common);
 
                 json response = {
                     {"id", id},
