@@ -4,7 +4,7 @@
 #include "ragger/auth.h"
 #include "ragger/config.h"
 
-#include <CommonCrypto/CommonDigest.h>
+#include <openssl/sha.h>
 #include <fstream>
 #include <sstream>
 #include <iomanip>
@@ -49,12 +49,13 @@ static std::string base64url_encode(const unsigned char* data, size_t len) {
 }
 
 std::string hash_token(const std::string& token) {
-    unsigned char hash[CC_SHA256_DIGEST_LENGTH];
-    CC_SHA256(token.c_str(), static_cast<CC_LONG>(token.size()), hash);
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(token.c_str()), 
+           token.size(), hash);
     
     // Convert to hex string
     std::ostringstream oss;
-    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; ++i) {
+    for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
         oss << std::hex << std::setw(2) << std::setfill('0')
             << static_cast<int>(hash[i]);
     }

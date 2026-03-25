@@ -102,6 +102,11 @@ target_link_libraries(c_lib_po PUBLIC Boost::program_options)
 find_package(CURL REQUIRED)
 
 # ---------------------------------------------------------------------------
+# OpenSSL (for SHA-256 hashing in auth)
+# ---------------------------------------------------------------------------
+find_package(OpenSSL REQUIRED)
+
+# ---------------------------------------------------------------------------
 # ragger library (core logic, no main())
 # ---------------------------------------------------------------------------
 add_library(ragger_core STATIC
@@ -136,6 +141,7 @@ target_link_libraries(ragger_core PUBLIC
     vendor_headers
     Boost::boost
     CURL::libcurl
+    OpenSSL::Crypto
 )
 
 # ---------------------------------------------------------------------------
