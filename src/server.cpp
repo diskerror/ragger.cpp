@@ -606,6 +606,10 @@ static bool is_port_available(const std::string& host, int port) {
     int sock = ::socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return false;
 
+    // Allow binding to TIME_WAIT sockets (matches Crow's SO_REUSEADDR)
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
