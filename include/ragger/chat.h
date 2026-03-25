@@ -58,6 +58,9 @@ private:
     /// Expire old turns based on age and count limits
     void expire_old_turns();
     
+    /// Fork a background process to summarize turns
+    void bg_summarize(const std::vector<std::pair<std::string, std::string>>& turns);
+    
     /// Check if pause has elapsed and summarize if needed
     void check_pause_summary();
     

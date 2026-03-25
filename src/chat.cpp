@@ -420,68 +420,30 @@ void Chat::expire_old_turns() {
     }
 }
 
-void Chat::check_pause_summary() {
-    if (!summarize_on_pause_ || unsummarized_turns_.empty()) {
-        return;
-    }
-    
-    int idle = idle_seconds();
-    if (idle < pause_minutes_ * 60) {
-        return;
-    }
-    
-    // Generate and store summary
-    std::string summary = summarize_conversation(unsummarized_turns_);
-    if (!summary.empty()) {
-        try {
-            json meta = {
-                {"collection", "memory"},
-                {"category", "session-summary"},
-                {"source", "ragger-chat"},
-                {"turns", unsummarized_turns_.size()}
-            };
-            memory_.store(summary, meta);
-            std::cerr << "Stored pause summary (" << unsummarized_turns_.size() << " turns)\n";
-            
-            // Now delete the raw turns that were just summarized
-            expire_old_turns();
-            
-        } catch (const std::exception& e) {
-            std::cerr << "Warning: failed to store pause summary: " << e.what() << "\n";
-        }
-    }
-    
-    unsummarized_turns_.clear();
-}
+void Chat::bg_summarize(
+        const std::vector<std::pair<std::string, std::string>>& turns_to_summarize) {
+    if (turns_to_summarize.empty()) return;
 
-void Chat::quit_summary() {
-    if (!summarize_on_quit_ || unsummarized_turns_.empty()) {
-        return;
-    }
-    
-    // Capture turns before forking
-    auto turns_copy = unsummarized_turns_;
-    
+    auto turns_copy = turns_to_summarize;
+
     pid_t pid = fork();
     if (pid != 0) {
         // Parent: return immediately
-        std::cout << "Summarizing in background...\n";
         return;
     }
-    
+
     // Child process: fresh connections (SQLite not fork-safe)
     try {
         const auto& cfg = config();
         RaggerMemory child_memory(cfg.resolved_db_path(), cfg.resolved_model_dir());
         InferenceClient child_inference = InferenceClient::from_config(cfg);
-        
-        // Build conversation text and summarize
+
         std::string conversation_text;
         for (const auto& turn : turns_copy) {
             conversation_text += "**User:** " + turn.first + "\n\n";
             conversation_text += "**Assistant:** " + turn.second + "\n\n";
         }
-        
+
         std::vector<Message> summary_messages = {
             {"system", "Summarize this conversation into a concise memory entry. "
                        "Extract: key facts, decisions, questions asked, topics discussed. "
@@ -489,9 +451,9 @@ void Chat::quit_summary() {
                        "as a memory chunk for future retrieval."},
             {"user", conversation_text}
         };
-        
+
         std::string summary = child_inference.chat(summary_messages, model_);
-        
+
         if (!summary.empty()) {
             json meta = {
                 {"collection", "memory"},
@@ -501,12 +463,35 @@ void Chat::quit_summary() {
             };
             child_memory.store(summary, meta);
         }
-        
+
         child_memory.close();
     } catch (...) {
         // Silent failure in background child
     }
     _exit(0);
+}
+
+void Chat::check_pause_summary() {
+    if (!summarize_on_pause_ || unsummarized_turns_.empty()) {
+        return;
+    }
+
+    int idle = idle_seconds();
+    if (idle < pause_minutes_ * 60) {
+        return;
+    }
+
+    bg_summarize(unsummarized_turns_);
+    unsummarized_turns_.clear();
+}
+
+void Chat::quit_summary() {
+    if (!summarize_on_quit_ || unsummarized_turns_.empty()) {
+        return;
+    }
+
+    std::cout << "Summarizing in background...\n";
+    bg_summarize(unsummarized_turns_);
 }
 
 std::string Chat::summarize_conversation(const std::vector<std::pair<std::string, std::string>>& turns) {
