@@ -167,6 +167,18 @@ std::vector<SearchResult> RaggerClient::search_by_metadata(const json& metadata_
     return results;
 }
 
+json RaggerClient::register_user(const std::string& username, bool is_admin) {
+    json payload;
+    payload["username"] = username;
+    if (is_admin) payload["is_admin"] = true;
+
+    auto resp = http_post("/register", payload.dump());
+    if (resp.status < 200 || resp.status >= 300) {
+        throw std::runtime_error("Register failed: HTTP " + std::to_string(resp.status));
+    }
+    return json::parse(resp.body);
+}
+
 // HTTP implementation helpers
 
 RaggerClient::HttpResponse RaggerClient::http_get(const std::string& path) const {

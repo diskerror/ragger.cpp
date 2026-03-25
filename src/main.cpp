@@ -19,7 +19,6 @@
 #include "ProgramOptions.h"
 #include "ragger/auth.h"
 #include "ragger/chat.h"
-#include "ragger/embedder.h"
 #include "ragger/client.h"
 #include "ragger/config.h"
 #include "ragger/import.h"
@@ -499,49 +498,6 @@ static std::pair<std::string, bool> provision_user(
     return {token, true};
 }
 
-/// Register user in DB (common DB if multi-user, else user DB).
-/// Returns user_id.
-static int register_user_in_db(
-        const std::string& username,
-        const std::string& token,
-        bool is_admin,
-        const std::string& db_path_override = "") {
-    const auto& cfg = ragger::config();
-    std::string db_path = db_path_override;
-    if (db_path.empty()) {
-        db_path = cfg.single_user
-            ? cfg.resolved_db_path()
-            : cfg.resolved_common_db_path();
-    }
-
-    // SqliteBackend requires an embedder, but user management never embeds.
-    ragger::Embedder embedder(cfg.resolved_model_dir());
-    ragger::SqliteBackend backend(embedder, db_path);
-
-    std::string hashed = ragger::hash_token(token);
-
-    // Check existing
-    auto existing = backend.get_user_by_username(username);
-    if (existing) {
-        if (existing->token_hash != hashed) {
-            // Token changed — update
-            backend.update_user_token(username, hashed);
-        }
-        int id = existing->id;
-        backend.close();
-        return id;
-    }
-
-    try {
-        int user_id = backend.create_user(username, hashed, is_admin);
-        backend.close();
-        return user_id;
-    } catch (...) {
-        backend.close();
-        throw;
-    }
-}
-
 // -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
@@ -803,13 +759,17 @@ int main(int argc, char** argv) {
                 std::cout << "✓ Created ~/.ragger/token for " << username << "\n";
             else
                 std::cout << "Token already exists for " << username << "\n";
-            // Try DB registration — will fail if common DB isn't writable (normal for non-root)
+            // Register via daemon HTTP API
             try {
-                int user_id = register_user_in_db(username, token, true);
-                if (user_id > 0)
-                    std::cout << "✓ Registered in database (user_id: " << user_id << ")\n";
-                else
-                    std::cout << "Server will auto-register on first authenticated request.\n";
+                ragger::RaggerClient client(host, port, token);
+                if (client.is_available()) {
+                    auto result = client.register_user(username);
+                    if (result.contains("user_id"))
+                        std::cout << "✓ Registered in database (user_id: "
+                                  << result["user_id"] << ")\n";
+                } else {
+                    std::cout << "Server not running. Will auto-register on first authenticated request.\n";
+                }
             } catch (const std::exception& e) {
                 std::cout << "Server will auto-register on first authenticated request.\n";
             }
@@ -829,8 +789,16 @@ int main(int argc, char** argv) {
                     std::cout << "✓ Created token for " << username << "\n";
                 else
                     std::cout << "Token already exists for " << username << "\n";
-                int user_id = register_user_in_db(username, token, is_admin);
-                std::cout << "✓ Registered in database (user_id: " << user_id << ")\n";
+                // Register via daemon
+                ragger::RaggerClient client(host, port, token);
+                if (client.is_available()) {
+                    auto result = client.register_user(username, is_admin);
+                    if (result.contains("user_id"))
+                        std::cout << "✓ Registered in database (user_id: "
+                                  << result["user_id"] << ")\n";
+                } else {
+                    std::cout << "Server not running. Will auto-register on first authenticated request.\n";
+                }
             } catch (const std::exception& e) {
                 std::cerr << "Error: " << e.what() << "\n";
                 return 1;
@@ -856,7 +824,18 @@ int main(int argc, char** argv) {
                 try {
                     auto [token, created] = provision_user(uname, pw->pw_dir);
                     std::string status = created ? "created" : "exists";
-                    register_user_in_db(uname, token, false);
+                    // Register via daemon
+                    try {
+                        ragger::RaggerClient client(host, port, token);
+                        if (client.is_available()) {
+                            client.register_user(uname);
+                            status += ", registered";
+                        } else {
+                            status += ", pending registration";
+                        }
+                    } catch (...) {
+                        status += ", pending registration";
+                    }
                     std::cout << "  " << uname << ": " << status << "\n";
                     ++count;
                 } catch (const std::exception& e) {

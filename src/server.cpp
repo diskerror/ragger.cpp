@@ -11,8 +11,11 @@
 #include "crow_all.h"
 
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <optional>
+#include <pwd.h>
 #include <sstream>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -355,6 +358,82 @@ struct Server::Impl {
             } catch (const std::exception& e) {
                 log_http("POST /search_by_metadata 500");
                 log_error(std::string("POST /search_by_metadata failed: ") + e.what());
+                return crow::response(500, std::string("Error: ") + e.what());
+            }
+        });
+
+        // POST /register — register a user in the common DB
+        CROW_ROUTE(app, "/register").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) -> crow::response {
+            try {
+                auto body = json::parse(req.body);
+                std::string username = body.value("username", "");
+                if (username.empty()) {
+                    log_http("POST /register 400");
+                    return crow::response(400, "{\"error\": \"username required\"}");
+                }
+
+                // Extract bearer token
+                auto auth_header = req.get_header_value("Authorization");
+                const std::string bearer_prefix = "Bearer ";
+                if (auth_header.size() <= bearer_prefix.size() ||
+                    auth_header.substr(0, bearer_prefix.size()) != bearer_prefix) {
+                    log_http("POST /register 401");
+                    return crow::response(401, "{\"error\": \"bearer token required\"}");
+                }
+                std::string provided_token = auth_header.substr(bearer_prefix.size());
+
+                // Verify: read token from user's file on filesystem
+                struct passwd* pw = getpwnam(username.c_str());
+                if (!pw) {
+                    log_http("POST /register 400");
+                    return crow::response(400,
+                        "{\"error\": \"unknown system user: " + username + "\"}");
+                }
+                std::string user_token_file =
+                    std::string(pw->pw_dir) + "/.ragger/token";
+                if (!std::filesystem::exists(user_token_file)) {
+                    log_http("POST /register 400");
+                    return crow::response(400,
+                        "{\"error\": \"no token file for " + username + "\"}");
+                }
+                std::ifstream f(user_token_file);
+                std::string file_token;
+                std::getline(f, file_token);
+                // trim
+                size_t s = file_token.find_first_not_of(" \t\r\n");
+                size_t e = file_token.find_last_not_of(" \t\r\n");
+                if (s != std::string::npos)
+                    file_token = file_token.substr(s, e - s + 1);
+
+                if (provided_token != file_token) {
+                    log_http("POST /register 403");
+                    return crow::response(403,
+                        "{\"error\": \"token does not match user's token file\"}");
+                }
+
+                // Register in DB
+                std::string hashed = hash_token(provided_token);
+                auto* backend = memory.backend();
+                auto existing = backend->get_user_by_username(username);
+                json result;
+                if (existing) {
+                    if (existing->token_hash != hashed) {
+                        backend->update_user_token(username, hashed);
+                    }
+                    result = {{"status", "exists"}, {"user_id", existing->id},
+                              {"username", username}};
+                } else {
+                    bool is_admin = body.value("is_admin", false);
+                    int user_id = backend->create_user(username, hashed, is_admin);
+                    result = {{"status", "created"}, {"user_id", user_id},
+                              {"username", username}};
+                }
+                log_http("POST /register 200");
+                return crow::response(200, result.dump());
+            } catch (const std::exception& e) {
+                log_http("POST /register 500");
+                log_error(std::string("POST /register failed: ") + e.what());
                 return crow::response(500, std::string("Error: ") + e.what());
             }
         });
