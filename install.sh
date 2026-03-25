@@ -154,10 +154,6 @@ if [ ! -x "$BINARY" ]; then
     exit 1
 fi
 
-info "Installing /usr/local/bin/ragger-cpp"
-cp "$BINARY" /usr/local/bin/ragger-cpp
-chmod 0755 /usr/local/bin/ragger-cpp
-
 info "Installing /usr/local/bin/ragger"
 cp "$BINARY" /usr/local/bin/ragger
 chmod 0755 /usr/local/bin/ragger
