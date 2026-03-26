@@ -753,11 +753,7 @@ void Chat::run() {
             continue;
         }
 
-        // ---- unknown slash command ----
-        if (line[0] == '/' && line.size() > 1 && std::isalpha(line[1])) {
-            std::cout << "Unknown command: " << line << " (try /help)\n\n";
-            continue;
-        }
+        // Unrecognized input (including unknown /commands) passes through to the LLM
         
         update_activity();
         
