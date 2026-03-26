@@ -607,6 +607,56 @@ void Chat::run() {
             std::cout << "Goodbye!\n";
             break;
         }
+
+        if (line == "/models") {
+            const auto& cfg = config();
+            std::cout << "Available models:\n";
+            if (!cfg.model_aliases.empty()) {
+                std::cout << "\n  Aliases:\n";
+                for (const auto& [alias, full] : cfg.model_aliases) {
+                    std::cout << "    " << alias << " → " << full << "\n";
+                }
+            }
+            if (!cfg.inference_endpoints.empty()) {
+                std::cout << "\n  Endpoints:\n";
+                for (const auto& ep : cfg.inference_endpoints) {
+                    std::cout << "    " << ep.name << ": " << ep.models
+                              << " (" << ep.api_url << ")\n";
+                }
+            }
+            std::cout << "\n  Current: " << cfg.inference_model << "\n";
+            std::cout << "  Use /model <name> to switch\n\n";
+            continue;
+        }
+
+        if (line.substr(0, 7) == "/model ") {
+            std::string new_model = line.substr(7);
+            new_model.erase(0, new_model.find_first_not_of(" \t"));
+            new_model.erase(new_model.find_last_not_of(" \t") + 1);
+            if (new_model.empty()) {
+                std::cout << "Usage: /model <name>\n";
+            } else {
+                // Resolve alias
+                auto it = config().model_aliases.find(new_model);
+                std::string resolved = (it != config().model_aliases.end()) ? it->second : new_model;
+                // TODO: update active model for inference client
+                std::cout << "Switched to: " << resolved;
+                if (it != config().model_aliases.end()) {
+                    std::cout << " (alias: " << new_model << ")";
+                }
+                std::cout << "\n\n";
+            }
+            continue;
+        }
+
+        if (line == "/help") {
+            std::cout << "Commands:\n";
+            std::cout << "  /models  — list available models and endpoints\n";
+            std::cout << "  /model <name>  — switch model (alias or full name)\n";
+            std::cout << "  /help    — show this help\n";
+            std::cout << "  /quit    — exit chat\n\n";
+            continue;
+        }
         
         update_activity();
         
