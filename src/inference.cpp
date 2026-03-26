@@ -96,7 +96,27 @@ InferenceClient InferenceClient::from_config(const Config& cfg) {
     return InferenceClient(endpoints, cfg.inference_model, cfg.inference_max_tokens);
 }
 
+void InferenceClient::set_forced_endpoint(const std::string& name) {
+    if (name.empty()) {
+        forced_endpoint_.clear();
+        return;
+    }
+    for (auto& ep : _endpoints) {
+        if (ep.name == name) {
+            forced_endpoint_ = name;
+            return;
+        }
+    }
+    throw std::runtime_error("Unknown endpoint: " + name);
+}
+
 Endpoint& InferenceClient::resolve_endpoint(const std::string& model_name) {
+    // If forced, use that endpoint
+    if (!forced_endpoint_.empty()) {
+        for (auto& ep : _endpoints) {
+            if (ep.name == forced_endpoint_) return ep;
+        }
+    }
     for (auto& ep : _endpoints) {
         if (ep.matches(model_name)) {
             return ep;
@@ -107,6 +127,104 @@ Endpoint& InferenceClient::resolve_endpoint(const std::string& model_name) {
         return _endpoints.back();
     }
     throw std::runtime_error("No inference endpoints configured");
+}
+
+// -----------------------------------------------------------------------
+// Endpoint health / model listing
+// -----------------------------------------------------------------------
+bool Endpoint::is_reachable() const {
+    // Try /v1/models first, fall back to base URL
+    std::string url = api_url;
+    auto pos = url.rfind("/v1");
+    if (pos != std::string::npos)
+        url = url.substr(0, pos + 3) + "/models";
+    else
+        url += "/models";
+
+    CURL* curl = curl_easy_init();
+    if (!curl) return false;
+
+    std::string buf;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
+        +[](char* p, size_t s, size_t n, void* ud) -> size_t {
+            static_cast<std::string*>(ud)->append(p, s * n);
+            return s * n;
+        });
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
+
+    if (!api_key.empty()) {
+        struct curl_slist* hdrs = nullptr;
+        std::string auth = "Authorization: Bearer " + api_key;
+        hdrs = curl_slist_append(hdrs, auth.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+        CURLcode res = curl_easy_perform(curl);
+        long code = 0;
+        if (res == CURLE_OK) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+        curl_slist_free_all(hdrs);
+        curl_easy_cleanup(curl);
+        return res == CURLE_OK && code < 400;
+    }
+
+    CURLcode res = curl_easy_perform(curl);
+    long code = 0;
+    if (res == CURLE_OK) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    curl_easy_cleanup(curl);
+    return res == CURLE_OK && code < 400;
+}
+
+std::vector<std::string> Endpoint::list_models() const {
+    std::vector<std::string> result;
+
+    std::string url = api_url;
+    auto pos = url.rfind("/v1");
+    if (pos != std::string::npos)
+        url = url.substr(0, pos + 3) + "/models";
+    else
+        url += "/models";
+
+    CURL* curl = curl_easy_init();
+    if (!curl) return result;
+
+    std::string buf;
+    struct curl_slist* hdrs = nullptr;
+    if (!api_key.empty()) {
+        std::string auth = "Authorization: Bearer " + api_key;
+        hdrs = curl_slist_append(hdrs, auth.c_str());
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
+        +[](char* p, size_t s, size_t n, void* ud) -> size_t {
+            static_cast<std::string*>(ud)->append(p, s * n);
+            return s * n;
+        });
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
+
+    CURLcode res = curl_easy_perform(curl);
+    long code = 0;
+    if (res == CURLE_OK) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    if (hdrs) curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK || code >= 400) return result;
+
+    try {
+        auto json = nlohmann::json::parse(buf);
+        if (json.contains("data") && json["data"].is_array()) {
+            for (const auto& m : json["data"]) {
+                if (m.contains("id") && m["id"].is_string()) {
+                    result.push_back(m["id"].get<std::string>());
+                }
+            }
+        }
+    } catch (...) {}
+
+    std::sort(result.begin(), result.end());
+    return result;
 }
 
 // -----------------------------------------------------------------------

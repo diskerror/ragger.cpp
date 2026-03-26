@@ -35,6 +35,12 @@ struct Endpoint {
 
     /// Check if this endpoint handles the given model name (fnmatch-style glob)
     bool matches(const std::string& model) const;
+
+    /// Check if endpoint is reachable (GET /models or /health, 3s timeout)
+    bool is_reachable() const;
+
+    /// Query available models from endpoint (GET /v1/models)
+    std::vector<std::string> list_models() const;
 };
 
 /// Multi-endpoint inference client
@@ -60,7 +66,14 @@ public:
                      std::function<void(const std::string&)> on_token,
                      const std::string& model = "");
 
+    /// Force a specific endpoint by name (empty = auto-route)
+    void set_forced_endpoint(const std::string& name);
+
+    /// Get the currently forced endpoint name (empty = auto)
+    const std::string& forced_endpoint() const { return forced_endpoint_; }
+
 private:
+    std::string forced_endpoint_;
     Endpoint& resolve_endpoint(const std::string& model);
 };
 

@@ -608,30 +608,55 @@ void Chat::run() {
             break;
         }
 
+        // ---- /models — query active endpoint for available models ----
         if (line == "/models") {
             const auto& cfg = config();
-            std::cout << "Available models:\n";
+
+            // Determine which endpoint to query
+            Endpoint* active_ep = nullptr;
+            if (!inference_.forced_endpoint().empty()) {
+                for (auto& ep : inference_._endpoints) {
+                    if (ep.name == inference_.forced_endpoint()) { active_ep = &ep; break; }
+                }
+            }
+            if (!active_ep && !inference_._endpoints.empty()) {
+                // Use the endpoint that would handle the current model
+                for (auto& ep : inference_._endpoints) {
+                    if (model_.empty() || ep.matches(model_)) { active_ep = &ep; break; }
+                }
+                if (!active_ep) active_ep = &inference_._endpoints.back();
+            }
+
+            if (active_ep) {
+                std::cout << "Querying " << active_ep->name << " (" << active_ep->api_url << ")...\n";
+                auto models = active_ep->list_models();
+                if (models.empty()) {
+                    std::cout << "  (no models returned or endpoint unreachable)\n";
+                } else {
+                    for (const auto& m : models) {
+                        std::cout << "  " << m << "\n";
+                    }
+                    std::cout << models.size() << " model(s)\n";
+                }
+            } else {
+                std::cout << "No endpoints configured.\n";
+            }
+
             if (!cfg.model_aliases.empty()) {
-                std::cout << "\n  Aliases:\n";
+                std::cout << "\nAliases:\n";
                 for (const auto& [alias, full] : cfg.model_aliases) {
-                    std::cout << "    " << alias << " → " << full << "\n";
+                    std::cout << "  " << alias << " → " << full << "\n";
                 }
             }
-            if (!cfg.inference_endpoints.empty()) {
-                std::cout << "\n  Endpoints:\n";
-                for (const auto& ep : cfg.inference_endpoints) {
-                    std::cout << "    " << ep.name << ": " << ep.models
-                              << " (" << ep.api_url << ")\n";
-                }
-            }
-            std::cout << "\n  Current: " << cfg.inference_model << "\n";
-            std::cout << "  Use /model <name> to switch\n\n";
+
+            std::cout << "\nCurrent: " << (model_.empty() ? "(default)" : model_) << "\n\n";
             continue;
         }
 
+        // ---- /model [name] — show or switch model ----
         if (line == "/model") {
-            std::cout << "Current model: " << model_ << "\n";
-            std::cout << "Usage: /model <name> to switch\n\n";
+            std::cout << "Current model: " << (model_.empty() ? "(default)" : model_) << "\n";
+            std::cout << "Use /model <name> to switch\n\n";
             continue;
         }
 
@@ -640,27 +665,97 @@ void Chat::run() {
             new_model.erase(0, new_model.find_first_not_of(" \t"));
             new_model.erase(new_model.find_last_not_of(" \t") + 1);
             if (new_model.empty()) {
-                std::cout << "Usage: /model <name>\n";
-            } else {
-                // Resolve alias
-                auto it = config().model_aliases.find(new_model);
-                std::string resolved = (it != config().model_aliases.end()) ? it->second : new_model;
-                // TODO: update active model for inference client
-                std::cout << "Switched to: " << resolved;
-                if (it != config().model_aliases.end()) {
-                    std::cout << " (alias: " << new_model << ")";
+                std::cout << "Usage: /model <name>\n\n";
+                continue;
+            }
+            // Resolve alias
+            std::string resolved = config().resolve_model(new_model);
+            model_ = resolved;
+            std::cout << "Switched to: " << resolved;
+            if (resolved != new_model) std::cout << " (alias: " << new_model << ")";
+            std::cout << "\n\n";
+            continue;
+        }
+
+        // ---- /endpoints — list endpoints with live status ----
+        if (line == "/endpoints" || line == "/services") {
+            std::cout << "Endpoints:\n";
+            for (auto& ep : inference_._endpoints) {
+                bool up = ep.is_reachable();
+                std::string marker = up ? "✓" : "✗";
+                std::string forced = (ep.name == inference_.forced_endpoint()) ? " (active)" : "";
+                std::cout << "  " << marker << " " << ep.name
+                          << " — " << ep.api_url
+                          << " [" << ep.format_name << "]"
+                          << forced << "\n";
+            }
+            std::string current = inference_.forced_endpoint().empty() ? "auto" : inference_.forced_endpoint();
+            std::cout << "\nRouting: " << current << "\n";
+            std::cout << "Use /endpoint <name> to force, /endpoint auto to auto-route\n\n";
+            continue;
+        }
+
+        // ---- /endpoint [name|auto] — force or auto-route endpoint ----
+        if (line == "/endpoint" || line == "/service") {
+            std::string current = inference_.forced_endpoint().empty() ? "auto" : inference_.forced_endpoint();
+            std::cout << "Current endpoint: " << current << "\n";
+            std::cout << "Use /endpoint <name> to force, /endpoint auto to auto-route\n\n";
+            continue;
+        }
+
+        if (line.substr(0, 10) == "/endpoint " || line.substr(0, 9) == "/service ") {
+            size_t skip = (line[1] == 'e') ? 10 : 9;
+            std::string name = line.substr(skip);
+            name.erase(0, name.find_first_not_of(" \t"));
+            name.erase(name.find_last_not_of(" \t") + 1);
+            if (name.empty()) {
+                std::cout << "Usage: /endpoint <name|auto>\n\n";
+                continue;
+            }
+            if (name == "auto") {
+                inference_.set_forced_endpoint("");
+                std::cout << "Routing: auto (model-based)\n\n";
+                continue;
+            }
+            try {
+                inference_.set_forced_endpoint(name);
+                // Check reachability
+                for (auto& ep : inference_._endpoints) {
+                    if (ep.name == name) {
+                        if (!ep.is_reachable()) {
+                            std::cout << "Warning: " << name << " is not reachable\n";
+                        }
+                        break;
+                    }
+                }
+                std::cout << "Forced endpoint: " << name << "\n\n";
+            } catch (const std::exception& e) {
+                std::cout << "Warning: " << e.what() << "\n";
+                std::cout << "Available: ";
+                for (size_t i = 0; i < inference_._endpoints.size(); ++i) {
+                    if (i > 0) std::cout << ", ";
+                    std::cout << inference_._endpoints[i].name;
                 }
                 std::cout << "\n\n";
             }
             continue;
         }
 
+        // ---- /help ----
         if (line == "/help") {
             std::cout << "Commands:\n";
-            std::cout << "  /models  — list available models and endpoints\n";
-            std::cout << "  /model <name>  — switch model (alias or full name)\n";
-            std::cout << "  /help    — show this help\n";
-            std::cout << "  /quit    — exit chat (also /exit)\n\n";
+            std::cout << "  /models          — list models available on active endpoint\n";
+            std::cout << "  /model [name]    — show or switch model (alias or full name)\n";
+            std::cout << "  /endpoints       — list inference endpoints with status\n";
+            std::cout << "  /endpoint [name] — show, force, or auto-route endpoint\n";
+            std::cout << "  /help            — show this help\n";
+            std::cout << "  /quit            — exit chat (also /exit, Ctrl+D)\n\n";
+            continue;
+        }
+
+        // ---- unknown slash command ----
+        if (line[0] == '/' && line.size() > 1 && std::isalpha(line[1])) {
+            std::cout << "Unknown command: " << line << " (try /help)\n\n";
             continue;
         }
         
