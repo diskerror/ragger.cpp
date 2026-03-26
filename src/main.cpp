@@ -33,6 +33,8 @@
 #include "ragger/memory.h"
 #include "ragger/server.h"
 #include "ragger/llama_manager.h"
+#include "ragger/embedder.h"
+#include "ragger/sqlite_backend.h"
 #include "nlohmann_json.hpp"
 
 using namespace ragger::lang;
@@ -978,9 +980,26 @@ int main(int argc, char** argv) {
                 }
 
             } else if (subcmd == "download") {
+                // Check admin: root always allowed, otherwise check is_admin in DB
                 if (getuid() != 0) {
-                    std::cerr << "Error: model download requires sudo\n";
-                    return 1;
+                    std::string username = [] {
+                        struct passwd* pw = getpwuid(getuid());
+                        return pw ? std::string(pw->pw_name) : "unknown";
+                    }();
+                    try {
+                        auto common_path = cfg.single_user
+                            ? cfg.resolved_db_path()
+                            : cfg.resolved_common_db_path();
+                        ragger::Embedder embedder(cfg.resolved_model_dir());
+                        ragger::SqliteBackend db(embedder, common_path);
+                        auto user = db.get_user_by_username(username);
+                        if (!user || !user->is_admin) {
+                            std::cerr << "Error: model download requires admin privileges\n";
+                            return 1;
+                        }
+                    } catch (...) {
+                        // No DB or no users table — allow (first-run scenario)
+                    }
                 }
                 if (argc < 4) {
                     std::cout << "Usage: ragger model download <repo>[:quant]\n";
@@ -1078,8 +1097,24 @@ int main(int argc, char** argv) {
 
             } else if (subcmd == "remove") {
                 if (getuid() != 0) {
-                    std::cerr << "Error: model remove requires sudo\n";
-                    return 1;
+                    std::string username = [] {
+                        struct passwd* pw = getpwuid(getuid());
+                        return pw ? std::string(pw->pw_name) : "unknown";
+                    }();
+                    try {
+                        auto common_path = cfg.single_user
+                            ? cfg.resolved_db_path()
+                            : cfg.resolved_common_db_path();
+                        ragger::Embedder embedder(cfg.resolved_model_dir());
+                        ragger::SqliteBackend db(embedder, common_path);
+                        auto user = db.get_user_by_username(username);
+                        if (!user || !user->is_admin) {
+                            std::cerr << "Error: model remove requires admin privileges\n";
+                            return 1;
+                        }
+                    } catch (...) {
+                        // No DB or no users table — allow (first-run scenario)
+                    }
                 }
                 if (argc < 4) {
                     std::cout << "Usage: ragger model remove <filename.gguf>\n";
