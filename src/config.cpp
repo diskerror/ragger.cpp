@@ -33,29 +33,8 @@ std::string Config::resolved_model_dir() const {
 
 std::string Config::resolve_model(const std::string& name) const {
     // Check aliases first
-    std::string resolved = name;
     auto it = model_aliases.find(name);
-    if (it != model_aliases.end()) {
-        resolved = it->second;
-    }
-
-    // If it's a .gguf filename (not a path), prepend model_dir
-    if (resolved.size() >= 5 &&
-        resolved.compare(resolved.size() - 5, 5, ".gguf") == 0 &&
-        resolved.find('/') == std::string::npos) {
-        std::string dir = llama_model_dir.empty()
-#ifdef __APPLE__
-            ? expand_path("~/Library/Caches/llama.cpp")
-#else
-            ? expand_path("~/.cache/llama.cpp")
-#endif
-            : expand_path(llama_model_dir);
-        resolved = dir + "/" + resolved;
-    } else {
-        resolved = expand_path(resolved);
-    }
-
-    return resolved;
+    return (it != model_aliases.end()) ? it->second : name;
 }
 
 // -----------------------------------------------------------------------
@@ -95,7 +74,7 @@ bm25_b = 0.75
 
 [inference]
 # Default model for chat
-model = claude-sonnet-4-5
+model =
 max_tokens = 4096
 
 # Single endpoint (simple setup):
@@ -411,23 +390,8 @@ Config load_config(const std::string& path) {
             cfg.model_aliases[key] = val;
         }
         else if (section == "llama") {
-            if (key == "enabled") cfg.llama_enabled = parse_bool(val);
-            else if (key == "binary") cfg.llama_binary = val;
-            else if (key == "model") cfg.llama_model = val;
-            else if (key == "model_dir") cfg.llama_model_dir = val;
-            else if (key == "host") cfg.llama_host = val;
-            else if (key == "port") cfg.llama_port = std::stoi(val);
-            else if (key == "ctx_size") cfg.llama_ctx_size = std::stoi(val);
-            else if (key == "gpu_layers") cfg.llama_gpu_layers = std::stoi(val);
-            else if (key == "threads") cfg.llama_threads = std::stoi(val);
-            else if (key == "batch_size") cfg.llama_batch_size = std::stoi(val);
-            else if (key == "parallel") cfg.llama_parallel = std::stoi(val);
-            else if (key == "flash_attn") cfg.llama_flash_attn = parse_bool(val);
-            else if (key == "mlock") cfg.llama_mlock = parse_bool(val);
-            else if (key == "mmap") cfg.llama_mmap = parse_bool(val);
-            else if (key == "cache_type_k") cfg.llama_cache_type_k = val;
-            else if (key == "cache_type_v") cfg.llama_cache_type_v = val;
-            else if (key == "extra_args") cfg.llama_extra_args = val;
+            // [llama] section removed — use external inference providers
+            // Silently ignore for backward compatibility with old configs
         }
     }
 

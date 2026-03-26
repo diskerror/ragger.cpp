@@ -65,7 +65,7 @@ case "$OS" in
             echo -e "${RED}[!] Boost not found.${NC} Install with: sudo port install boost"
             exit 1
         fi
-        JOBS=$(sysctl -n hw.ncpu)
+        JOBS=$(/usr/sbin/sysctl -n hw.ncpu)
         ;;
     Linux)
         JOBS=$(nproc)

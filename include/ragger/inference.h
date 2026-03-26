@@ -45,7 +45,7 @@ public:
     std::vector<Endpoint> _endpoints;
 
     InferenceClient(const std::vector<Endpoint>& endpoints,
-                    const std::string& model = "claude-sonnet-4-5",
+                    const std::string& model = "",
                     int max_tokens = 4096);
 
     /// Build from config

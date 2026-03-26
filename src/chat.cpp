@@ -629,6 +629,12 @@ void Chat::run() {
             continue;
         }
 
+        if (line == "/model") {
+            std::cout << "Current model: " << model_ << "\n";
+            std::cout << "Usage: /model <name> to switch\n\n";
+            continue;
+        }
+
         if (line.substr(0, 7) == "/model ") {
             std::string new_model = line.substr(7);
             new_model.erase(0, new_model.find_first_not_of(" \t"));

@@ -18,8 +18,6 @@
 #include <signal.h>
 #include <iomanip>
 #include <curl/curl.h>
-#include <thread>
-#include <chrono>
 
 #include "ProgramOptions.h"
 #include "ragger/auth.h"
@@ -32,7 +30,6 @@
 #include "ragger/logs.h"
 #include "ragger/memory.h"
 #include "ragger/server.h"
-#include "ragger/llama_manager.h"
 #include "ragger/embedder.h"
 #include "ragger/sqlite_backend.h"
 #include "nlohmann_json.hpp"
@@ -358,6 +355,47 @@ static void do_chat(const std::string& db_path, const std::string& model_dir) {
         return;
     }
 
+    // Quick connectivity check — GET /models on the first endpoint
+    {
+        auto& ep = inference._endpoints[0];
+        std::string models_url = ep.api_url;
+        // Strip trailing /chat/completions or similar, append /models
+        auto pos = models_url.rfind("/v1");
+        if (pos != std::string::npos)
+            models_url = models_url.substr(0, pos + 3) + "/models";
+        else
+            models_url += "/models";
+
+        CURL* curl = curl_easy_init();
+        if (curl) {
+            std::string response;
+            curl_easy_setopt(curl, CURLOPT_URL, models_url.c_str());
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
+                +[](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
+                    static_cast<std::string*>(userdata)->append(ptr, size * nmemb);
+                    return size * nmemb;
+                });
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+            CURLcode res = curl_easy_perform(curl);
+            long http_code = 0;
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+            curl_easy_cleanup(curl);
+
+            if (res != CURLE_OK) {
+                std::cerr << "Error: cannot reach inference endpoint '" << ep.name
+                          << "' at " << ep.api_url << "\n"
+                          << "  " << curl_easy_strerror(res) << "\n";
+                return;
+            }
+            if (http_code >= 400) {
+                std::cerr << "Error: inference endpoint '" << ep.name
+                          << "' returned HTTP " << http_code << "\n";
+                return;
+            }
+        }
+    }
+
     // Load memory for context search
     ragger::RaggerMemory memory(db_path, model_dir);
 
@@ -524,7 +562,6 @@ int main(int argc, char** argv) {
         ("group-by", Diskerror::po::value<std::string>()->default_value("date"), "Grouping for export (date|category|collection)")
         ("admin", "Grant admin privileges (for add-user)")
         ("yes,y", "Skip confirmation prompts (for scripting)")
-        ("no-llama", "Don't start llama-server subprocess")
     ;
     opts.add_hidden_options()
         ("command", Diskerror::po::value<std::string>()->default_value("help"), CLI_COMMAND)
@@ -559,8 +596,7 @@ int main(int argc, char** argv) {
         std::cout << "  add-all            Provision all users (requires sudo)\n";
         std::cout << "  rebuild-bm25       Rebuild the BM25 keyword index\n";
         std::cout << "  rebuild-embeddings Rebuild embeddings for all memories\n";
-        std::cout << "  model <list|download|remove>  Manage GGUF models\n";
-        std::cout << "  llama <start|stop|status>  Manage llama-server subprocess\n";
+        // (llama and model verbs removed — use external providers)
         std::cout << "  help               Show this help\n";
         std::cout << "  version            Show version\n";
         std::cout << "\nOptions:\n";
@@ -616,22 +652,8 @@ int main(int argc, char** argv) {
             std::snprintf(buf, sizeof(buf), MSG_LOADED_MEMORIES, memory.count());
             std::cout << buf << "\n";
 
-            // Start llama-server subprocess if enabled
-            std::unique_ptr<ragger::LlamaManager> llama;
-            bool run_llama = cfg.llama_enabled && !opts.count("no-llama");
-            if (run_llama) {
-                llama = std::make_unique<ragger::LlamaManager>();
-                if (!llama->start()) {
-                    std::cerr << "Warning: llama-server failed to start, continuing without it\n";
-                    llama.reset();
-                }
-            }
-
             ragger::Server server(memory, host, port);
             server.run();
-
-            // Clean up llama-server on exit
-            if (llama) llama->stop();
 
         } else if (command == "chat") {
             ragger::setup_logging(false, false);
@@ -929,296 +951,6 @@ int main(int argc, char** argv) {
             }
             endpwent();
             std::cout << "✓ Processed " << count << " users\n";
-
-        } else if (command == "model") {
-            ragger::setup_logging(false, false);
-            const auto& cfg = ragger::config();
-
-            // Resolve model_dir
-            std::string model_dir = cfg.llama_model_dir.empty()
-#ifdef __APPLE__
-                ? ragger::expand_path("~/Library/Caches/llama.cpp")
-#else
-                ? ragger::expand_path("~/.cache/llama.cpp")
-#endif
-                : ragger::expand_path(cfg.llama_model_dir);
-
-            std::string subcmd = (argc > 2) ? argv[2] : "list";
-
-            if (subcmd == "list") {
-                std::cout << "Model directory: " << model_dir << "\n\n";
-
-                // List .gguf files
-                std::vector<std::pair<std::string, uintmax_t>> models;
-                if (fs::is_directory(model_dir)) {
-                    for (const auto& entry : fs::directory_iterator(model_dir)) {
-                        if (entry.path().extension() == ".gguf") {
-                            models.emplace_back(entry.path().filename().string(),
-                                              entry.file_size());
-                        }
-                    }
-                }
-
-                if (models.empty()) {
-                    std::cout << "No models found.\n";
-                } else {
-                    std::sort(models.begin(), models.end());
-                    for (const auto& [name, size] : models) {
-                        double gb = static_cast<double>(size) / (1024.0 * 1024.0 * 1024.0);
-                        std::cout << "  " << name << "  ("
-                                  << std::fixed << std::setprecision(1) << gb << " GB)\n";
-                    }
-                    std::cout << "\n" << models.size() << " model(s)\n";
-                }
-
-                // Show aliases
-                if (!cfg.model_aliases.empty()) {
-                    std::cout << "\nAliases:\n";
-                    for (const auto& [alias, full] : cfg.model_aliases) {
-                        std::cout << "  " << alias << " → " << full << "\n";
-                    }
-                }
-
-            } else if (subcmd == "download") {
-                // Check admin: root always allowed, otherwise check is_admin in DB
-                if (getuid() != 0) {
-                    std::string username = [] {
-                        struct passwd* pw = getpwuid(getuid());
-                        return pw ? std::string(pw->pw_name) : "unknown";
-                    }();
-                    try {
-                        auto common_path = cfg.single_user
-                            ? cfg.resolved_db_path()
-                            : cfg.resolved_common_db_path();
-                        ragger::Embedder embedder(cfg.resolved_model_dir());
-                        ragger::SqliteBackend db(embedder, common_path);
-                        auto user = db.get_user_by_username(username);
-                        if (user && !user->is_admin) {
-                            std::cerr << "Error: model download requires admin privileges\n";
-                            return 1;
-                        }
-                        // !user = not registered yet, allow (first-run)
-                    } catch (...) {
-                        // No DB or no users table — allow (first-run scenario)
-                    }
-                }
-                if (argc < 4) {
-                    std::cout << "Usage: ragger model download <repo>[:quant]\n";
-                    std::cout << "  e.g.: ragger model download Qwen/Qwen3-8B-GGUF:Q4_K_M\n";
-                    return 1;
-                }
-                std::string repo = argv[3];
-
-                // Use llama-server's --hf-repo to download, then immediately exit
-                // llama-server downloads to ~/.cache/llama.cpp/ automatically
-                std::string binary = cfg.llama_binary;
-                if (binary == "llama-server") {
-                    // Try common locations
-                    if (fs::exists("/opt/local/bin/llama-server"))
-                        binary = "/opt/local/bin/llama-server";
-                    else if (fs::exists("/usr/local/bin/llama-server"))
-                        binary = "/usr/local/bin/llama-server";
-                }
-
-                std::cout << "Downloading " << repo << " ...\n";
-                std::cout << "(Press Ctrl+C to abort — download is resumable)\n\n";
-
-                // Build command: llama-server --hf-repo <repo> -ngl 0 --port 0
-                // Port 0 = don't actually serve. We just want the download.
-                // Unfortunately llama-server doesn't have a download-only mode,
-                // so we run it briefly and kill after model loads.
-                std::vector<std::string> dl_args = {
-                    binary, "--hf-repo", repo,
-                    "-ngl", "0",
-                    "--host", "127.0.0.1",
-                    "--port", "19999"  // unlikely to conflict
-                };
-
-                std::vector<char*> dl_argv;
-                for (auto& a : dl_args) dl_argv.push_back(a.data());
-                dl_argv.push_back(nullptr);
-
-                pid_t pid = fork();
-                if (pid == 0) {
-                    execvp(dl_argv[0], dl_argv.data());
-                    _exit(127);
-                }
-                if (pid < 0) {
-                    std::cerr << "Error: fork failed\n";
-                    return 1;
-                }
-
-                // Wait for download to complete (model loads = download done)
-                // Check health on port 19999
-                auto start_time = std::chrono::steady_clock::now();
-                bool downloaded = false;
-                while (true) {
-                    // Check if child died
-                    int status;
-                    pid_t result = waitpid(pid, &status, WNOHANG);
-                    if (result == pid) {
-                        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-                            downloaded = true;
-                        }
-                        break;
-                    }
-
-                    // Check if server is ready (= model downloaded and loaded)
-                    CURL* curl = curl_easy_init();
-                    if (curl) {
-                        curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:19999/health");
-                        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 1L);
-                        curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
-                        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-                        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
-                            +[](char*, size_t s, size_t n, void*) -> size_t { return s * n; });
-                        CURLcode res = curl_easy_perform(curl);
-                        long code = 0;
-                        if (res == CURLE_OK)
-                            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-                        curl_easy_cleanup(curl);
-                        if (code == 200) {
-                            downloaded = true;
-                            kill(pid, SIGTERM);
-                            waitpid(pid, &status, 0);
-                            break;
-                        }
-                    }
-
-                    std::this_thread::sleep_for(std::chrono::seconds(2));
-                }
-
-                if (downloaded) {
-                    std::cout << "\n✓ Download complete. Model saved to " << model_dir << "\n";
-                    std::cout << "  Add an alias in [models] section of ragger.ini to use it.\n";
-                } else {
-                    std::cerr << "\nDownload may have failed. Check output above.\n";
-                    return 1;
-                }
-
-            } else if (subcmd == "remove") {
-                if (getuid() != 0) {
-                    std::string username = [] {
-                        struct passwd* pw = getpwuid(getuid());
-                        return pw ? std::string(pw->pw_name) : "unknown";
-                    }();
-                    try {
-                        auto common_path = cfg.single_user
-                            ? cfg.resolved_db_path()
-                            : cfg.resolved_common_db_path();
-                        ragger::Embedder embedder(cfg.resolved_model_dir());
-                        ragger::SqliteBackend db(embedder, common_path);
-                        auto user = db.get_user_by_username(username);
-                        if (user && !user->is_admin) {
-                            std::cerr << "Error: model remove requires admin privileges\n";
-                            return 1;
-                        }
-                    } catch (...) {
-                        // No DB or no users table — allow (first-run scenario)
-                    }
-                }
-                if (argc < 4) {
-                    std::cout << "Usage: ragger model remove <filename.gguf>\n";
-                    return 1;
-                }
-                std::string filename = argv[3];
-
-                // Resolve alias
-                auto it = cfg.model_aliases.find(filename);
-                if (it != cfg.model_aliases.end()) {
-                    filename = it->second;
-                }
-
-                // Build full path
-                fs::path model_path;
-                if (filename.find('/') != std::string::npos) {
-                    model_path = ragger::expand_path(filename);
-                } else {
-                    model_path = fs::path(model_dir) / filename;
-                }
-
-                if (!fs::exists(model_path)) {
-                    std::cerr << "Not found: " << model_path << "\n";
-                    return 1;
-                }
-
-                auto size = fs::file_size(model_path);
-                double gb = static_cast<double>(size) / (1024.0 * 1024.0 * 1024.0);
-                std::cout << "Remove " << model_path.filename().string()
-                          << " (" << std::fixed << std::setprecision(1) << gb << " GB)? [y/N] ";
-                std::string confirm;
-                std::getline(std::cin, confirm);
-                if (confirm == "y" || confirm == "Y") {
-                    fs::remove(model_path);
-                    // Also remove .etag sidecar if present
-                    auto etag = model_path;
-                    etag += ".etag";
-                    if (fs::exists(etag)) fs::remove(etag);
-                    std::cout << "✓ Removed\n";
-                } else {
-                    std::cout << "Cancelled\n";
-                }
-
-            } else {
-                std::cerr << "Usage: ragger model <list|download|remove>\n";
-                return 1;
-            }
-
-        } else if (command == "llama") {
-            ragger::setup_logging(false, false);
-            const auto& cfg = ragger::config();
-
-            if (!cfg.llama_enabled) {
-                std::cerr << "Error: [llama] not enabled in config\n";
-                return 1;
-            }
-
-            std::string subcmd = (argc > 2) ? argv[2] : "status";
-            ragger::LlamaManager llama;
-
-            if (subcmd == "start") {
-                if (!llama.start()) return 1;
-                pid_t pid = llama.release();  // Don't kill on exit
-                std::cout << "llama-server running (pid " << pid << "). Use 'ragger llama stop' to stop.\n";
-            } else if (subcmd == "stop") {
-                // Find llama-server by port using lsof
-                std::string cmd = "lsof -ti tcp:" + std::to_string(cfg.llama_port) + " 2>/dev/null";
-                FILE* pipe = popen(cmd.c_str(), "r");
-                if (pipe) {
-                    char buf[64];
-                    std::string pids;
-                    while (fgets(buf, sizeof(buf), pipe)) pids += buf;
-                    pclose(pipe);
-                    if (pids.empty()) {
-                        std::cout << "No process found on port " << cfg.llama_port << "\n";
-                    } else {
-                        std::istringstream iss(pids);
-                        std::string pid_str;
-                        while (std::getline(iss, pid_str)) {
-                            pid_str.erase(pid_str.find_last_not_of(" \t\r\n") + 1);
-                            if (!pid_str.empty()) {
-                                pid_t pid = std::stoi(pid_str);
-                                kill(pid, SIGTERM);
-                                std::cout << "Sent SIGTERM to pid " << pid << "\n";
-                            }
-                        }
-                    }
-                }
-            } else if (subcmd == "status") {
-                auto s = llama.status();
-                std::cout << "llama-server:\n";
-                std::cout << "  enabled: " << (cfg.llama_enabled ? "true" : "false") << "\n";
-                std::cout << "  model:   " << cfg.llama_model << "\n";
-                std::cout << "  host:    " << cfg.llama_host << "\n";
-                std::cout << "  port:    " << cfg.llama_port << "\n";
-                std::cout << "  running: " << (s.running ? "yes" : "no") << "\n";
-                if (s.running) {
-                    std::cout << "  pid:     " << s.pid << "\n";
-                }
-            } else {
-                std::cerr << "Usage: ragger llama <start|stop|status>\n";
-                return 1;
-            }
 
         } else {
             std::cerr << CLI_UNKNOWN_COMMAND << command << "\n";
