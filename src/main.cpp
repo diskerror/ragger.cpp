@@ -978,6 +978,10 @@ int main(int argc, char** argv) {
                 }
 
             } else if (subcmd == "download") {
+                if (getuid() != 0) {
+                    std::cerr << "Error: model download requires sudo\n";
+                    return 1;
+                }
                 if (argc < 4) {
                     std::cout << "Usage: ragger model download <repo>[:quant]\n";
                     std::cout << "  e.g.: ragger model download Qwen/Qwen3-8B-GGUF:Q4_K_M\n";
@@ -1073,6 +1077,10 @@ int main(int argc, char** argv) {
                 }
 
             } else if (subcmd == "remove") {
+                if (getuid() != 0) {
+                    std::cerr << "Error: model remove requires sudo\n";
+                    return 1;
+                }
                 if (argc < 4) {
                     std::cout << "Usage: ragger model remove <filename.gguf>\n";
                     return 1;
