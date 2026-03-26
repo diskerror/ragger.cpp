@@ -517,6 +517,7 @@ int main(int argc, char** argv) {
         ("group-by", Diskerror::po::value<std::string>()->default_value("date"), "Grouping for export (date|category|collection)")
         ("admin", "Grant admin privileges (for add-user)")
         ("yes,y", "Skip confirmation prompts (for scripting)")
+        ("no-llama", "Don't start llama-server subprocess")
     ;
     opts.add_hidden_options()
         ("command", Diskerror::po::value<std::string>()->default_value("help"), CLI_COMMAND)
@@ -609,7 +610,8 @@ int main(int argc, char** argv) {
 
             // Start llama-server subprocess if enabled
             std::unique_ptr<ragger::LlamaManager> llama;
-            if (cfg.llama_enabled) {
+            bool run_llama = cfg.llama_enabled && !opts.count("no-llama");
+            if (run_llama) {
                 llama = std::make_unique<ragger::LlamaManager>();
                 if (!llama->start()) {
                     std::cerr << "Warning: llama-server failed to start, continuing without it\n";

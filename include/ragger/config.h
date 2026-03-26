@@ -68,7 +68,7 @@ struct Config {
     int  minimum_chunk_size    = 300;
 
     // --- Llama.cpp (subprocess inference) ---
-    bool llama_enabled           = false;
+    bool llama_enabled           = true;
     std::string llama_binary     = "llama-server";  // PATH or absolute
     std::string llama_model      = "";              // path to .gguf
     std::string llama_host       = "127.0.0.1";
