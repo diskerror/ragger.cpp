@@ -208,6 +208,14 @@ struct Server::Impl {
                     return crow::response(400, "Missing 'text' field");
                 }
 
+                // Ensure required metadata defaults
+                if (!metadata.contains("collection") || metadata["collection"].get<std::string>().empty()) {
+                    metadata["collection"] = "memory";
+                }
+                if (!metadata.contains("source") || metadata["source"].get<std::string>().empty()) {
+                    metadata["source"] = user->username;
+                }
+
                 bool common = body.value("common", false);
                 std::string id = memory.store(text, metadata, common);
 
