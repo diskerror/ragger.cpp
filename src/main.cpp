@@ -16,6 +16,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <signal.h>
+#include <iomanip>
+#include <curl/curl.h>
+#include <thread>
+#include <chrono>
 
 #include "ProgramOptions.h"
 #include "ragger/auth.h"
@@ -553,6 +557,7 @@ int main(int argc, char** argv) {
         std::cout << "  add-all            Provision all users (requires sudo)\n";
         std::cout << "  rebuild-bm25       Rebuild the BM25 keyword index\n";
         std::cout << "  rebuild-embeddings Rebuild embeddings for all memories\n";
+        std::cout << "  model <list|download|remove>  Manage GGUF models\n";
         std::cout << "  llama <start|stop|status>  Manage llama-server subprocess\n";
         std::cout << "  help               Show this help\n";
         std::cout << "  version            Show version\n";
@@ -922,6 +927,198 @@ int main(int argc, char** argv) {
             }
             endpwent();
             std::cout << "✓ Processed " << count << " users\n";
+
+        } else if (command == "model") {
+            ragger::setup_logging(false, false);
+            const auto& cfg = ragger::config();
+
+            // Resolve model_dir
+            std::string model_dir = cfg.llama_model_dir.empty()
+#ifdef __APPLE__
+                ? ragger::expand_path("~/Library/Caches/llama.cpp")
+#else
+                ? ragger::expand_path("~/.cache/llama.cpp")
+#endif
+                : ragger::expand_path(cfg.llama_model_dir);
+
+            std::string subcmd = (argc > 2) ? argv[2] : "list";
+
+            if (subcmd == "list") {
+                std::cout << "Model directory: " << model_dir << "\n\n";
+
+                // List .gguf files
+                std::vector<std::pair<std::string, uintmax_t>> models;
+                if (fs::is_directory(model_dir)) {
+                    for (const auto& entry : fs::directory_iterator(model_dir)) {
+                        if (entry.path().extension() == ".gguf") {
+                            models.emplace_back(entry.path().filename().string(),
+                                              entry.file_size());
+                        }
+                    }
+                }
+
+                if (models.empty()) {
+                    std::cout << "No models found.\n";
+                } else {
+                    std::sort(models.begin(), models.end());
+                    for (const auto& [name, size] : models) {
+                        double gb = static_cast<double>(size) / (1024.0 * 1024.0 * 1024.0);
+                        std::cout << "  " << name << "  ("
+                                  << std::fixed << std::setprecision(1) << gb << " GB)\n";
+                    }
+                    std::cout << "\n" << models.size() << " model(s)\n";
+                }
+
+                // Show aliases
+                if (!cfg.model_aliases.empty()) {
+                    std::cout << "\nAliases:\n";
+                    for (const auto& [alias, full] : cfg.model_aliases) {
+                        std::cout << "  " << alias << " → " << full << "\n";
+                    }
+                }
+
+            } else if (subcmd == "download") {
+                if (argc < 4) {
+                    std::cout << "Usage: ragger model download <repo>[:quant]\n";
+                    std::cout << "  e.g.: ragger model download Qwen/Qwen3-8B-GGUF:Q4_K_M\n";
+                    return 1;
+                }
+                std::string repo = argv[3];
+
+                // Use llama-server's --hf-repo to download, then immediately exit
+                // llama-server downloads to ~/.cache/llama.cpp/ automatically
+                std::string binary = cfg.llama_binary;
+                if (binary == "llama-server") {
+                    // Try common locations
+                    if (fs::exists("/opt/local/bin/llama-server"))
+                        binary = "/opt/local/bin/llama-server";
+                    else if (fs::exists("/usr/local/bin/llama-server"))
+                        binary = "/usr/local/bin/llama-server";
+                }
+
+                std::cout << "Downloading " << repo << " ...\n";
+                std::cout << "(Press Ctrl+C to abort — download is resumable)\n\n";
+
+                // Build command: llama-server --hf-repo <repo> -ngl 0 --port 0
+                // Port 0 = don't actually serve. We just want the download.
+                // Unfortunately llama-server doesn't have a download-only mode,
+                // so we run it briefly and kill after model loads.
+                std::vector<std::string> dl_args = {
+                    binary, "--hf-repo", repo,
+                    "-ngl", "0",
+                    "--host", "127.0.0.1",
+                    "--port", "19999"  // unlikely to conflict
+                };
+
+                std::vector<char*> dl_argv;
+                for (auto& a : dl_args) dl_argv.push_back(a.data());
+                dl_argv.push_back(nullptr);
+
+                pid_t pid = fork();
+                if (pid == 0) {
+                    execvp(dl_argv[0], dl_argv.data());
+                    _exit(127);
+                }
+                if (pid < 0) {
+                    std::cerr << "Error: fork failed\n";
+                    return 1;
+                }
+
+                // Wait for download to complete (model loads = download done)
+                // Check health on port 19999
+                auto start_time = std::chrono::steady_clock::now();
+                bool downloaded = false;
+                while (true) {
+                    // Check if child died
+                    int status;
+                    pid_t result = waitpid(pid, &status, WNOHANG);
+                    if (result == pid) {
+                        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                            downloaded = true;
+                        }
+                        break;
+                    }
+
+                    // Check if server is ready (= model downloaded and loaded)
+                    CURL* curl = curl_easy_init();
+                    if (curl) {
+                        curl_easy_setopt(curl, CURLOPT_URL, "http://127.0.0.1:19999/health");
+                        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 1L);
+                        curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
+                        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+                        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
+                            +[](char*, size_t s, size_t n, void*) -> size_t { return s * n; });
+                        CURLcode res = curl_easy_perform(curl);
+                        long code = 0;
+                        if (res == CURLE_OK)
+                            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+                        curl_easy_cleanup(curl);
+                        if (code == 200) {
+                            downloaded = true;
+                            kill(pid, SIGTERM);
+                            waitpid(pid, &status, 0);
+                            break;
+                        }
+                    }
+
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                }
+
+                if (downloaded) {
+                    std::cout << "\n✓ Download complete. Model saved to " << model_dir << "\n";
+                    std::cout << "  Add an alias in [models] section of ragger.ini to use it.\n";
+                } else {
+                    std::cerr << "\nDownload may have failed. Check output above.\n";
+                    return 1;
+                }
+
+            } else if (subcmd == "remove") {
+                if (argc < 4) {
+                    std::cout << "Usage: ragger model remove <filename.gguf>\n";
+                    return 1;
+                }
+                std::string filename = argv[3];
+
+                // Resolve alias
+                auto it = cfg.model_aliases.find(filename);
+                if (it != cfg.model_aliases.end()) {
+                    filename = it->second;
+                }
+
+                // Build full path
+                fs::path model_path;
+                if (filename.find('/') != std::string::npos) {
+                    model_path = ragger::expand_path(filename);
+                } else {
+                    model_path = fs::path(model_dir) / filename;
+                }
+
+                if (!fs::exists(model_path)) {
+                    std::cerr << "Not found: " << model_path << "\n";
+                    return 1;
+                }
+
+                auto size = fs::file_size(model_path);
+                double gb = static_cast<double>(size) / (1024.0 * 1024.0 * 1024.0);
+                std::cout << "Remove " << model_path.filename().string()
+                          << " (" << std::fixed << std::setprecision(1) << gb << " GB)? [y/N] ";
+                std::string confirm;
+                std::getline(std::cin, confirm);
+                if (confirm == "y" || confirm == "Y") {
+                    fs::remove(model_path);
+                    // Also remove .etag sidecar if present
+                    auto etag = model_path;
+                    etag += ".etag";
+                    if (fs::exists(etag)) fs::remove(etag);
+                    std::cout << "✓ Removed\n";
+                } else {
+                    std::cout << "Cancelled\n";
+                }
+
+            } else {
+                std::cerr << "Usage: ragger model <list|download|remove>\n";
+                return 1;
+            }
 
         } else if (command == "llama") {
             ragger::setup_logging(false, false);

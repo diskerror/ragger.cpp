@@ -44,7 +44,11 @@ std::string Config::resolve_model(const std::string& name) const {
         resolved.compare(resolved.size() - 5, 5, ".gguf") == 0 &&
         resolved.find('/') == std::string::npos) {
         std::string dir = llama_model_dir.empty()
+#ifdef __APPLE__
+            ? expand_path("~/Library/Caches/llama.cpp")
+#else
             ? expand_path("~/.cache/llama.cpp")
+#endif
             : expand_path(llama_model_dir);
         resolved = dir + "/" + resolved;
     } else {
