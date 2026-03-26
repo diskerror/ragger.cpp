@@ -654,7 +654,7 @@ void Chat::run() {
             std::cout << "  /models  — list available models and endpoints\n";
             std::cout << "  /model <name>  — switch model (alias or full name)\n";
             std::cout << "  /help    — show this help\n";
-            std::cout << "  /quit    — exit chat\n\n";
+            std::cout << "  /quit    — exit chat (also /exit)\n\n";
             continue;
         }
         
