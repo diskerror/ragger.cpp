@@ -1,0 +1,155 @@
+/**
+ * HTTP chat session manager implementation
+ */
+#include "ragger/chat_sessions.h"
+#include "ragger/config.h"
+
+#include <filesystem>
+#include <fstream>
+#include <random>
+#include <sstream>
+
+namespace fs = std::filesystem;
+
+namespace ragger {
+
+// -----------------------------------------------------------------------
+// ChatSession
+// -----------------------------------------------------------------------
+ChatSession::ChatSession(const std::string& id, const std::string& user)
+    : session_id(id), username(user)
+    , last_activity(std::chrono::system_clock::now())
+    , created_at(std::chrono::system_clock::now())
+{}
+
+void ChatSession::add_user_message(const std::string& text) {
+    messages.push_back({"user", text});
+    last_activity = std::chrono::system_clock::now();
+}
+
+void ChatSession::add_assistant_message(const std::string& text) {
+    messages.push_back({"assistant", text});
+    if (messages.size() >= 2) {
+        unsummarized_turns.push_back({
+            messages[messages.size() - 2].content,  // user
+            text  // assistant
+        });
+    }
+    last_activity = std::chrono::system_clock::now();
+}
+
+int ChatSession::idle_seconds() const {
+    auto now = std::chrono::system_clock::now();
+    return std::chrono::duration_cast<std::chrono::seconds>(now - last_activity).count();
+}
+
+std::vector<Message> ChatSession::build_messages(
+    const std::string& system_prompt,
+    const std::string& memory_context,
+    int max_turns) const
+{
+    std::vector<Message> result;
+
+    // System prompt with memory context
+    std::string system_content = system_prompt;
+    if (!memory_context.empty()) {
+        system_content += "\n\n## Relevant memories:\n\n" + memory_context;
+    }
+    if (!system_content.empty()) {
+        result.push_back({"system", system_content});
+    }
+
+    // Conversation history (bounded)
+    int max_messages = max_turns * 2;
+    int start = (int)messages.size() > max_messages
+        ? (int)messages.size() - max_messages : 0;
+    for (int i = start; i < (int)messages.size(); ++i) {
+        result.push_back(messages[i]);
+    }
+
+    return result;
+}
+
+// -----------------------------------------------------------------------
+// ChatSessionManager
+// -----------------------------------------------------------------------
+std::string ChatSessionManager::generate_id() {
+    // Simple UUID-like random string
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    static std::uniform_int_distribution<> dis(0, 15);
+    static const char hex[] = "0123456789abcdef";
+
+    std::string id;
+    id.reserve(36);
+    for (int i = 0; i < 32; ++i) {
+        if (i == 8 || i == 12 || i == 16 || i == 20) id += '-';
+        id += hex[dis(gen)];
+    }
+    return id;
+}
+
+ChatSession& ChatSessionManager::get_or_create(
+    const std::string& session_id, const std::string& username)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!session_id.empty()) {
+        auto it = sessions_.find(session_id);
+        if (it != sessions_.end()) {
+            it->second.last_activity = std::chrono::system_clock::now();
+            return it->second;
+        }
+    }
+
+    std::string id = session_id.empty() ? generate_id() : session_id;
+    sessions_.emplace(id, ChatSession(id, username));
+    return sessions_[id];
+}
+
+std::string ChatSessionManager::load_workspace_files() {
+    std::string ragger_dir = expand_path("~/.ragger");
+    std::vector<std::string> files = {"SOUL.md", "USER.md", "AGENTS.md", "TOOLS.md"};
+    std::string result;
+
+    for (const auto& fname : files) {
+        std::string fpath = ragger_dir + "/" + fname;
+        if (fs::exists(fpath)) {
+            std::ifstream f(fpath);
+            if (f.is_open()) {
+                std::string content((std::istreambuf_iterator<char>(f)),
+                                     std::istreambuf_iterator<char>());
+                if (!content.empty()) {
+                    if (!result.empty()) result += "\n\n---\n\n";
+                    result += "## " + fname + "\n\n" + content;
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+std::vector<std::vector<std::pair<std::string, std::string>>>
+ChatSessionManager::cleanup_expired(int pause_minutes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::vector<std::pair<std::string, std::string>>> expired_turns;
+    std::vector<std::string> to_remove;
+
+    for (auto& [sid, session] : sessions_) {
+        if (session.idle_seconds() > pause_minutes * 60) {
+            if (!session.unsummarized_turns.empty()) {
+                expired_turns.push_back(session.unsummarized_turns);
+            }
+            to_remove.push_back(sid);
+        }
+    }
+
+    for (const auto& sid : to_remove) {
+        sessions_.erase(sid);
+    }
+
+    return expired_turns;
+}
+
+} // namespace ragger

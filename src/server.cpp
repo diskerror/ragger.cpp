@@ -8,6 +8,8 @@
 #include "ragger/logs.h"
 #include "ragger/auth.h"
 #include "ragger/config.h"
+#include "ragger/inference.h"
+#include "ragger/chat_sessions.h"
 #include "nlohmann_json.hpp"
 #include "crow_all.h"
 
@@ -35,12 +37,25 @@ struct Server::Impl {
     int             port;
     std::string     server_token_;
     std::optional<SqliteBackend::UserInfo> default_user_;
+    std::unique_ptr<InferenceClient> inference_;
+    ChatSessionManager session_mgr_;
 
     Impl(RaggerMemory& mem, const std::string& h, int p)
         : memory(mem), host(h), port(p)
     {
         bootstrap_auth();
+        init_inference();
         setup_routes();
+    }
+
+    void init_inference() {
+        const auto& cfg = config();
+        auto client = InferenceClient::from_config(cfg);
+        if (!client._endpoints.empty()) {
+            inference_ = std::make_unique<InferenceClient>(std::move(client));
+            std::cout << "Inference: enabled (" << inference_->_endpoints.size()
+                      << " endpoint(s))\n";
+        }
     }
 
     void bootstrap_auth() {
@@ -519,6 +534,126 @@ struct Server::Impl {
             } catch (const std::exception& e) {
                 log_http("DELETE /user/model 500");
                 log_error(std::string("DELETE /user/model failed: ") + e.what());
+                return crow::response(500, std::string("Error: ") + e.what());
+            }
+        });
+
+        // POST /chat — memory-augmented chat with SSE streaming
+        CROW_ROUTE(app, "/chat").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) -> crow::response {
+            auto user = _check_auth(req);
+            if (!user) {
+                log_http("POST /chat 401");
+                return crow::response(401, "Unauthorized");
+            }
+
+            if (!inference_) {
+                log_http("POST /chat 503");
+                return crow::response(503, "{\"error\": \"inference not configured\"}");
+            }
+
+            try {
+                auto body = json::parse(req.body);
+                std::string message = body.value("message", "");
+                if (message.empty()) {
+                    log_http("POST /chat 400");
+                    return crow::response(400, "{\"error\": \"message required\"}");
+                }
+
+                std::string session_id = body.value("session_id", "");
+                std::string request_model = body.value("model", "");
+
+                // Get or create session
+                auto& session = session_mgr_.get_or_create(session_id, user->username);
+
+                // Search memory for context
+                std::string memory_context;
+                try {
+                    const auto& cfg = config();
+                    int max_results = cfg.chat_max_memory_results;
+                    auto search_result = memory.search(message, max_results, 0.3f);
+                    for (const auto& r : search_result.results) {
+                        if (!memory_context.empty()) memory_context += "\n\n---\n\n";
+                        memory_context += r.text;
+                    }
+                } catch (const std::exception& e) {
+                    log_error(std::string("Memory search failed for /chat: ") + e.what());
+                }
+
+                // Resolve model
+                auto* backend = memory.backend();
+                auto preferred_model = backend->get_user_preferred_model(user->username);
+                std::string use_model = preferred_model.value_or("");
+                if (use_model.empty()) use_model = request_model;
+                if (use_model.empty()) use_model = inference_->model;
+
+                // Resolve alias
+                use_model = config().resolve_model(use_model);
+
+                // Build messages with persona + memory + history
+                std::string system_prompt = ChatSessionManager::load_workspace_files();
+                session.add_user_message(message);
+                auto full_messages = session.build_messages(system_prompt, memory_context);
+
+                // Stream response from inference, collect SSE body
+                std::string sse_body;
+                std::string response_text;
+
+                inference_->chat_stream(full_messages, [&](const std::string& token) {
+                    response_text += token;
+                    json event = {{"token", token}};
+                    sse_body += "data: " + event.dump() + "\n\n";
+                }, use_model);
+
+                // Done event
+                json done_event = {
+                    {"done", true},
+                    {"session_id", session.session_id}
+                };
+                sse_body += "data: " + done_event.dump() + "\n\n";
+
+                // Update session
+                if (!response_text.empty()) {
+                    session.add_assistant_message(response_text);
+
+                    // Store turn if configured
+                    const auto& cfg = config();
+                    if (cfg.chat_store_turns != "false") {
+                        try {
+                            json turn_meta = {
+                                {"collection", "conversation"},
+                                {"category", "chat-turn"},
+                                {"source", "chat-http-" + user->username}
+                            };
+                            memory.store(
+                                "User: " + message + "\n\nAssistant: " + response_text,
+                                turn_meta
+                            );
+                        } catch (const std::exception& e) {
+                            log_error(std::string("Turn storage failed: ") + e.what());
+                        }
+                    }
+                }
+
+                // Cleanup expired sessions in background
+                const auto& cfg = config();
+                auto expired = session_mgr_.cleanup_expired(cfg.chat_pause_minutes);
+                // TODO: summarize expired sessions in background
+
+                crow::response res(200);
+                res.set_header("Content-Type", "text/event-stream");
+                res.set_header("Cache-Control", "no-cache");
+                res.set_header("X-Session-Id", session.session_id);
+                res.body = sse_body;
+                log_http("POST /chat 200");
+                return res;
+
+            } catch (const json::exception& e) {
+                log_http("POST /chat 400");
+                return crow::response(400, std::string("JSON error: ") + e.what());
+            } catch (const std::exception& e) {
+                log_http("POST /chat 500");
+                log_error(std::string("POST /chat failed: ") + e.what());
                 return crow::response(500, std::string("Error: ") + e.what());
             }
         });
