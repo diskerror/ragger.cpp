@@ -70,7 +70,8 @@ struct Config {
     // --- Llama.cpp (subprocess inference) ---
     bool llama_enabled           = true;
     std::string llama_binary     = "llama-server";  // PATH or absolute
-    std::string llama_model      = "";              // path to .gguf
+    std::string llama_model      = "";              // path, filename, or alias
+    std::string llama_model_dir  = "";              // directory for .gguf files
     std::string llama_host       = "127.0.0.1";
     int  llama_port              = 8433;
     int  llama_ctx_size          = 0;               // 0 = model default
@@ -84,6 +85,9 @@ struct Config {
     std::string llama_cache_type_k = "f16";
     std::string llama_cache_type_v = "f16";
     std::string llama_extra_args = "";              // pass-through CLI args
+
+    // --- Model aliases ---
+    std::map<std::string, std::string> model_aliases;  // short name → full name or .gguf filename
 
     // --- Auth ---
     int  token_rotation_minutes = 1440;  // 1440 = 24h, 0 = never
@@ -110,6 +114,9 @@ struct Config {
     std::string resolved_common_db_path() const;
     std::string resolved_log_dir() const;
     std::string resolved_model_dir() const;
+
+    /// Resolve a model name: check aliases, prepend model_dir for .gguf files.
+    std::string resolve_model(const std::string& name) const;
 };
 
 /// Expand ~ to $HOME in a path string.

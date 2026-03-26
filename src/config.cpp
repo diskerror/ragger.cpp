@@ -31,6 +31,29 @@ std::string Config::resolved_model_dir() const {
     return expand_path(model_dir.empty() ? "~/.ragger/models" : model_dir);
 }
 
+std::string Config::resolve_model(const std::string& name) const {
+    // Check aliases first
+    std::string resolved = name;
+    auto it = model_aliases.find(name);
+    if (it != model_aliases.end()) {
+        resolved = it->second;
+    }
+
+    // If it's a .gguf filename (not a path), prepend model_dir
+    if (resolved.size() >= 5 &&
+        resolved.compare(resolved.size() - 5, 5, ".gguf") == 0 &&
+        resolved.find('/') == std::string::npos) {
+        std::string dir = llama_model_dir.empty()
+            ? expand_path("~/.cache/llama.cpp")
+            : expand_path(llama_model_dir);
+        resolved = dir + "/" + resolved;
+    } else {
+        resolved = expand_path(resolved);
+    }
+
+    return resolved;
+}
+
 // -----------------------------------------------------------------------
 // Default config (embedded)
 // -----------------------------------------------------------------------
@@ -380,10 +403,14 @@ Config load_config(const std::string& path) {
         else if (section == "auth") {
             if (key == "token_rotation_minutes") cfg.token_rotation_minutes = std::stoi(val);
         }
+        else if (section == "models") {
+            cfg.model_aliases[key] = val;
+        }
         else if (section == "llama") {
             if (key == "enabled") cfg.llama_enabled = parse_bool(val);
             else if (key == "binary") cfg.llama_binary = val;
             else if (key == "model") cfg.llama_model = val;
+            else if (key == "model_dir") cfg.llama_model_dir = val;
             else if (key == "host") cfg.llama_host = val;
             else if (key == "port") cfg.llama_port = std::stoi(val);
             else if (key == "ctx_size") cfg.llama_ctx_size = std::stoi(val);

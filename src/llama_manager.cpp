@@ -38,7 +38,7 @@ struct LlamaManager::Impl {
 
         if (!cfg.llama_model.empty()) {
             args.push_back("--model");
-            args.push_back(expand_path(cfg.llama_model));
+            args.push_back(cfg.resolve_model(cfg.llama_model));
         }
 
         if (cfg.llama_ctx_size > 0) {
@@ -179,9 +179,10 @@ bool LlamaManager::start() {
     auto args = pImpl->build_args();
     auto argv = Impl::to_argv(args);
 
+    std::string resolved_model = cfg.resolve_model(cfg.llama_model);
     std::cout << "Starting llama-server on " << cfg.llama_host
               << ":" << cfg.llama_port << std::endl;
-    std::cout << "  Model: " << expand_path(cfg.llama_model) << std::endl;
+    std::cout << "  Model: " << resolved_model << std::endl;
 
     pid_t pid = fork();
     if (pid < 0) {
