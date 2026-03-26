@@ -27,6 +27,7 @@
 #include "ragger/logs.h"
 #include "ragger/memory.h"
 #include "ragger/server.h"
+#include "ragger/llama_manager.h"
 #include "nlohmann_json.hpp"
 
 using namespace ragger::lang;
@@ -550,6 +551,7 @@ int main(int argc, char** argv) {
         std::cout << "  add-all            Provision all users (requires sudo)\n";
         std::cout << "  rebuild-bm25       Rebuild the BM25 keyword index\n";
         std::cout << "  rebuild-embeddings Rebuild embeddings for all memories\n";
+        std::cout << "  llama <start|stop|status>  Manage llama-server subprocess\n";
         std::cout << "  help               Show this help\n";
         std::cout << "  version            Show version\n";
         std::cout << "\nOptions:\n";
@@ -605,8 +607,21 @@ int main(int argc, char** argv) {
             std::snprintf(buf, sizeof(buf), MSG_LOADED_MEMORIES, memory.count());
             std::cout << buf << "\n";
 
+            // Start llama-server subprocess if enabled
+            std::unique_ptr<ragger::LlamaManager> llama;
+            if (cfg.llama_enabled) {
+                llama = std::make_unique<ragger::LlamaManager>();
+                if (!llama->start()) {
+                    std::cerr << "Warning: llama-server failed to start, continuing without it\n";
+                    llama.reset();
+                }
+            }
+
             ragger::Server server(memory, host, port);
             server.run();
+
+            // Clean up llama-server on exit
+            if (llama) llama->stop();
 
         } else if (command == "chat") {
             ragger::setup_logging(false, false);
@@ -904,6 +919,48 @@ int main(int argc, char** argv) {
             }
             endpwent();
             std::cout << "✓ Processed " << count << " users\n";
+
+        } else if (command == "llama") {
+            ragger::setup_logging(false, false);
+            const auto& cfg = ragger::config();
+
+            if (!cfg.llama_enabled) {
+                std::cerr << "Error: [llama] not enabled in config\n";
+                return 1;
+            }
+
+            std::string subcmd = (argc > 2) ? argv[2] : "status";
+            ragger::LlamaManager llama;
+
+            if (subcmd == "start") {
+                if (!llama.start()) return 1;
+                // Detach — don't wait. The process runs independently.
+                std::cout << "llama-server started. Use 'ragger llama stop' to stop.\n";
+            } else if (subcmd == "stop") {
+                // Send SIGTERM to any llama-server on the configured port
+                // For now, just check health and report
+                auto s = llama.status();
+                if (!s.running) {
+                    std::cout << "llama-server is not running (as our child)\n";
+                } else {
+                    llama.stop();
+                    std::cout << "llama-server stopped\n";
+                }
+            } else if (subcmd == "status") {
+                auto s = llama.status();
+                std::cout << "llama-server:\n";
+                std::cout << "  enabled: " << (cfg.llama_enabled ? "true" : "false") << "\n";
+                std::cout << "  model:   " << cfg.llama_model << "\n";
+                std::cout << "  host:    " << cfg.llama_host << "\n";
+                std::cout << "  port:    " << cfg.llama_port << "\n";
+                std::cout << "  running: " << (s.running ? "yes" : "no") << "\n";
+                if (s.running) {
+                    std::cout << "  pid:     " << s.pid << "\n";
+                }
+            } else {
+                std::cerr << "Usage: ragger llama <start|stop|status>\n";
+                return 1;
+            }
 
         } else {
             std::cerr << CLI_UNKNOWN_COMMAND << command << "\n";

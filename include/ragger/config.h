@@ -67,6 +67,24 @@ struct Config {
     // --- Import ---
     int  minimum_chunk_size    = 300;
 
+    // --- Llama.cpp (subprocess inference) ---
+    bool llama_enabled           = false;
+    std::string llama_binary     = "llama-server";  // PATH or absolute
+    std::string llama_model      = "";              // path to .gguf
+    std::string llama_host       = "127.0.0.1";
+    int  llama_port              = 8433;
+    int  llama_ctx_size          = 0;               // 0 = model default
+    int  llama_gpu_layers        = -1;              // -1 = all, 0 = CPU only
+    int  llama_threads           = 0;               // 0 = auto
+    int  llama_batch_size        = 2048;
+    int  llama_parallel          = 1;               // concurrent slots
+    bool llama_flash_attn        = true;
+    bool llama_mlock             = false;
+    bool llama_mmap              = true;
+    std::string llama_cache_type_k = "f16";
+    std::string llama_cache_type_v = "f16";
+    std::string llama_extra_args = "";              // pass-through CLI args
+
     // --- Auth ---
     int  token_rotation_minutes = 1440;  // 1440 = 24h, 0 = never
 

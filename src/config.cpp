@@ -380,6 +380,24 @@ Config load_config(const std::string& path) {
         else if (section == "auth") {
             if (key == "token_rotation_minutes") cfg.token_rotation_minutes = std::stoi(val);
         }
+        else if (section == "llama") {
+            if (key == "enabled") cfg.llama_enabled = parse_bool(val);
+            else if (key == "binary") cfg.llama_binary = val;
+            else if (key == "model") cfg.llama_model = val;
+            else if (key == "host") cfg.llama_host = val;
+            else if (key == "port") cfg.llama_port = std::stoi(val);
+            else if (key == "ctx_size") cfg.llama_ctx_size = std::stoi(val);
+            else if (key == "gpu_layers") cfg.llama_gpu_layers = std::stoi(val);
+            else if (key == "threads") cfg.llama_threads = std::stoi(val);
+            else if (key == "batch_size") cfg.llama_batch_size = std::stoi(val);
+            else if (key == "parallel") cfg.llama_parallel = std::stoi(val);
+            else if (key == "flash_attn") cfg.llama_flash_attn = parse_bool(val);
+            else if (key == "mlock") cfg.llama_mlock = parse_bool(val);
+            else if (key == "mmap") cfg.llama_mmap = parse_bool(val);
+            else if (key == "cache_type_k") cfg.llama_cache_type_k = val;
+            else if (key == "cache_type_v") cfg.llama_cache_type_v = val;
+            else if (key == "extra_args") cfg.llama_extra_args = val;
+        }
     }
 
     // Convert endpoint map to vector
