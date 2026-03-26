@@ -289,6 +289,13 @@ bool LlamaManager::poll() {
     return is_running();
 }
 
+pid_t LlamaManager::release() {
+    pid_t pid = pImpl->child_pid;
+    pImpl->child_pid = 0;
+    pImpl->started = false;
+    return pid;
+}
+
 int LlamaManager::wait() {
     if (pImpl->child_pid <= 0) return pImpl->last_exit_code;
     int status;

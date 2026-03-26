@@ -53,6 +53,10 @@ public:
     /// Returns true if child is still running.
     bool poll();
 
+    /// Release ownership of the child process (don't stop on destruction).
+    /// Returns the child pid.
+    pid_t release();
+
 private:
     struct Impl;
     std::unique_ptr<Impl> pImpl;

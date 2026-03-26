@@ -15,6 +15,7 @@
 #include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include "ProgramOptions.h"
 #include "ragger/auth.h"
@@ -936,17 +937,31 @@ int main(int argc, char** argv) {
 
             if (subcmd == "start") {
                 if (!llama.start()) return 1;
-                // Detach — don't wait. The process runs independently.
-                std::cout << "llama-server started. Use 'ragger llama stop' to stop.\n";
+                pid_t pid = llama.release();  // Don't kill on exit
+                std::cout << "llama-server running (pid " << pid << "). Use 'ragger llama stop' to stop.\n";
             } else if (subcmd == "stop") {
-                // Send SIGTERM to any llama-server on the configured port
-                // For now, just check health and report
-                auto s = llama.status();
-                if (!s.running) {
-                    std::cout << "llama-server is not running (as our child)\n";
-                } else {
-                    llama.stop();
-                    std::cout << "llama-server stopped\n";
+                // Find llama-server by port using lsof
+                std::string cmd = "lsof -ti tcp:" + std::to_string(cfg.llama_port) + " 2>/dev/null";
+                FILE* pipe = popen(cmd.c_str(), "r");
+                if (pipe) {
+                    char buf[64];
+                    std::string pids;
+                    while (fgets(buf, sizeof(buf), pipe)) pids += buf;
+                    pclose(pipe);
+                    if (pids.empty()) {
+                        std::cout << "No process found on port " << cfg.llama_port << "\n";
+                    } else {
+                        std::istringstream iss(pids);
+                        std::string pid_str;
+                        while (std::getline(iss, pid_str)) {
+                            pid_str.erase(pid_str.find_last_not_of(" \t\r\n") + 1);
+                            if (!pid_str.empty()) {
+                                pid_t pid = std::stoi(pid_str);
+                                kill(pid, SIGTERM);
+                                std::cout << "Sent SIGTERM to pid " << pid << "\n";
+                            }
+                        }
+                    }
                 }
             } else if (subcmd == "status") {
                 auto s = llama.status();
