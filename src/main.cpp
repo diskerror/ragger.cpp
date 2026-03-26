@@ -993,10 +993,11 @@ int main(int argc, char** argv) {
                         ragger::Embedder embedder(cfg.resolved_model_dir());
                         ragger::SqliteBackend db(embedder, common_path);
                         auto user = db.get_user_by_username(username);
-                        if (!user || !user->is_admin) {
+                        if (user && !user->is_admin) {
                             std::cerr << "Error: model download requires admin privileges\n";
                             return 1;
                         }
+                        // !user = not registered yet, allow (first-run)
                     } catch (...) {
                         // No DB or no users table — allow (first-run scenario)
                     }
@@ -1108,7 +1109,7 @@ int main(int argc, char** argv) {
                         ragger::Embedder embedder(cfg.resolved_model_dir());
                         ragger::SqliteBackend db(embedder, common_path);
                         auto user = db.get_user_by_username(username);
-                        if (!user || !user->is_admin) {
+                        if (user && !user->is_admin) {
                             std::cerr << "Error: model remove requires admin privileges\n";
                             return 1;
                         }
