@@ -64,7 +64,7 @@ std::string Config::resolved_log_dir() const {
 }
 std::string Config::resolved_model_dir() const {
     if (model_dir.empty()) {
-        return expand_path(single_user ? "~/.ragger/models" : "/var/ragger/models");
+        return "/var/ragger/models";  // Always use shared location - embedding model must be consistent
     }
     return expand_path(model_dir);
 }
@@ -98,9 +98,9 @@ formats_dir = /var/ragger/formats
 [embedding]
 model = all-MiniLM-L6-v2
 dimensions = 384
-# model_dir: path to ONNX model files
-# Personal (default): model_dir = ~/.ragger/models
-# Shared (recommended if multi-user): model_dir = /var/ragger/models
+# model_dir: path to ONNX model files (default: /var/ragger/models)
+# All users on the same system must use the same embedding model
+# for vector search to work correctly.
 
 [search]
 default_limit = 5
