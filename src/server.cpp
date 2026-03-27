@@ -58,35 +58,50 @@ struct Server::Impl {
     }
 
     void bootstrap_auth() {
-        // Ensure token exists (create if needed)
-        server_token_ = ensure_token();
+        const auto& cfg = config();
         
-        if (!server_token_.empty()) {
-            // Hash token and check if user exists
-            std::string token_hash = hash_token(server_token_);
-            auto user = memory.backend()->get_user_by_token_hash(token_hash);
+        if (cfg.single_user) {
+            // Single-user mode: ensure token exists, create default user if needed
+            server_token_ = ensure_token();
             
-            if (!user) {
-                // Create default user
-                std::string username = "default";
-                int user_id = memory.backend()->create_user(username, token_hash, true);
-                user = SqliteBackend::UserInfo{user_id, username, true, token_hash, ""};
-                log_info("Created default user: " + username + " (id=" + std::to_string(user_id) + ")");
+            if (!server_token_.empty()) {
+                std::string token_hash = hash_token(server_token_);
+                auto user = memory.backend()->get_user_by_token_hash(token_hash);
+                
+                if (!user) {
+                    // Auto-create the single user
+                    std::string username = "default";
+                    // Try to use actual username
+                    struct passwd* pw = getpwuid(getuid());
+                    if (pw) username = pw->pw_name;
+                    
+                    int user_id = memory.backend()->create_user(username, token_hash, true);
+                    user = SqliteBackend::UserInfo{user_id, username, true, token_hash, ""};
+                    log_info("Created user: " + username + " (id=" + std::to_string(user_id) + ")");
+                }
+                default_user_ = user;
             }
-            default_user_ = user;
+        } else {
+            // Multi-user mode: don't create tokens or default users.
+            // Users are provisioned via install.sh / add-user.
+            // Auth is validated per-request against the common DB.
+            log_info("Multi-user mode: auth via provisioned user tokens");
         }
     }
 
     std::optional<SqliteBackend::UserInfo> _check_auth(const crow::request& req) {
-        // If no token configured, auth is disabled
-        if (server_token_.empty()) {
-            return SqliteBackend::UserInfo{0, "anonymous", false, "", ""};
-        }
-
+        const auto& cfg = config();
+        
         // Extract Authorization header
         auto auth_header = req.get_header_value("Authorization");
+        
+        // If single-user mode with no token configured, auth is disabled
+        if (cfg.single_user && server_token_.empty()) {
+            return SqliteBackend::UserInfo{0, "anonymous", false, "", ""};
+        }
+        
         if (auth_header.empty()) {
-            return std::nullopt;
+            return std::nullopt;  // No auth header → reject
         }
 
         // Parse "Bearer <token>"
@@ -96,7 +111,7 @@ struct Server::Impl {
         }
         std::string token = auth_header.substr(bearer_prefix.size());
 
-        // Hash and lookup in database
+        // Hash and lookup in database (works for both modes)
         std::string token_hash = hash_token(token);
         auto user = memory.backend()->get_user_by_token_hash(token_hash);
         if (user) {
@@ -105,8 +120,8 @@ struct Server::Impl {
             return user;
         }
 
-        // Fallback: direct comparison with server token
-        if (token == server_token_ && default_user_) {
+        // Fallback: direct comparison with server token (single-user only)
+        if (cfg.single_user && token == server_token_ && default_user_) {
             return default_user_;
         }
 

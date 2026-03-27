@@ -880,8 +880,17 @@ int main(int argc, char** argv) {
 
         } else if (command == "mcp") {
             ragger::setup_logging(false, false);
-            ragger::RaggerMemory memory(db_path, model_dir);
-            do_mcp(memory);
+            std::unique_ptr<ragger::RaggerMemory> mem_ptr;
+            if (!cfg.single_user) {
+                // Multi-user MCP: use common DB for shared memories
+                auto common_path = cfg.resolved_common_db_path();
+                auto user_path = cfg.resolved_db_path();
+                mem_ptr = std::make_unique<ragger::RaggerMemory>(
+                    common_path, model_dir, user_path);
+            } else {
+                mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path, model_dir);
+            }
+            do_mcp(*mem_ptr);
 
         } else if (command == "rebuild-bm25") {
             ragger::setup_logging(false, false);
@@ -947,19 +956,24 @@ int main(int argc, char** argv) {
                 std::cout << "✓ Created ~/.ragger/token for " << username << "\n";
             else
                 std::cout << "Token already exists for " << username << "\n";
-            // Register via daemon HTTP API
+            // Register directly in DB
             try {
-                ragger::RaggerClient client(host, port, token);
-                if (client.is_available()) {
-                    auto result = client.register_user(username);
-                    if (result.contains("user_id"))
-                        std::cout << "✓ Registered in database (user_id: "
-                                  << result["user_id"] << ")\n";
+                std::string reg_db = cfg.single_user
+                    ? cfg.resolved_db_path()
+                    : cfg.resolved_common_db_path();
+                ragger::RaggerMemory memory(reg_db, model_dir);
+                std::string token_hash = ragger::hash_token(token);
+                auto existing = memory.backend()->get_user_by_username(username);
+                if (existing) {
+                    if (existing->token_hash != token_hash)
+                        memory.backend()->update_user_token(username, token_hash);
+                    std::cout << "✓ User exists in database (id: " << existing->id << ")\n";
                 } else {
-                    std::cout << "Server not running. Will auto-register on first authenticated request.\n";
+                    int user_id = memory.backend()->create_user(username, token_hash);
+                    std::cout << "✓ Registered in database (user_id: " << user_id << ")\n";
                 }
             } catch (const std::exception& e) {
-                std::cout << "Server will auto-register on first authenticated request.\n";
+                std::cout << "Warning: DB registration deferred (" << e.what() << ")\n";
             }
 
         } else if (command == "add-user") {
@@ -977,15 +991,20 @@ int main(int argc, char** argv) {
                     std::cout << "✓ Created token for " << username << "\n";
                 else
                     std::cout << "Token already exists for " << username << "\n";
-                // Register via daemon
-                ragger::RaggerClient client(host, port, token);
-                if (client.is_available()) {
-                    auto result = client.register_user(username, is_admin);
-                    if (result.contains("user_id"))
-                        std::cout << "✓ Registered in database (user_id: "
-                                  << result["user_id"] << ")\n";
+                // Register directly in DB (works whether daemon is running or not)
+                std::string reg_db = cfg.single_user
+                    ? cfg.resolved_db_path()
+                    : cfg.resolved_common_db_path();
+                ragger::RaggerMemory memory(reg_db, model_dir);
+                std::string token_hash = ragger::hash_token(token);
+                auto existing = memory.backend()->get_user_by_username(username);
+                if (existing) {
+                    if (existing->token_hash != token_hash)
+                        memory.backend()->update_user_token(username, token_hash);
+                    std::cout << "✓ User exists in database (id: " << existing->id << ")\n";
                 } else {
-                    std::cout << "Server not running. Will auto-register on first authenticated request.\n";
+                    int user_id = memory.backend()->create_user(username, token_hash, is_admin);
+                    std::cout << "✓ Registered in database (user_id: " << user_id << ")\n";
                 }
             } catch (const std::exception& e) {
                 std::cerr << "Error: " << e.what() << "\n";
@@ -1009,6 +1028,12 @@ int main(int argc, char** argv) {
             static const std::set<std::string> skip_homes = {
                 "/", "/var", "/var/empty", "/dev/null", "/nonexistent",
             };
+            // Open DB directly for registration
+            std::string reg_db = cfg.single_user
+                ? cfg.resolved_db_path()
+                : cfg.resolved_common_db_path();
+            ragger::RaggerMemory memory(reg_db, model_dir);
+            
             int count = 0;
             setpwent();
             while (struct passwd* pw = getpwent()) {
@@ -1025,17 +1050,20 @@ int main(int argc, char** argv) {
                 try {
                     auto [token, created] = provision_user(uname, pw->pw_dir);
                     std::string status = created ? "created" : "exists";
-                    // Register via daemon
+                    // Register directly in DB
                     try {
-                        ragger::RaggerClient client(host, port, token);
-                        if (client.is_available()) {
-                            client.register_user(uname);
+                        std::string token_hash = ragger::hash_token(token);
+                        auto existing = memory.backend()->get_user_by_username(uname);
+                        if (existing) {
+                            if (existing->token_hash != token_hash)
+                                memory.backend()->update_user_token(uname, token_hash);
                             status += ", registered";
                         } else {
-                            status += ", pending registration";
+                            memory.backend()->create_user(uname, token_hash);
+                            status += ", registered";
                         }
-                    } catch (...) {
-                        status += ", pending registration";
+                    } catch (const std::exception& e) {
+                        status += ", db error: " + std::string(e.what());
                     }
                     std::cout << "  " << uname << ": " << status << "\n";
                     ++count;
