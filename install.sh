@@ -74,7 +74,7 @@ else
     fi
 fi
 
-# --- Create directories and fix ownership ---
+# --- Create directories and fix ownership/permissions ---
 for dir in "$DATA_DIR" "$LOG_DIR"; do
     if [ ! -d "$dir" ]; then
         info "Creating $dir"
@@ -82,6 +82,17 @@ for dir in "$DATA_DIR" "$LOG_DIR"; do
     fi
     chown -R "$RAGGER_USER:$RAGGER_GROUP" "$dir"
     chmod 0750 "$dir"
+    # Fix subdirectory permissions
+    find "$dir" -type d -exec chmod 0750 {} +
+done
+
+# Fix file permissions: DB files group-writable (for MCP users), logs 0660
+info "Fixing file permissions"
+find "$DATA_DIR" -name "*.db" -o -name "*.db-shm" -o -name "*.db-wal" 2>/dev/null | while read f; do
+    chmod 0660 "$f"
+done
+find "$LOG_DIR" -type f 2>/dev/null | while read f; do
+    chmod 0660 "$f"
 done
 
 # --- Install system config if missing ---
@@ -130,8 +141,8 @@ if [ "$OS" = "Darwin" ]; then
     <string>com.diskerror.ragger</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
-        <string>/usr/local/bin/ragger-start.sh</string>
+        <string>/usr/local/bin/ragger</string>
+        <string>serve</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
