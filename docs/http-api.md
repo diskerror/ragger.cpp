@@ -207,7 +207,7 @@ curl -X POST http://localhost:8432/search \
 ## MCP Server
 
 Ragger implements the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
-for integration with AI agents.
+for integration with AI agents. Protocol version: `2024-11-05`.
 
 ### Starting the MCP Server
 
@@ -215,67 +215,57 @@ for integration with AI agents.
 ragger mcp
 ```
 
-The MCP server runs over stdin/stdout using JSON-RPC 2.0. It supports:
+The MCP server runs over stdin/stdout using JSON-RPC 2.0. It implements the
+standard MCP handshake and tool discovery:
 
-- `tools/list` — List available tools
-- `tools/call` — Call a tool (store, search)
+1. **`initialize`** — Returns server info (`ragger-memory`) and capabilities
+2. **`notifications/initialized`** — Client acknowledgment (no response)
+3. **`tools/list`** — Returns available tools with JSON Schema definitions
+4. **`tools/call`** — Executes a tool and returns results
+
+### Tools
+
+| Tool | Description | Required Params |
+|------|-------------|-----------------|
+| `store` | Store a memory for later retrieval | `text` (string) |
+| `search` | Search memories by semantic similarity | `query` (string) |
+
+**Optional `store` params:** `metadata` (object — category, tags, source, collection)
+
+**Optional `search` params:** `limit` (integer), `min_score` (number), `collections` (string array)
+
+### Example Session
+
+```json
+→ {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"ragger-memory","version":"0.7.0"}}}
+
+→ {"jsonrpc":"2.0","method":"notifications/initialized"}
+
+→ {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+← {"jsonrpc":"2.0","id":2,"result":{"tools":[...]}}
+
+→ {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"query":"deployment requirements","limit":5}}}
+← {"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"[...]"}]}}
+```
 
 ### Plain Text Mode
 
-The MCP server also accepts plain text queries. If a line isn't valid JSON,
-it's treated as a search query and results are returned as readable plain text:
+The MCP server also accepts plain text queries for interactive use.
+Non-JSON lines are treated as search queries with human-readable output:
 
 ```
 > deployment requirements
 1. [score: 0.823] (deployment-notes.md) [memory]
    The deploy script requires Node 18+
 
-2. [score: 0.712] (api-guide.md) [docs]
-   Authentication requires a valid API token.
-
 Timing: 12.3ms (10614 chunks)
 ```
 
 JSON-RPC and plain text can be interleaved freely in the same session.
 
-**For scripting:**
-
 ```bash
 echo "API authentication" | ragger mcp
-```
-
-Or use `--search` for one-shot queries:
-
-```bash
-ragger search "API authentication" --limit 3
-```
-
-### MCP Tools
-
-**Available tools:**
-
-- `store` — Store a memory
-- `search` — Search memories
-
-**Example `tools/call` request:**
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "tools/call",
-  "params": {
-    "name": "search",
-    "arguments": {
-      "query": "deployment requirements",
-      "limit": 5,
-      "collections": [
-        "memory",
-        "docs"
-      ]
-    }
-  }
-}
 ```
 
 See the [MCP specification](https://modelcontextprotocol.io/docs/spec/)

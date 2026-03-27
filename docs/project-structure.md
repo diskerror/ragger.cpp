@@ -243,12 +243,11 @@ See [HTTP API](http-api.md) for endpoint reference.
 
 ### `mcp_server.py`
 
-Model Context Protocol (MCP) server for AI agent integration.
+MCP-compliant server for AI agent integration (protocol version `2024-11-05`).
 
-**Modes:**
-
-- **JSON-RPC:** Standard MCP protocol over stdin/stdout
-- **Plain text:** Non-JSON lines treated as search queries
+Implements the standard MCP handshake (`initialize`, `notifications/initialized`)
+and tool discovery (`tools/list`, `tools/call`). Also accepts plain text queries
+as a search shortcut for interactive CLI use.
 
 **Tools:**
 

@@ -407,6 +407,76 @@ static void do_chat(const std::string& db_path, const std::string& model_dir) {
 // -----------------------------------------------------------------------
 // MCP: JSON-RPC server over stdin/stdout
 // -----------------------------------------------------------------------
+/// MCP tool definitions for tools/list
+static nlohmann::json mcp_tools_list() {
+    return {{"tools", nlohmann::json::array({
+        {
+            {"name", "store"},
+            {"description", "Store a memory for later semantic retrieval."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"text", {{"type", "string"}, {"description", "The text content to store."}}},
+                    {"metadata", {{"type", "object"}, {"description", "Optional metadata (category, tags, source, collection, etc.)."}}}
+                }},
+                {"required", nlohmann::json::array({"text"})}
+            }}
+        },
+        {
+            {"name", "search"},
+            {"description", "Search stored memories by semantic similarity."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"query", {{"type", "string"}, {"description", "The search query."}}},
+                    {"limit", {{"type", "integer"}, {"description", "Maximum number of results (default: 5)."}}},
+                    {"min_score", {{"type", "number"}, {"description", "Minimum similarity score 0-1 (default: 0.0)."}}},
+                    {"collections", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Filter by collection names."}}}
+                }},
+                {"required", nlohmann::json::array({"query"})}
+            }}
+        }
+    })}};
+}
+
+/// Handle tools/call dispatch
+static nlohmann::json mcp_tool_call(ragger::RaggerMemory& memory, const nlohmann::json& params) {
+    auto tool_name = params.value("name", "");
+    auto arguments = params.value("arguments", nlohmann::json::object());
+
+    if (tool_name == "store") {
+        auto text = arguments.value("text", "");
+        if (text.empty()) {
+            return {{"content", nlohmann::json::array({{{"type", "text"}, {"text", "Error: text parameter required"}}})}, {"isError", true}};
+        }
+        auto metadata = arguments.value("metadata", nlohmann::json::object());
+        auto id = memory.store(text, metadata);
+        nlohmann::json result_data = {{"id", id}, {"status", "stored"}};
+        return {{"content", nlohmann::json::array({{{"type", "text"}, {"text", result_data.dump()}}})}};
+
+    } else if (tool_name == "search") {
+        auto query = arguments.value("query", "");
+        if (query.empty()) {
+            return {{"content", nlohmann::json::array({{{"type", "text"}, {"text", "Error: query parameter required"}}})}, {"isError", true}};
+        }
+        int limit = arguments.value("limit", 5);
+        float min_score = arguments.value("min_score", 0.0f);
+        auto collections = arguments.value("collections", std::vector<std::string>{});
+        auto response = memory.search(query, limit, min_score, collections);
+        nlohmann::json results_arr = nlohmann::json::array();
+        for (auto& r : response.results) {
+            results_arr.push_back({
+                {"id", r.id}, {"text", r.text}, {"score", r.score},
+                {"metadata", r.metadata}, {"timestamp", r.timestamp}
+            });
+        }
+        return {{"content", nlohmann::json::array({{{"type", "text"}, {"text", results_arr.dump()}}})}};
+
+    } else {
+        return {{"content", nlohmann::json::array({{{"type", "text"}, {"text", "Unknown tool: " + tool_name}}})}, {"isError", true}};
+    }
+}
+
 static void do_mcp(ragger::RaggerMemory& memory) {
     auto send_response = [](const nlohmann::json& response) {
         std::cout << response.dump() << std::endl;
@@ -421,35 +491,36 @@ static void do_mcp(ragger::RaggerMemory& memory) {
                 auto request = nlohmann::json::parse(line);
                 auto method = request.value("method", "");
                 auto params = request.value("params", nlohmann::json::object());
-                auto req_id = request.value("id", nlohmann::json());
 
+                // Check if this is a notification (no "id" field) — no response
+                bool is_notification = !request.contains("id");
+                if (is_notification) {
+                    // notifications/initialized, etc. — silently acknowledge
+                    continue;
+                }
+
+                auto req_id = request["id"];
                 nlohmann::json result;
 
-                if (method == "memory_store") {
-                    auto text = params.value("text", "");
-                    auto metadata = params.value("metadata", nlohmann::json::object());
-                    if (text.empty()) throw std::runtime_error("text parameter required");
-                    auto id = memory.store(text, metadata);
-                    result = {{"id", id}, {"status", "stored"}};
+                if (method == "initialize") {
+                    result = {
+                        {"protocolVersion", "2024-11-05"},
+                        {"capabilities", {{"tools", nlohmann::json::object()}}},
+                        {"serverInfo", {{"name", "ragger-memory"}, {"version", "0.7.0"}}}
+                    };
 
-                } else if (method == "memory_search") {
-                    auto query = params.value("query", "");
-                    int limit = params.value("limit", 5);
-                    float min_score = params.value("min_score", 0.0f);
-                    auto collections = params.value("collections", std::vector<std::string>{});
-                    if (query.empty()) throw std::runtime_error("query parameter required");
-                    auto response = memory.search(query, limit, min_score, collections);
-                    nlohmann::json results_arr = nlohmann::json::array();
-                    for (auto& r : response.results) {
-                        results_arr.push_back({
-                            {"id", r.id}, {"text", r.text}, {"score", r.score},
-                            {"metadata", r.metadata}, {"timestamp", r.timestamp}
-                        });
-                    }
-                    result = {{"results", results_arr}};
+                } else if (method == "tools/list") {
+                    result = mcp_tools_list();
+
+                } else if (method == "tools/call") {
+                    result = mcp_tool_call(memory, params);
 
                 } else {
-                    throw std::runtime_error("Unknown method: " + method);
+                    send_response({
+                        {"jsonrpc", "2.0"}, {"id", req_id},
+                        {"error", {{"code", -32601}, {"message", "Method not found: " + method}}}
+                    });
+                    continue;
                 }
 
                 send_response({
@@ -464,7 +535,7 @@ static void do_mcp(ragger::RaggerMemory& memory) {
                 });
             }
         } else {
-            // Plain text → search shortcut
+            // Plain text → search shortcut (interactive use)
             try {
                 auto response = memory.search(line);
                 if (response.results.empty()) {
