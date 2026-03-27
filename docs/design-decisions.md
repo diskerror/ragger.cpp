@@ -120,14 +120,50 @@ when memories are stored to the common database, preventing accidental
 loss of curated shared knowledge. The `bad` tag marks wrong or harmful
 memories — preserved as institutional memory of anti-patterns.
 
-## Token-Based Auth, Not Passwords (for API)
+## Dual Authentication: Tokens + Passwords
 
-API clients authenticate with bearer tokens stored in `~/.ragger/token`.
-Tokens are auto-generated on first run. This is simpler and more
-secure than username/password for programmatic access.
+Ragger uses two authentication mechanisms for different access patterns:
 
-Browser auth (for future web UI) uses hashed passwords + session
-cookies — a separate mechanism for a different access pattern.
+**Tokens** — Machine auth for API and MCP clients.
+- Auto-generated at provisioning, stored in `~/.ragger/token`
+- SHA-256 hash stored in the database
+- Used by OpenClaw, Claude Desktop, and other programmatic clients
+- Auto-rotate on a configurable interval (default: 24 hours)
+
+**Passwords** — Human auth for the web UI.
+- User-chosen, set during installation or via `ragger passwd`
+- PBKDF2-SHA256 hash stored in the database (600k iterations)
+- Only the user knows the password — even root can't recover it, only reset it
+- Optional: blank password disables web UI access
+
+### Why Both?
+
+Tokens live on disk (`~/.ragger/token`) and are readable by any user
+with sudo privileges. That's acceptable for machine clients but not
+for human authentication — a compromised token file shouldn't grant
+persistent human-level access.
+
+### Why Tokens Auto-Rotate
+
+The primary motivation is **backup exposure**, not live access.
+
+macOS Time Machine (and similar backup systems) makes local snapshots
+of the user's computer before transferring them to remote storage.
+Token rotation ensures the token has likely expired before the snapshot
+reaches the backup drive or server. This prevents a valid token from
+sitting indefinitely in backup storage where it might be extracted.
+
+The sudo-user window (where another admin could read the token file)
+is a secondary concern — token rotation limits that exposure too, but
+backup safety is the driving design constraint.
+
+### Three Access Levels
+
+| Level | Capabilities |
+|-------|-------------|
+| **User** | Use ragger, change own password |
+| **Admin** | Add/remove users, reset any user's password |
+| **Root (sudo)** | Direct DB access, system config, group management |
 
 ## Chat Scope: Memory-Aware Conversation Only
 
