@@ -1,7 +1,7 @@
 # OpenClaw Integration
 
 Ragger integrates with [OpenClaw](https://github.com/openclaw/openclaw) as a
-memory plugin via the HTTP server.
+memory plugin via HTTP (daemon) or MCP (per-user stdio).
 
 ## 1. Install the OpenClaw plugin
 
@@ -28,10 +28,12 @@ In `~/.openclaw/openclaw.json`, set the memory plugin slot:
         "enabled": true,
         "config": {
           "serverUrl": "http://localhost:8432",
+          "transport": "auto",
           "autoRecall": true,
           "autoCapture": true,
           "serverCommand": "/usr/local/bin/ragger",
-          "serverArgs": ["serve"]
+          "serverArgs": ["serve"],
+          "mcpCommand": "ragger"
         }
       }
     }
@@ -39,13 +41,32 @@ In `~/.openclaw/openclaw.json`, set the memory plugin slot:
 }
 ```
 
-The `serverCommand` can point to either the C++ binary (`ragger serve`)
-or a startup script that waits for external drives, sets environment,
-etc. The plugin automatically starts the server if it's not already
-running and waits up to 15 seconds for it to become ready.
+### Transport Options
+
+- **`transport: "http"`** — Use HTTP daemon only (multi-user, auth via token)
+- **`transport: "mcp"`** — Use MCP stdio only (spawns `ragger mcp` per-user)
+- **`transport: "auto"`** (default) — Try HTTP, fall back to MCP if daemon unavailable
+
+**HTTP mode:**
+- Connects to Ragger daemon (LaunchDaemon, systemd, or manual)
+- Multi-user with token auth (`~/.ragger/token`)
+- `serverCommand` spawns the daemon if not running (optional)
+
+**MCP mode:**
+- Spawns `ragger mcp` as the current user (no daemon needed)
+- Uses stdio for JSON-RPC communication
+- Single-user, no authentication required
+- `mcpCommand` defaults to `ragger` from PATH
+
+**Auto mode:**
+- Tries HTTP first
+- Falls back to MCP if HTTP server unavailable
+- Best for mixed environments (daemon when available, MCP when not)
+
+Both transports can run simultaneously — SQLite WAL handles concurrent access.
 
 If you prefer to manage the server yourself (launchd, systemd, manual),
-just omit `serverCommand` and start it however you like.
+omit `serverCommand` and start it however you like.
 
 ## Agent Tools
 
