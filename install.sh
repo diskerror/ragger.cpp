@@ -168,6 +168,7 @@ fi
 info "Installing /usr/local/bin/ragger"
 cp "$BINARY" /usr/local/bin/ragger
 chmod 0755 /usr/local/bin/ragger
+codesign -f -s - /usr/local/bin/ragger 2>/dev/null || true
 
 # --- Restart daemon ---
 if [ "$OS" = "Darwin" ]; then
