@@ -15,7 +15,9 @@ Copy the `memory-ragger` plugin directory into `~/.openclaw/extensions/`:
 
 ## 2. Configure OpenClaw
 
-In `~/.openclaw/openclaw.json`, set the memory plugin slot:
+### Single-user Setup (Recommended)
+
+For personal use, MCP mode requires no daemon — just the `ragger` binary:
 
 ```json
 {
@@ -27,13 +29,9 @@ In `~/.openclaw/openclaw.json`, set the memory plugin slot:
       "memory-ragger": {
         "enabled": true,
         "config": {
-          "serverUrl": "http://localhost:8432",
-          "transport": "auto",
+          "transport": "mcp",
           "autoRecall": true,
-          "autoCapture": true,
-          "serverCommand": "/usr/local/bin/ragger",
-          "serverArgs": ["serve"],
-          "mcpCommand": "ragger"
+          "autoCapture": true
         }
       }
     }
@@ -41,32 +39,61 @@ In `~/.openclaw/openclaw.json`, set the memory plugin slot:
 }
 ```
 
-### Transport Options
+This spawns `ragger mcp` on demand. No daemon, no ports, no auth tokens.
 
-- **`transport: "http"`** — Use HTTP daemon only (multi-user, auth via token)
-- **`transport: "mcp"`** — Use MCP stdio only (spawns `ragger mcp` per-user)
-- **`transport: "auto"`** (default) — Try HTTP, fall back to MCP if daemon unavailable
+### Multi-user Setup (Daemon)
 
-**HTTP mode:**
-- Connects to Ragger daemon (LaunchDaemon, systemd, or manual)
-- Multi-user with token auth (`~/.ragger/token`)
-- `serverCommand` spawns the daemon if not running (optional)
+If you're running a system daemon (see [Deployment](deployment.md)), use HTTP transport:
 
-**MCP mode:**
-- Spawns `ragger mcp` as the current user (no daemon needed)
-- Uses stdio for JSON-RPC communication
-- Single-user, no authentication required
-- `mcpCommand` defaults to `ragger` from PATH
+```json
+{
+  "plugins": {
+    "slots": {
+      "memory": "memory-ragger"
+    },
+    "entries": {
+      "memory-ragger": {
+        "enabled": true,
+        "config": {
+          "transport": "http",
+          "serverUrl": "http://localhost:8432",
+          "autoRecall": true,
+          "autoCapture": true
+        }
+      }
+    }
+  }
+}
+```
 
-**Auto mode:**
-- Tries HTTP first
-- Falls back to MCP if HTTP server unavailable
-- Best for mixed environments (daemon when available, MCP when not)
+### Auto Transport (Fallback)
 
-Both transports can run simultaneously — SQLite WAL handles concurrent access.
+Use `"transport": "auto"` to try HTTP first, fall back to MCP:
 
-If you prefer to manage the server yourself (launchd, systemd, manual),
-omit `serverCommand` and start it however you like.
+```json
+{
+  "config": {
+    "transport": "auto",
+    "serverUrl": "http://localhost:8432",
+    "autoRecall": true,
+    "autoCapture": true
+  }
+}
+```
+
+Good for development — connects to daemon when running, spawns MCP when not.
+
+### Transport Comparison
+
+| Mode   | Use Case             | Auth   | Daemon | Multi-user |
+|--------|----------------------|--------|--------|------------|
+| `mcp`  | Single user (laptop) | None   | No     | No         |
+| `http` | Multi-user (server)  | Token  | Yes    | Yes        |
+| `auto` | Development/mixed    | Token* | Maybe  | Maybe      |
+
+\* Auto uses token for HTTP, none for MCP fallback.
+
+**Recommendation:** Use `mcp` unless you need multi-user or remote access.
 
 ## Agent Tools
 
