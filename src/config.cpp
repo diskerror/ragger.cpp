@@ -13,6 +13,8 @@
 #include <iostream>
 #include <sstream>
 #include <algorithm>
+#include <pwd.h>
+#include <unistd.h>
 
 // Standalone timestamp — usable before logging is initialized
 static std::string ts() {
@@ -38,6 +40,11 @@ namespace fs = std::filesystem;
 std::string expand_path(const std::string& path) {
     if (path.empty() || path[0] != '~') return path;
     const char* home = std::getenv("HOME");
+    if (!home) {
+        // Fallback: look up home directory from passwd entry
+        struct passwd* pw = getpwuid(getuid());
+        if (pw && pw->pw_dir) home = pw->pw_dir;
+    }
     if (!home) return path;
     return std::string(home) + path.substr(1);
 }
@@ -172,8 +179,12 @@ std::string find_system_config(const std::string& cli_path) {
 
 std::string find_user_config() {
     std::string user_conf = expand_path("~/.ragger/ragger.ini");
-    if (fs::exists(user_conf)) {
-        return user_conf;
+    try {
+        if (fs::exists(user_conf)) {
+            return user_conf;
+        }
+    } catch (const fs::filesystem_error&) {
+        // Permission denied or inaccessible — skip user config silently
     }
     return "";
 }
