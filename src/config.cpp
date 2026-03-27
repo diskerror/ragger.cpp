@@ -49,11 +49,24 @@ std::string expand_path(const std::string& path) {
     return std::string(home) + path.substr(1);
 }
 
-std::string Config::resolved_db_path()        const { return expand_path(db_path); }
+std::string Config::resolved_db_path() const {
+    if (db_path.empty()) {
+        return expand_path(single_user ? "~/.ragger/memories.db" : common_db_path);
+    }
+    return expand_path(db_path);
+}
 std::string Config::resolved_common_db_path() const { return expand_path(common_db_path); }
-std::string Config::resolved_log_dir()        const { return expand_path(log_dir); }
+std::string Config::resolved_log_dir() const {
+    if (log_dir.empty()) {
+        return expand_path(single_user ? "~/.ragger" : "/var/log/ragger");
+    }
+    return expand_path(log_dir);
+}
 std::string Config::resolved_model_dir() const {
-    return expand_path(model_dir.empty() ? "~/.ragger/models" : model_dir);
+    if (model_dir.empty()) {
+        return expand_path(single_user ? "~/.ragger/models" : "/var/ragger/models");
+    }
+    return expand_path(model_dir);
 }
 
 std::string Config::resolve_model(const std::string& name) const {

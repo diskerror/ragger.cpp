@@ -20,7 +20,7 @@ struct Config {
     bool        single_user    = true;
 
     // --- Storage ---
-    std::string db_path        = "~/.ragger/memories.db";
+    std::string db_path;     // empty = resolved at runtime (single_user: ~/.ragger/memories.db)
     std::string common_db_path = "/var/ragger/memories.db";
     std::string default_collection = "memory";
     std::string formats_dir    = "/var/ragger/formats";
@@ -28,7 +28,7 @@ struct Config {
     // --- Embedding ---
     std::string embedding_model = "all-MiniLM-L6-v2";
     int         embedding_dimensions = 384;
-    std::string model_dir;   // empty = default (~/.ragger/models)
+    std::string model_dir;   // empty = resolved at runtime (single_user: ~/.ragger/models, daemon: /var/ragger/models)
 
     // --- Search ---
     int   default_search_limit = 5;
@@ -56,7 +56,7 @@ struct Config {
     std::vector<InferenceEndpointConfig> inference_endpoints;
 
     // --- Logging ---
-    std::string log_dir        = "~/.ragger";
+    std::string log_dir;       // empty = resolved at runtime (single_user: ~/.ragger, daemon: /var/log/ragger)
     bool query_log_enabled     = true;
     bool http_log_enabled      = true;
     bool mcp_log_enabled       = true;

@@ -97,13 +97,8 @@ void setup_logging(bool verbose, bool server_mode) {
 
     const auto& cfg = config();
 
-    // Determine log directory
-    std::string log_dir;
-    if (server_mode) {
-        log_dir = cfg.resolved_log_dir();
-    } else {
-        log_dir = expand_path("~/.ragger");
-    }
+    // Determine log directory — always use config (resolves based on single_user)
+    std::string log_dir = cfg.resolved_log_dir();
 
     // Always open error.log
     g_logger.error_log = open_log_file(log_dir, "error.log");
