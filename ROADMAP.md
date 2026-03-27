@@ -22,6 +22,12 @@ Both Python and C++ versions at feature parity. C++ is production server.
 - `resources/list` — enumerate available collections
 - `resources/read` — read collection contents
 
+### Performance
+
+- **Pre-load user configs:** At daemon startup/HUP, cache all user configurations
+  from the users table. Eliminates per-request disk I/O for `~/.ragger/ragger.ini`.
+  Tradeoff: config changes require HUP to reload.
+
 ### Potential Upgrades
 
 - **Re-ranking:** Cross-encoder reranking after initial retrieval

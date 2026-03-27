@@ -98,8 +98,9 @@ formats_dir = /var/ragger/formats
 [embedding]
 model = all-MiniLM-L6-v2
 dimensions = 384
-# model_dir: path to ONNX model files (default: ~/.ragger/models)
-# model_dir = ~/.ragger/models
+# model_dir: path to ONNX model files
+# Personal (default): model_dir = ~/.ragger/models
+# Shared (recommended if multi-user): model_dir = /var/ragger/models
 
 [search]
 default_limit = 5
