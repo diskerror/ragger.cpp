@@ -28,10 +28,7 @@ constexpr const char* MSG_LOADED_MEMORIES     = "Loaded %d memories";
 constexpr const char* MSG_STORED_WITH_ID      = "Stored with id: ";
 constexpr const char* MSG_SERVER_STARTING     = "Starting Ragger server on ";
 constexpr const char* ERR_PORT_IN_USE_1       = "Error: port ";
-constexpr const char* ERR_PORT_IN_USE_2       =
-    " is already in use. Another instance may be running.\n"
-    "To run multiple instances, set a different port in your config file\n"
-    "(~/.ragger/ragger.ini) and update the OpenClaw plugin's serverUrl to match.";
+constexpr const char* ERR_PORT_IN_USE_2       = " is already in use";
 constexpr const char* MSG_CONFIG_LOADED       = "Config loaded from ";
 constexpr const char* MSG_CONFIG_CREATED      = "Created default config: ";
 

@@ -642,15 +642,14 @@ int main(int argc, char** argv) {
                 auto user_path = cfg.resolved_db_path();
                 mem_ptr = std::make_unique<ragger::RaggerMemory>(
                     common_path, model_dir, user_path);
-                std::cout << "Multi-user mode: common=" << common_path
-                          << ", user=" << user_path << "\n";
+                ragger::log_info("Multi-user mode: common=" + common_path + ", user=" + user_path);
             } else {
                 mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path, model_dir);
             }
             auto& memory = *mem_ptr;
             char buf[128];
             std::snprintf(buf, sizeof(buf), MSG_LOADED_MEMORIES, memory.count());
-            std::cout << buf << "\n";
+            ragger::log_info(buf);
 
             ragger::Server server(memory, host, port);
             server.run();

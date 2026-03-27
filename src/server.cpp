@@ -53,8 +53,7 @@ struct Server::Impl {
         auto client = InferenceClient::from_config(cfg);
         if (!client._endpoints.empty()) {
             inference_ = std::make_unique<InferenceClient>(std::move(client));
-            std::cout << "Inference: enabled (" << inference_->_endpoints.size()
-                      << " endpoint(s))\n";
+            log_info("Inference: enabled (" + std::to_string(inference_->_endpoints.size()) + " endpoint(s))");
         }
     }
 
@@ -72,7 +71,7 @@ struct Server::Impl {
                 std::string username = "default";
                 int user_id = memory.backend()->create_user(username, token_hash, true);
                 user = SqliteBackend::UserInfo{user_id, username, true, token_hash, ""};
-                std::cerr << "Created default user: " << username << " (id=" << user_id << ")\n";
+                log_info("Created default user: " + username + " (id=" + std::to_string(user_id) + ")");
             }
             default_user_ = user;
         }
@@ -160,7 +159,7 @@ struct Server::Impl {
                     auto* backend = memory.backend();
                     backend->update_user_token(username, new_hash);
                     backend->update_user_token_rotated_at(username, now_str);
-                    std::cerr << "Rotated token for user: " << username << std::endl;
+                    log_info("Rotated token for user: " + std::string(username));
                 } catch (const std::exception& e) {
                     log_error(std::string("Token rotation failed for ") + username + ": " + e.what());
                 }
@@ -765,13 +764,11 @@ static bool is_port_available(const std::string& host, int port) {
 
 void Server::run() {
     if (!is_port_available(pImpl->host, pImpl->port)) {
-        std::cerr << lang::ERR_PORT_IN_USE_1 << pImpl->port
-                  << lang::ERR_PORT_IN_USE_2 << std::endl;
+        log_error(std::string(lang::ERR_PORT_IN_USE_1) + std::to_string(pImpl->port) + lang::ERR_PORT_IN_USE_2);
         std::exit(1);
     }
 
-    std::cout << lang::MSG_SERVER_STARTING 
-              << pImpl->host << ":" << pImpl->port << std::endl;
+    log_info(std::string(lang::MSG_SERVER_STARTING) + pImpl->host + ":" + std::to_string(pImpl->port));
     
     pImpl->app.loglevel(crow::LogLevel::Warning)
               .bindaddr(pImpl->host)

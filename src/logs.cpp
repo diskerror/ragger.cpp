@@ -57,11 +57,11 @@ static std::string get_timestamp() {
     ) % 1000;
 
     std::tm tm{};
-    gmtime_r(&time_t, &tm);
+    localtime_r(&time_t, &tm);
 
     std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%S")
-        << "." << std::setfill('0') << std::setw(3) << ms.count() << "Z";
+    oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S")
+        << "." << std::setfill('0') << std::setw(3) << ms.count();
     return oss.str();
 }
 

@@ -4,12 +4,30 @@
 #include "ragger/config.h"
 #include "ragger/lang.h"
 
+#include <chrono>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <algorithm>
+
+// Standalone timestamp — usable before logging is initialized
+static std::string ts() {
+    auto now = std::chrono::system_clock::now();
+    auto tt = std::chrono::system_clock::to_time_t(now);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()) % 1000;
+    std::tm tm{};
+    localtime_r(&tt, &tm);
+    char buf[24];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+    char result[32];
+    std::snprintf(result, sizeof(result), "%s.%03d", buf, (int)ms.count());
+    return result;
+}
 
 namespace ragger {
 namespace fs = std::filesystem;
@@ -125,7 +143,7 @@ static std::string bootstrap_user_config() {
     out << DEFAULT_CONFIG;
     out.close();
 
-    std::cout << lang::MSG_CONFIG_CREATED << conf_path << std::endl;
+    std::cout << ts() << " [INFO] " << lang::MSG_CONFIG_CREATED << conf_path << std::endl;
     return conf_path;
 }
 
@@ -419,14 +437,14 @@ void init_config(const std::string& cli_config_path) {
     // Load system config first
     std::string system_path = find_system_config(cli_config_path);
     static Config cfg = load_config(system_path);
-    std::cout << lang::MSG_CONFIG_LOADED << system_path << std::endl;
+    std::cout << ts() << " [INFO] " << lang::MSG_CONFIG_LOADED << system_path << std::endl;
     
     // Then overlay user-specific overrides
     std::string user_path = find_user_config();
     if (!user_path.empty() && user_path != system_path) {
         Config user_cfg = load_config(user_path);
         apply_user_overrides(cfg, user_cfg);
-        std::cout << "Applied user overrides from " << user_path << std::endl;
+        std::cout << ts() << " [INFO] Applied user overrides from " << user_path << std::endl;
     }
 
     g_config = &cfg;
