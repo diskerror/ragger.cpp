@@ -209,6 +209,11 @@ curl -X POST http://localhost:8432/search \
 Ragger implements the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
 for integration with AI agents. Protocol version: `2024-11-05`.
 
+**When to use MCP vs HTTP:** MCP is ideal for single-user/local setups where
+the agent fork+execs `ragger mcp` directly — no server needed, no auth overhead.
+In multi-user mode, prefer HTTP — it already handles auth, user routing, and
+concurrent access to both user and common databases.
+
 ### Starting the MCP Server
 
 ```bash

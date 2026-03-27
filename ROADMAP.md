@@ -4,26 +4,23 @@
 
 Both Python and C++ versions at feature parity. C++ is production server.
 
+### Transport Model
+
+- **HTTP** — Primary transport for all modes (single-user and multi-user).
+  Runs as a daemon via launchd/systemd. Handles auth, routing, and
+  concurrent access to both user and common databases.
+- **MCP** — Spec-compliant (protocol `2024-11-05`). Best suited for
+  single-user/local use where no server is needed — agent fork+execs
+  `ragger mcp` directly. In multi-user mode, HTTP is preferred since
+  it already solves auth/routing/permissions.
+
 ## Planned
 
-### MCP Spec Compliance
+### MCP Resources (Phase 2)
 
-Both Python and C++ MCP servers currently use custom JSON-RPC methods
-(`memory_store`, `memory_search`) directly. This works but is **not
-MCP-spec compliant** — no MCP client (Claude Desktop, OpenClaw, etc.)
-can discover or use the server.
-
-**Phase 1: Tools** (priority)
-- `initialize` / `initialized` handshake with capability negotiation
-- `tools/list` — expose `store` and `search` as discoverable tools
-- `tools/call` — dispatch tool invocations
-- Keep plain-text search shortcut for interactive use
-
-**Phase 2: Resources** (later)
 - Expose collections as MCP resources
-- `resources/list` — enumerate available collections (maps to DB tables)
+- `resources/list` — enumerate available collections
 - `resources/read` — read collection contents
-- Resource subscriptions for live updates (if useful)
 
 ### Potential Upgrades
 
