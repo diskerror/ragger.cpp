@@ -157,6 +157,14 @@ The sudo-user window (where another admin could read the token file)
 is a secondary concern — token rotation limits that exposure too, but
 backup safety is the driving design constraint.
 
+### Network Scope
+
+Currently the HTTP API binds to `127.0.0.1` (localhost only). Token
+auth is sufficient for local access since all users are already on
+the machine. Authentication for remote connections (binding to
+`0.0.0.0` or a specific interface) will be implemented soon — this
+will require TLS and stricter token/session validation.
+
 ### Three Access Levels
 
 | Level | Capabilities |
