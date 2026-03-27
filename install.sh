@@ -170,18 +170,16 @@ cp "$BINARY" /usr/local/bin/ragger
 chmod 0755 /usr/local/bin/ragger
 codesign -f -s - /usr/local/bin/ragger 2>/dev/null || true
 
-# --- Restart daemon ---
-if [ "$OS" = "Darwin" ]; then
-    info "Loading daemon"
-    launchctl unload "$PLIST" 2>/dev/null || true
-    launchctl load "$PLIST"
-elif [ "$OS" = "Linux" ]; then
-    if systemctl is-active --quiet ragger; then
-        info "Restarting daemon"
-        systemctl restart ragger
-    fi
-fi
-
 echo ""
 info "Installed: /usr/local/bin/ragger"
 /usr/local/bin/ragger version 2>/dev/null || true
+
+# --- Print restart commands ---
+echo ""
+echo -e "${GREEN}[+]${NC} To (re)start the daemon, run:"
+if [ "$OS" = "Darwin" ]; then
+    echo "    sudo launchctl bootout system/com.diskerror.ragger 2>/dev/null || true"
+    echo "    sudo launchctl bootstrap system $PLIST"
+elif [ "$OS" = "Linux" ]; then
+    echo "    sudo systemctl restart ragger"
+fi
