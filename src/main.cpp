@@ -14,6 +14,7 @@
 #include <set>
 #include <sstream>
 #include <sys/stat.h>
+#include <termios.h>
 #include <unistd.h>
 #include <signal.h>
 #include <iomanip>
@@ -562,6 +563,28 @@ static void do_mcp(ragger::RaggerMemory& memory) {
 }
 
 // -----------------------------------------------------------------------
+// Password input (with echo suppression)
+// -----------------------------------------------------------------------
+
+static std::string read_password(const std::string& prompt) {
+    std::cout << prompt;
+    std::cout.flush();
+    
+    struct termios old_term, new_term;
+    tcgetattr(STDIN_FILENO, &old_term);
+    new_term = old_term;
+    new_term.c_lflag &= ~ECHO;
+    tcsetattr(STDIN_FILENO, TCSANOW, &new_term);
+    
+    std::string password;
+    std::getline(std::cin, password);
+    
+    tcsetattr(STDIN_FILENO, TCSANOW, &old_term);
+    std::cout << "\n";
+    return password;
+}
+
+// -----------------------------------------------------------------------
 // User provisioning
 // -----------------------------------------------------------------------
 
@@ -665,6 +688,7 @@ int main(int argc, char** argv) {
         std::cout << "  add-self           Provision yourself (create token)\n";
         std::cout << "  add-user <name>    Provision a user (requires sudo)\n";
         std::cout << "  add-all            Provision all users (requires sudo)\n";
+        std::cout << "  passwd [<name>]    Change password (own or another user's with sudo)\n";
         std::cout << "  rebuild-bm25       Rebuild the BM25 keyword index\n";
         std::cout << "  rebuild-embeddings Rebuild embeddings for all memories\n";
         // (llama and model verbs removed — use external providers)
@@ -1021,6 +1045,68 @@ int main(int argc, char** argv) {
             }
             endpwent();
             std::cout << "✓ Processed " << count << " users\n";
+
+        } else if (command == "passwd") {
+            ragger::setup_logging(false, false);
+            auto args = opts.getParams("args");
+            
+            // Determine target user
+            std::string target_user;
+            if (!args.empty()) {
+                // Changing another user's password — requires sudo or admin
+                target_user = args[0];
+                if (getuid() != 0) {
+                    std::cerr << "Error: changing another user's password requires sudo\n";
+                    return 1;
+                }
+            } else {
+                // Changing own password
+                struct passwd* self_pw = getpwuid(getuid());
+                if (!self_pw) {
+                    std::cerr << "Error: cannot determine username\n";
+                    return 1;
+                }
+                target_user = self_pw->pw_name;
+            }
+            
+            // Open database directly
+            ragger::RaggerMemory memory(db_path, model_dir);
+            
+            // Verify user exists in DB
+            auto user_info = memory.backend()->get_user_by_username(target_user);
+            if (!user_info) {
+                std::cerr << "Error: user '" << target_user << "' not found in database\n";
+                std::cerr << "Provision the user first: sudo ragger add-user " << target_user << "\n";
+                return 1;
+            }
+            
+            // If changing own password and not root, verify current password
+            if (args.empty() && user_info->id > 0) {
+                auto existing = memory.backend()->get_user_password(target_user);
+                if (existing) {
+                    std::string current = read_password("Current password: ");
+                    if (!ragger::verify_password(current, *existing)) {
+                        std::cerr << "Error: incorrect password\n";
+                        return 1;
+                    }
+                }
+            }
+            
+            // Read new password
+            std::string new_pass = read_password("New password: ");
+            if (new_pass.empty()) {
+                std::cout << "Password cleared (web UI access disabled).\n";
+                memory.backend()->set_user_password(target_user, "");
+            } else {
+                std::string confirm = read_password("Confirm password: ");
+                if (new_pass != confirm) {
+                    std::cerr << "Error: passwords do not match\n";
+                    return 1;
+                }
+                std::string hash = ragger::hash_password(new_pass);
+                memory.backend()->set_user_password(target_user, hash);
+                std::cout << "✓ Password updated for " << target_user << "\n";
+            }
 
         } else {
             std::cerr << CLI_UNKNOWN_COMMAND << command << "\n";

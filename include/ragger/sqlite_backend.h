@@ -103,6 +103,12 @@ public:
     /// Update a user's preferred model.
     void update_user_preferred_model(const std::string& username, const std::string& model);
 
+    /// Set a user's password hash. Empty string clears it.
+    void set_user_password(const std::string& username, const std::string& password_hash);
+
+    /// Get a user's password hash. Returns nullopt if not set.
+    std::optional<std::string> get_user_password(const std::string& username);
+
     /// Delete a memory by ID. Returns true if deleted.
     bool delete_memory(int memory_id);
 

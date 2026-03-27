@@ -139,6 +139,7 @@ struct SqliteBackend::Impl {
         migrate_dedicated_columns();
         migrate_add_token_rotated_at();
         migrate_add_preferred_model();
+        migrate_add_password_hash();
     }
 
     void migrate_add_user_id() {
@@ -302,6 +303,22 @@ struct SqliteBackend::Impl {
         if (!has_preferred_model) {
             exec("ALTER TABLE users ADD COLUMN preferred_model TEXT");
             std::cerr << "Migrated users: added preferred_model column\n";
+        }
+    }
+
+    void migrate_add_password_hash() {
+        sqlite3_stmt* stmt;
+        sqlite3_prepare_v2(db, "PRAGMA table_info(users)", -1, &stmt, nullptr);
+        bool has_password_hash = false;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            std::string col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            if (col == "password_hash") has_password_hash = true;
+        }
+        sqlite3_finalize(stmt);
+
+        if (!has_password_hash) {
+            exec("ALTER TABLE users ADD COLUMN password_hash TEXT");
+            std::cerr << "Migrated users: added password_hash column\n";
         }
     }
 
@@ -1192,6 +1209,47 @@ void SqliteBackend::update_user_preferred_model(const std::string& username,
         throw std::runtime_error("Failed to execute statement");
     }
     sqlite3_finalize(stmt);
+}
+
+void SqliteBackend::set_user_password(const std::string& username,
+                                       const std::string& password_hash) {
+    sqlite3_stmt* stmt = nullptr;
+    if (password_hash.empty()) {
+        int rc = sqlite3_prepare_v2(pImpl->db,
+            "UPDATE users SET password_hash = NULL WHERE username = ?",
+            -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) throw std::runtime_error("Failed to prepare statement");
+        sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    } else {
+        int rc = sqlite3_prepare_v2(pImpl->db,
+            "UPDATE users SET password_hash = ? WHERE username = ?",
+            -1, &stmt, nullptr);
+        if (rc != SQLITE_OK) throw std::runtime_error("Failed to prepare statement");
+        sqlite3_bind_text(stmt, 1, password_hash.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
+    }
+    int rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        throw std::runtime_error("Failed to execute statement");
+    }
+    sqlite3_finalize(stmt);
+}
+
+std::optional<std::string> SqliteBackend::get_user_password(
+        const std::string& username) {
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(pImpl->db,
+        "SELECT password_hash FROM users WHERE username = ?",
+        -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* val = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        sqlite3_finalize(stmt);
+        if (val && val[0] != '\0') return std::string(val);
+    }
+    sqlite3_finalize(stmt);
+    return std::nullopt;
 }
 
 } // namespace ragger

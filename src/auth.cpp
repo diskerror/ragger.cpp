@@ -5,12 +5,15 @@
 #include "ragger/config.h"
 
 #include <openssl/sha.h>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
 #include <fstream>
 #include <sstream>
 #include <iomanip>
 #include <filesystem>
 #include <random>
 #include <cstdio>
+#include <cstring>
 #include <pwd.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -168,6 +171,81 @@ std::pair<std::string, std::string> rotate_token_for_user(const std::string& use
     chmod(token_file.c_str(), 0640);
     
     return {new_token, new_hash};
+}
+
+// PBKDF2 password hashing
+static const int PBKDF2_ITERATIONS = 600000;
+static const int PBKDF2_SALT_LEN = 16;
+static const int PBKDF2_KEY_LEN = 32;
+
+static std::string bytes_to_hex(const unsigned char* data, size_t len) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < len; ++i) {
+        oss << std::hex << std::setw(2) << std::setfill('0')
+            << static_cast<int>(data[i]);
+    }
+    return oss.str();
+}
+
+static std::vector<unsigned char> hex_to_bytes(const std::string& hex) {
+    std::vector<unsigned char> bytes;
+    for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+        unsigned int byte;
+        std::sscanf(hex.c_str() + i, "%02x", &byte);
+        bytes.push_back(static_cast<unsigned char>(byte));
+    }
+    return bytes;
+}
+
+std::string hash_password(const std::string& password) {
+    unsigned char salt[PBKDF2_SALT_LEN];
+    if (RAND_bytes(salt, PBKDF2_SALT_LEN) != 1) {
+        throw std::runtime_error("Failed to generate random salt");
+    }
+    
+    unsigned char key[PBKDF2_KEY_LEN];
+    if (PKCS5_PBKDF2_HMAC(
+            password.c_str(), static_cast<int>(password.size()),
+            salt, PBKDF2_SALT_LEN,
+            PBKDF2_ITERATIONS,
+            EVP_sha256(),
+            PBKDF2_KEY_LEN, key) != 1) {
+        throw std::runtime_error("PBKDF2 failed");
+    }
+    
+    // Format: pbkdf2:iterations:salt_hex:key_hex
+    return "pbkdf2:" + std::to_string(PBKDF2_ITERATIONS) + ":"
+         + bytes_to_hex(salt, PBKDF2_SALT_LEN) + ":"
+         + bytes_to_hex(key, PBKDF2_KEY_LEN);
+}
+
+bool verify_password(const std::string& password, const std::string& stored_hash) {
+    // Parse "pbkdf2:iterations:salt_hex:key_hex"
+    if (stored_hash.substr(0, 7) != "pbkdf2:") return false;
+    
+    size_t pos1 = 7;
+    size_t pos2 = stored_hash.find(':', pos1);
+    if (pos2 == std::string::npos) return false;
+    size_t pos3 = stored_hash.find(':', pos2 + 1);
+    if (pos3 == std::string::npos) return false;
+    
+    int iterations = std::stoi(stored_hash.substr(pos1, pos2 - pos1));
+    auto salt = hex_to_bytes(stored_hash.substr(pos2 + 1, pos3 - pos2 - 1));
+    auto expected_key = hex_to_bytes(stored_hash.substr(pos3 + 1));
+    
+    unsigned char key[PBKDF2_KEY_LEN];
+    if (PKCS5_PBKDF2_HMAC(
+            password.c_str(), static_cast<int>(password.size()),
+            salt.data(), static_cast<int>(salt.size()),
+            iterations,
+            EVP_sha256(),
+            PBKDF2_KEY_LEN, key) != 1) {
+        return false;
+    }
+    
+    // Constant-time comparison
+    return CRYPTO_memcmp(key, expected_key.data(),
+                         std::min(static_cast<size_t>(PBKDF2_KEY_LEN), expected_key.size())) == 0;
 }
 
 } // namespace ragger
