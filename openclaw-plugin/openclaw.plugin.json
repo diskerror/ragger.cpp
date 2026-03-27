@@ -1,0 +1,70 @@
+{
+  "id": "memory-ragger",
+  "kind": "memory",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "serverUrl": {
+        "type": "string",
+        "default": "http://localhost:8432"
+      },
+      "autoRecall": {
+        "type": "boolean",
+        "default": true
+      },
+      "autoCapture": {
+        "type": "boolean",
+        "default": true
+      },
+      "serverCommand": {
+        "type": "string"
+      },
+      "serverArgs": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": ["serve"]
+      },
+      "mcpCommand": {
+        "type": "string"
+      },
+      "transport": {
+        "type": "string",
+        "enum": ["http", "mcp", "auto"],
+        "default": "auto"
+      }
+    }
+  },
+  "uiHints": {
+    "serverUrl": {
+      "label": "Ragger Server URL",
+      "placeholder": "http://localhost:8432"
+    },
+    "autoRecall": {
+      "label": "Auto-Recall",
+      "help": "Automatically inject relevant memories into context before agent runs"
+    },
+    "autoCapture": {
+      "label": "Auto-Capture",
+      "help": "Automatically store important user messages after conversations"
+    },
+    "serverCommand": {
+      "label": "Server Command",
+      "help": "Path to ragger binary. If set, the plugin will auto-start the HTTP server when it's not running.",
+      "placeholder": "/usr/local/bin/ragger"
+    },
+    "serverArgs": {
+      "label": "Server Arguments",
+      "help": "Arguments to pass to serverCommand (default: [\"serve\"])"
+    },
+    "mcpCommand": {
+      "label": "MCP Command",
+      "help": "Path to ragger binary for MCP fallback (default: \"ragger\" from PATH)",
+      "placeholder": "ragger"
+    },
+    "transport": {
+      "label": "Transport",
+      "help": "Transport preference: \"http\" (daemon), \"mcp\" (spawn per-user), or \"auto\" (try HTTP, fall back to MCP)"
+    }
+  }
+}

@@ -174,6 +174,33 @@ echo ""
 info "Installed: /usr/local/bin/ragger"
 /usr/local/bin/ragger version 2>/dev/null || true
 
+# --- Install OpenClaw plugin (if OpenClaw is present) ---
+# Detect the actual user who ran sudo (not root)
+if [ -n "${SUDO_USER:-}" ]; then
+    ACTUAL_USER="$SUDO_USER"
+    ACTUAL_HOME=$(eval echo ~"$SUDO_USER")
+else
+    ACTUAL_USER="$USER"
+    ACTUAL_HOME="$HOME"
+fi
+
+OPENCLAW_DIR="$ACTUAL_HOME/.openclaw"
+PLUGIN_SRC="openclaw-plugin"
+
+if [ -d "$OPENCLAW_DIR" ] && [ -d "$PLUGIN_SRC" ]; then
+    PLUGIN_DEST="$OPENCLAW_DIR/extensions/memory-ragger"
+    info "Installing OpenClaw plugin to $PLUGIN_DEST"
+    mkdir -p "$PLUGIN_DEST"
+    cp "$PLUGIN_SRC/openclaw.plugin.json" "$PLUGIN_DEST/"
+    cp "$PLUGIN_SRC/index.ts" "$PLUGIN_DEST/"
+    chown -R "$ACTUAL_USER" "$PLUGIN_DEST"
+    echo "    Plugin installed. Restart OpenClaw to load it."
+elif [ -d "$PLUGIN_SRC" ]; then
+    echo ""
+    echo -e "${GREEN}[+]${NC} OpenClaw plugin available at: $(pwd)/$PLUGIN_SRC"
+    echo "    To install later, copy to: ~/.openclaw/extensions/memory-ragger/"
+fi
+
 # --- Print restart commands ---
 echo ""
 echo -e "${GREEN}[+]${NC} To (re)start the daemon, run:"
