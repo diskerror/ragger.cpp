@@ -30,7 +30,7 @@ In `~/.openclaw/openclaw.json`, set the memory plugin slot:
           "serverUrl": "http://localhost:8432",
           "autoRecall": true,
           "autoCapture": true,
-          "serverCommand": "/usr/local/bin/ragger-start.sh",
+          "serverCommand": "/usr/local/bin/ragger",
           "serverArgs": ["serve"]
         }
       }

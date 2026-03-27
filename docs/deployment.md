@@ -45,20 +45,23 @@ Or vice versa.
 
 ## System-wide Install (Multi-user)
 
-**Status:** Reserved for future multi-user support.
+**Status:** Framework in place, per-user DB routing in progress.
 
-Multi-user framework is in place (layered config, SERVER_LOCKED keys,
-system ceilings, token auth) but the data layer is still single-user
-(one database, no user routing).
+Multi-user framework is complete (layered config, SERVER_LOCKED keys,
+system ceilings, token auth). User-specific DB routing via authenticated
+HTTP requests is planned.
 
-**Planned locations:**
+**Locations:**
 
-| Component      | Path                                       |
-|----------------|--------------------------------------------|
-| Executable     | `/usr/local/bin/ragger`                    |
-| System config  | `/etc/ragger.ini`                          |
-| Data directory | `/var/ragger/`                             |
-| User databases | `/var/ragger/users/<username>/memories.db` |
+| Component       | Path                           |
+|-----------------|--------------------------------|
+| Executable      | `/usr/local/bin/ragger`        |
+| System config   | `/etc/ragger.ini`              |
+| Common database | `/var/ragger/memories.db`      |
+| Embedding model | `/var/ragger/models/`          |
+| System logs     | `/var/log/ragger/`             |
+| User databases  | `~/.ragger/memories.db`        |
+| User tokens     | `~/.ragger/token`              |
 
 ---
 
@@ -69,7 +72,7 @@ a specific user):
 
 ### 1. Create a LaunchDaemon plist
 
-`/Library/LaunchDaemons/com.ragger.server.plist`:
+`/Library/LaunchDaemons/com.diskerror.ragger.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -77,20 +80,13 @@ a specific user):
 <plist version="1.0">
     <dict>
         <key>Label</key>
-        <string>com.ragger.server</string>
+        <string>com.diskerror.ragger</string>
 
         <key>ProgramArguments</key>
         <array>
-            <string>/Users/reid/.local/bin/ragger</string>
+            <string>/usr/local/bin/ragger</string>
             <string>serve</string>
-            <string>--host</string>
-            <string>127.0.0.1</string>
-            <string>--port</string>
-            <string>8432</string>
         </array>
-
-        <key>UserName</key>
-        <string>reid</string>
 
         <key>RunAtLoad</key>
         <true/>
@@ -99,88 +95,42 @@ a specific user):
         <true/>
 
         <key>StandardOutPath</key>
-        <string>/Users/reid/.ragger/server.log</string>
+        <string>/var/log/ragger/stdout.log</string>
 
         <key>StandardErrorPath</key>
-        <string>/Users/reid/.ragger/server.err</string>
+        <string>/var/log/ragger/stderr.log</string>
     </dict>
 </plist>
 ```
 
-**Key fields:**
-
-- `ProgramArguments` — Full path to `ragger` + arguments
-- `UserName` — User to run as (must own the database and config files)
-- `RunAtLoad` — Start at boot
-- `KeepAlive` — Restart if it crashes
+**Note:** The daemon uses `/etc/ragger.ini` for configuration. All paths
+are system paths (`/var/ragger/*`, `/var/log/ragger/*`) — no `~` expansion.
 
 ### 2. Load the LaunchDaemon
 
 ```bash
-sudo launchctl load /Library/LaunchDaemons/com.ragger.server.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.diskerror.ragger.plist
 ```
 
 **Check status:**
 
 ```bash
 sudo launchctl list | grep ragger
+curl -s http://localhost:8432/health
 ```
 
 **View logs:**
 
 ```bash
-tail -f ~/.ragger/server.log
-tail -f ~/.ragger/server.err
+tail -f /var/log/ragger/stdout.log
+tail -f /var/log/ragger/stderr.log
 ```
 
 **Unload:**
 
 ```bash
-sudo launchctl unload /Library/LaunchDaemons/com.ragger.server.plist
+sudo launchctl bootout system/com.diskerror.ragger
 ```
-
----
-
-## External Volume Timing (macOS)
-
-If the user's home directory is on an **external or non-default volume**
-(e.g., `/Volumes/WDBlack2`), that volume may not be mounted when the
-LaunchDaemon tries to start at boot.
-
-**Solutions:**
-
-1. **Enable auto-login** for the relevant user:
-	- **System Settings → Users & Groups → Automatically log in as…**
-	- This ensures the volume is mounted early in the boot process
-
-2. **Add a wait-for-volume script:**
-	- Wrap `ragger serve` in a shell script that waits for the volume
-	- Set a timeout (e.g., 60 seconds) to avoid hanging forever
-
-**Example wait script:**
-
-```bash
-#!/bin/bash
-# /Users/reid/.local/bin/ragger-wait-and-serve
-
-VOLUME="/Volumes/WDBlack2"
-TIMEOUT=60
-ELAPSED=0
-
-while [ ! -d "$VOLUME" ] && [ $ELAPSED -lt $TIMEOUT ]; do
-    sleep 1
-    ELAPSED=$((ELAPSED + 1))
-done
-
-if [ ! -d "$VOLUME" ]; then
-    echo "Volume $VOLUME not mounted after ${TIMEOUT}s" >&2
-    exit 1
-fi
-
-exec /Users/reid/.local/bin/ragger serve --host 127.0.0.1 --port 8432
-```
-
-Update the LaunchDaemon plist to call this script instead of `ragger` directly.
 
 ---
 
