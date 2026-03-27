@@ -86,6 +86,17 @@ std::string Chat::load_workspace_files(int max_context) {
         max_persona_chars = cfg.chat_max_persona_chars;
     }
     
+    // Multi-user mode requires SOUL.md in common dir
+    if (!cfg.single_user) {
+        std::string soul_path = common_dir + "/SOUL.md";
+        if (!fs::exists(soul_path)) {
+            throw std::runtime_error(
+                "Multi-user mode requires SOUL.md in " + common_dir + "\n"
+                "SOUL.md defines the assistant's personality and must be present for consistent behavior."
+            );
+        }
+    }
+    
     // File list with priority order and search locations
     struct FileSpec {
         std::string filename;
