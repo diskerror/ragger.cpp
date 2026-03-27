@@ -19,6 +19,8 @@ After that, all operations are offline.
 | Linux    | `~/.local/bin/ragger`              | `~/.ragger/ragger.ini`             |
 | Windows  | `%LOCALAPPDATA%\ragger\ragger.exe` | `%LOCALAPPDATA%\ragger\ragger.ini` |
 
+> **Note:** Windows support is planned but not yet implemented. macOS and Linux only for now.
+
 On macOS/Linux, ensure `~/.local/bin` is in your `PATH`:
 
 ```bash

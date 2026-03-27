@@ -109,6 +109,9 @@ public:
     /// Get a user's password hash. Returns nullopt if not set.
     std::optional<std::string> get_user_password(const std::string& username);
 
+    /// Remove a user from the users table.
+    void delete_user(const std::string& username);
+
     /// Delete a memory by ID. Returns true if deleted.
     bool delete_memory(int memory_id);
 

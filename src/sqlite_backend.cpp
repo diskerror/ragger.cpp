@@ -1252,4 +1252,14 @@ std::optional<std::string> SqliteBackend::get_user_password(
     return std::nullopt;
 }
 
+void SqliteBackend::delete_user(const std::string& username) {
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(pImpl->db,
+        "DELETE FROM users WHERE username = ?",
+        -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
 } // namespace ragger

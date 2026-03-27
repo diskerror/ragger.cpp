@@ -85,15 +85,11 @@ Good for development — connects to daemon when running, spawns MCP when not.
 
 ### Transport Comparison
 
-| Mode   | Use Case             | Auth   | Daemon | Multi-user |
-|--------|----------------------|--------|--------|------------|
-| `mcp`  | Single user (laptop) | None   | No     | No         |
-| `http` | Multi-user (server)  | Token  | Yes    | Yes        |
-| `auto` | Development/mixed    | Token* | Maybe  | Maybe      |
+- **mcp** — Single or multi-user. No daemon, no auth. Each user spawns their own instance. Simple but uses more resources in multi-user setups (each instance loads the embedding model).
+- **http** — Multi-user only. Requires `ragger serve` running as `ragger`/`_ragger` system user with user table and token auth. One daemon serves all users efficiently.
+- **auto** — Development/mixed. Tries HTTP first, falls back to MCP. Uses token for HTTP, none for MCP fallback.
 
-\* Auto uses token for HTTP, none for MCP fallback.
-
-**Recommendation:** Use `mcp` unless you need multi-user or remote access.
+**Recommendation:** Use `mcp` for personal use. Use `http` for managed multi-user deployments where `ragger serve` is running.
 
 ## Agent Tools
 

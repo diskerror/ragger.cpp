@@ -27,6 +27,12 @@ cd /path/to/ragger.cpp
 sudo ./install.sh         # Install to /usr/local/bin, restart daemon
 ```
 
+The installer is interactive: it asks for single-user or multi-user mode,
+creates all system resources, installs the binary, then walks through
+every user on the system — offering to add, remove, or configure client
+integrations (OpenClaw, Claude Desktop) for each. Safe to re-run on
+upgrades; only the binary is overwritten.
+
 **Development build** (manual cmake):
 ```bash
 cmake -B build -DBOOST_ROOT=/opt/local/libexec/boost/1.88
@@ -126,3 +132,7 @@ Features: multi-user with per-user databases and search merging, common shared m
 ## License
 
 GPL v3 — same as the Python version.
+
+**Commercial licensing:** If you'd like to use Ragger in a proprietary
+product without GPL obligations, commercial licenses are available.
+Contact reid@diskerror.com.

@@ -688,6 +688,7 @@ int main(int argc, char** argv) {
         std::cout << "  add-self           Provision yourself (create token)\n";
         std::cout << "  add-user <name>    Provision a user (requires sudo)\n";
         std::cout << "  add-all            Provision all users (requires sudo)\n";
+        std::cout << "  remove-user <name> Remove a user (requires sudo)\n";
         std::cout << "  passwd [<name>]    Change password (own or another user's with sudo)\n";
         std::cout << "  rebuild-bm25       Rebuild the BM25 keyword index\n";
         std::cout << "  rebuild-embeddings Rebuild embeddings for all memories\n";
@@ -991,6 +992,18 @@ int main(int argc, char** argv) {
                     std::cout << "✓ Created token for " << username << "\n";
                 else
                     std::cout << "Token already exists for " << username << "\n";
+                // Add user to ragger group (requires root)
+                if (getuid() == 0) {
+#ifdef __APPLE__
+                    std::string cmd = "dscl . -append /Groups/ragger GroupMembership " + username;
+#else
+                    std::string cmd = "usermod -aG ragger " + username;
+#endif
+                    if (std::system(cmd.c_str()) == 0)
+                        std::cout << "✓ Added " << username << " to ragger group\n";
+                    else
+                        std::cerr << "Warning: could not add " << username << " to ragger group\n";
+                }
                 // Register directly in DB (works whether daemon is running or not)
                 std::string reg_db = cfg.single_user
                     ? cfg.resolved_db_path()
@@ -1043,6 +1056,8 @@ int main(int argc, char** argv) {
                 if (!fs::is_directory(pw->pw_dir)) continue;
                 // Skip root, nobody, etc.
                 if (skip_users.count(pw->pw_name)) continue;
+                // Skip service accounts (names starting with _)
+                if (pw->pw_name[0] == '_') continue;
                 // Skip system home directories
                 if (skip_homes.count(pw->pw_dir)) continue;
 
@@ -1050,6 +1065,18 @@ int main(int argc, char** argv) {
                 try {
                     auto [token, created] = provision_user(uname, pw->pw_dir);
                     std::string status = created ? "created" : "exists";
+                    // Add to ragger group
+                    {
+#ifdef __APPLE__
+                        std::string cmd = "dscl . -append /Groups/ragger GroupMembership " + uname;
+#else
+                        std::string cmd = "usermod -aG ragger " + uname;
+#endif
+                        if (std::system(cmd.c_str()) == 0)
+                            status += ", group added";
+                        else
+                            status += ", group skipped";
+                    }
                     // Register directly in DB
                     try {
                         std::string token_hash = ragger::hash_token(token);
@@ -1073,6 +1100,80 @@ int main(int argc, char** argv) {
             }
             endpwent();
             std::cout << "✓ Processed " << count << " users\n";
+
+        } else if (command == "remove-user") {
+            ragger::setup_logging(false, false);
+            auto args = opts.getParams("args");
+            if (args.empty()) {
+                std::cerr << "Usage: ragger remove-user <username> [--keep-data]\n";
+                return 1;
+            }
+            if (getuid() != 0) {
+                std::cerr << "Error: remove-user requires sudo\n";
+                return 1;
+            }
+            std::string username = args[0];
+            bool keep_data = false;
+            for (const auto& a : args) {
+                if (a == "--keep-data") keep_data = true;
+            }
+
+            // 1. Remove from ragger OS group
+            {
+#ifdef __APPLE__
+                std::string cmd = "dscl . -delete /Groups/ragger GroupMembership " + username;
+#else
+                std::string cmd = "gpasswd -d " + username + " ragger";
+#endif
+                int rc = std::system(cmd.c_str());
+                if (rc == 0)
+                    std::cout << "✓ Removed " << username << " from ragger group\n";
+                else
+                    std::cout << "  " << username << " was not in ragger group (skipped)\n";
+            }
+
+            // 2. Remove from common database
+            try {
+                std::string reg_db = cfg.single_user
+                    ? cfg.resolved_db_path()
+                    : cfg.resolved_common_db_path();
+                ragger::RaggerMemory memory(reg_db, model_dir);
+                auto existing = memory.backend()->get_user_by_username(username);
+                if (existing) {
+                    memory.backend()->delete_user(username);
+                    std::cout << "✓ Removed " << username << " from database\n";
+                } else {
+                    std::cout << "  " << username << " not found in database (skipped)\n";
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: database removal: " << e.what() << "\n";
+            }
+
+            // 3. Remove token and optionally ~/.ragger/
+            struct passwd* pw = getpwnam(username.c_str());
+            if (pw) {
+                std::string ragger_dir = std::string(pw->pw_dir) + "/.ragger";
+                std::string token_path = ragger_dir + "/token";
+                if (!keep_data) {
+                    if (fs::is_directory(ragger_dir)) {
+                        fs::remove_all(ragger_dir);
+                        std::cout << "✓ Removed " << ragger_dir << "\n";
+                    } else {
+                        std::cout << "  No ~/.ragger/ directory found (skipped)\n";
+                    }
+                } else {
+                    // Just remove token, keep the rest
+                    if (fs::exists(token_path)) {
+                        fs::remove(token_path);
+                        std::cout << "✓ Removed token (" << token_path << ")\n";
+                    }
+                    std::cout << "  Kept " << ragger_dir << " (--keep-data)\n";
+                }
+            } else {
+                std::cout << "  User " << username << " not found in system passwd (skipped data)\n";
+            }
+
+            std::cout << "\n✓ User " << username << " removed\n";
 
         } else if (command == "passwd") {
             ragger::setup_logging(false, false);
