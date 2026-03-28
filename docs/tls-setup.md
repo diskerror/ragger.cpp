@@ -105,17 +105,37 @@ tls_key  = /etc/letsencrypt/live/chat.yourdomain.com/privkey.pem
 
 ### Automatic renewal
 
-Certbot renews certificates automatically (via cron or systemd timer), but
-ragger needs to reload the new certs. Add a deploy hook:
+Certbot installs a cron job or systemd timer that checks for renewal twice
+daily. When a certificate is renewed, the new files are written to disk — but
+ragger (and most servers) hold certs in memory. **You must configure a deploy
+hook to restart ragger after renewal**, or it will continue serving the old
+(eventually expired) certificate.
 
-**macOS (launchd):**
+#### Step 1: Verify certbot's renewal timer is active
 
 ```bash
-sudo certbot renew --deploy-hook "launchctl kickstart -k system/com.ragger.daemon"
+# Linux (systemd)
+systemctl list-timers | grep certbot
+
+# Or check cron
+cat /etc/cron.d/certbot 2>/dev/null
+crontab -l -u root 2>/dev/null | grep certbot
 ```
 
-Add this to your certbot renewal config at
-`/etc/letsencrypt/renewal/chat.yourdomain.com.conf`:
+If nothing shows up, add a cron entry:
+
+```bash
+# Check twice daily (certbot only renews when needed)
+echo "0 0,12 * * * root certbot renew -q" | sudo tee /etc/cron.d/certbot-renew
+```
+
+#### Step 2: Add the deploy hook
+
+Edit the renewal config at
+`/etc/letsencrypt/renewal/chat.yourdomain.com.conf` and add a `deploy_hook`
+line under `[renewalparams]`:
+
+**macOS (launchd):**
 
 ```ini
 [renewalparams]
@@ -128,6 +148,25 @@ deploy_hook = launchctl kickstart -k system/com.ragger.daemon
 [renewalparams]
 deploy_hook = systemctl restart ragger
 ```
+
+The deploy hook runs only after a successful renewal, not on every check.
+
+You can also set the hook globally (for all domains) by adding it to
+`/etc/letsencrypt/cli.ini`:
+
+```ini
+deploy-hook = systemctl restart ragger
+```
+
+#### Step 3: Test it
+
+```bash
+# Dry run — checks renewal logic without actually renewing
+sudo certbot renew --dry-run
+```
+
+If this succeeds, renewal will work automatically when the cert approaches
+expiration (~30 days before).
 
 ### File permissions
 
