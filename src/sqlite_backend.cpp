@@ -32,7 +32,7 @@ namespace fs = std::filesystem;
 // -----------------------------------------------------------------------
 struct SqliteBackend::Impl {
     sqlite3*    db       = nullptr;
-    Embedder&   embedder;
+    Embedder*   embedder = nullptr;    // nullable — null for DB-only (user mgmt) mode
     BM25Index   bm25;  // initialized after config loaded
     std::string db_path;
 
@@ -46,7 +46,7 @@ struct SqliteBackend::Impl {
     std::vector<std::string>       cached_timestamps;
 
     Impl(Embedder& emb, const std::string& path)
-        : embedder(emb), bm25(config().bm25_k1, config().bm25_b)
+        : embedder(&emb), bm25(config().bm25_k1, config().bm25_b)
     {
         const auto& cfg = config();
         db_path = path.empty() ? cfg.resolved_db_path() : expand_path(path);
@@ -65,6 +65,27 @@ struct SqliteBackend::Impl {
         exec("PRAGMA journal_mode=WAL");
         exec("PRAGMA foreign_keys = ON");
         create_schema();
+    }
+
+    /// DB-only constructor — no embedder, only user management ops work.
+    explicit Impl(const std::string& path)
+        : embedder(nullptr), bm25(0, 0)
+    {
+        db_path = expand_path(path);
+        fs::create_directories(fs::path(db_path).parent_path());
+
+        int rc = sqlite3_open(db_path.c_str(), &db);
+        if (rc != SQLITE_OK) {
+            std::string err = sqlite3_errmsg(db);
+            sqlite3_close(db);
+            db = nullptr;
+            throw std::runtime_error(std::string(lang::ERR_SQLITE_OPEN) + err);
+        }
+
+        exec("PRAGMA journal_mode=WAL");
+        exec("PRAGMA foreign_keys = ON");
+        // Only ensure users table + user columns exist (skip memories/BM25)
+        create_users_schema();
     }
 
     ~Impl() { close(); }
@@ -322,6 +343,23 @@ struct SqliteBackend::Impl {
         }
     }
 
+    /// Minimal schema for user management only (no memories/BM25).
+    void create_users_schema() {
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS users (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                username   TEXT NOT NULL UNIQUE,
+                token_hash TEXT NOT NULL,
+                is_admin   INTEGER NOT NULL DEFAULT 0,
+                created    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                modified   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )
+        )");
+        migrate_add_token_rotated_at();
+        migrate_add_preferred_model();
+        migrate_add_password_hash();
+    }
+
     // ---- path normalization -------------------------------------------
     static std::string normalize_path(const std::string& text) {
         if (!config().normalize_home_path) return text;
@@ -533,7 +571,7 @@ struct SqliteBackend::Impl {
         std::string text = normalize_path(raw_text);
 
         // Compute embedding
-        auto emb = embedder.encode(text);
+        auto emb = embedder->encode(text);
 
         // Timestamp
         auto ts = now_iso();
@@ -612,7 +650,7 @@ struct SqliteBackend::Impl {
 
         // ---- query embedding ------------------------------------------
         auto t_embed_start = clock::now();
-        auto q_vec = embedder.encode(query);
+        auto q_vec = embedder->encode(query);
         auto t_embed_end = clock::now();
 
         // ---- cosine similarity ----------------------------------------
@@ -789,7 +827,7 @@ struct SqliteBackend::Impl {
         return doc_count;
     }
 
-    int rebuild_embeddings(Embedder& embedder) {
+    int rebuild_embeddings(Embedder& emb_ref) {
         // Get total count first
         sqlite3_stmt* count_stmt = nullptr;
         sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM memories",
@@ -817,7 +855,7 @@ struct SqliteBackend::Impl {
             if (!text) continue;
 
             // Generate new embedding
-            auto emb = embedder.encode(text);
+            auto emb = emb_ref.encode(text);
 
             // Update database
             sqlite3_bind_blob(update_stmt, 1, emb.data(),
@@ -1021,6 +1059,9 @@ struct SqliteBackend::Impl {
 SqliteBackend::SqliteBackend(Embedder& embedder, const std::string& db_path)
     : pImpl(std::make_unique<Impl>(embedder, db_path)) {}
 
+SqliteBackend::SqliteBackend(const std::string& db_path)
+    : pImpl(std::make_unique<Impl>(db_path)) {}
+
 SqliteBackend::~SqliteBackend() = default;
 
 std::string SqliteBackend::store(const std::string& text, json metadata) {
@@ -1144,13 +1185,13 @@ std::optional<std::string> SqliteBackend::get_user_token_rotated_at(
         "SELECT token_rotated_at FROM users WHERE username = ?",
         -1, &stmt, nullptr);
     sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    std::optional<std::string> result;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         const char* val = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        sqlite3_finalize(stmt);
-        if (val) return std::string(val);
+        if (val) result = std::string(val);
     }
     sqlite3_finalize(stmt);
-    return std::nullopt;
+    return result;
 }
 
 void SqliteBackend::update_user_token_rotated_at(const std::string& username,
@@ -1172,13 +1213,13 @@ std::optional<std::string> SqliteBackend::get_user_preferred_model(
         "SELECT preferred_model FROM users WHERE username = ?",
         -1, &stmt, nullptr);
     sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    std::optional<std::string> result;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         const char* val = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        sqlite3_finalize(stmt);
-        if (val && val[0] != '\0') return std::string(val);
+        if (val && val[0] != '\0') result = std::string(val);
     }
     sqlite3_finalize(stmt);
-    return std::nullopt;
+    return result;
 }
 
 void SqliteBackend::update_user_preferred_model(const std::string& username,
@@ -1243,13 +1284,13 @@ std::optional<std::string> SqliteBackend::get_user_password(
         "SELECT password_hash FROM users WHERE username = ?",
         -1, &stmt, nullptr);
     sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    std::optional<std::string> result;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         const char* val = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        sqlite3_finalize(stmt);
-        if (val && val[0] != '\0') return std::string(val);
+        if (val && val[0] != '\0') result = std::string(val);
     }
     sqlite3_finalize(stmt);
-    return std::nullopt;
+    return result;
 }
 
 void SqliteBackend::delete_user(const std::string& username) {

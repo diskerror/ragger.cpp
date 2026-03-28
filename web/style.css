@@ -1,0 +1,211 @@
+/* Ragger Chat — Default Theme
+ *
+ * Variable names are stable. Override in your own style.css
+ * to customize without touching the logic.
+ */
+
+:root {
+    --bg:           #1a1a2e;
+    --bg-chat:      #16213e;
+    --bg-input:     #0f3460;
+    --bg-user:      #0f3460;
+    --bg-assistant: #1a1a2e;
+    --text:         #e0e0e0;
+    --text-muted:   #888;
+    --accent:       #e94560;
+    --accent-hover: #ff6b81;
+    --border:       #2a2a4a;
+    --radius:       8px;
+    --font:         -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                    "Helvetica Neue", Arial, sans-serif;
+    --font-mono:    "SF Mono", "Fira Code", "Consolas", monospace;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html, body {
+    height: 100%;
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+}
+
+#app {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+/* Header */
+#header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+}
+
+#header h1 {
+    font-size: 1.2rem;
+    font-weight: 600;
+    color: var(--accent);
+}
+
+.status {
+    font-size: 0.8rem;
+    transition: color 0.3s;
+}
+
+.status.connected    { color: #4caf50; }
+.status.disconnected { color: var(--text-muted); }
+.status.streaming    { color: var(--accent); animation: pulse 1s infinite; }
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.4; }
+}
+
+/* Messages */
+#messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.message {
+    max-width: 85%;
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-size: 0.95rem;
+}
+
+.message.user {
+    align-self: flex-end;
+    background: var(--bg-user);
+    border-bottom-right-radius: 2px;
+}
+
+.message.assistant {
+    align-self: flex-start;
+    background: var(--bg-assistant);
+    border: 1px solid var(--border);
+    border-bottom-left-radius: 2px;
+}
+
+.message.error {
+    align-self: center;
+    background: transparent;
+    color: var(--accent);
+    font-size: 0.85rem;
+    font-style: italic;
+}
+
+/* Code blocks inside messages */
+.message code {
+    font-family: var(--font-mono);
+    background: rgba(255, 255, 255, 0.06);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 0.9em;
+}
+
+.message pre {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 10px;
+    border-radius: 4px;
+    overflow-x: auto;
+    margin: 6px 0;
+}
+
+.message pre code {
+    background: transparent;
+    padding: 0;
+}
+
+/* Input area */
+#chat-form {
+    display: flex;
+    gap: 8px;
+    padding: clamp(8px, 2vh, 16px) 16px;
+    margin-bottom: clamp(8px, 2vh, 16px);
+    border-top: 1px solid var(--border);
+    background: var(--bg-chat);
+}
+
+#input {
+    flex: 1;
+    background: var(--bg-input);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    font-family: var(--font);
+    font-size: 0.95rem;
+    resize: none;
+    min-height: 42px;
+    max-height: 200px;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+#input:focus {
+    border-color: var(--accent);
+}
+
+#send-btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius);
+    padding: 10px 20px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+    white-space: nowrap;
+}
+
+#send-btn:hover {
+    background: var(--accent-hover);
+}
+
+#send-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Scrollbar */
+#messages::-webkit-scrollbar {
+    width: 6px;
+}
+
+#messages::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+#messages::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 3px;
+}
+
+/* Mobile */
+@media (max-width: 600px) {
+    #app {
+        max-width: 100%;
+    }
+    .message {
+        max-width: 92%;
+    }
+}

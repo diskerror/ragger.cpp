@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ragger — Login</title>
+    <link rel="stylesheet" href="style.css">
+    <style>
+        #app {
+            justify-content: center;
+            align-items: center;
+        }
+
+        #login-box {
+            width: 100%;
+            max-width: 360px;
+            padding: 32px 24px;
+            background: var(--bg-chat);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+        }
+
+        #login-box h1 {
+            color: var(--accent);
+            font-size: 1.4rem;
+            margin-bottom: 24px;
+            text-align: center;
+        }
+
+        #login-box label {
+            display: block;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+            margin-top: 16px;
+        }
+
+        #login-box label:first-of-type {
+            margin-top: 0;
+        }
+
+        #login-box input {
+            width: 100%;
+            background: var(--bg-input);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 10px 14px;
+            font-family: var(--font);
+            font-size: 0.95rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        #login-box input:focus {
+            border-color: var(--accent);
+        }
+
+        #login-btn {
+            width: 100%;
+            margin-top: 24px;
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            border-radius: var(--radius);
+            padding: 12px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        #login-btn:hover {
+            background: var(--accent-hover);
+        }
+
+        #login-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        #login-error {
+            color: var(--accent);
+            font-size: 0.85rem;
+            text-align: center;
+            margin-top: 12px;
+            min-height: 1.2em;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <form id="login-box" autocomplete="on">
+            <h1>Ragger</h1>
+            <label for="username">Username</label>
+            <input type="text" id="username" name="username"
+                   autocomplete="username" required autofocus>
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password"
+                   autocomplete="current-password" required>
+            <button type="submit" id="login-btn">Sign in</button>
+            <div id="login-error"></div>
+        </form>
+    </div>
+
+    <script>
+    (function () {
+        "use strict";
+
+        var form     = document.getElementById("login-box");
+        var errorDiv = document.getElementById("login-error");
+        var btn      = document.getElementById("login-btn");
+
+        // If already have a token, go straight to chat
+        if (document.cookie.match(/(?:^|;\s*)ragger_token=([^;]+)/)) {
+            window.location.href = "/";
+            return;
+        }
+
+        form.addEventListener("submit", function (e) {
+            e.preventDefault();
+            errorDiv.textContent = "";
+            btn.disabled = true;
+            btn.textContent = "Signing in…";
+
+            var username = document.getElementById("username").value.trim();
+            var password = document.getElementById("password").value;
+
+            fetch("/auth/login", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username: username, password: password })
+            }).then(function (res) {
+                return res.json().then(function (data) {
+                    if (!res.ok) {
+                        throw new Error(data.error || "Login failed");
+                    }
+                    return data;
+                });
+            }).then(function (data) {
+                // Store token in cookie
+                var maxAge = data.expires_in || 86400;
+                document.cookie = "ragger_token=" + encodeURIComponent(data.token)
+                    + ";path=/;max-age=" + maxAge + ";SameSite=Strict";
+                window.location.href = "/";
+            }).catch(function (err) {
+                errorDiv.textContent = err.message;
+                btn.disabled = false;
+                btn.textContent = "Sign in";
+            });
+        });
+    })();
+    </script>
+</body>
+</html>

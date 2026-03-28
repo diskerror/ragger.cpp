@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ragger Chat</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <header id="header">
+            <h1>Ragger</h1>
+            <div style="display:flex;align-items:center;gap:12px">
+                <div id="status" class="status disconnected">●</div>
+                <button id="logout-btn" title="Sign out"
+                        style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:0.85rem">↪ Out</button>
+            </div>
+        </header>
+
+        <div id="messages"></div>
+
+        <form id="chat-form">
+            <textarea id="input" placeholder="Type a message…" rows="1"
+                      autocomplete="off"></textarea>
+            <button type="submit" id="send-btn">Send</button>
+        </form>
+    </div>
+
+    <script src="chat.js"></script>
+</body>
+</html>

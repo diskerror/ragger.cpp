@@ -291,6 +291,10 @@ fi
 
 info "Installing /usr/local/bin/ragger"
 cp "$BINARY" /usr/local/bin/ragger
+# Ad-hoc sign on macOS (AMFI kills unsigned binaries)
+if [ "$(uname)" = "Darwin" ]; then
+    codesign --force --sign - /usr/local/bin/ragger
+fi
 chmod 0755 /usr/local/bin/ragger
 codesign -f -s - /usr/local/bin/ragger 2>/dev/null || true
 

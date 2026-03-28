@@ -581,6 +581,11 @@ static std::string read_password(const std::string& prompt) {
     
     tcsetattr(STDIN_FILENO, TCSANOW, &old_term);
     std::cout << "\n";
+    
+    // Trim trailing whitespace/CR (paranoia)
+    while (!password.empty() && (password.back() == '\r' || password.back() == '\n' || password.back() == ' '))
+        password.pop_back();
+    
     return password;
 }
 
@@ -709,7 +714,8 @@ int main(int argc, char** argv) {
 
     // Load config file
     try {
-        ragger::init_config(opts["config"].as<std::string>());
+        bool server_cmd = (command == "serve");
+        ragger::init_config(opts["config"].as<std::string>(), /*quiet=*/!server_cmd);
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return 1;
@@ -959,18 +965,16 @@ int main(int argc, char** argv) {
                 std::cout << "Token already exists for " << username << "\n";
             // Register directly in DB
             try {
-                std::string reg_db = cfg.single_user
-                    ? cfg.resolved_db_path()
-                    : cfg.resolved_common_db_path();
-                ragger::RaggerMemory memory(reg_db, model_dir);
+                std::string reg_db = cfg.resolved_common_db_path();
+                ragger::SqliteBackend memory(reg_db);
                 std::string token_hash = ragger::hash_token(token);
-                auto existing = memory.backend()->get_user_by_username(username);
+                auto existing = memory.get_user_by_username(username);
                 if (existing) {
                     if (existing->token_hash != token_hash)
-                        memory.backend()->update_user_token(username, token_hash);
+                        memory.update_user_token(username, token_hash);
                     std::cout << "✓ User exists in database (id: " << existing->id << ")\n";
                 } else {
-                    int user_id = memory.backend()->create_user(username, token_hash);
+                    int user_id = memory.create_user(username, token_hash);
                     std::cout << "✓ Registered in database (user_id: " << user_id << ")\n";
                 }
             } catch (const std::exception& e) {
@@ -1005,18 +1009,16 @@ int main(int argc, char** argv) {
                         std::cerr << "Warning: could not add " << username << " to ragger group\n";
                 }
                 // Register directly in DB (works whether daemon is running or not)
-                std::string reg_db = cfg.single_user
-                    ? cfg.resolved_db_path()
-                    : cfg.resolved_common_db_path();
-                ragger::RaggerMemory memory(reg_db, model_dir);
+                std::string reg_db = cfg.resolved_common_db_path();
+                ragger::SqliteBackend memory(reg_db);
                 std::string token_hash = ragger::hash_token(token);
-                auto existing = memory.backend()->get_user_by_username(username);
+                auto existing = memory.get_user_by_username(username);
                 if (existing) {
                     if (existing->token_hash != token_hash)
-                        memory.backend()->update_user_token(username, token_hash);
+                        memory.update_user_token(username, token_hash);
                     std::cout << "✓ User exists in database (id: " << existing->id << ")\n";
                 } else {
-                    int user_id = memory.backend()->create_user(username, token_hash, is_admin);
+                    int user_id = memory.create_user(username, token_hash, is_admin);
                     std::cout << "✓ Registered in database (user_id: " << user_id << ")\n";
                 }
             } catch (const std::exception& e) {
@@ -1042,10 +1044,8 @@ int main(int argc, char** argv) {
                 "/", "/var", "/var/empty", "/dev/null", "/nonexistent",
             };
             // Open DB directly for registration
-            std::string reg_db = cfg.single_user
-                ? cfg.resolved_db_path()
-                : cfg.resolved_common_db_path();
-            ragger::RaggerMemory memory(reg_db, model_dir);
+            std::string reg_db = cfg.resolved_common_db_path();
+            ragger::SqliteBackend memory(reg_db);
             
             int count = 0;
             setpwent();
@@ -1080,13 +1080,13 @@ int main(int argc, char** argv) {
                     // Register directly in DB
                     try {
                         std::string token_hash = ragger::hash_token(token);
-                        auto existing = memory.backend()->get_user_by_username(uname);
+                        auto existing = memory.get_user_by_username(uname);
                         if (existing) {
                             if (existing->token_hash != token_hash)
-                                memory.backend()->update_user_token(uname, token_hash);
+                                memory.update_user_token(uname, token_hash);
                             status += ", registered";
                         } else {
-                            memory.backend()->create_user(uname, token_hash);
+                            memory.create_user(uname, token_hash);
                             status += ", registered";
                         }
                     } catch (const std::exception& e) {
@@ -1134,13 +1134,11 @@ int main(int argc, char** argv) {
 
             // 2. Remove from common database
             try {
-                std::string reg_db = cfg.single_user
-                    ? cfg.resolved_db_path()
-                    : cfg.resolved_common_db_path();
-                ragger::RaggerMemory memory(reg_db, model_dir);
-                auto existing = memory.backend()->get_user_by_username(username);
+                std::string reg_db = cfg.resolved_common_db_path();
+                ragger::SqliteBackend memory(reg_db);
+                auto existing = memory.get_user_by_username(username);
                 if (existing) {
-                    memory.backend()->delete_user(username);
+                    memory.delete_user(username);
                     std::cout << "✓ Removed " << username << " from database\n";
                 } else {
                     std::cout << "  " << username << " not found in database (skipped)\n";
@@ -1198,11 +1196,12 @@ int main(int argc, char** argv) {
                 target_user = self_pw->pw_name;
             }
             
-            // Open database directly
-            ragger::RaggerMemory memory(db_path, model_dir);
+            // Open common database directly (no embedder needed for user management)
+            // User management always uses the common DB (/var/ragger/memories.db)
+            ragger::SqliteBackend backend(cfg.resolved_common_db_path());
             
             // Verify user exists in DB
-            auto user_info = memory.backend()->get_user_by_username(target_user);
+            auto user_info = backend.get_user_by_username(target_user);
             if (!user_info) {
                 std::cerr << "Error: user '" << target_user << "' not found in database\n";
                 std::cerr << "Provision the user first: sudo ragger add-user " << target_user << "\n";
@@ -1211,7 +1210,7 @@ int main(int argc, char** argv) {
             
             // If changing own password and not root, verify current password
             if (args.empty() && user_info->id > 0) {
-                auto existing = memory.backend()->get_user_password(target_user);
+                auto existing = backend.get_user_password(target_user);
                 if (existing) {
                     std::string current = read_password("Current password: ");
                     if (!ragger::verify_password(current, *existing)) {
@@ -1225,7 +1224,7 @@ int main(int argc, char** argv) {
             std::string new_pass = read_password("New password: ");
             if (new_pass.empty()) {
                 std::cout << "Password cleared (web UI access disabled).\n";
-                memory.backend()->set_user_password(target_user, "");
+                backend.set_user_password(target_user, "");
             } else {
                 std::string confirm = read_password("Confirm password: ");
                 if (new_pass != confirm) {
@@ -1233,7 +1232,7 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 std::string hash = ragger::hash_password(new_pass);
-                memory.backend()->set_user_password(target_user, hash);
+                backend.set_user_password(target_user, hash);
                 std::cout << "✓ Password updated for " << target_user << "\n";
             }
 

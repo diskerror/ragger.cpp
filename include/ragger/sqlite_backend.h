@@ -43,6 +43,10 @@ class BM25Index;
 class SqliteBackend {
 public:
     SqliteBackend(Embedder& embedder, const std::string& db_path = "");
+
+    /// DB-only constructor — no embedder required.
+    /// Only user management operations work; store/search will throw.
+    explicit SqliteBackend(const std::string& db_path);
     ~SqliteBackend();
 
     /// Store text with metadata. Returns memory ID.

@@ -458,18 +458,20 @@ const Config& config() {
     return *g_config;
 }
 
-void init_config(const std::string& cli_config_path) {
+void init_config(const std::string& cli_config_path, bool quiet) {
     // Load system config first
     std::string system_path = find_system_config(cli_config_path);
     static Config cfg = load_config(system_path);
-    std::cout << ts() << " [INFO] " << lang::MSG_CONFIG_LOADED << system_path << std::endl;
+    if (!quiet)
+        std::cout << ts() << " [INFO] " << lang::MSG_CONFIG_LOADED << system_path << std::endl;
     
     // Then overlay user-specific overrides
     std::string user_path = find_user_config();
     if (!user_path.empty() && user_path != system_path) {
         Config user_cfg = load_config(user_path);
         apply_user_overrides(cfg, user_cfg);
-        std::cout << ts() << " [INFO] Applied user overrides from " << user_path << std::endl;
+        if (!quiet)
+            std::cout << ts() << " [INFO] Applied user overrides from " << user_path << std::endl;
     }
 
     g_config = &cfg;

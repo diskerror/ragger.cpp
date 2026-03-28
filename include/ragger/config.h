@@ -123,6 +123,6 @@ void apply_user_overrides(Config& cfg, const Config& user);
 const Config& config();
 
 /// Initialize global config. Call once at startup.
-void init_config(const std::string& cli_config_path = "");
+void init_config(const std::string& cli_config_path = "", bool quiet = false);
 
 } // namespace ragger
