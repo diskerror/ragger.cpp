@@ -642,18 +642,24 @@ struct Server::Impl {
             }
         });
 
-        // POST /chat — memory-augmented chat with SSE streaming
+        // POST /chat — memory-augmented chat with true SSE streaming
         CROW_ROUTE(app, "/chat").methods(crow::HTTPMethod::POST)
-        ([this](const crow::request& req) -> crow::response {
+        ([this](const crow::request& req, crow::response& res) {
             auto user = _check_auth(req);
             if (!user) {
                 log_http("POST /chat 401");
-                return crow::response(401, "Unauthorized");
+                res.code = 401;
+                res.body = "Unauthorized";
+                res.end();
+                return;
             }
 
             if (!inference_) {
                 log_http("POST /chat 503");
-                return crow::response(503, "{\"error\": \"inference not configured\"}");
+                res.code = 503;
+                res.body = R"({"error": "inference not configured"})";
+                res.end();
+                return;
             }
 
             try {
@@ -661,7 +667,10 @@ struct Server::Impl {
                 std::string message = body.value("message", "");
                 if (message.empty()) {
                     log_http("POST /chat 400");
-                    return crow::response(400, "{\"error\": \"message required\"}");
+                    res.code = 400;
+                    res.body = R"({"error": "message required"})";
+                    res.end();
+                    return;
                 }
 
                 std::string session_id = body.value("session_id", "");
@@ -699,14 +708,21 @@ struct Server::Impl {
                 session.add_user_message(message);
                 auto full_messages = session.build_messages(system_prompt, memory_context);
 
-                // Stream response from inference, collect SSE body
-                std::string sse_body;
+                // Set SSE headers and start true streaming
+                res.code = 200;
+                res.set_header("Content-Type", "text/event-stream");
+                res.set_header("Cache-Control", "no-cache");
+                res.set_header("Connection", "close");
+                res.set_header("X-Session-Id", session.session_id);
+                res.start_stream();  // Send headers immediately
+
                 std::string response_text;
 
                 inference_->chat_stream(full_messages, [&](const std::string& token) {
+                    if (!res.is_alive()) return;
                     response_text += token;
                     json event = {{"token", token}};
-                    sse_body += "data: " + event.dump() + "\n\n";
+                    res.stream_body("data: " + event.dump() + "\n\n");
                 }, use_model);
 
                 // Done event
@@ -714,7 +730,7 @@ struct Server::Impl {
                     {"done", true},
                     {"session_id", session.session_id}
                 };
-                sse_body += "data: " + done_event.dump() + "\n\n";
+                res.stream_body("data: " + done_event.dump() + "\n\n");
 
                 // Update session
                 if (!response_text.empty()) {
@@ -739,26 +755,24 @@ struct Server::Impl {
                     }
                 }
 
-                // Cleanup expired sessions in background
+                // Cleanup expired sessions
                 const auto& cfg = config();
-                auto expired = session_mgr_.cleanup_expired(cfg.chat_pause_minutes);
-                // TODO: summarize expired sessions in background
+                session_mgr_.cleanup_expired(cfg.chat_pause_minutes);
 
-                crow::response res(200);
-                res.set_header("Content-Type", "text/event-stream");
-                res.set_header("Cache-Control", "no-cache");
-                res.set_header("X-Session-Id", session.session_id);
-                res.body = sse_body;
                 log_http("POST /chat 200");
-                return res;
+                res.end_stream();
 
             } catch (const json::exception& e) {
                 log_http("POST /chat 400");
-                return crow::response(400, std::string("JSON error: ") + e.what());
+                res.code = 400;
+                res.body = std::string("JSON error: ") + e.what();
+                res.end();
             } catch (const std::exception& e) {
                 log_http("POST /chat 500");
                 log_error(std::string("POST /chat failed: ") + e.what());
-                return crow::response(500, std::string("Error: ") + e.what());
+                res.code = 500;
+                res.body = std::string("Error: ") + e.what();
+                res.end();
             }
         });
 
