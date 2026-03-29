@@ -484,22 +484,20 @@ static nlohmann::json mcp_tool_call(ragger::RaggerMemory& memory, const nlohmann
 /// Check if an HTTP server is running (any ragger PID file with a live process).
 static bool is_http_server_running() {
     namespace fs = std::filesystem;
-    for (const auto& dir : {"/var/run", "/tmp"}) {
-        try {
-            for (const auto& entry : fs::directory_iterator(dir)) {
-                auto name = entry.path().filename().string();
-                // Match ragger-{port}.pid
-                if (name.rfind("ragger-", 0) == 0 && name.size() > 11
-                    && name.substr(name.size() - 4) == ".pid") {
-                    std::ifstream pf(entry.path());
-                    pid_t pid = 0;
-                    if (pf >> pid && pid > 0 && kill(pid, 0) == 0) {
-                        return true;
-                    }
+    std::string dir = "/tmp/ragger";
+    try {
+        for (const auto& entry : fs::directory_iterator(dir)) {
+            auto name = entry.path().filename().string();
+            // Match {port}.pid
+            if (name.size() > 4 && name.substr(name.size() - 4) == ".pid") {
+                std::ifstream pf(entry.path());
+                pid_t pid = 0;
+                if (pf >> pid && pid > 0 && kill(pid, 0) == 0) {
+                    return true;
                 }
             }
-        } catch (...) {}
-    }
+        }
+    } catch (...) {}
     return false;
 }
 
@@ -1321,7 +1319,7 @@ int main(int argc, char** argv) {
             // Send SIGUSR1 to the process holding our user's housekeeping lock
             struct passwd* pw = getpwuid(getuid());
             std::string username = pw ? pw->pw_name : "default";
-            std::string lock_path = "/tmp/ragger-housekeeping-" + username + ".lock";
+            std::string lock_path = "/tmp/ragger/housekeeping-" + username + ".lock";
 
             pid_t daemon_pid = 0;
             {
