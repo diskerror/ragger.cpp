@@ -481,15 +481,26 @@ static nlohmann::json mcp_tool_call(ragger::RaggerMemory& memory, const nlohmann
     }
 }
 
-/// Check if another process holds the housekeeping lock for a user.
-static bool is_housekeeping_locked(const std::string& username) {
-    std::string lock_path = "/tmp/ragger-housekeeping-" + username + ".lock";
-    int fd = open(lock_path.c_str(), O_RDONLY);
-    if (fd < 0) return false;  // no lock file = not locked
-    bool locked = (flock(fd, LOCK_EX | LOCK_NB) != 0);
-    if (!locked) flock(fd, LOCK_UN);  // we got it, release immediately
-    ::close(fd);
-    return locked;
+/// Check if an HTTP server is running (any ragger PID file with a live process).
+static bool is_http_server_running() {
+    namespace fs = std::filesystem;
+    for (const auto& dir : {"/var/run", "/tmp"}) {
+        try {
+            for (const auto& entry : fs::directory_iterator(dir)) {
+                auto name = entry.path().filename().string();
+                // Match ragger-{port}.pid
+                if (name.rfind("ragger-", 0) == 0 && name.size() > 11
+                    && name.substr(name.size() - 4) == ".pid") {
+                    std::ifstream pf(entry.path());
+                    pid_t pid = 0;
+                    if (pf >> pid && pid > 0 && kill(pid, 0) == 0) {
+                        return true;
+                    }
+                }
+            }
+        } catch (...) {}
+    }
+    return false;
 }
 
 /// MCP housekeeping: periodically clean user DB if no HTTP server is handling it.
@@ -500,8 +511,8 @@ static void mcp_housekeeping_thread(ragger::RaggerMemory& memory, const std::str
     while (true) {
         std::this_thread::sleep_for(std::chrono::seconds(60));
 
-        // If HTTP server has taken over, stop
-        if (is_housekeeping_locked(username)) continue;
+        // If HTTP server has started, stop doing housekeeping
+        if (is_http_server_running()) continue;
 
         if (max_age_hours <= 0) continue;
 
@@ -957,14 +968,12 @@ int main(int argc, char** argv) {
             } else {
                 mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path, model_dir);
             }
-            // Start housekeeping thread if HTTP server isn't handling it
-            struct passwd* mcp_pw = getpwuid(getuid());
-            std::string mcp_username = mcp_pw ? mcp_pw->pw_name : "default";
-            std::thread hk_thread;
-            if (!is_housekeeping_locked(mcp_username)) {
-                hk_thread = std::thread(mcp_housekeeping_thread,
-                                        std::ref(*mem_ptr), mcp_username);
-                hk_thread.detach();
+            // Start housekeeping thread if no HTTP server is running
+            if (!is_http_server_running()) {
+                struct passwd* mcp_pw = getpwuid(getuid());
+                std::string mcp_username = mcp_pw ? mcp_pw->pw_name : "default";
+                std::thread(mcp_housekeeping_thread,
+                            std::ref(*mem_ptr), mcp_username).detach();
             }
             do_mcp(*mem_ptr);
 
