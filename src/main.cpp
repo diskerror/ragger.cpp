@@ -695,6 +695,7 @@ int main(int argc, char** argv) {
         std::cout << "  add-all            Provision all users (requires sudo)\n";
         std::cout << "  remove-user <name> Remove a user (requires sudo)\n";
         std::cout << "  passwd [<name>]    Change password (own or another user's with sudo)\n";
+        std::cout << "  housekeeping       Trigger housekeeping on running daemon\n";
         std::cout << "  rebuild-bm25       Rebuild the BM25 keyword index\n";
         std::cout << "  rebuild-embeddings Rebuild embeddings for all memories\n";
         // (llama and model verbs removed — use external providers)
@@ -1235,6 +1236,32 @@ int main(int argc, char** argv) {
                 backend.set_user_password(target_user, hash);
                 std::cout << "✓ Password updated for " << target_user << "\n";
             }
+
+        } else if (command == "housekeeping") {
+            ragger::setup_logging(false, false);
+            // Send SIGUSR1 to running daemon
+            std::vector<std::string> pid_paths = {"/var/run/ragger.pid", "/tmp/ragger.pid"};
+            pid_t daemon_pid = 0;
+            for (const auto& path : pid_paths) {
+                std::ifstream pf(path);
+                if (pf) {
+                    pf >> daemon_pid;
+                    break;
+                }
+            }
+            if (daemon_pid <= 0) {
+                std::cerr << "Error: no running daemon found (no PID file)\n";
+                return 1;
+            }
+            if (kill(daemon_pid, 0) != 0) {
+                std::cerr << "Error: daemon (pid " << daemon_pid << ") is not running\n";
+                return 1;
+            }
+            if (kill(daemon_pid, SIGUSR1) != 0) {
+                std::cerr << "Error: failed to signal daemon: " << strerror(errno) << "\n";
+                return 1;
+            }
+            std::cout << "✓ Housekeeping triggered (pid " << daemon_pid << ")\n";
 
         } else {
             std::cerr << CLI_UNKNOWN_COMMAND << command << "\n";

@@ -23,6 +23,9 @@
 #include <sstream>
 #include <thread>
 #include <unordered_map>
+#include <atomic>
+#include <signal.h>
+#include <sqlite3.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -32,6 +35,13 @@ namespace ragger {
 namespace fs = std::filesystem;
 
 using json = nlohmann::json;
+
+// Global signal flag (async-signal-safe)
+static std::atomic<bool> g_housekeeping_requested{false};
+
+static void sigusr1_handler(int) {
+    g_housekeeping_requested.store(true, std::memory_order_relaxed);
+}
 
 struct Server::Impl {
     crow::SimpleApp app;
@@ -46,6 +56,10 @@ struct Server::Impl {
     // Per-user memory cache (username → RaggerMemory)
     std::unordered_map<std::string, std::unique_ptr<RaggerMemory>> user_memories_;
     std::mutex user_memories_mutex_;
+
+    // Housekeeping timer
+    std::atomic<bool> timer_running_{false};
+    std::thread timer_thread_;
 
     Impl(RaggerMemory& mem, const std::string& h, int p)
         : memory(mem), host(h), port(p)
@@ -89,6 +103,97 @@ struct Server::Impl {
                 log_info("Model preload skipped: " + err);
             }
         }).detach();
+    }
+
+    /// Run one housekeeping pass: summarize idle sessions + purge old conversations.
+    void run_housekeeping() {
+        const auto& cfg = config();
+        int pause_minutes = cfg.chat_pause_minutes;
+        float max_age_hours = cfg.cleanup_max_age_hours;
+
+        // 1. Expire idle chat sessions
+        auto expired = session_mgr_.cleanup_expired(pause_minutes);
+        int sessions_expired = (int)expired.size();
+
+        // TODO: summarize expired session turns via inference (like Python)
+
+        // 2. Purge old conversation entries from all known user DBs
+        int conversations_cleaned = 0;
+        if (max_age_hours > 0) {
+            auto now = std::chrono::system_clock::now();
+            auto cutoff = now - std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                std::chrono::duration<double, std::ratio<3600>>(max_age_hours));
+            auto cutoff_t = std::chrono::system_clock::to_time_t(cutoff);
+            char cutoff_str[32];
+            std::strftime(cutoff_str, sizeof(cutoff_str), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&cutoff_t));
+
+            // Collect user DB paths from cache
+            std::vector<std::string> db_paths;
+            {
+                std::lock_guard<std::mutex> lock(user_memories_mutex_);
+                for (auto& [username, mem] : user_memories_) {
+                    if (mem && mem->user_backend()) {
+                        db_paths.push_back(mem->user_backend()->db_path());
+                    }
+                }
+            }
+
+            for (const auto& db_path : db_paths) {
+                try {
+                    sqlite3* db = nullptr;
+                    if (sqlite3_open(db_path.c_str(), &db) != SQLITE_OK) continue;
+                    std::string sql = "DELETE FROM memories WHERE collection = 'conversation' AND timestamp < ?";
+                    sqlite3_stmt* stmt = nullptr;
+                    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+                        sqlite3_bind_text(stmt, 1, cutoff_str, -1, SQLITE_STATIC);
+                        sqlite3_step(stmt);
+                        int deleted = sqlite3_changes(db);
+                        conversations_cleaned += deleted;
+                        if (deleted > 0) {
+                            log_info("Cleaned " + std::to_string(deleted)
+                                   + " expired conversations from " + db_path);
+                        }
+                    }
+                    sqlite3_finalize(stmt);
+                    sqlite3_close(db);
+                } catch (const std::exception& e) {
+                    log_error("Cleanup failed for " + db_path + ": " + e.what());
+                }
+            }
+        }
+
+        if (sessions_expired > 0 || conversations_cleaned > 0) {
+            log_info("Housekeeping: " + std::to_string(sessions_expired) + " sessions expired, "
+                   + std::to_string(conversations_cleaned) + " conversations cleaned");
+        }
+    }
+
+    /// Start background timer for periodic housekeeping.
+    void start_housekeeping_timer() {
+        timer_running_ = true;
+        timer_thread_ = std::thread([this]() {
+            while (timer_running_) {
+                // Sleep 60s in 1s increments so we can stop quickly
+                for (int i = 0; i < 60 && timer_running_; ++i) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    // Check for signal-triggered housekeeping
+                    if (g_housekeeping_requested.exchange(false)) {
+                        log_info("Housekeeping triggered by signal");
+                        run_housekeeping();
+                    }
+                }
+                if (timer_running_) {
+                    run_housekeeping();
+                }
+            }
+        });
+    }
+
+    void stop_housekeeping_timer() {
+        timer_running_ = false;
+        if (timer_thread_.joinable()) {
+            timer_thread_.join();
+        }
     }
 
     void init_inference() {
@@ -1086,10 +1191,41 @@ void Server::run() {
         }
     }
 
+    // Write PID file
+    std::string pid_file = "/var/run/ragger.pid";
+    {
+        std::ofstream pf(pid_file);
+        if (pf) {
+            pf << getpid();
+            log_info("PID file: " + pid_file);
+        } else {
+            // Fallback to /tmp if /var/run not writable
+            pid_file = "/tmp/ragger.pid";
+            std::ofstream pf2(pid_file);
+            if (pf2) pf2 << getpid();
+            log_info("PID file: " + pid_file);
+        }
+    }
+
+    // Install SIGUSR1 handler for housekeeping
+    struct sigaction sa{};
+    sa.sa_handler = sigusr1_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGUSR1, &sa, nullptr);
+
+    // Start housekeeping timer (runs every 60s + on SIGUSR1)
+    pImpl->start_housekeeping_timer();
+
     a.run();
+
+    // Cleanup
+    pImpl->stop_housekeeping_timer();
+    std::remove(pid_file.c_str());
 }
 
 void Server::stop() {
+    pImpl->stop_housekeeping_timer();
     pImpl->app.stop();
 }
 

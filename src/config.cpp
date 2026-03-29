@@ -427,6 +427,7 @@ Config load_config(const std::string& path) {
             else if (key == "summarize_on_quit") cfg.chat_summarize_on_quit = parse_bool(val);
             else if (key == "max_turn_retention_minutes") cfg.chat_max_turn_retention_minutes = std::stoi(val);
             else if (key == "max_turns_stored") cfg.chat_max_turns_stored = std::stoi(val);
+            else if (key == "cleanup_max_age_hours") cfg.cleanup_max_age_hours = std::stof(val);
             else if (key == "max_persona_chars") cfg.chat_max_persona_chars = std::stoi(val);
             else if (key == "max_memory_results") cfg.chat_max_memory_results = std::stoi(val);
             else if (key == "persona_pct") cfg.chat_persona_pct = std::stoi(val);
