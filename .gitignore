@@ -27,3 +27,4 @@ models/model.onnx
 
 # OS
 .DS_Store
+deploy.sh

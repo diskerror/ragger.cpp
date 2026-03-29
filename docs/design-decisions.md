@@ -235,3 +235,12 @@ Below `PERSONA_SIZING_THRESHOLD` (32768 tokens), persona content is
 proportionally sized using `persona_pct`. This prevents persona
 content from overwhelming small context windows while using full
 persona on large ones.
+
+## Chat Streaming
+
+The Python server streams chat responses via Server-Sent Events (SSE),
+sending tokens to the client as they arrive from the inference backend.
+
+The C++ server currently buffers the full response and sends it at once.
+SSE streaming is planned but requires either replacing the HTTP library
+(Crow 1.3 has no native streaming support) or maintaining a fork.
