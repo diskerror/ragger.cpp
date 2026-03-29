@@ -489,7 +489,7 @@ static bool is_http_server_running() {
         for (const auto& entry : fs::directory_iterator(dir)) {
             auto name = entry.path().filename().string();
             // Match {port}.pid
-            if (name.size() > 4 && name.substr(name.size() - 4) == ".pid") {
+            if (name.rfind("server-", 0) == 0 && name.substr(name.size() - 4) == ".pid") {
                 std::ifstream pf(entry.path());
                 pid_t pid = 0;
                 if (pf >> pid && pid > 0 && kill(pid, 0) == 0) {
@@ -1319,7 +1319,7 @@ int main(int argc, char** argv) {
             // Send SIGUSR1 to the process holding our user's housekeeping lock
             struct passwd* pw = getpwuid(getuid());
             std::string username = pw ? pw->pw_name : "default";
-            std::string lock_path = "/tmp/ragger/housekeeping-" + username + ".lock";
+            std::string lock_path = "/tmp/ragger/" + username + ".lock";
 
             pid_t daemon_pid = 0;
             {
