@@ -96,6 +96,106 @@ InferenceClient InferenceClient::from_config(const Config& cfg) {
     return InferenceClient(endpoints, cfg.inference_model, cfg.inference_max_tokens);
 }
 
+// -----------------------------------------------------------------------
+// Model auto-load (LM Studio v1 API)
+// -----------------------------------------------------------------------
+
+/// CURL write callback for simple string collection
+static size_t _simple_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    auto* buf = static_cast<std::string*>(userdata);
+    buf->append(ptr, size * nmemb);
+    return size * nmemb;
+}
+
+std::string InferenceClient::ensure_model_loaded(const std::string& model_override) {
+    std::string use_model = model_override.empty() ? model : model_override;
+    if (use_model.empty()) return "";
+
+    Endpoint* ep = nullptr;
+    try {
+        ep = &resolve_endpoint(use_model);
+    } catch (...) {
+        return "";  // no endpoint, fail open
+    }
+
+    // Derive management API from OpenAI-compat URL
+    // e.g. http://localhost:1234/v1 → http://localhost:1234/api/v1
+    std::string base = ep->api_url;
+    // Strip trailing slash
+    while (!base.empty() && base.back() == '/') base.pop_back();
+    auto pos = base.rfind("/v1");
+    if (pos == std::string::npos) return "";  // not a recognized local engine
+    std::string mgmt_base = base.substr(0, pos) + "/api/v1";
+
+    CURL* curl = curl_easy_init();
+    if (!curl) return "";
+
+    std::string response_buf;
+
+    // Check if model is loaded
+    std::string list_url = mgmt_base + "/models";
+    curl_easy_setopt(curl, CURLOPT_URL, list_url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, _simple_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_buf);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+
+    CURLcode res = curl_easy_perform(curl);
+    if (res != CURLE_OK) {
+        curl_easy_cleanup(curl);
+        if (res == CURLE_COULDNT_CONNECT || res == CURLE_OPERATION_TIMEDOUT) {
+            return "Inference engine not reachable at " + mgmt_base;
+        }
+        return "";  // fail open
+    }
+
+    try {
+        auto data = nlohmann::json::parse(response_buf);
+        auto models = data.contains("models") ? data["models"] : data.value("data", nlohmann::json::array());
+
+        for (const auto& m : models) {
+            std::string key = m.value("key", m.value("id", std::string("")));
+            bool loaded = false;
+            if (m.contains("loaded_instances") && m["loaded_instances"].is_array()) {
+                loaded = !m["loaded_instances"].empty();
+            }
+            if (key == use_model && loaded) {
+                curl_easy_cleanup(curl);
+                return "";  // already loaded
+            }
+        }
+    } catch (...) {
+        curl_easy_cleanup(curl);
+        return "";  // can't parse, fail open
+    }
+
+    // Model not loaded — trigger load
+    std::string load_url = mgmt_base + "/models/load";
+    nlohmann::json load_body = {{"model", use_model}};
+    std::string body_str = load_body.dump();
+    response_buf.clear();
+
+    curl_easy_setopt(curl, CURLOPT_URL, load_url.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_str.c_str());
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+    res = curl_easy_perform(curl);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (res == CURLE_OPERATION_TIMEDOUT) {
+        return "Model " + use_model + " load timed out";
+    }
+    if (res != CURLE_OK) {
+        return "Failed to load model " + use_model;
+    }
+
+    return "";  // loaded successfully
+}
+
 void InferenceClient::set_forced_endpoint(const std::string& name) {
     if (name.empty()) {
         forced_endpoint_.clear();

@@ -65,7 +65,7 @@ struct Server::Impl {
         } catch (const std::exception& e) {
             log_info("Warmup: " + std::string(e.what()));
         }
-        // TODO: verify inference engine model is loaded (ensure_model_loaded)
+        // Model auto-load handled per-request in /chat route
     }
 
     void init_inference() {
@@ -729,6 +729,21 @@ struct Server::Impl {
 
                 // Resolve alias
                 use_model = config().resolve_model(use_model);
+
+                // Ensure model is loaded (auto-load for local engines)
+                auto load_err = inference_->ensure_model_loaded(use_model);
+                if (!load_err.empty()) {
+                    json err_event = {{"error", load_err}};
+                    json done_event = {{"done", true}};
+                    std::string sse = "data: " + err_event.dump() + "\n\n"
+                                    + "data: " + done_event.dump() + "\n\n";
+                    auto resp = crow::response(200, sse);
+                    resp.set_header("Content-Type", "text/event-stream");
+                    resp.set_header("Cache-Control", "no-cache");
+                    resp.set_header("Connection", "close");
+                    log_http("POST /chat 200 (model load error)");
+                    return resp;
+                }
 
                 // Build messages with persona + memory + history
                 std::string system_prompt = ChatSessionManager::load_workspace_files();

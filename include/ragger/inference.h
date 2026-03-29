@@ -66,6 +66,10 @@ public:
                      std::function<void(const std::string&)> on_token,
                      const std::string& model = "");
 
+    /// Ensure model is loaded in local inference engine (e.g. LM Studio).
+    /// Returns empty string if loaded/not applicable, error message otherwise.
+    std::string ensure_model_loaded(const std::string& model = "");
+
     /// Force a specific endpoint by name (empty = auto-route)
     void set_forced_endpoint(const std::string& name);
 
