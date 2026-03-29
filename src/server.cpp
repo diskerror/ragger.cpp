@@ -468,8 +468,10 @@ struct Server::Impl {
             return memory;
         }
 
-        // Try to acquire housekeeping lock for this user
-        acquire_user_housekeeping_lock(username);
+        // Try to acquire housekeeping lock for this user (only if housekeeping enabled)
+        if (config().housekeeping_interval > 0) {
+            acquire_user_housekeeping_lock(username);
+        }
 
         auto& ref = *user_mem;
         user_memories_[username] = std::move(user_mem);
