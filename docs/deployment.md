@@ -253,6 +253,22 @@ model cache to `/var/ragger/models/`.
 Each user's token lives at `~/.ragger/token`. If it gets corrupted or
 lost, re-register: `ragger user add <username>` (as admin or with sudo).
 
+**"Token rotation failed" or "attempt to write a readonly database":**
+In multi-user mode, the daemon runs as `_ragger` and needs write access
+to each user's `~/.ragger/` directory (for token rotation and per-user
+memory). The directory, database, and token must be group-writable by
+the `ragger` group:
+
+```bash
+sudo chgrp -R ragger ~/.ragger
+sudo chmod g+rwx ~/.ragger
+sudo chmod g+rw ~/.ragger/memories.db ~/.ragger/token
+```
+
+The `install.sh` script and `ragger add-user` set these permissions
+automatically. If you created `~/.ragger/` manually or permissions
+have drifted, run the commands above to fix them.
+
 ---
 
 ## Related

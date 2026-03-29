@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <grp.h>
 #include <pwd.h>
 #include <regex>
 #include <set>
@@ -699,14 +700,23 @@ static std::pair<std::string, bool> provision_user(
         std::ofstream f(tok_path);
         f << token << "\n";
     }
-    chmod(tok_path.c_str(), 0640);
+    chmod(tok_path.c_str(), 0660);
 
-    // Set ownership if running as root
+    // Set ownership if running as root: user owns, ragger group for daemon access
     if (getuid() == 0) {
         struct passwd* pw = getpwnam(username.c_str());
+        struct group* rg = getgrnam("ragger");
         if (pw) {
-            chown(ragger_dir.c_str(), pw->pw_uid, pw->pw_gid);
-            chown(tok_path.c_str(), pw->pw_uid, pw->pw_gid);
+            gid_t gid = rg ? rg->gr_gid : pw->pw_gid;
+            chown(ragger_dir.c_str(), pw->pw_uid, gid);
+            chmod(ragger_dir.c_str(), 0770);
+            chown(tok_path.c_str(), pw->pw_uid, gid);
+            // Also fix memories.db if it exists
+            std::string db_path = ragger_dir + "/memories.db";
+            if (fs::exists(db_path)) {
+                chown(db_path.c_str(), pw->pw_uid, gid);
+                chmod(db_path.c_str(), 0660);
+            }
         }
     }
 
