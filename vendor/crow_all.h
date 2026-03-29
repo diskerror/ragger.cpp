@@ -8211,52 +8211,6 @@ namespace crow
         bool completed_{};
         std::function<void()> complete_request_handler_;
         std::function<bool()> is_alive_helper_;
-
-    public:
-        /// Raw socket write for streaming (SSE). Set by Connection.
-        /// Writes HTTP status + headers on first call, then body data directly.
-        std::function<void(const std::string&)> stream_write_;
-        bool stream_started_{false};
-
-        /// Begin streaming: send headers, then write body data via stream_write_.
-        void start_stream()
-        {
-            if (stream_started_ || !stream_write_) return;
-            stream_started_ = true;
-            manual_length_header = true;
-
-            // Build HTTP header string
-            std::string header_buf;
-            header_buf += "HTTP/1.1 " + std::to_string(code) + " OK\r\n";
-            for (auto& kv : headers) {
-                header_buf += kv.first + ": " + kv.second + "\r\n";
-            }
-            header_buf += "\r\n";
-            stream_write_(header_buf);
-        }
-
-        /// Write and flush a chunk of body data (call start_stream() first).
-        void stream_body(const std::string& data)
-        {
-            if (!stream_started_) start_stream();
-            if (stream_write_) stream_write_(data);
-        }
-
-        /// End streaming. Marks response as completed.
-        /// The normal end() / complete_request flow will detect stream_started_
-        /// and skip the buffered write path.
-        void end_stream()
-        {
-            if (!completed_)
-            {
-                completed_ = true;
-                if (complete_request_handler_)
-                {
-                    complete_request_handler_();
-                }
-            }
-        }
-
         static_file_info file_info;
     };
 } // namespace crow
@@ -9897,13 +9851,6 @@ namespace crow
                     return self->adaptor_.is_open();
                 };
 
-                // Stream write: synchronous raw socket write for SSE
-                res.stream_write_ = [self](const std::string& data) {
-                    if (!self->adaptor_.is_open()) return;
-                    error_code ec;
-                    asio::write(self->adaptor_.socket(), asio::buffer(data), ec);
-                };
-
                 detail::middleware_call_helper<detail::middleware_call_criteria_only_global,
                                                0, decltype(ctx_), decltype(*middlewares_)>({}, *middlewares_, req_, res, ctx_);
 
@@ -9974,26 +9921,6 @@ namespace crow
             }
 #endif
 
-            // If response was already streamed (SSE), skip normal buffered write
-            if (res.stream_write_)
-            {
-                res.stream_write_ = nullptr;
-                res.complete_request_handler_ = nullptr;
-                res.is_alive_helper_ = nullptr;
-                res.stream_started_ = false;
-
-                // Close this connection (SSE uses Connection: close)
-                close_connection_ = true;
-                res.clear();
-                buffers_.clear();
-                parser_.clear();
-
-                adaptor_.shutdown_readwrite();
-                adaptor_.close();
-                CROW_LOG_DEBUG << this << " from write (streamed)";
-                return;
-            }
-
             prepare_buffers();
 
             if (res.is_static_type())
@@ -10011,7 +9938,6 @@ namespace crow
         {
             res.complete_request_handler_ = nullptr;
             res.is_alive_helper_ = nullptr;
-            res.stream_write_ = nullptr;
 
             if (!adaptor_.is_open())
             {
