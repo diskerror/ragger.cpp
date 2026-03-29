@@ -176,14 +176,14 @@ struct Server::Impl {
     std::mutex housekeeping_locks_mutex_;
 
     /// Try to acquire housekeeping lock for a specific user.
-    /// Lock file: /tmp/ragger/{username}.lock
+    /// Lock file: /tmp/ragger/housekeeping-{username}.lock
     /// Returns true if this instance now owns housekeeping for that user.
     bool acquire_user_housekeeping_lock(const std::string& username) {
         std::lock_guard<std::mutex> lock(housekeeping_locks_mutex_);
         if (housekeeping_locks_.count(username)) return true;  // already own it
 
         fs::create_directories("/tmp/ragger");
-        std::string lock_path = "/tmp/ragger/" + username + ".lock";
+        std::string lock_path = "/tmp/ragger/housekeeping-" + username + ".lock";
         int fd = open(lock_path.c_str(), O_WRONLY | O_CREAT, 0644);
         if (fd < 0) return false;
 

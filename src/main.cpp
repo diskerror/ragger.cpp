@@ -1319,7 +1319,7 @@ int main(int argc, char** argv) {
             // Send SIGUSR1 to the process holding our user's housekeeping lock
             struct passwd* pw = getpwuid(getuid());
             std::string username = pw ? pw->pw_name : "default";
-            std::string lock_path = "/tmp/ragger/" + username + ".lock";
+            std::string lock_path = "/tmp/ragger/housekeeping-" + username + ".lock";
 
             pid_t daemon_pid = 0;
             {
