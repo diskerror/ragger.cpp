@@ -17,6 +17,7 @@ struct Config {
     // --- Server ---
     std::string host           = "127.0.0.1";
     int         port           = 8432;
+    std::string server_name;   // hostname for Crow (e.g. "ragger.local")
     bool        single_user    = true;
 
     // --- Storage ---
@@ -63,6 +64,13 @@ struct Config {
 
     // --- Paths ---
     bool normalize_home_path   = true;
+
+    // --- Web UI ---
+    std::string web_root;      // empty = use bundled web/ dir next to binary
+
+    // --- TLS ---
+    std::string tls_cert;      // path to certificate chain (PEM)
+    std::string tls_key;       // path to private key (PEM)
 
     // --- Import ---
     int  minimum_chunk_size    = 300;

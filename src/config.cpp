@@ -358,6 +358,7 @@ Config load_config(const std::string& path) {
         if (section == "server") {
             if      (key == "host") cfg.host = val;
             else if (key == "port") cfg.port = std::stoi(val);
+            else if (key == "server_name" || key == "hostname") cfg.server_name = val;
             else if (key == "single_user") cfg.single_user = parse_bool(val);
         }
         else if (section == "storage") {
@@ -408,6 +409,13 @@ Config load_config(const std::string& path) {
         }
         else if (section == "paths") {
             if (key == "normalize_home") cfg.normalize_home_path = parse_bool(val);
+        }
+        else if (section == "web") {
+            if (key == "root" || key == "web_root") cfg.web_root = val;
+        }
+        else if (section == "tls" || section == "ssl") {
+            if (key == "cert" || key == "tls_cert") cfg.tls_cert = val;
+            else if (key == "key" || key == "tls_key") cfg.tls_key = val;
         }
         else if (section == "import") {
             if (key == "minimum_chunk_size") cfg.minimum_chunk_size = std::stoi(val);

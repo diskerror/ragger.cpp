@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(ragger VERSION 0.8.1 LANGUAGES CXX)
+project(ragger VERSION 0.9.1 LANGUAGES CXX)
 
 # Build metadata: version, commit, build date
 string(TIMESTAMP RAGGER_BUILD_DATE "%Y-%m-%d %H:%M:%S")
@@ -83,7 +83,7 @@ target_include_directories(vendor_headers INTERFACE
     "${CMAKE_SOURCE_DIR}/vendor"
 )
 # Crow: use Boost.Asio instead of standalone Asio
-target_compile_definitions(vendor_headers INTERFACE CROW_USE_BOOST)
+target_compile_definitions(vendor_headers INTERFACE CROW_USE_BOOST CROW_ENABLE_SSL)
 
 # ---------------------------------------------------------------------------
 # c_lib — ProgramOptions (hard-linked from c_lib)
@@ -143,6 +143,7 @@ target_link_libraries(ragger_core PUBLIC
     Boost::boost
     CURL::libcurl
     OpenSSL::Crypto
+    OpenSSL::SSL
 )
 
 # ---------------------------------------------------------------------------

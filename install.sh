@@ -298,6 +298,14 @@ fi
 chmod 0755 /usr/local/bin/ragger
 codesign -f -s - /usr/local/bin/ragger 2>/dev/null || true
 
+# Install web UI files
+WEB_DIR="/var/ragger/www"
+mkdir -p "$WEB_DIR"
+if [ -d "web" ]; then
+    cp web/* "$WEB_DIR/" 2>/dev/null || true
+    info "Web UI installed: $WEB_DIR"
+fi
+
 echo ""
 info "Installed: /usr/local/bin/ragger"
 /usr/local/bin/ragger version 2>/dev/null || true

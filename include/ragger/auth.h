@@ -30,6 +30,7 @@ std::string ensure_token();
 std::pair<std::string, std::string> rotate_token_for_user(const std::string& username);
 
 /// Hash a password using PBKDF2-SHA256. Returns "pbkdf2:iterations:salt:hash" string.
+std::string generate_random_token(int bytes = 32);
 std::string hash_password(const std::string& password);
 
 /// Verify a password against a stored hash string.

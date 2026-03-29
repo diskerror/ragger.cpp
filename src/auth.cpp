@@ -197,6 +197,15 @@ static std::vector<unsigned char> hex_to_bytes(const std::string& hex) {
     return bytes;
 }
 
+std::string generate_random_token(int bytes) {
+    std::vector<unsigned char> buf(bytes);
+    if (RAND_bytes(buf.data(), bytes) != 1) {
+        throw std::runtime_error("Failed to generate random bytes");
+    }
+    // URL-safe base64-like: hex encoding (simple, always works)
+    return bytes_to_hex(buf.data(), bytes);
+}
+
 std::string hash_password(const std::string& password) {
     unsigned char salt[PBKDF2_SALT_LEN];
     if (RAND_bytes(salt, PBKDF2_SALT_LEN) != 1) {

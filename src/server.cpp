@@ -16,6 +16,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <iostream>
 #include <optional>
 #include <pwd.h>
@@ -27,6 +28,7 @@
 #include <unistd.h>
 
 namespace ragger {
+namespace fs = std::filesystem;
 
 using json = nlohmann::json;
 
@@ -46,6 +48,19 @@ struct Server::Impl {
         bootstrap_auth();
         init_inference();
         setup_routes();
+        warmup();
+    }
+
+    void warmup() {
+        // Pre-load embedding cache so first request isn't slow
+        try {
+            auto result = memory.search("warmup", 1, 0.0f);
+            log_info("Warmup: embedding cache loaded (" 
+                     + std::to_string(memory.count()) + " memories)");
+        } catch (const std::exception& e) {
+            log_info("Warmup: " + std::string(e.what()));
+        }
+        // TODO: verify inference engine model is loaded (ensure_model_loaded)
     }
 
     void init_inference() {
@@ -89,6 +104,61 @@ struct Server::Impl {
         }
     }
 
+    // --- Web sessions (password login) ---
+    struct WebSession {
+        std::string username;
+        int user_id;
+        bool is_admin;
+        std::chrono::steady_clock::time_point expires;
+    };
+    std::unordered_map<std::string, WebSession> web_sessions_;
+    std::mutex web_sessions_mutex_;
+    static constexpr int WEB_SESSION_TTL = 86400; // 24 hours
+
+    std::optional<SqliteBackend::UserInfo> _check_web_session(const std::string& token) {
+        std::lock_guard<std::mutex> lock(web_sessions_mutex_);
+        auto it = web_sessions_.find(token);
+        if (it == web_sessions_.end()) return std::nullopt;
+        if (std::chrono::steady_clock::now() > it->second.expires) {
+            web_sessions_.erase(it);
+            return std::nullopt;
+        }
+        return SqliteBackend::UserInfo{
+            it->second.user_id, it->second.username,
+            it->second.is_admin, "", ""
+        };
+    }
+
+    // --- Web root resolution ---
+    std::string resolve_web_root() {
+        const auto& cfg = config();
+        if (!cfg.web_root.empty()) {
+            auto p = expand_path(cfg.web_root);
+            if (fs::is_directory(p)) return p;
+        }
+        // Fall back to common locations
+        for (const auto& dir : {
+            std::string("/var/ragger/www"),
+            std::string("/usr/local/share/ragger/www"),
+            std::string("web")
+        }) {
+            if (fs::is_directory(dir)) return dir;
+        }
+        return "";
+    }
+
+    static std::string mime_type(const std::string& path) {
+        auto ext = fs::path(path).extension().string();
+        if (ext == ".html") return "text/html; charset=utf-8";
+        if (ext == ".css")  return "text/css; charset=utf-8";
+        if (ext == ".js")   return "application/javascript; charset=utf-8";
+        if (ext == ".json") return "application/json";
+        if (ext == ".png")  return "image/png";
+        if (ext == ".svg")  return "image/svg+xml";
+        if (ext == ".ico")  return "image/x-icon";
+        return "application/octet-stream";
+    }
+
     std::optional<SqliteBackend::UserInfo> _check_auth(const crow::request& req) {
         const auto& cfg = config();
         
@@ -100,8 +170,24 @@ struct Server::Impl {
             return SqliteBackend::UserInfo{0, "anonymous", false, "", ""};
         }
         
+        // Check cookie for web session token
         if (auth_header.empty()) {
-            return std::nullopt;  // No auth header → reject
+            auto cookie = req.get_header_value("Cookie");
+            std::string cookie_token;
+            auto pos = cookie.find("ragger_token=");
+            if (pos != std::string::npos) {
+                auto start = pos + 13;
+                auto end = cookie.find(';', start);
+                cookie_token = cookie.substr(start, end == std::string::npos ? end : end - start);
+            }
+            if (!cookie_token.empty()) {
+                auto ws = _check_web_session(cookie_token);
+                if (ws) return ws;
+                // Also try as bearer token
+                auto user = memory.backend()->get_user_by_token_hash(hash_token(cookie_token));
+                if (user) return user;
+            }
+            return std::nullopt;
         }
 
         // Parse "Bearer <token>"
@@ -110,6 +196,10 @@ struct Server::Impl {
             return std::nullopt;
         }
         std::string token = auth_header.substr(bearer_prefix.size());
+
+        // Check web sessions first
+        auto ws = _check_web_session(token);
+        if (ws) return ws;
 
         // Hash and lookup in database (works for both modes)
         std::string token_hash = hash_token(token);
@@ -747,6 +837,109 @@ struct Server::Impl {
                 return crow::response(500, std::string("Error: ") + e.what());
             }
         });
+
+        // POST /auth/login — password authentication → session token
+        CROW_ROUTE(app, "/auth/login").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) -> crow::response {
+            try {
+                auto body = json::parse(req.body);
+                std::string username = body.value("username", "");
+                std::string password = body.value("password", "");
+
+                if (username.empty() || password.empty()) {
+                    return crow::response(400, R"({"error":"username and password required"})");
+                }
+
+                auto user = memory.backend()->get_user_by_username(username);
+                if (!user) {
+                    return crow::response(401, R"({"error":"invalid credentials"})");
+                }
+
+                auto stored_hash = memory.backend()->get_user_password(username);
+                if (!stored_hash) {
+                    return crow::response(401, R"({"error":"no password set — use 'ragger passwd' first"})");
+                }
+
+                if (!verify_password(password, *stored_hash)) {
+                    return crow::response(401, R"({"error":"invalid credentials"})");
+                }
+
+                // Generate session token
+                std::string session_token = generate_random_token(32);
+                {
+                    std::lock_guard<std::mutex> lock(web_sessions_mutex_);
+                    web_sessions_[session_token] = WebSession{
+                        username, user->id, user->is_admin,
+                        std::chrono::steady_clock::now() + std::chrono::seconds(WEB_SESSION_TTL)
+                    };
+                }
+
+                json result = {
+                    {"token", session_token},
+                    {"username", username},
+                    {"expires_in", WEB_SESSION_TTL}
+                };
+                log_http("POST /auth/login 200 (" + username + ")");
+                return crow::response(200, result.dump());
+            } catch (const std::exception& e) {
+                log_error(std::string("Login error: ") + e.what());
+                return crow::response(500, R"({"error":"login failed"})");
+            }
+        });
+
+        // Static file serving (web UI) — no auth required
+        CROW_ROUTE(app, "/<path>")
+        ([this](const crow::request& req, const std::string& path) -> crow::response {
+            std::string web_root = resolve_web_root();
+            if (web_root.empty()) {
+                return crow::response(404, "Not found");
+            }
+
+            // Map / to index.html
+            std::string safe_path = path.empty() ? "index.html" : path;
+
+            // Prevent directory traversal
+            if (safe_path.find("..") != std::string::npos) {
+                return crow::response(403, "Forbidden");
+            }
+
+            fs::path file_path = fs::path(web_root) / safe_path;
+            if (!fs::is_regular_file(file_path)) {
+                return crow::response(404, "Not found");
+            }
+
+            std::ifstream file(file_path, std::ios::binary);
+            if (!file) {
+                return crow::response(500, "Cannot read file");
+            }
+
+            std::ostringstream ss;
+            ss << file.rdbuf();
+            auto resp = crow::response(200, ss.str());
+            resp.set_header("Content-Type", mime_type(file_path.string()));
+            return resp;
+        });
+
+        // Root path
+        CROW_ROUTE(app, "/")
+        ([this](const crow::request& req) -> crow::response {
+            std::string web_root = resolve_web_root();
+            if (web_root.empty()) {
+                return crow::response(200, R"({"status":"ok","message":"Ragger API"})");
+            }
+
+            fs::path file_path = fs::path(web_root) / "index.html";
+            if (!fs::is_regular_file(file_path)) {
+                return crow::response(200, R"({"status":"ok","message":"Ragger API"})");
+            }
+
+            std::ifstream file(file_path, std::ios::binary);
+            std::ostringstream ss;
+            ss << file.rdbuf();
+            auto resp = crow::response(200, ss.str());
+            resp.set_header("Content-Type", "text/html; charset=utf-8");
+            return resp;
+        });
     }
 };
 
@@ -783,13 +976,37 @@ void Server::run() {
         std::exit(1);
     }
 
-    log_info(std::string(lang::MSG_SERVER_STARTING) + pImpl->host + ":" + std::to_string(pImpl->port));
+    std::string addr = pImpl->host + ":" + std::to_string(pImpl->port);
+    log_info(std::string(lang::MSG_SERVER_STARTING) + addr);
+    log_info("  Health check: curl http://" + addr + "/health");
     
-    pImpl->app.loglevel(crow::LogLevel::Warning)
-              .bindaddr(pImpl->host)
-              .port(pImpl->port)
-              .multithreaded()
-              .run();
+    const auto& cfg = config();
+
+    auto& a = pImpl->app;
+    a.loglevel(crow::LogLevel::Warning)
+     .bindaddr(pImpl->host)
+     .port(pImpl->port)
+     .multithreaded();
+
+    if (!cfg.server_name.empty()) {
+        a.server_name(cfg.server_name);
+    }
+
+    // TLS support
+    if (!cfg.tls_cert.empty() && !cfg.tls_key.empty()) {
+        auto cert_path = expand_path(cfg.tls_cert);
+        auto key_path = expand_path(cfg.tls_key);
+        if (fs::exists(cert_path) && fs::exists(key_path)) {
+            a.ssl_file(cert_path, key_path);
+            log_info("TLS enabled: " + cert_path);
+        } else {
+            log_error("TLS certificates not found — starting without encryption");
+            if (!fs::exists(cert_path)) log_error("  Missing: " + cert_path);
+            if (!fs::exists(key_path))  log_error("  Missing: " + key_path);
+        }
+    }
+
+    a.run();
 }
 
 void Server::stop() {
