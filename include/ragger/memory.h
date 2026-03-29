@@ -60,13 +60,26 @@ public:
     /// Search by metadata field matching. In multi-DB mode, merges results from both DBs.
     std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit = 0);
 
+    /// Create a user-scoped view sharing this instance's embedder and common backend.
+    /// Opens ~username/.ragger/memories.db as the user's private DB.
+    /// Returns nullptr if no user DB exists (caller should fall back to this instance).
+    std::unique_ptr<RaggerMemory> for_user(const std::string& username);
+
     /// Access primary backend (for user management, etc.)
     SqliteBackend* backend() { return backend_.get(); }
     SqliteBackend* user_backend() { return user_backend_.get(); }
 
     void close();
 
+    /// Resolve a username to their home directory (macOS + Linux).
+    static std::string resolve_user_home(const std::string& username);
+
 private:
+    /// Private constructor for for_user() — shares embedder and common backend.
+    RaggerMemory(Embedder* shared_embedder, SqliteBackend* shared_common,
+                 const std::string& user_db_path);
+
+    Embedder*                      shared_embedder_{nullptr}; // non-owning, set by for_user()
     std::unique_ptr<Embedder>      embedder_;
     std::unique_ptr<SqliteBackend> backend_;      // common DB (or only DB in single-user)
     std::unique_ptr<SqliteBackend> user_backend_;  // user's private DB (nullptr = single-user)

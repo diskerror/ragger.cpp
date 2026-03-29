@@ -5,8 +5,13 @@
 #include "ragger/memory.h"
 #include "ragger/embedder.h"
 #include "ragger/config.h"
+#include "ragger/logs.h"
+
+#include <filesystem>
+#include <pwd.h>
 
 namespace ragger {
+namespace fs = std::filesystem;
 
 RaggerMemory::RaggerMemory(const std::string& db_path,
                            const std::string& model_dir,
@@ -27,6 +32,62 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     if (!user_db_path.empty()) {
         user_backend_ = std::make_unique<SqliteBackend>(*embedder_, user_db_path);
     }
+}
+
+// Private constructor for for_user() — shares embedder and common backend
+RaggerMemory::RaggerMemory(Embedder* shared_embedder, SqliteBackend* shared_common,
+                           const std::string& user_db_path)
+    : shared_embedder_(shared_embedder)
+{
+    // backend_ points to shared common (non-owning would be cleaner but
+    // we wrap it in a unique_ptr with a no-op deleter isn't worth the complexity).
+    // Instead, we create a new SqliteBackend for common that shares the same DB.
+    // Actually — just store a raw pointer and special-case close().
+    // Simplest: re-open common DB read-only... No, that breaks store-to-common.
+    //
+    // Real approach: backend_ wraps the same DB path with shared embedder.
+    // The common DB supports concurrent readers via WAL mode.
+    backend_ = std::make_unique<SqliteBackend>(*shared_embedder, shared_common->db_path());
+    user_backend_ = std::make_unique<SqliteBackend>(*shared_embedder, user_db_path);
+}
+
+std::string RaggerMemory::resolve_user_home(const std::string& username) {
+    // Try pwd first (works on macOS and Linux)
+    struct passwd* pw = getpwnam(username.c_str());
+    if (pw && pw->pw_dir) {
+        std::string home = pw->pw_dir;
+        if (fs::is_directory(home)) return home;
+    }
+
+    // Fallback: common home base directories
+#ifdef __APPLE__
+    std::string candidate = "/Users/" + username;
+#else
+    std::string candidate = "/home/" + username;
+#endif
+    if (fs::is_directory(candidate)) return candidate;
+
+    return "";
+}
+
+std::unique_ptr<RaggerMemory> RaggerMemory::for_user(const std::string& username) {
+    std::string home = resolve_user_home(username);
+    if (home.empty()) {
+        log_info("[WARN] Cannot resolve home for user '" + username + "', using common DB only");
+        return nullptr;
+    }
+
+    std::string user_db = home + "/.ragger/memories.db";
+    if (!fs::exists(user_db)) {
+        log_info("No user DB for '" + username + "' at " + user_db + ", using common DB only");
+        return nullptr;
+    }
+
+    Embedder* emb = shared_embedder_ ? shared_embedder_ : embedder_.get();
+    auto inst = std::unique_ptr<RaggerMemory>(
+        new RaggerMemory(emb, backend_.get(), user_db));
+    log_info("Opened user DB for '" + username + "': " + user_db);
+    return inst;
 }
 
 RaggerMemory::~RaggerMemory() {

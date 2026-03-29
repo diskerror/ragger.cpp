@@ -49,6 +49,9 @@ public:
     explicit SqliteBackend(const std::string& db_path);
     ~SqliteBackend();
 
+    /// Path to the database file.
+    std::string db_path() const;
+
     /// Store text with metadata. Returns memory ID.
     std::string store(const std::string& text, json metadata = {});
 

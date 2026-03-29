@@ -1064,6 +1064,8 @@ SqliteBackend::SqliteBackend(const std::string& db_path)
 
 SqliteBackend::~SqliteBackend() = default;
 
+std::string SqliteBackend::db_path() const { return pImpl->db_path; }
+
 std::string SqliteBackend::store(const std::string& text, json metadata) {
     return pImpl->store(text, std::move(metadata));
 }

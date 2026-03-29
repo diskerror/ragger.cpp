@@ -22,6 +22,7 @@
 #include <pwd.h>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -41,6 +42,10 @@ struct Server::Impl {
     std::optional<SqliteBackend::UserInfo> default_user_;
     std::unique_ptr<InferenceClient> inference_;
     ChatSessionManager session_mgr_;
+
+    // Per-user memory cache (username → RaggerMemory)
+    std::unordered_map<std::string, std::unique_ptr<RaggerMemory>> user_memories_;
+    std::mutex user_memories_mutex_;
 
     Impl(RaggerMemory& mem, const std::string& h, int p)
         : memory(mem), host(h), port(p)
@@ -272,6 +277,30 @@ struct Server::Impl {
         }
     }
 
+    /// Get per-user memory (or fallback to common).
+    /// In single-user mode, always returns the main memory instance.
+    RaggerMemory& _get_memory(const std::string& username) {
+        if (config().single_user) return memory;
+
+        std::lock_guard<std::mutex> lock(user_memories_mutex_);
+        auto it = user_memories_.find(username);
+        if (it != user_memories_.end()) {
+            return it->second ? *it->second : memory;
+        }
+
+        // Try to open user's private DB
+        auto user_mem = memory.for_user(username);
+        if (!user_mem) {
+            // Cache the miss so we don't retry every request
+            user_memories_[username] = nullptr;
+            return memory;
+        }
+
+        auto& ref = *user_mem;
+        user_memories_[username] = std::move(user_mem);
+        return ref;
+    }
+
     void setup_routes() {
         // GET /health
         CROW_ROUTE(app, "/health")
@@ -295,12 +324,13 @@ struct Server::Impl {
                 log_http("GET /count 401");
                 return crow::response(401, "Unauthorized");
             }
+            auto& mem = _get_memory(user->username);
             json response = {
-                {"count", memory.count()}
+                {"count", mem.count()}
             };
-            if (memory.is_multi_db()) {
-                response["user"] = memory.user_backend()->count();
-                response["common"] = memory.backend()->count();
+            if (mem.is_multi_db()) {
+                response["user"] = mem.user_backend()->count();
+                response["common"] = mem.backend()->count();
             }
             log_http("GET /count 200");
             return crow::response(response.dump());
@@ -336,7 +366,8 @@ struct Server::Impl {
                 }
 
                 bool common = body.value("common", false);
-                std::string id = memory.store(text, metadata, common);
+                auto& mem = _get_memory(user->username);
+                std::string id = mem.store(text, metadata, common);
 
                 json response = {
                     {"id", id},
@@ -379,7 +410,8 @@ struct Server::Impl {
 
                 auto start_time = std::chrono::high_resolution_clock::now();
                 
-                SearchResponse search_response = memory.search(
+                auto& mem = _get_memory(user->username);
+                SearchResponse search_response = mem.search(
                     query, limit, min_score, collections
                 );
 
@@ -441,7 +473,8 @@ struct Server::Impl {
             }
 
             try {
-                bool deleted = memory.delete_memory(id);
+                auto& mem = _get_memory(user->username);
+                bool deleted = mem.delete_memory(id);
                 
                 if (deleted) {
                     json response = {
@@ -480,7 +513,8 @@ struct Server::Impl {
                 }
 
                 std::vector<int> ids = body["ids"].get<std::vector<int>>();
-                int deleted = memory.delete_batch(ids);
+                auto& mem = _get_memory(user->username);
+                int deleted = mem.delete_batch(ids);
 
                 json response = {
                     {"deleted", deleted}
@@ -517,7 +551,8 @@ struct Server::Impl {
                 json metadata_filter = body["metadata"];
                 int limit = body.value("limit", 0);
 
-                auto results = memory.search_by_metadata(metadata_filter, limit);
+                auto& mem = _get_memory(user->username);
+                auto results = mem.search_by_metadata(metadata_filter, limit);
 
                 // Build results array
                 json results_json = json::array();
@@ -675,7 +710,8 @@ struct Server::Impl {
                 try {
                     const auto& cfg = config();
                     int max_results = cfg.chat_max_memory_results;
-                    auto search_result = memory.search(message, max_results, 0.3f);
+                    auto& mem = _get_memory(user->username);
+                    auto search_result = mem.search(message, max_results, 0.3f);
                     for (const auto& r : search_result.results) {
                         if (!memory_context.empty()) memory_context += "\n\n---\n\n";
                         memory_context += r.text;
@@ -729,7 +765,8 @@ struct Server::Impl {
                                 {"category", "chat-turn"},
                                 {"source", "chat-http-" + user->username}
                             };
-                            memory.store(
+                            auto& mem = _get_memory(user->username);
+                            mem.store(
                                 "User: " + message + "\n\nAssistant: " + response_text,
                                 turn_meta
                             );
