@@ -17,6 +17,9 @@
 #include <termios.h>
 #include <unistd.h>
 #include <signal.h>
+#include <sys/file.h>
+#include <sqlite3.h>
+#include <thread>
 #include <iomanip>
 #include <curl/curl.h>
 
@@ -478,6 +481,62 @@ static nlohmann::json mcp_tool_call(ragger::RaggerMemory& memory, const nlohmann
     }
 }
 
+/// Check if another process holds the housekeeping lock for a user.
+static bool is_housekeeping_locked(const std::string& username) {
+    std::string lock_path = "/tmp/ragger-housekeeping-" + username + ".lock";
+    int fd = open(lock_path.c_str(), O_RDONLY);
+    if (fd < 0) return false;  // no lock file = not locked
+    bool locked = (flock(fd, LOCK_EX | LOCK_NB) != 0);
+    if (!locked) flock(fd, LOCK_UN);  // we got it, release immediately
+    ::close(fd);
+    return locked;
+}
+
+/// MCP housekeeping: periodically clean user DB if no HTTP server is handling it.
+static void mcp_housekeeping_thread(ragger::RaggerMemory& memory, const std::string& username) {
+    const auto& cfg = ragger::config();
+    float max_age_hours = cfg.cleanup_max_age_hours;
+
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::seconds(60));
+
+        // If HTTP server has taken over, stop
+        if (is_housekeeping_locked(username)) continue;
+
+        if (max_age_hours <= 0) continue;
+
+        // Clean expired conversations from user DB
+        auto* user_be = memory.user_backend();
+        if (!user_be) user_be = memory.backend();
+
+        std::string db_path = user_be->db_path();
+        auto now = std::chrono::system_clock::now();
+        auto cutoff = now - std::chrono::duration_cast<std::chrono::system_clock::duration>(
+            std::chrono::duration<double, std::ratio<3600>>(max_age_hours));
+        auto cutoff_t = std::chrono::system_clock::to_time_t(cutoff);
+        char cutoff_str[32];
+        std::strftime(cutoff_str, sizeof(cutoff_str), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&cutoff_t));
+
+        try {
+            sqlite3* db = nullptr;
+            if (sqlite3_open(db_path.c_str(), &db) != SQLITE_OK) continue;
+            std::string sql = "DELETE FROM memories WHERE collection = 'conversation' AND timestamp < ?";
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_text(stmt, 1, cutoff_str, -1, SQLITE_STATIC);
+                sqlite3_step(stmt);
+                int deleted = sqlite3_changes(db);
+                if (deleted > 0) {
+                    ragger::log_info("MCP housekeeping: cleaned " + std::to_string(deleted)
+                                   + " expired conversations");
+                }
+            }
+            sqlite3_finalize(stmt);
+            sqlite3_close(db);
+        } catch (...) {}
+    }
+}
+
 static void do_mcp(ragger::RaggerMemory& memory) {
     auto send_response = [](const nlohmann::json& response) {
         std::cout << response.dump() << std::endl;
@@ -897,6 +956,15 @@ int main(int argc, char** argv) {
                     common_path, model_dir, user_path);
             } else {
                 mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path, model_dir);
+            }
+            // Start housekeeping thread if HTTP server isn't handling it
+            struct passwd* mcp_pw = getpwuid(getuid());
+            std::string mcp_username = mcp_pw ? mcp_pw->pw_name : "default";
+            std::thread hk_thread;
+            if (!is_housekeeping_locked(mcp_username)) {
+                hk_thread = std::thread(mcp_housekeeping_thread,
+                                        std::ref(*mem_ptr), mcp_username);
+                hk_thread.detach();
             }
             do_mcp(*mem_ptr);
 
