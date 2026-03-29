@@ -507,9 +507,11 @@ static bool is_http_server_running() {
 static void mcp_housekeeping_thread(ragger::RaggerMemory& memory, const std::string& username) {
     const auto& cfg = ragger::config();
     float max_age_hours = cfg.cleanup_max_age_hours;
+    int interval = cfg.housekeeping_interval;
+    if (interval == 0) return;  // disabled
 
     while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(60));
+        std::this_thread::sleep_for(std::chrono::seconds(interval));
 
         // If HTTP server has started, stop doing housekeeping
         if (is_http_server_running()) continue;

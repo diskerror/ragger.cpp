@@ -203,11 +203,15 @@ struct Server::Impl {
     /// Start background timer for periodic housekeeping.
     /// Housekeeping only acts on users whose locks we hold.
     void start_housekeeping_timer() {
+        int interval = config().housekeeping_interval;
+        if (interval == 0) {
+            log_info("Housekeeping: disabled (interval = 0)");
+            return;
+        }
         timer_running_ = true;
-        timer_thread_ = std::thread([this]() {
+        timer_thread_ = std::thread([this, interval]() {
             while (timer_running_) {
-                // Sleep 60s in 1s increments so we can stop quickly
-                for (int i = 0; i < 60 && timer_running_; ++i) {
+                for (int i = 0; i < interval && timer_running_; ++i) {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                     // Check for signal-triggered housekeeping
                     if (g_housekeeping_requested.exchange(false)) {
