@@ -1239,32 +1239,31 @@ int main(int argc, char** argv) {
 
         } else if (command == "housekeeping") {
             ragger::setup_logging(false, false);
-            // Send SIGUSR1 to the housekeeping owner (reads lock file for PID)
-            std::vector<std::string> lock_paths = {
-                "/var/run/ragger-housekeeping.lock",
-                "/tmp/ragger-housekeeping.lock"
-            };
+            // Send SIGUSR1 to the process holding our user's housekeeping lock
+            struct passwd* pw = getpwuid(getuid());
+            std::string username = pw ? pw->pw_name : "default";
+            std::string lock_path = "/tmp/ragger-housekeeping-" + username + ".lock";
+
             pid_t daemon_pid = 0;
-            for (const auto& path : lock_paths) {
-                std::ifstream pf(path);
-                if (pf) {
-                    pf >> daemon_pid;
-                    break;
-                }
+            {
+                std::ifstream pf(lock_path);
+                if (pf) pf >> daemon_pid;
             }
             if (daemon_pid <= 0) {
-                std::cerr << "Error: no running daemon found (no housekeeping lock file)\n";
+                std::cerr << "Error: no instance owns housekeeping for user '"
+                          << username << "'\n";
                 return 1;
             }
             if (kill(daemon_pid, 0) != 0) {
-                std::cerr << "Error: daemon (pid " << daemon_pid << ") is not running\n";
+                std::cerr << "Error: process (pid " << daemon_pid << ") is not running\n";
                 return 1;
             }
             if (kill(daemon_pid, SIGUSR1) != 0) {
-                std::cerr << "Error: failed to signal daemon: " << strerror(errno) << "\n";
+                std::cerr << "Error: failed to signal process: " << strerror(errno) << "\n";
                 return 1;
             }
-            std::cout << "✓ Housekeeping triggered (pid " << daemon_pid << ")\n";
+            std::cout << "✓ Housekeeping triggered for " << username
+                      << " (pid " << daemon_pid << ")\n";
 
         } else {
             std::cerr << CLI_UNKNOWN_COMMAND << command << "\n";

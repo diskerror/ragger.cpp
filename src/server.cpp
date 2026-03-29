@@ -61,7 +61,6 @@ struct Server::Impl {
     // Housekeeping timer
     std::atomic<bool> timer_running_{false};
     std::thread timer_thread_;
-    int housekeeping_lock_fd_{-1};
     std::string pid_file_;
 
     Impl(RaggerMemory& mem, const std::string& h, int p)
@@ -130,12 +129,13 @@ struct Server::Impl {
             char cutoff_str[32];
             std::strftime(cutoff_str, sizeof(cutoff_str), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&cutoff_t));
 
-            // Collect user DB paths from cache
+            // Collect user DB paths only for users we hold housekeeping locks for
             std::vector<std::string> db_paths;
             {
-                std::lock_guard<std::mutex> lock(user_memories_mutex_);
+                std::lock_guard<std::mutex> hk_lock(housekeeping_locks_mutex_);
+                std::lock_guard<std::mutex> mem_lock(user_memories_mutex_);
                 for (auto& [username, mem] : user_memories_) {
-                    if (mem && mem->user_backend()) {
+                    if (mem && mem->user_backend() && housekeeping_locks_.count(username)) {
                         db_paths.push_back(mem->user_backend()->db_path());
                     }
                 }
@@ -171,39 +171,38 @@ struct Server::Impl {
         }
     }
 
-    /// Try to acquire housekeeping lock. Returns true if this instance owns it.
-    bool acquire_housekeeping_lock() {
-        std::string lock_path = "/var/run/ragger-housekeeping.lock";
-        housekeeping_lock_fd_ = open(lock_path.c_str(), O_WRONLY | O_CREAT, 0644);
-        if (housekeeping_lock_fd_ < 0) {
-            // Fallback to /tmp
-            lock_path = "/tmp/ragger-housekeeping.lock";
-            housekeeping_lock_fd_ = open(lock_path.c_str(), O_WRONLY | O_CREAT, 0644);
-        }
-        if (housekeeping_lock_fd_ < 0) return false;
+    // Per-user housekeeping locks: username → fd
+    std::unordered_map<std::string, int> housekeeping_locks_;
+    std::mutex housekeeping_locks_mutex_;
 
-        if (flock(housekeeping_lock_fd_, LOCK_EX | LOCK_NB) != 0) {
-            ::close(housekeeping_lock_fd_);
-            housekeeping_lock_fd_ = -1;
+    /// Try to acquire housekeeping lock for a specific user.
+    /// Lock file: /tmp/ragger-housekeeping-{username}.lock
+    /// Returns true if this instance now owns housekeeping for that user.
+    bool acquire_user_housekeeping_lock(const std::string& username) {
+        std::lock_guard<std::mutex> lock(housekeeping_locks_mutex_);
+        if (housekeeping_locks_.count(username)) return true;  // already own it
+
+        std::string lock_path = "/tmp/ragger-housekeeping-" + username + ".lock";
+        int fd = open(lock_path.c_str(), O_WRONLY | O_CREAT, 0644);
+        if (fd < 0) return false;
+
+        if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+            ::close(fd);
             return false;  // another instance owns it
         }
 
-        // Write our PID to the lock file
-        ftruncate(housekeeping_lock_fd_, 0);
+        // Write our PID
+        ftruncate(fd, 0);
         auto pid_str = std::to_string(getpid());
-        (void)write(housekeeping_lock_fd_, pid_str.c_str(), pid_str.size());
-        // Don't close fd — keeps the flock
-        log_info("Housekeeping owner: this instance (lock: " + lock_path + ")");
+        (void)write(fd, pid_str.c_str(), pid_str.size());
+        housekeeping_locks_[username] = fd;
+        log_info("Housekeeping owner for user '" + username + "'");
         return true;
     }
 
-    /// Start background timer for periodic housekeeping (only if we own the lock).
+    /// Start background timer for periodic housekeeping.
+    /// Housekeeping only acts on users whose locks we hold.
     void start_housekeeping_timer() {
-        if (!acquire_housekeeping_lock()) {
-            log_info("Housekeeping: another instance owns the lock, skipping timer");
-            // Still handle SIGUSR1 but just ignore it
-            return;
-        }
         timer_running_ = true;
         timer_thread_ = std::thread([this]() {
             while (timer_running_) {
@@ -228,11 +227,13 @@ struct Server::Impl {
         if (timer_thread_.joinable()) {
             timer_thread_.join();
         }
-        if (housekeeping_lock_fd_ >= 0) {
-            flock(housekeeping_lock_fd_, LOCK_UN);
-            ::close(housekeeping_lock_fd_);
-            housekeeping_lock_fd_ = -1;
+        // Release all user housekeeping locks
+        std::lock_guard<std::mutex> lock(housekeeping_locks_mutex_);
+        for (auto& [username, fd] : housekeeping_locks_) {
+            flock(fd, LOCK_UN);
+            ::close(fd);
         }
+        housekeeping_locks_.clear();
     }
 
     void init_inference() {
@@ -462,6 +463,9 @@ struct Server::Impl {
             user_memories_[username] = nullptr;
             return memory;
         }
+
+        // Try to acquire housekeeping lock for this user
+        acquire_user_housekeeping_lock(username);
 
         auto& ref = *user_mem;
         user_memories_[username] = std::move(user_mem);
