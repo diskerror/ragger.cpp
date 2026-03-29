@@ -26,6 +26,7 @@
 #include <atomic>
 #include <signal.h>
 #include <sqlite3.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -60,6 +61,8 @@ struct Server::Impl {
     // Housekeeping timer
     std::atomic<bool> timer_running_{false};
     std::thread timer_thread_;
+    int housekeeping_lock_fd_{-1};
+    std::string pid_file_;
 
     Impl(RaggerMemory& mem, const std::string& h, int p)
         : memory(mem), host(h), port(p)
@@ -168,8 +171,39 @@ struct Server::Impl {
         }
     }
 
-    /// Start background timer for periodic housekeeping.
+    /// Try to acquire housekeeping lock. Returns true if this instance owns it.
+    bool acquire_housekeeping_lock() {
+        std::string lock_path = "/var/run/ragger-housekeeping.lock";
+        housekeeping_lock_fd_ = open(lock_path.c_str(), O_WRONLY | O_CREAT, 0644);
+        if (housekeeping_lock_fd_ < 0) {
+            // Fallback to /tmp
+            lock_path = "/tmp/ragger-housekeeping.lock";
+            housekeeping_lock_fd_ = open(lock_path.c_str(), O_WRONLY | O_CREAT, 0644);
+        }
+        if (housekeeping_lock_fd_ < 0) return false;
+
+        if (flock(housekeeping_lock_fd_, LOCK_EX | LOCK_NB) != 0) {
+            ::close(housekeeping_lock_fd_);
+            housekeeping_lock_fd_ = -1;
+            return false;  // another instance owns it
+        }
+
+        // Write our PID to the lock file
+        ftruncate(housekeeping_lock_fd_, 0);
+        auto pid_str = std::to_string(getpid());
+        (void)write(housekeeping_lock_fd_, pid_str.c_str(), pid_str.size());
+        // Don't close fd — keeps the flock
+        log_info("Housekeeping owner: this instance (lock: " + lock_path + ")");
+        return true;
+    }
+
+    /// Start background timer for periodic housekeeping (only if we own the lock).
     void start_housekeeping_timer() {
+        if (!acquire_housekeeping_lock()) {
+            log_info("Housekeeping: another instance owns the lock, skipping timer");
+            // Still handle SIGUSR1 but just ignore it
+            return;
+        }
         timer_running_ = true;
         timer_thread_ = std::thread([this]() {
             while (timer_running_) {
@@ -193,6 +227,11 @@ struct Server::Impl {
         timer_running_ = false;
         if (timer_thread_.joinable()) {
             timer_thread_.join();
+        }
+        if (housekeeping_lock_fd_ >= 0) {
+            flock(housekeeping_lock_fd_, LOCK_UN);
+            ::close(housekeeping_lock_fd_);
+            housekeeping_lock_fd_ = -1;
         }
     }
 
@@ -1191,19 +1230,18 @@ void Server::run() {
         }
     }
 
-    // Write PID file
-    std::string pid_file = "/var/run/ragger.pid";
+    // Write PID file (per-port)
+    std::string port_str = std::to_string(pImpl->port);
+    pImpl->pid_file_ = "/var/run/ragger-" + port_str + ".pid";
     {
-        std::ofstream pf(pid_file);
+        std::ofstream pf(pImpl->pid_file_);
+        if (!pf) {
+            pImpl->pid_file_ = "/tmp/ragger-" + port_str + ".pid";
+            pf.open(pImpl->pid_file_);
+        }
         if (pf) {
             pf << getpid();
-            log_info("PID file: " + pid_file);
-        } else {
-            // Fallback to /tmp if /var/run not writable
-            pid_file = "/tmp/ragger.pid";
-            std::ofstream pf2(pid_file);
-            if (pf2) pf2 << getpid();
-            log_info("PID file: " + pid_file);
+            log_info("PID file: " + pImpl->pid_file_);
         }
     }
 
@@ -1221,7 +1259,7 @@ void Server::run() {
 
     // Cleanup
     pImpl->stop_housekeeping_timer();
-    std::remove(pid_file.c_str());
+    if (!pImpl->pid_file_.empty()) std::remove(pImpl->pid_file_.c_str());
 }
 
 void Server::stop() {

@@ -1239,10 +1239,13 @@ int main(int argc, char** argv) {
 
         } else if (command == "housekeeping") {
             ragger::setup_logging(false, false);
-            // Send SIGUSR1 to running daemon
-            std::vector<std::string> pid_paths = {"/var/run/ragger.pid", "/tmp/ragger.pid"};
+            // Send SIGUSR1 to the housekeeping owner (reads lock file for PID)
+            std::vector<std::string> lock_paths = {
+                "/var/run/ragger-housekeeping.lock",
+                "/tmp/ragger-housekeeping.lock"
+            };
             pid_t daemon_pid = 0;
-            for (const auto& path : pid_paths) {
+            for (const auto& path : lock_paths) {
                 std::ifstream pf(path);
                 if (pf) {
                     pf >> daemon_pid;
@@ -1250,7 +1253,7 @@ int main(int argc, char** argv) {
                 }
             }
             if (daemon_pid <= 0) {
-                std::cerr << "Error: no running daemon found (no PID file)\n";
+                std::cerr << "Error: no running daemon found (no housekeeping lock file)\n";
                 return 1;
             }
             if (kill(daemon_pid, 0) != 0) {
