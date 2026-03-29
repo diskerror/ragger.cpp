@@ -39,6 +39,9 @@ struct Endpoint {
     /// Check if endpoint is reachable (GET /models or /health, 3s timeout)
     bool is_reachable() const;
 
+    /// True if endpoint appears to be a local/non-commercial engine
+    bool is_local() const;
+
     /// Query available models from endpoint (GET /v1/models)
     std::vector<std::string> list_models() const;
 };
@@ -76,9 +79,11 @@ public:
     /// Get the currently forced endpoint name (empty = auto)
     const std::string& forced_endpoint() const { return forced_endpoint_; }
 
+    /// Resolve which endpoint handles a given model name
+    Endpoint& resolve_endpoint(const std::string& model);
+
 private:
     std::string forced_endpoint_;
-    Endpoint& resolve_endpoint(const std::string& model);
 };
 
 } // namespace ragger

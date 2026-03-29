@@ -65,7 +65,30 @@ struct Server::Impl {
         } catch (const std::exception& e) {
             log_info("Warmup: " + std::string(e.what()));
         }
-        // Model auto-load handled per-request in /chat route
+        // Preload default model on local inference engines
+        if (inference_) {
+            preload_local_model(inference_->model);
+        }
+    }
+
+    /// Preload a model if its endpoint is local (non-commercial).
+    /// Runs in background thread to avoid blocking startup.
+    void preload_local_model(const std::string& model_name) {
+        if (model_name.empty() || !inference_) return;
+        try {
+            auto& ep = inference_->resolve_endpoint(model_name);
+            if (!ep.is_local()) return;
+        } catch (...) {
+            return;
+        }
+        std::thread([this, model_name]() {
+            auto err = inference_->ensure_model_loaded(model_name);
+            if (err.empty()) {
+                log_info("Preloaded model: " + model_name);
+            } else {
+                log_info("Model preload skipped: " + err);
+            }
+        }).detach();
     }
 
     void init_inference() {
@@ -601,11 +624,16 @@ struct Server::Impl {
                 }
                 
                 auto* backend = memory.backend();
-                backend->update_user_preferred_model(user->username, model);
+                // Resolve alias before storing
+                std::string resolved = config().resolve_model(model);
+                backend->update_user_preferred_model(user->username, resolved);
+
+                // Preload on local engines
+                preload_local_model(resolved);
                 
                 json response = {
                     {"status", "updated"},
-                    {"model", model}
+                    {"model", resolved}
                 };
                 log_http("PUT /user/model 200");
                 return crow::response(200, response.dump());

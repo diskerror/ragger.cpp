@@ -274,6 +274,15 @@ bool Endpoint::is_reachable() const {
     return res == CURLE_OK && code < 400;
 }
 
+bool Endpoint::is_local() const {
+    // Local if URL contains localhost, 127.x, 192.168.x, 10.x, or has /v1 without an API key
+    return api_url.find("localhost") != std::string::npos
+        || api_url.find("127.0.0.") != std::string::npos
+        || api_url.find("192.168.") != std::string::npos
+        || api_url.find("10.") != std::string::npos
+        || api_url.find("0.0.0.0") != std::string::npos;
+}
+
 std::vector<std::string> Endpoint::list_models() const {
     std::vector<std::string> result;
 
