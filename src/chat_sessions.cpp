@@ -130,16 +130,20 @@ std::string ChatSessionManager::load_workspace_files() {
     return result;
 }
 
-std::vector<std::vector<std::pair<std::string, std::string>>>
+std::vector<ChatSessionManager::ExpiredSession>
 ChatSessionManager::cleanup_expired(int pause_minutes) {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<std::vector<std::pair<std::string, std::string>>> expired_turns;
+    std::vector<ExpiredSession> expired;
     std::vector<std::string> to_remove;
 
     for (auto& [sid, session] : sessions_) {
         if (session.idle_seconds() > pause_minutes * 60) {
             if (!session.unsummarized_turns.empty()) {
-                expired_turns.push_back(session.unsummarized_turns);
+                expired.push_back({
+                    session.username,
+                    session.session_id,
+                    session.unsummarized_turns
+                });
             }
             to_remove.push_back(sid);
         }
@@ -149,7 +153,7 @@ ChatSessionManager::cleanup_expired(int pause_minutes) {
         sessions_.erase(sid);
     }
 
-    return expired_turns;
+    return expired;
 }
 
 } // namespace ragger

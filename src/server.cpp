@@ -118,11 +118,64 @@ struct Server::Impl {
         int pause_minutes = cfg.chat_pause_minutes;
         float max_age_hours = cfg.cleanup_max_age_hours;
 
-        // 1. Expire idle chat sessions
+        // 1. Expire idle chat sessions + summarize via inference
         auto expired = session_mgr_.cleanup_expired(pause_minutes);
         int sessions_expired = (int)expired.size();
 
-        // TODO: summarize expired session turns via inference (like Python)
+        // Summarize expired sessions in background threads
+        for (auto& es : expired) {
+            if (!inference_ || es.turns.empty()) continue;
+
+            // Capture by value for the detached thread
+            auto turns = es.turns;
+            auto username = es.username;
+            auto sid_short = es.session_id.substr(0, 8);
+            auto* inf = inference_.get();
+
+            // Resolve per-user memory
+            RaggerMemory* user_mem = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(user_memories_mutex_);
+                auto it = user_memories_.find(username);
+                if (it != user_memories_.end() && it->second) {
+                    user_mem = it->second.get();
+                }
+            }
+            if (!user_mem) user_mem = &memory;
+
+            auto* mem_ptr = user_mem;
+            std::thread([turns, username, sid_short, inf, mem_ptr]() {
+                try {
+                    // Build conversation text
+                    std::string conv;
+                    for (auto& [user_text, asst_text] : turns) {
+                        conv += "**User:** " + user_text + "\n\n";
+                        conv += "**Assistant:** " + asst_text + "\n\n";
+                    }
+
+                    std::vector<Message> messages = {
+                        {"system", "Summarize this conversation into a concise memory entry. "
+                         "Extract key facts, decisions, and action items. Be brief but complete."},
+                        {"user", conv}
+                    };
+
+                    std::string summary = inf->chat(messages);
+
+                    if (!summary.empty()) {
+                        json meta = {
+                            {"collection", "memory"},
+                            {"category", "session-summary"},
+                            {"source", "chat-session-" + sid_short}
+                        };
+                        mem_ptr->store(summary, meta);
+                        log_info("Summarized session " + sid_short +
+                                 " (" + std::to_string(turns.size()) + " turns)");
+                    }
+                } catch (const std::exception& e) {
+                    log_error("Session summarization failed: " + std::string(e.what()));
+                }
+            }).detach();
+        }
 
         // 2. Purge old conversation entries from all known user DBs
         int conversations_cleaned = 0;
@@ -999,7 +1052,7 @@ struct Server::Impl {
                 // Cleanup expired sessions in background
                 const auto& cfg = config();
                 auto expired = session_mgr_.cleanup_expired(cfg.chat_pause_minutes);
-                // TODO: summarize expired sessions in background
+                // Summarization handled by housekeeping timer
 
                 crow::response res(200);
                 res.set_header("Content-Type", "text/event-stream");

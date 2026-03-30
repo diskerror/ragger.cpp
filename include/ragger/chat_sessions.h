@@ -47,9 +47,15 @@ public:
     /// Load workspace/persona files for system prompt
     static std::string load_workspace_files();
 
-    /// Remove expired sessions (returns unsummarized turns from expired sessions)
-    std::vector<std::vector<std::pair<std::string, std::string>>>
-    cleanup_expired(int pause_minutes);
+    /// Expired session data (username + unsummarized turns)
+    struct ExpiredSession {
+        std::string username;
+        std::string session_id;
+        std::vector<std::pair<std::string, std::string>> turns;  // (user_text, assistant_text)
+    };
+
+    /// Remove expired sessions (returns data for summarization)
+    std::vector<ExpiredSession> cleanup_expired(int pause_minutes);
 
 private:
     std::map<std::string, ChatSession> sessions_;
