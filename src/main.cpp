@@ -751,7 +751,7 @@ int main(int argc, char** argv) {
         ("user", Diskerror::po::value<std::string>(), "Target user (move/cleanup)")
         ("dry-run", "Show what would happen without doing it")
         ("max-age", Diskerror::po::value<float>(), "Max age in hours (cleanup)")
-        ("keep-data", "Keep user data on remove")
+        // --keep-data removed: always keep user data, sudoer can rm manually
     ;
     opts.add_positional("command", 1);
     opts.add_positional("args", -1);
@@ -1206,7 +1206,7 @@ int main(int argc, char** argv) {
             ragger::setup_logging(false, false);
             auto args = opts.getParams("args");
             if (args.empty()) {
-                std::cerr << "Usage: ragger remove-user <username> [--keep-data]\n";
+                std::cerr << "Usage: ragger remove-user <username>\n";
                 return 1;
             }
             if (getuid() != 0) {
@@ -1214,7 +1214,6 @@ int main(int argc, char** argv) {
                 return 1;
             }
             std::string username = args[0];
-            bool keep_data = opts.count("keep-data") > 0;
 
             // 1. Remove from ragger OS group
             {
@@ -1245,28 +1244,18 @@ int main(int argc, char** argv) {
                 std::cerr << "Warning: database removal: " << e.what() << "\n";
             }
 
-            // 3. Remove token and optionally ~/.ragger/
+            // 3. Remove token (keep ~/.ragger/ data — sudoer can remove manually)
             struct passwd* pw = getpwnam(username.c_str());
             if (pw) {
-                std::string ragger_dir = std::string(pw->pw_dir) + "/.ragger";
-                std::string token_path = ragger_dir + "/token";
-                if (!keep_data) {
-                    if (fs::is_directory(ragger_dir)) {
-                        fs::remove_all(ragger_dir);
-                        std::cout << "✓ Removed " << ragger_dir << "\n";
-                    } else {
-                        std::cout << "  No ~/.ragger/ directory found (skipped)\n";
-                    }
+                std::string token_path = std::string(pw->pw_dir) + "/.ragger/token";
+                if (fs::exists(token_path)) {
+                    fs::remove(token_path);
+                    std::cout << "✓ Removed token (" << token_path << ")\n";
                 } else {
-                    // Just remove token, keep the rest
-                    if (fs::exists(token_path)) {
-                        fs::remove(token_path);
-                        std::cout << "✓ Removed token (" << token_path << ")\n";
-                    }
-                    std::cout << "  Kept " << ragger_dir << " (--keep-data)\n";
+                    std::cout << "  No token file found (skipped)\n";
                 }
             } else {
-                std::cout << "  User " << username << " not found in system passwd (skipped data)\n";
+                std::cout << "  User " << username << " not found in system passwd (skipped token)\n";
             }
 
             std::cout << "\n✓ User " << username << " removed\n";
