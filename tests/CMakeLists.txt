@@ -36,3 +36,15 @@ add_test(NAME test_memory COMMAND test_memory)
 add_executable(test_export test_export.cpp)
 target_link_libraries(test_export PRIVATE ragger_core)
 add_test(NAME test_export COMMAND test_export)
+
+add_executable(test_path_normalization test_path_normalization.cpp)
+target_link_libraries(test_path_normalization PRIVATE ragger_core)
+add_test(NAME test_path_normalization COMMAND test_path_normalization)
+
+add_executable(test_embedder test_embedder.cpp)
+target_link_libraries(test_embedder PRIVATE ragger_core)
+add_test(NAME test_embedder COMMAND test_embedder)
+
+add_executable(test_logging test_logging.cpp)
+target_link_libraries(test_logging PRIVATE ragger_core)
+add_test(NAME test_logging COMMAND test_logging)
