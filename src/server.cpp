@@ -1049,11 +1049,6 @@ struct Server::Impl {
                     }
                 }
 
-                // Cleanup expired sessions in background
-                const auto& cfg = config();
-                auto expired = session_mgr_.cleanup_expired(cfg.chat_pause_minutes);
-                // Summarization handled by housekeeping timer
-
                 crow::response res(200);
                 res.set_header("Content-Type", "text/event-stream");
                 res.set_header("Cache-Control", "no-cache");
