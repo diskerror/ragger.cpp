@@ -37,11 +37,16 @@ namespace fs = std::filesystem;
 
 using json = nlohmann::json;
 
-// Global signal flag (async-signal-safe)
+// Global signal flags (async-signal-safe)
 static std::atomic<bool> g_housekeeping_requested{false};
+static std::atomic<bool> g_config_reload_requested{false};
 
 static void sigusr1_handler(int) {
     g_housekeeping_requested.store(true, std::memory_order_relaxed);
+}
+
+static void sighup_handler(int) {
+    g_config_reload_requested.store(true, std::memory_order_relaxed);
 }
 
 struct Server::Impl {
@@ -218,6 +223,23 @@ struct Server::Impl {
                     if (g_housekeeping_requested.exchange(false)) {
                         log_info("Housekeeping triggered by signal");
                         run_housekeeping();
+                    }
+                    // Check for config reload (SIGHUP)
+                    if (g_config_reload_requested.exchange(false)) {
+                        int n = reload_config();
+                        if (n > 0) {
+                            log_info("Config reloaded: " + std::to_string(n) + " value(s) changed");
+                            // Re-initialize inference client if endpoints changed
+                            try {
+                                inference_ = std::make_unique<InferenceClient>(
+                                    InferenceClient::from_config(config()));
+                                log_info("Inference client reloaded");
+                            } catch (const std::exception& e) {
+                                log_error("Inference client reload failed: " + std::string(e.what()));
+                            }
+                        } else {
+                            log_info("Config reloaded: no changes");
+                        }
                     }
                 }
                 if (timer_running_) {
@@ -1253,12 +1275,16 @@ void Server::run() {
         }
     }
 
-    // Install SIGUSR1 handler for housekeeping
+    // Install signal handlers
     struct sigaction sa{};
-    sa.sa_handler = sigusr1_handler;
-    sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+
+    sa.sa_handler = sigusr1_handler;
     sigaction(SIGUSR1, &sa, nullptr);
+
+    sa.sa_handler = sighup_handler;
+    sigaction(SIGHUP, &sa, nullptr);
 
     // Start housekeeping timer (runs every 60s + on SIGUSR1)
     pImpl->start_housekeeping_timer();

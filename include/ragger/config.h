@@ -135,4 +135,8 @@ const Config& config();
 /// Initialize global config. Call once at startup.
 void init_config(const std::string& cli_config_path = "", bool quiet = false);
 
+/// Reload config from INI file(s). Updates hot-reloadable values in-place.
+/// Returns number of values changed. Logs restart-required changes without applying.
+int reload_config();
+
 } // namespace ragger

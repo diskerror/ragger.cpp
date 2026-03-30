@@ -776,6 +776,7 @@ int main(int argc, char** argv) {
         std::cout << "  remove-user <name> Remove a user (requires sudo)\n";
         std::cout << "  passwd [<name>]    Change password (own or another user's with sudo)\n";
         std::cout << "  housekeeping       Trigger housekeeping on running daemon\n";
+        std::cout << "  reload             Reload config on running daemon (SIGHUP)\n";
         std::cout << "  rebuild-bm25       Rebuild the BM25 keyword index\n";
         std::cout << "  rebuild-embeddings Rebuild embeddings for all memories\n";
         // (llama and model verbs removed — use external providers)
@@ -1351,6 +1352,34 @@ int main(int argc, char** argv) {
             }
             std::cout << "✓ Housekeeping triggered for " << username
                       << " (pid " << daemon_pid << ")\n";
+
+        } else if (command == "reload") {
+            // Send SIGHUP to running daemon to reload config
+            namespace fs = std::filesystem;
+            pid_t daemon_pid = 0;
+            try {
+                for (const auto& entry : fs::directory_iterator("/tmp/ragger")) {
+                    auto name = entry.path().filename().string();
+                    if (name.rfind("server-", 0) == 0 &&
+                        name.size() > 4 && name.substr(name.size() - 4) == ".pid") {
+                        std::ifstream pf(entry.path());
+                        if (pf >> daemon_pid && daemon_pid > 0 && kill(daemon_pid, 0) == 0) {
+                            break;
+                        }
+                        daemon_pid = 0;
+                    }
+                }
+            } catch (...) {}
+
+            if (daemon_pid <= 0) {
+                std::cerr << "Error: no running ragger daemon found\n";
+                return 1;
+            }
+            if (kill(daemon_pid, SIGHUP) != 0) {
+                std::cerr << "Error: failed to signal process: " << strerror(errno) << "\n";
+                return 1;
+            }
+            std::cout << "✓ Config reload triggered (pid " << daemon_pid << ")\n";
 
         } else {
             std::cerr << CLI_UNKNOWN_COMMAND << command << "\n";

@@ -490,4 +490,129 @@ void init_config(const std::string& cli_config_path, bool quiet) {
     g_config = &cfg;
 }
 
+int reload_config() {
+    if (!g_config) return 0;
+
+    // Re-read from the same files
+    std::string sys_path, user_path;
+    try {
+        sys_path = find_system_config("");
+    } catch (...) {
+        return 0;
+    }
+    user_path = find_user_config();
+
+    Config fresh = load_config(sys_path);
+    if (!user_path.empty() && user_path != sys_path) {
+        Config user_cfg = load_config(user_path);
+        apply_user_overrides(fresh, user_cfg);
+    }
+
+    Config& cfg = *g_config;
+    int changes = 0;
+
+    // Keys that require restart (log but don't apply)
+    auto warn_restart = [&](const std::string& name, bool changed) {
+        if (changed) {
+            std::cerr << ts() << " [WARN] Config reload: '" << name
+                      << "' changed but requires restart\n";
+        }
+    };
+    warn_restart("host", fresh.host != cfg.host);
+    warn_restart("port", fresh.port != cfg.port);
+    warn_restart("single_user", fresh.single_user != cfg.single_user);
+    warn_restart("db_path", fresh.db_path != cfg.db_path);
+    warn_restart("common_db_path", fresh.common_db_path != cfg.common_db_path);
+    warn_restart("tls_cert", fresh.tls_cert != cfg.tls_cert);
+    warn_restart("tls_key", fresh.tls_key != cfg.tls_key);
+    warn_restart("embedding_model", fresh.embedding_model != cfg.embedding_model);
+    warn_restart("embedding_dimensions", fresh.embedding_dimensions != cfg.embedding_dimensions);
+
+    // Hot-reloadable fields
+    #define RELOAD(field) do { \
+        if (cfg.field != fresh.field) { \
+            cfg.field = fresh.field; \
+            ++changes; \
+        } \
+    } while(0)
+
+    // Search
+    RELOAD(default_search_limit);
+    RELOAD(default_min_score);
+    RELOAD(bm25_enabled);
+    RELOAD(bm25_weight);
+    RELOAD(vector_weight);
+    RELOAD(bm25_k1);
+    RELOAD(bm25_b);
+
+    // Inference
+    RELOAD(inference_model);
+    RELOAD(inference_default);
+    RELOAD(inference_api_url);
+    RELOAD(inference_api_key);
+    RELOAD(inference_max_tokens);
+    // Endpoints: replace entirely if different
+    if (cfg.inference_endpoints.size() != fresh.inference_endpoints.size()) {
+        cfg.inference_endpoints = fresh.inference_endpoints;
+        ++changes;
+    } else {
+        for (size_t i = 0; i < cfg.inference_endpoints.size(); ++i) {
+            auto& a = cfg.inference_endpoints[i];
+            auto& b = fresh.inference_endpoints[i];
+            if (a.name != b.name || a.api_url != b.api_url || a.api_key != b.api_key ||
+                a.models != b.models || a.format != b.format || a.max_context != b.max_context) {
+                cfg.inference_endpoints = fresh.inference_endpoints;
+                ++changes;
+                break;
+            }
+        }
+    }
+
+    // Logging
+    RELOAD(query_log_enabled);
+    RELOAD(http_log_enabled);
+    RELOAD(mcp_log_enabled);
+
+    // Paths
+    RELOAD(normalize_home_path);
+
+    // Web
+    RELOAD(web_root);
+
+    // Import
+    RELOAD(minimum_chunk_size);
+
+    // Model aliases
+    if (cfg.model_aliases != fresh.model_aliases) {
+        cfg.model_aliases = fresh.model_aliases;
+        ++changes;
+    }
+
+    // Auth
+    RELOAD(token_rotation_minutes);
+
+    // Chat / housekeeping
+    RELOAD(chat_store_turns);
+    RELOAD(chat_summarize_on_pause);
+    RELOAD(chat_pause_minutes);
+    RELOAD(chat_summarize_on_quit);
+    RELOAD(chat_max_turn_retention_minutes);
+    RELOAD(chat_max_turns_stored);
+    RELOAD(cleanup_max_age_hours);
+    RELOAD(housekeeping_interval);
+    RELOAD(chat_max_persona_chars);
+    RELOAD(chat_max_memory_results);
+    RELOAD(chat_persona_pct);
+    RELOAD(chat_chars_per_token);
+
+    // System ceilings
+    RELOAD(max_search_limit);
+    RELOAD(chat_max_persona_chars_limit);
+    RELOAD(chat_max_memory_results_limit);
+
+    #undef RELOAD
+
+    return changes;
+}
+
 } // namespace ragger
