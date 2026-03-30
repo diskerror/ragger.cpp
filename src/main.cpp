@@ -745,6 +745,13 @@ int main(int argc, char** argv) {
     opts.add_hidden_options()
         ("command", Diskerror::po::value<std::string>()->default_value("help"), CLI_COMMAND)
         ("args", Diskerror::po::value<std::vector<std::string>>(), CLI_ARGS)
+        ("ids", Diskerror::po::value<std::string>(), "Comma-separated IDs (move)")
+        ("source", Diskerror::po::value<std::string>(), "Source pattern (move)")
+        ("category", Diskerror::po::value<std::string>(), "Category filter (move/cleanup)")
+        ("user", Diskerror::po::value<std::string>(), "Target user (move/cleanup)")
+        ("dry-run", "Show what would happen without doing it")
+        ("max-age", Diskerror::po::value<float>(), "Max age in hours (cleanup)")
+        ("keep-data", "Keep user data on remove")
     ;
     opts.add_positional("command", 1);
     opts.add_positional("args", -1);
@@ -777,6 +784,11 @@ int main(int argc, char** argv) {
         std::cout << "  passwd [<name>]    Change password (own or another user's with sudo)\n";
         std::cout << "  housekeeping       Trigger housekeeping on running daemon\n";
         std::cout << "  reload             Reload config on running daemon (SIGHUP)\n";
+        std::cout << "  move <direction>   Move memories between user and common DBs\n";
+        std::cout << "                     direction: to-common | to-user\n";
+        std::cout << "                     filters: --ids, --source, --collection, --category\n";
+        std::cout << "                     options: --user <name>, --dry-run\n";
+        std::cout << "  cleanup            Delete old conversation entries by age\n";
         std::cout << "  rebuild-bm25       Rebuild the BM25 keyword index\n";
         std::cout << "  rebuild-embeddings Rebuild embeddings for all memories\n";
         // (llama and model verbs removed — use external providers)
@@ -1202,10 +1214,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
             std::string username = args[0];
-            bool keep_data = false;
-            for (const auto& a : args) {
-                if (a == "--keep-data") keep_data = true;
-            }
+            bool keep_data = opts.count("keep-data") > 0;
 
             // 1. Remove from ragger OS group
             {
@@ -1380,6 +1389,232 @@ int main(int argc, char** argv) {
                 return 1;
             }
             std::cout << "✓ Config reload triggered (pid " << daemon_pid << ")\n";
+
+        } else if (command == "move") {
+            auto args = opts.getParams("args");
+            if (args.empty() || (args[0] != "to-common" && args[0] != "to-user")) {
+                std::cerr << "Usage: ragger move <to-common|to-user> [options]\n"
+                          << "  --ids ID1,ID2,...    Filter by IDs\n"
+                          << "  --source PATTERN     Filter by source (SQL LIKE)\n"
+                          << "  --collection NAME    Filter by collection\n"
+                          << "  --category NAME      Filter by category\n"
+                          << "  --user USERNAME      Target user (default: current)\n"
+                          << "  --dry-run            Show what would be moved\n";
+                return 1;
+            }
+            std::string direction = args[0];
+            std::string filter_ids = opts.count("ids") ? opts["ids"].as<std::string>() : "";
+            std::string filter_source = opts.count("source") ? opts["source"].as<std::string>() : "";
+            std::string filter_collection = opts.count("collection") ? opts["collection"].as<std::string>() : "";
+            std::string filter_category = opts.count("category") ? opts["category"].as<std::string>() : "";
+            std::string target_user = opts.count("user") ? opts["user"].as<std::string>() : "";
+            bool dry_run = opts.count("dry-run") > 0;
+
+            if (filter_ids.empty() && filter_source.empty() &&
+                filter_collection.empty() && filter_category.empty()) {
+                std::cerr << "Error: specify at least one filter (--ids, --source, --collection, --category)\n";
+                return 1;
+            }
+
+            // Resolve user DB path
+            std::string user_db;
+            std::string username;
+            if (!target_user.empty()) {
+                username = target_user;
+                struct passwd* pw = getpwnam(target_user.c_str());
+                if (!pw) {
+                    std::cerr << "Error: cannot resolve home for user '" << target_user << "'\n";
+                    return 1;
+                }
+                user_db = std::string(pw->pw_dir) + "/.ragger/memories.db";
+            } else {
+                struct passwd* pw = getpwuid(getuid());
+                username = pw ? pw->pw_name : "default";
+                user_db = ragger::expand_path("~/.ragger/memories.db");
+            }
+
+            std::string common_db = cfg.resolved_common_db_path();
+
+            if (!fs::exists(user_db)) {
+                std::cerr << "Error: user DB not found at " << user_db << "\n";
+                return 1;
+            }
+            if (!fs::exists(common_db)) {
+                std::cerr << "Error: common DB not found at " << common_db << "\n";
+                return 1;
+            }
+
+            std::string src_path, dst_path, label_from, label_to;
+            if (direction == "to-common") {
+                src_path = user_db; dst_path = common_db;
+                label_from = "user"; label_to = "common";
+            } else {
+                src_path = common_db; dst_path = user_db;
+                label_from = "common"; label_to = "user";
+            }
+
+            sqlite3 *src = nullptr, *dst = nullptr;
+            if (sqlite3_open(src_path.c_str(), &src) != SQLITE_OK) {
+                std::cerr << "Error: cannot open source DB: " << src_path << "\n";
+                return 1;
+            }
+            if (sqlite3_open(dst_path.c_str(), &dst) != SQLITE_OK) {
+                std::cerr << "Error: cannot open destination DB: " << dst_path << "\n";
+                sqlite3_close(src);
+                return 1;
+            }
+
+            // Resolve user_id for provenance when moving to common
+            int user_id = -1;
+            if (direction == "to-common") {
+                sqlite3_stmt* ustmt = nullptr;
+                sqlite3_prepare_v2(dst, "SELECT id FROM users WHERE username = ?", -1, &ustmt, nullptr);
+                sqlite3_bind_text(ustmt, 1, username.c_str(), -1, SQLITE_STATIC);
+                if (sqlite3_step(ustmt) == SQLITE_ROW) {
+                    user_id = sqlite3_column_int(ustmt, 0);
+                } else {
+                    std::cout << "Warning: user '" << username << "' not found in common DB. "
+                              << "Records will be moved without user_id.\n";
+                }
+                sqlite3_finalize(ustmt);
+            }
+
+            // Build WHERE clause
+            std::string where;
+            std::vector<std::string> params;
+            auto add_condition = [&](const std::string& cond, const std::string& val) {
+                if (!where.empty()) where += " AND ";
+                where += cond;
+                params.push_back(val);
+            };
+
+            if (!filter_ids.empty()) {
+                // Split comma-separated IDs
+                std::vector<std::string> id_list;
+                std::istringstream iss(filter_ids);
+                std::string tok;
+                while (std::getline(iss, tok, ',')) {
+                    tok.erase(0, tok.find_first_not_of(' '));
+                    tok.erase(tok.find_last_not_of(' ') + 1);
+                    if (!tok.empty()) id_list.push_back(tok);
+                }
+                std::string placeholders;
+                for (size_t i = 0; i < id_list.size(); ++i) {
+                    if (i > 0) placeholders += ",";
+                    placeholders += "?";
+                    params.push_back(id_list[i]);
+                }
+                if (!where.empty()) where += " AND ";
+                where += "id IN (" + placeholders + ")";
+            }
+            if (!filter_source.empty())
+                add_condition("json_extract(metadata, '$.source') LIKE ?", filter_source);
+            if (!filter_collection.empty())
+                add_condition("collection = ?", filter_collection);
+            if (!filter_category.empty())
+                add_condition("category = ?", filter_category);
+
+            // Query matching records
+            std::string sql = "SELECT id, text, embedding, metadata, timestamp, "
+                              "collection, category, tags FROM memories WHERE " + where;
+            sqlite3_stmt* sel = nullptr;
+            sqlite3_prepare_v2(src, sql.c_str(), -1, &sel, nullptr);
+            for (size_t i = 0; i < params.size(); ++i) {
+                sqlite3_bind_text(sel, (int)i + 1, params[i].c_str(), -1, SQLITE_TRANSIENT);
+            }
+
+            struct Row {
+                int64_t id;
+                std::string text;
+                std::vector<uint8_t> embedding;
+                std::string metadata, timestamp, collection, category, tags;
+            };
+            std::vector<Row> rows;
+            while (sqlite3_step(sel) == SQLITE_ROW) {
+                Row r;
+                r.id = sqlite3_column_int64(sel, 0);
+                r.text = (const char*)sqlite3_column_text(sel, 1);
+                auto* blob = (const uint8_t*)sqlite3_column_blob(sel, 2);
+                int blob_sz = sqlite3_column_bytes(sel, 2);
+                if (blob && blob_sz > 0) r.embedding.assign(blob, blob + blob_sz);
+                auto* s3 = sqlite3_column_text(sel, 3);
+                r.metadata = s3 ? (const char*)s3 : "";
+                auto* s4 = sqlite3_column_text(sel, 4);
+                r.timestamp = s4 ? (const char*)s4 : "";
+                auto* s5 = sqlite3_column_text(sel, 5);
+                r.collection = s5 ? (const char*)s5 : "";
+                auto* s6 = sqlite3_column_text(sel, 6);
+                r.category = s6 ? (const char*)s6 : "";
+                auto* s7 = sqlite3_column_text(sel, 7);
+                r.tags = s7 ? (const char*)s7 : "";
+                rows.push_back(std::move(r));
+            }
+            sqlite3_finalize(sel);
+
+            if (rows.empty()) {
+                std::cout << "No matching records in " << label_from << " DB\n";
+                sqlite3_close(src);
+                sqlite3_close(dst);
+                return 0;
+            }
+
+            if (dry_run) {
+                std::cout << "Would move " << rows.size() << " records from "
+                          << label_from << " → " << label_to << ":\n";
+                int shown = 0;
+                for (auto& r : rows) {
+                    if (shown++ >= 10) {
+                        std::cout << "  ... and " << (rows.size() - 10) << " more\n";
+                        break;
+                    }
+                    std::string preview = r.text.substr(0, 70);
+                    std::cout << "  id=" << r.id << " " << preview << "...\n";
+                }
+            } else {
+                // Insert into destination
+                bool has_user_id_col = (direction == "to-common" && user_id >= 0);
+                std::string ins_sql = has_user_id_col
+                    ? "INSERT INTO memories (text, embedding, metadata, timestamp, collection, category, tags, user_id) "
+                      "VALUES (?,?,?,?,?,?,?,?)"
+                    : "INSERT INTO memories (text, embedding, metadata, timestamp, collection, category, tags) "
+                      "VALUES (?,?,?,?,?,?,?)";
+
+                for (auto& r : rows) {
+                    sqlite3_stmt* ins = nullptr;
+                    sqlite3_prepare_v2(dst, ins_sql.c_str(), -1, &ins, nullptr);
+                    sqlite3_bind_text(ins, 1, r.text.c_str(), -1, SQLITE_TRANSIENT);
+                    if (!r.embedding.empty())
+                        sqlite3_bind_blob(ins, 2, r.embedding.data(), (int)r.embedding.size(), SQLITE_TRANSIENT);
+                    else
+                        sqlite3_bind_null(ins, 2);
+                    if (!r.metadata.empty())
+                        sqlite3_bind_text(ins, 3, r.metadata.c_str(), -1, SQLITE_TRANSIENT);
+                    else
+                        sqlite3_bind_null(ins, 3);
+                    sqlite3_bind_text(ins, 4, r.timestamp.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(ins, 5, r.collection.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(ins, 6, r.category.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(ins, 7, r.tags.c_str(), -1, SQLITE_TRANSIENT);
+                    if (has_user_id_col) sqlite3_bind_int(ins, 8, user_id);
+                    sqlite3_step(ins);
+                    sqlite3_finalize(ins);
+                }
+
+                // Delete from source
+                for (auto& r : rows) {
+                    sqlite3_stmt* del = nullptr;
+                    sqlite3_prepare_v2(src, "DELETE FROM memories WHERE id = ?", -1, &del, nullptr);
+                    sqlite3_bind_int64(del, 1, r.id);
+                    sqlite3_step(del);
+                    sqlite3_finalize(del);
+                }
+
+                std::cout << "Moved " << rows.size() << " records from "
+                          << label_from << " → " << label_to << "\n";
+            }
+
+            sqlite3_close(src);
+            sqlite3_close(dst);
 
         } else {
             std::cerr << CLI_UNKNOWN_COMMAND << command << "\n";
