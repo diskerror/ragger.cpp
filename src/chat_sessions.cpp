@@ -108,6 +108,10 @@ ChatSession& ChatSessionManager::get_or_create(
 }
 
 std::string ChatSessionManager::load_workspace_files() {
+    // TODO: Make persona file load pattern configurable via common config
+    // Current pattern: SOUL common→user, others user→common (multi-user only)
+    
+    const auto& cfg = config();
     std::string user_dir = expand_path("~/.ragger");
     std::string common_dir = "/var/ragger";
     std::vector<std::string> files = {"SOUL.md", "USER.md", "AGENTS.md", "TOOLS.md"};
@@ -116,8 +120,14 @@ std::string ChatSessionManager::load_workspace_files() {
     for (const auto& fname : files) {
         std::string fpath;
         
-        if (fname == "SOUL.md") {
-            // SOUL.md: common first (shared personality), user fallback
+        if (cfg.single_user) {
+            // Single-user mode: only read from user directory
+            std::string user_path = user_dir + "/" + fname;
+            if (fs::exists(user_path)) {
+                fpath = user_path;
+            }
+        } else if (fname == "SOUL.md") {
+            // Multi-user SOUL.md: common first (shared personality), user fallback
             std::string common_path = common_dir + "/SOUL.md";
             if (fs::exists(common_path)) {
                 fpath = common_path;
@@ -128,7 +138,7 @@ std::string ChatSessionManager::load_workspace_files() {
                 }
             }
         } else {
-            // Other files: user first (override), common fallback
+            // Multi-user other files: user first (override), common fallback
             std::string user_path = user_dir + "/" + fname;
             if (fs::exists(user_path)) {
                 fpath = user_path;
