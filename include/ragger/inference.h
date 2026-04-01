@@ -26,12 +26,14 @@ struct Endpoint {
     std::string api_key;
     std::string models;  // comma-separated glob patterns
     std::string format_name;  // API format name (openai, anthropic, etc.)
+    int max_tokens = 0;  // 0 = use client default
 
     Endpoint(const std::string& name_,
              const std::string& api_url_,
              const std::string& api_key_ = "",
              const std::string& models_ = "*",
-             const std::string& format_ = "");
+             const std::string& format_ = "",
+             int max_tokens_ = 0);
 
     /// Check if this endpoint handles the given model name (fnmatch-style glob)
     bool matches(const std::string& model) const;

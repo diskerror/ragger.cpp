@@ -48,6 +48,7 @@ struct Config {
         std::string models = "*";
         std::string format;  // API format name (openai, anthropic, etc.)
         int max_context = 0; // 0 = unknown. Context window in tokens.
+        int max_tokens = 0;  // 0 = use global default
     };
     std::string inference_model = "claude-sonnet-4-5";
     std::string inference_default = "";

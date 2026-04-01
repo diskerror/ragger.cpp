@@ -21,8 +21,10 @@ Endpoint::Endpoint(const std::string& name_,
                    const std::string& api_url_,
                    const std::string& api_key_,
                    const std::string& models_,
-                   const std::string& format_)
-    : name(name_), api_url(api_url_), api_key(api_key_), models(models_), format_name(format_) {
+                   const std::string& format_,
+                   int max_tokens_)
+    : name(name_), api_url(api_url_), api_key(api_key_), models(models_),
+      format_name(format_), max_tokens(max_tokens_) {
     // Strip trailing slash from URL
     if (!api_url.empty() && api_url.back() == '/') {
         api_url = api_url.substr(0, api_url.size() - 1);
@@ -70,7 +72,7 @@ InferenceClient InferenceClient::from_config(const Config& cfg) {
 
     // Multi-endpoint from config
     for (const auto& ep : cfg.inference_endpoints) {
-        endpoints.push_back(Endpoint(ep.name, ep.api_url, ep.api_key, ep.models, ep.format));
+        endpoints.push_back(Endpoint(ep.name, ep.api_url, ep.api_key, ep.models, ep.format, ep.max_tokens));
     }
 
     // Single endpoint fallback from main [inference] section
@@ -411,8 +413,9 @@ std::string InferenceClient::chat(const std::vector<Message>& messages,
         api_messages.push_back({msg.role, msg.content});
     }
 
-    // Build request payload using format
-    nlohmann::json payload = build_request_body(fmt, api_messages, use_model, max_tokens, false);
+    // Build request payload using format (endpoint max_tokens overrides global)
+    int use_max_tokens = endpoint.max_tokens > 0 ? endpoint.max_tokens : max_tokens;
+    nlohmann::json payload = build_request_body(fmt, api_messages, use_model, use_max_tokens, false);
     std::string body = payload.dump();
 
     // Setup libcurl
@@ -481,8 +484,9 @@ void InferenceClient::chat_stream(const std::vector<Message>& messages,
         api_messages.push_back({msg.role, msg.content});
     }
 
-    // Build request payload using format
-    nlohmann::json payload = build_request_body(fmt, api_messages, use_model, max_tokens, true);
+    // Build request payload using format (endpoint max_tokens overrides global)
+    int use_max_tokens = endpoint.max_tokens > 0 ? endpoint.max_tokens : max_tokens;
+    nlohmann::json payload = build_request_body(fmt, api_messages, use_model, use_max_tokens, true);
     std::string body = payload.dump();
 
     // Setup libcurl

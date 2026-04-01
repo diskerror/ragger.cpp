@@ -400,6 +400,7 @@ Config load_config(const std::string& path) {
             else if (key == "models")      ep.models = val;
             else if (key == "format")      ep.format = val;
             else if (key == "max_context") ep.max_context = std::stoi(val);
+            else if (key == "max_tokens") ep.max_tokens = std::stoi(val);
         }
         else if (section == "logging") {
             if      (key == "log_dir")   cfg.log_dir = val;

@@ -360,27 +360,11 @@ struct Server::Impl {
         }
     }
 
-    // --- Web sessions (password login) ---
-    struct WebSession {
-        std::string username;
-        int user_id;
-        std::chrono::steady_clock::time_point expires;
-    };
-    std::unordered_map<std::string, WebSession> web_sessions_;
-    std::mutex web_sessions_mutex_;
+    // --- Web sessions (password login, DB-backed) ---
     static constexpr int WEB_SESSION_TTL = 86400; // 24 hours
 
     std::optional<SqliteBackend::UserInfo> _check_web_session(const std::string& token) {
-        std::lock_guard<std::mutex> lock(web_sessions_mutex_);
-        auto it = web_sessions_.find(token);
-        if (it == web_sessions_.end()) return std::nullopt;
-        if (std::chrono::steady_clock::now() > it->second.expires) {
-            web_sessions_.erase(it);
-            return std::nullopt;
-        }
-        return SqliteBackend::UserInfo{
-            it->second.user_id, it->second.username, "", ""
-        };
+        return memory.backend()->get_web_session(token);
     }
 
     // --- Web root resolution ---
@@ -1075,13 +1059,8 @@ struct Server::Impl {
                 if (!stored_hash) { res.status = 401; res.set_content(R"({"error":"no password set — use 'ragger passwd' first"})", "application/json"); return; }
                 if (!verify_password(password, *stored_hash)) { res.status = 401; res.set_content(R"({"error":"invalid credentials"})", "application/json"); return; }
                 std::string session_token = generate_random_token(32);
-                {
-                    std::lock_guard<std::mutex> lock(web_sessions_mutex_);
-                    web_sessions_[session_token] = WebSession{
-                        username, user->id,
-                        std::chrono::steady_clock::now() + std::chrono::seconds(WEB_SESSION_TTL)
-                    };
-                }
+                memory.backend()->create_web_session(
+                    session_token, username, user->id, WEB_SESSION_TTL);
                 json result = {{"token", session_token}, {"username", username}, {"expires_in", WEB_SESSION_TTL}};
                 log_http("POST /auth/login 200 (" + username + ")");
                 res.set_content(result.dump(), "application/json");

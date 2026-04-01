@@ -120,6 +120,13 @@ public:
     int get_user_count();
     void delete_user(const std::string& username);
 
+    // --- Web sessions (password login, DB-backed) ---
+    void create_web_session(const std::string& token, const std::string& username,
+                            int user_id, int ttl_seconds = 86400);
+    std::optional<UserInfo> get_web_session(const std::string& token);
+    void delete_web_session(const std::string& token);
+    int cleanup_web_sessions();
+
     /// Delete a memory by ID. Returns true if deleted.
     bool delete_memory(int memory_id);
 

@@ -15,6 +15,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <iomanip>
 #include <filesystem>
 #include <numeric>
 #include <set>
@@ -160,6 +162,7 @@ struct SqliteBackend::Impl {
         migrate_add_token_rotated_at();
         migrate_add_preferred_model();
         migrate_add_password_hash();
+        migrate_add_web_sessions();
     }
 
     void migrate_add_user_id() {
@@ -342,6 +345,18 @@ struct SqliteBackend::Impl {
         }
     }
 
+    void migrate_add_web_sessions() {
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS web_sessions (
+                token    TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                user_id  INTEGER NOT NULL,
+                created  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                expires  TEXT NOT NULL
+            )
+        )");
+    }
+
     /// Minimal schema for user management only (no memories/BM25).
     void create_users_schema() {
         exec(R"(
@@ -356,6 +371,7 @@ struct SqliteBackend::Impl {
         migrate_add_token_rotated_at();
         migrate_add_preferred_model();
         migrate_add_password_hash();
+        migrate_add_web_sessions();
     }
 
     // ---- path normalization -------------------------------------------
@@ -1307,6 +1323,89 @@ void SqliteBackend::delete_user(const std::string& username) {
     sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
+}
+
+// --- Web sessions ---
+
+void SqliteBackend::create_web_session(const std::string& token, const std::string& username,
+                                       int user_id, int ttl_seconds) {
+    // Compute expires timestamp
+    auto now = std::chrono::system_clock::now();
+    auto expires = now + std::chrono::seconds(ttl_seconds);
+    auto now_t = std::chrono::system_clock::to_time_t(now);
+    auto exp_t = std::chrono::system_clock::to_time_t(expires);
+    char now_buf[32], exp_buf[32];
+    std::strftime(now_buf, sizeof(now_buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&now_t));
+    std::strftime(exp_buf, sizeof(exp_buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&exp_t));
+
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(pImpl->db,
+        "INSERT OR REPLACE INTO web_sessions (token, username, user_id, created, expires) "
+        "VALUES (?, ?, ?, ?, ?)",
+        -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 3, user_id);
+    sqlite3_bind_text(stmt, 4, now_buf, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, exp_buf, -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+std::optional<SqliteBackend::UserInfo> SqliteBackend::get_web_session(const std::string& token) {
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(pImpl->db,
+        "SELECT username, user_id, expires FROM web_sessions WHERE token = ?",
+        -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
+
+    std::optional<UserInfo> result;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        std::string username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        int user_id = sqlite3_column_int(stmt, 1);
+        std::string expires = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        sqlite3_finalize(stmt);
+
+        // Check expiry
+        struct std::tm tm = {};
+        std::istringstream ss(expires);
+        ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+        auto exp_time = std::chrono::system_clock::from_time_t(timegm(&tm));
+        if (std::chrono::system_clock::now() > exp_time) {
+            delete_web_session(token);
+            return std::nullopt;
+        }
+        return UserInfo{user_id, username, "", ""};
+    }
+    sqlite3_finalize(stmt);
+    return std::nullopt;
+}
+
+void SqliteBackend::delete_web_session(const std::string& token) {
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(pImpl->db,
+        "DELETE FROM web_sessions WHERE token = ?",
+        -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+int SqliteBackend::cleanup_web_sessions() {
+    auto now = std::chrono::system_clock::now();
+    auto now_t = std::chrono::system_clock::to_time_t(now);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&now_t));
+
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(pImpl->db,
+        "DELETE FROM web_sessions WHERE expires < ?",
+        -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, buf, -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    int count = sqlite3_changes(pImpl->db);
+    sqlite3_finalize(stmt);
+    return count;
 }
 
 } // namespace ragger
