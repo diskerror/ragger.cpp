@@ -116,17 +116,28 @@ std::string ChatSessionManager::load_workspace_files() {
     for (const auto& fname : files) {
         std::string fpath;
         
-        // SOUL.md: prefer common directory, fallback to user
         if (fname == "SOUL.md") {
+            // SOUL.md: common first (shared personality), user fallback
             std::string common_path = common_dir + "/SOUL.md";
             if (fs::exists(common_path)) {
                 fpath = common_path;
             } else {
-                fpath = user_dir + "/SOUL.md";
+                std::string user_path = user_dir + "/SOUL.md";
+                if (fs::exists(user_path)) {
+                    fpath = user_path;
+                }
             }
         } else {
-            // All other files: user directory only
-            fpath = user_dir + "/" + fname;
+            // Other files: user first (override), common fallback
+            std::string user_path = user_dir + "/" + fname;
+            if (fs::exists(user_path)) {
+                fpath = user_path;
+            } else {
+                std::string common_path = common_dir + "/" + fname;
+                if (fs::exists(common_path)) {
+                    fpath = common_path;
+                }
+            }
         }
         
         if (fs::exists(fpath)) {
