@@ -42,7 +42,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(RAGGER_BUILD_TESTS "Build test suite" ON)
 
 # ---------------------------------------------------------------------------
-# Boost (for ProgramOptions via c_lib, and Boost.Asio for Crow)
+# Boost (for ProgramOptions via c_lib)
 # ---------------------------------------------------------------------------
 # MacPorts boost188 lives here; adjust if using a different version
 set(BOOST_ROOT "/opt/local/libexec/boost/1.88" CACHE PATH "Boost root")
@@ -76,14 +76,14 @@ find_package(Eigen3 3.4 REQUIRED NO_MODULE
 )
 
 # ---------------------------------------------------------------------------
-# Header-only vendored libs (Crow, nlohmann/json)
+# Header-only vendored libs (cpp-httplib, nlohmann/json)
 # ---------------------------------------------------------------------------
 add_library(vendor_headers INTERFACE)
 target_include_directories(vendor_headers INTERFACE
     "${CMAKE_SOURCE_DIR}/vendor"
 )
-# Crow: use Boost.Asio instead of standalone Asio
-target_compile_definitions(vendor_headers INTERFACE CROW_USE_BOOST CROW_ENABLE_SSL)
+# cpp-httplib with OpenSSL support
+target_compile_definitions(vendor_headers INTERFACE CPPHTTPLIB_OPENSSL_SUPPORT)
 
 # ---------------------------------------------------------------------------
 # c_lib — ProgramOptions (hard-linked from c_lib)

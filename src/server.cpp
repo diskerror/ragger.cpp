@@ -11,9 +11,12 @@
 #include "ragger/inference.h"
 #include "ragger/chat_sessions.h"
 #include "nlohmann_json.hpp"
-#include "crow_all.h"
+
+#define CPPHTTPLIB_OPENSSL_SUPPORT
+#include "httplib.h"
 
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -50,7 +53,7 @@ static void sighup_handler(int) {
 }
 
 struct Server::Impl {
-    crow::SimpleApp app;
+    httplib::Server svr;
     RaggerMemory&   memory;
     std::string     host;
     int             port;
@@ -410,7 +413,7 @@ struct Server::Impl {
         return "application/octet-stream";
     }
 
-    std::optional<SqliteBackend::UserInfo> _check_auth(const crow::request& req) {
+    std::optional<SqliteBackend::UserInfo> _check_auth(const httplib::Request& req) {
         const auto& cfg = config();
         
         // Extract Authorization header
@@ -554,8 +557,7 @@ struct Server::Impl {
 
     void setup_routes() {
         // GET /health
-        CROW_ROUTE(app, "/health")
-        ([this]() {
+        svr.Get("/health", [this](const httplib::Request&, httplib::Response& res) {
             json response = {
                 {"status", "ok"},
                 {"version", RAGGER_VERSION},
@@ -564,16 +566,17 @@ struct Server::Impl {
                 {"memories", memory.count()}
             };
             log_http("GET /health 200");
-            return crow::response(response.dump());
+            res.set_content(response.dump(), "application/json");
         });
 
         // GET /count
-        CROW_ROUTE(app, "/count")
-        ([this](const crow::request& req) {
+        svr.Get("/count", [this](const httplib::Request& req, httplib::Response& res) {
             auto user = _check_auth(req);
             if (!user) {
                 log_http("GET /count 401");
-                return crow::response(401, "Unauthorized");
+                res.status = 401;
+                res.set_content("Unauthorized", "text/plain");
+                return;
             }
             auto& mem = _get_memory(user->username);
             json response = {
@@ -584,17 +587,18 @@ struct Server::Impl {
                 response["common"] = mem.backend()->count();
             }
             log_http("GET /count 200");
-            return crow::response(response.dump());
+            res.set_content(response.dump(), "application/json");
         });
 
         // POST /store
-        CROW_ROUTE(app, "/store").methods(crow::HTTPMethod::POST)
-        ([this](const crow::request& req) {
+        svr.Post("/store", [this](const httplib::Request& req, httplib::Response& res) {
             // Auth check
             auto user = _check_auth(req);
             if (!user) {
                 log_http("POST /store 401");
-                return crow::response(401, "Unauthorized");
+                res.status = 401;
+                res.set_content("Unauthorized", "text/plain");
+                return;
             }
 
             try {
@@ -605,7 +609,9 @@ struct Server::Impl {
 
                 if (text.empty()) {
                     log_http("POST /store 400");
-                    return crow::response(400, "Missing 'text' field");
+                    res.status = 400;
+                    res.set_content("Missing 'text' field", "text/plain");
+                    return;
                 }
 
                 // Ensure required metadata defaults
@@ -625,427 +631,284 @@ struct Server::Impl {
                     {"status", "stored"}
                 };
                 log_http("POST /store 200");
-                return crow::response(response.dump());
+                res.set_content(response.dump(), "application/json");
 
             } catch (const json::exception& e) {
                 log_http("POST /store 400");
-                return crow::response(400, std::string("JSON error: ") + e.what());
+                res.status = 400;
+                res.set_content(std::string("JSON error: ") + e.what(), "text/plain");
             } catch (const std::exception& e) {
                 log_http("POST /store 500");
                 log_error(std::string("POST /store failed: ") + e.what());
-                return crow::response(500, std::string("Error: ") + e.what());
+                res.status = 500;
+                res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
         });
 
         // POST /search
-        CROW_ROUTE(app, "/search").methods(crow::HTTPMethod::POST)
-        ([this](const crow::request& req) {
+        svr.Post("/search", [this](const httplib::Request& req, httplib::Response& res) {
             auto user = _check_auth(req);
             if (!user) {
                 log_http("POST /search 401");
-                return crow::response(401, "Unauthorized");
+                res.status = 401; res.set_content("Unauthorized", "text/plain"); return;
             }
             try {
                 auto body = json::parse(req.body);
-
                 std::string query = body.value("query", "");
                 int limit = body.value("limit", 5);
                 float min_score = body.value("min_score", 0.0f);
-                std::vector<std::string> collections = 
+                std::vector<std::string> collections =
                     body.value("collections", std::vector<std::string>{});
-
                 if (query.empty()) {
                     log_http("POST /search 400");
-                    return crow::response(400, "Missing 'query' field");
+                    res.status = 400; res.set_content("Missing 'query' field", "text/plain"); return;
                 }
-
                 auto start_time = std::chrono::high_resolution_clock::now();
-                
                 auto& mem = _get_memory(user->username);
-                SearchResponse search_response = mem.search(
-                    query, limit, min_score, collections
-                );
-
+                SearchResponse search_response = mem.search(query, limit, min_score, collections);
                 auto end_time = std::chrono::high_resolution_clock::now();
-                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    end_time - start_time
-                );
-
-                // Build results array
+                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
                 json results = json::array();
-                for (const auto& result : search_response.results) {
-                    json result_obj = {
-                        {"id", result.id},
-                        {"text", result.text},
-                        {"score", result.score},
-                        {"metadata", result.metadata},
-                        {"timestamp", result.timestamp}
-                    };
-                    results.push_back(result_obj);
+                for (const auto& r : search_response.results) {
+                    results.push_back({{"id", r.id}, {"text", r.text}, {"score", r.score},
+                                       {"metadata", r.metadata}, {"timestamp", r.timestamp}});
                 }
-
-                // Add timing from backend plus total request time
                 json timing = search_response.timing;
                 timing["total_ms"] = duration.count();
-
-                json response = {
-                    {"results", results},
-                    {"timing", timing}
-                };
-
-                // Log query
-                std::ostringstream query_log_msg;
-                query_log_msg << "query=\"" << query << "\" "
-                             << "results=" << search_response.results.size() << " "
-                             << "time=" << duration.count() << "ms";
-                log_query(query_log_msg.str());
-
+                json response = {{"results", results}, {"timing", timing}};
+                std::ostringstream ql;
+                ql << "query=\"" << query << "\" results=" << search_response.results.size()
+                   << " time=" << duration.count() << "ms";
+                log_query(ql.str());
                 log_http("POST /search 200");
-                return crow::response(response.dump());
-
+                res.set_content(response.dump(), "application/json");
             } catch (const json::exception& e) {
                 log_http("POST /search 400");
-                return crow::response(400, std::string("JSON error: ") + e.what());
+                res.status = 400; res.set_content(std::string("JSON error: ") + e.what(), "text/plain");
             } catch (const std::exception& e) {
                 log_http("POST /search 500");
                 log_error(std::string("POST /search failed: ") + e.what());
-                return crow::response(500, std::string("Error: ") + e.what());
+                res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
         });
 
-        // DELETE /memory/<id>
-        CROW_ROUTE(app, "/memory/<int>").methods(crow::HTTPMethod::DELETE)
-        ([this](const crow::request& req, int id) {
-            // Auth check
+        // DELETE /memory/:id
+        svr.Delete(R"(/memory/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
             auto user = _check_auth(req);
             if (!user) {
-                log_http("DELETE /memory/<int> 401");
-                return crow::response(401, "Unauthorized");
+                log_http("DELETE /memory 401");
+                res.status = 401; res.set_content("Unauthorized", "text/plain"); return;
             }
-
             try {
+                int id = std::stoi(req.matches[1]);
                 auto& mem = _get_memory(user->username);
                 bool deleted = mem.delete_memory(id);
-                
                 if (deleted) {
-                    json response = {
-                        {"id", id},
-                        {"status", "deleted"}
-                    };
-                    log_http("DELETE /memory/<int> 200");
-                    return crow::response(200, response.dump());
+                    json response = {{"id", id}, {"status", "deleted"}};
+                    log_http("DELETE /memory 200");
+                    res.set_content(response.dump(), "application/json");
                 } else {
-                    log_http("DELETE /memory/<int> 404");
-                    return crow::response(404, "Memory not found");
+                    log_http("DELETE /memory 404");
+                    res.status = 404; res.set_content("Memory not found", "text/plain");
                 }
             } catch (const std::exception& e) {
-                log_http("DELETE /memory/<int> 500");
-                log_error(std::string("DELETE /memory/<int> failed: ") + e.what());
-                return crow::response(500, std::string("Error: ") + e.what());
+                log_http("DELETE /memory 500");
+                log_error(std::string("DELETE /memory failed: ") + e.what());
+                res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
         });
 
         // POST /delete_batch
-        CROW_ROUTE(app, "/delete_batch").methods(crow::HTTPMethod::POST)
-        ([this](const crow::request& req) {
-            // Auth check
+        svr.Post("/delete_batch", [this](const httplib::Request& req, httplib::Response& res) {
             auto user = _check_auth(req);
             if (!user) {
                 log_http("POST /delete_batch 401");
-                return crow::response(401, "Unauthorized");
+                res.status = 401; res.set_content("Unauthorized", "text/plain"); return;
             }
-
             try {
                 auto body = json::parse(req.body);
-                
                 if (!body.contains("ids") || !body["ids"].is_array()) {
                     log_http("POST /delete_batch 400");
-                    return crow::response(400, "Missing or invalid 'ids' field");
+                    res.status = 400; res.set_content("Missing or invalid 'ids' field", "text/plain"); return;
                 }
-
                 std::vector<int> ids = body["ids"].get<std::vector<int>>();
                 auto& mem = _get_memory(user->username);
                 int deleted = mem.delete_batch(ids);
-
-                json response = {
-                    {"deleted", deleted}
-                };
+                json response = {{"deleted", deleted}};
                 log_http("POST /delete_batch 200");
-                return crow::response(response.dump());
-
+                res.set_content(response.dump(), "application/json");
             } catch (const json::exception& e) {
                 log_http("POST /delete_batch 400");
-                return crow::response(400, std::string("JSON error: ") + e.what());
+                res.status = 400; res.set_content(std::string("JSON error: ") + e.what(), "text/plain");
             } catch (const std::exception& e) {
                 log_http("POST /delete_batch 500");
                 log_error(std::string("POST /delete_batch failed: ") + e.what());
-                return crow::response(500, std::string("Error: ") + e.what());
+                res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
         });
 
         // POST /search_by_metadata
-        CROW_ROUTE(app, "/search_by_metadata").methods(crow::HTTPMethod::POST)
-        ([this](const crow::request& req) {
+        svr.Post("/search_by_metadata", [this](const httplib::Request& req, httplib::Response& res) {
             auto user = _check_auth(req);
             if (!user) {
                 log_http("POST /search_by_metadata 401");
-                return crow::response(401, "Unauthorized");
+                res.status = 401; res.set_content("Unauthorized", "text/plain"); return;
             }
             try {
                 auto body = json::parse(req.body);
-                
                 if (!body.contains("metadata") || !body["metadata"].is_object()) {
                     log_http("POST /search_by_metadata 400");
-                    return crow::response(400, "Missing or invalid 'metadata' field");
+                    res.status = 400; res.set_content("Missing or invalid 'metadata' field", "text/plain"); return;
                 }
-
                 json metadata_filter = body["metadata"];
                 int limit = body.value("limit", 0);
-
                 auto& mem = _get_memory(user->username);
                 auto results = mem.search_by_metadata(metadata_filter, limit);
-
-                // Build results array
                 json results_json = json::array();
-                for (const auto& result : results) {
-                    json result_obj = {
-                        {"id", result.id},
-                        {"text", result.text},
-                        {"metadata", result.metadata},
-                        {"timestamp", result.timestamp}
-                    };
-                    results_json.push_back(result_obj);
+                for (const auto& r : results) {
+                    results_json.push_back({{"id", r.id}, {"text", r.text},
+                                            {"metadata", r.metadata}, {"timestamp", r.timestamp}});
                 }
-
-                json response = {
-                    {"results", results_json},
-                    {"count", results.size()}
-                };
-
+                json response = {{"results", results_json}, {"count", results.size()}};
                 log_http("POST /search_by_metadata 200");
-                return crow::response(response.dump());
-
+                res.set_content(response.dump(), "application/json");
             } catch (const json::exception& e) {
                 log_http("POST /search_by_metadata 400");
-                return crow::response(400, std::string("JSON error: ") + e.what());
+                res.status = 400; res.set_content(std::string("JSON error: ") + e.what(), "text/plain");
             } catch (const std::exception& e) {
                 log_http("POST /search_by_metadata 500");
                 log_error(std::string("POST /search_by_metadata failed: ") + e.what());
-                return crow::response(500, std::string("Error: ") + e.what());
+                res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
         });
 
         // PUT /user/model — set preferred model
-        CROW_ROUTE(app, "/user/model").methods(crow::HTTPMethod::PUT)
-        ([this](const crow::request& req) {
+        // PUT /user/model
+        svr.Put("/user/model", [this](const httplib::Request& req, httplib::Response& res) {
             auto user = _check_auth(req);
-            if (!user) {
-                log_http("PUT /user/model 401");
-                return crow::response(401, "Unauthorized");
-            }
+            if (!user) { res.status = 401; res.set_content("Unauthorized", "text/plain"); return; }
             try {
                 auto body = json::parse(req.body);
                 std::string model = body.value("model", "");
-                if (model.empty()) {
-                    log_http("PUT /user/model 400");
-                    return crow::response(400, "Missing 'model' field");
-                }
-                
-                auto* backend = memory.backend();
-                // Resolve alias before storing
+                if (model.empty()) { res.status = 400; res.set_content("Missing 'model' field", "text/plain"); return; }
                 std::string resolved = config().resolve_model(model);
-                backend->update_user_preferred_model(user->username, resolved);
-
-                // Preload on local engines
+                memory.backend()->update_user_preferred_model(user->username, resolved);
                 preload_local_model(resolved);
-                
-                json response = {
-                    {"status", "updated"},
-                    {"model", resolved}
-                };
+                json response = {{"status", "updated"}, {"model", resolved}};
                 log_http("PUT /user/model 200");
-                return crow::response(200, response.dump());
-                
+                res.set_content(response.dump(), "application/json");
             } catch (const json::exception& e) {
-                log_http("PUT /user/model 400");
-                return crow::response(400, std::string("JSON error: ") + e.what());
+                res.status = 400; res.set_content(std::string("JSON error: ") + e.what(), "text/plain");
             } catch (const std::exception& e) {
-                log_http("PUT /user/model 500");
                 log_error(std::string("PUT /user/model failed: ") + e.what());
-                return crow::response(500, std::string("Error: ") + e.what());
+                res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
         });
 
-        // GET /user/model — get preferred model
-        CROW_ROUTE(app, "/user/model").methods(crow::HTTPMethod::GET)
-        ([this](const crow::request& req) {
+        // GET /user/model
+        svr.Get("/user/model", [this](const httplib::Request& req, httplib::Response& res) {
             auto user = _check_auth(req);
-            if (!user) {
-                log_http("GET /user/model 401");
-                return crow::response(401, "Unauthorized");
-            }
+            if (!user) { res.status = 401; res.set_content("Unauthorized", "text/plain"); return; }
             try {
-                auto* backend = memory.backend();
-                auto model_opt = backend->get_user_preferred_model(user->username);
-                
-                json response;
-                if (model_opt) {
-                    response = {
-                        {"model", *model_opt}
-                    };
-                } else {
-                    response = {
-                        {"model", nullptr}
-                    };
-                }
+                auto model_opt = memory.backend()->get_user_preferred_model(user->username);
+                json response = model_opt ? json{{"model", *model_opt}} : json{{"model", nullptr}};
                 log_http("GET /user/model 200");
-                return crow::response(200, response.dump());
-                
+                res.set_content(response.dump(), "application/json");
             } catch (const std::exception& e) {
-                log_http("GET /user/model 500");
                 log_error(std::string("GET /user/model failed: ") + e.what());
-                return crow::response(500, std::string("Error: ") + e.what());
+                res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
         });
 
-        // DELETE /user/model — clear preferred model
-        CROW_ROUTE(app, "/user/model").methods(crow::HTTPMethod::DELETE)
-        ([this](const crow::request& req) {
+        // DELETE /user/model
+        svr.Delete("/user/model", [this](const httplib::Request& req, httplib::Response& res) {
             auto user = _check_auth(req);
-            if (!user) {
-                log_http("DELETE /user/model 401");
-                return crow::response(401, "Unauthorized");
-            }
+            if (!user) { res.status = 401; res.set_content("Unauthorized", "text/plain"); return; }
             try {
-                auto* backend = memory.backend();
-                backend->update_user_preferred_model(user->username, "");
-                
-                json response = {
-                    {"status", "cleared"}
-                };
+                memory.backend()->update_user_preferred_model(user->username, "");
                 log_http("DELETE /user/model 200");
-                return crow::response(200, response.dump());
-                
+                res.set_content(R"({"status":"cleared"})", "application/json");
             } catch (const std::exception& e) {
-                log_http("DELETE /user/model 500");
                 log_error(std::string("DELETE /user/model failed: ") + e.what());
-                return crow::response(500, std::string("Error: ") + e.what());
+                res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
         });
 
-        // GET /user/token — show current token
-        CROW_ROUTE(app, "/user/token").methods(crow::HTTPMethod::GET)
-        ([this](const crow::request& req) {
+        // GET /user/token
+        svr.Get("/user/token", [this](const httplib::Request& req, httplib::Response& res) {
             auto user = _check_auth(req);
-            if (!user) {
-                log_http("GET /user/token 401");
-                return crow::response(401, "Unauthorized");
-            }
+            if (!user) { res.status = 401; res.set_content("Unauthorized", "text/plain"); return; }
             try {
                 struct passwd* pw = getpwnam(user->username.c_str());
-                if (!pw) {
-                    log_http("GET /user/token 404");
-                    return crow::response(404, "{\"error\": \"system user not found\"}");
-                }
+                if (!pw) { res.status = 404; res.set_content(R"({"error":"system user not found"})", "application/json"); return; }
                 std::string token_file = std::string(pw->pw_dir) + "/.ragger/token";
                 std::ifstream f(token_file);
-                if (!f) {
-                    log_http("GET /user/token 404");
-                    return crow::response(404, "{\"error\": \"no token file\"}");
-                }
+                if (!f) { res.status = 404; res.set_content(R"({"error":"no token file"})", "application/json"); return; }
                 std::string token;
                 std::getline(f, token);
-                // trim
                 size_t s = token.find_first_not_of(" \t\r\n");
                 size_t e = token.find_last_not_of(" \t\r\n");
                 if (s != std::string::npos) token = token.substr(s, e - s + 1);
-
                 json response = {{"token", token}, {"username", user->username}};
                 log_http("GET /user/token 200");
-                return crow::response(200, response.dump());
+                res.set_content(response.dump(), "application/json");
             } catch (const std::exception& ex) {
-                log_http("GET /user/token 500");
-                return crow::response(500, std::string("Error: ") + ex.what());
+                res.status = 500; res.set_content(std::string("Error: ") + ex.what(), "text/plain");
             }
         });
 
-        // POST /user/rotate-token — rotate authenticated user's token
-        CROW_ROUTE(app, "/user/rotate-token").methods(crow::HTTPMethod::POST)
-        ([this](const crow::request& req) {
+        // POST /user/rotate-token
+        svr.Post("/user/rotate-token", [this](const httplib::Request& req, httplib::Response& res) {
             auto user = _check_auth(req);
-            if (!user) {
-                log_http("POST /user/rotate-token 401");
-                return crow::response(401, "Unauthorized");
-            }
+            if (!user) { res.status = 401; res.set_content("Unauthorized", "text/plain"); return; }
             try {
                 struct passwd* pw = getpwnam(user->username.c_str());
-                if (!pw) {
-                    log_http("POST /user/rotate-token 404");
-                    return crow::response(404, "{\"error\": \"system user not found\"}");
-                }
-                std::string home = pw->pw_dir;
-                // Generate new token
+                if (!pw) { res.status = 404; res.set_content(R"({"error":"system user not found"})", "application/json"); return; }
                 std::string new_token = ragger::generate_random_token();
-                std::string token_path = home + "/.ragger/token";
-                // Write new token file
+                std::string token_path = std::string(pw->pw_dir) + "/.ragger/token";
                 std::ofstream tf(token_path, std::ios::trunc);
-                if (!tf) {
-                    log_http("POST /user/rotate-token 500");
-                    return crow::response(500, "{\"error\": \"cannot write token file\"}");
-                }
+                if (!tf) { res.status = 500; res.set_content(R"({"error":"cannot write token file"})", "application/json"); return; }
                 tf << new_token << "\n";
                 tf.close();
-                // Update DB
                 std::string new_hash = ragger::hash_token(new_token);
                 memory.backend()->update_user_token(user->username, new_hash);
-
-                json response = {
-                    {"token", new_token},
-                    {"username", user->username},
-                    {"status", "rotated"}
-                };
+                json response = {{"token", new_token}, {"username", user->username}, {"status", "rotated"}};
                 log_http("POST /user/rotate-token 200");
-                return crow::response(200, response.dump());
+                res.set_content(response.dump(), "application/json");
             } catch (const std::exception& ex) {
-                log_http("POST /user/rotate-token 500");
                 log_error(std::string("rotate-token failed: ") + ex.what());
-                return crow::response(500, std::string("Error: ") + ex.what());
+                res.status = 500; res.set_content(std::string("Error: ") + ex.what(), "text/plain");
             }
         });
 
         // POST /chat — memory-augmented chat with SSE streaming
-        CROW_ROUTE(app, "/chat").methods(crow::HTTPMethod::POST)
-        ([this](const crow::request& req) -> crow::response {
+        // POST /chat — memory-augmented chat with real SSE streaming
+        svr.Post("/chat", [this](const httplib::Request& req, httplib::Response& res) {
             auto user = _check_auth(req);
             if (!user) {
                 log_http("POST /chat 401");
-                return crow::response(401, "Unauthorized");
+                res.status = 401; res.set_content("Unauthorized", "text/plain"); return;
             }
-
             if (!inference_) {
                 log_http("POST /chat 503");
-                return crow::response(503, "{\"error\": \"inference not configured\"}");
+                res.status = 503; res.set_content(R"({"error":"inference not configured"})", "application/json"); return;
             }
 
             try {
                 auto body = json::parse(req.body);
                 std::string message = body.value("message", "");
                 if (message.empty()) {
-                    log_http("POST /chat 400");
-                    return crow::response(400, "{\"error\": \"message required\"}");
+                    res.status = 400; res.set_content(R"({"error":"message required"})", "application/json"); return;
                 }
 
                 std::string session_id = body.value("session_id", "");
                 std::string request_model = body.value("model", "");
-
-                // Get or create session
                 auto& session = session_mgr_.get_or_create(session_id, user->username);
 
                 // Search memory for context
                 std::string memory_context;
                 try {
-                    const auto& cfg = config();
-                    int max_results = cfg.chat_max_memory_results;
+                    int max_results = config().chat_max_memory_results;
                     auto& mem = _get_memory(user->username);
                     auto search_result = mem.search(message, max_results, 0.3f);
                     for (const auto& r : search_result.results) {
@@ -1057,123 +920,160 @@ struct Server::Impl {
                 }
 
                 // Resolve model
-                auto* backend = memory.backend();
-                auto preferred_model = backend->get_user_preferred_model(user->username);
+                auto preferred_model = memory.backend()->get_user_preferred_model(user->username);
                 std::string use_model = preferred_model.value_or("");
                 if (use_model.empty()) use_model = request_model;
                 if (use_model.empty()) use_model = inference_->model;
-
-                // Resolve alias
                 use_model = config().resolve_model(use_model);
 
-                // Ensure model is loaded (auto-load for local engines)
+                // Ensure model loaded
                 auto load_err = inference_->ensure_model_loaded(use_model);
                 if (!load_err.empty()) {
-                    json err_event = {{"error", load_err}};
-                    json done_event = {{"done", true}};
-                    std::string sse = "data: " + err_event.dump() + "\n\n"
-                                    + "data: " + done_event.dump() + "\n\n";
-                    auto resp = crow::response(200, sse);
-                    resp.set_header("Content-Type", "text/event-stream");
-                    resp.set_header("Cache-Control", "no-cache");
-                    resp.set_header("Connection", "close");
+                    res.set_header("Content-Type", "text/event-stream");
+                    res.set_header("Cache-Control", "no-cache");
+                    std::string sse = "data: " + json{{"error", load_err}}.dump() + "\n\n"
+                                    + "data: " + json{{"done", true}}.dump() + "\n\n";
+                    res.set_content(sse, "text/event-stream");
                     log_http("POST /chat 200 (model load error)");
-                    return resp;
+                    return;
                 }
 
-                // Build messages with persona + memory + history
+                // Build messages
                 std::string system_prompt = ChatSessionManager::load_workspace_files();
                 session.add_user_message(message);
                 auto full_messages = session.build_messages(system_prompt, memory_context);
 
-                // Stream response from inference, collect SSE body
-                std::string sse_body;
-                std::string response_text;
+                // Capture variables for the chunked provider
+                auto* inf = inference_.get();
+                auto msg_copy = full_messages;
+                auto model_copy = use_model;
+                auto username = user->username;
+                auto sid = session.session_id;
+                auto msg_text = message;
 
-                inference_->chat_stream(full_messages, [&](const std::string& token) {
-                    response_text += token;
-                    json event = {{"token", token}};
-                    sse_body += "data: " + event.dump() + "\n\n";
-                }, use_model);
+                // Use chunked content provider for real SSE streaming
+                res.set_header("Cache-Control", "no-cache");
+                res.set_header("Connection", "keep-alive");
+                res.set_header("X-Session-Id", sid);
 
-                // Done event
-                json done_event = {
-                    {"done", true},
-                    {"session_id", session.session_id}
-                };
-                sse_body += "data: " + done_event.dump() + "\n\n";
+                // We need to collect the full response for session/turn storage
+                auto response_text = std::make_shared<std::string>();
+                auto token_queue = std::make_shared<std::vector<std::string>>();
+                auto done = std::make_shared<std::atomic<bool>>(false);
+                auto mtx = std::make_shared<std::mutex>();
+                auto cv = std::make_shared<std::condition_variable>();
 
-                // Update session
-                if (!response_text.empty()) {
-                    session.add_assistant_message(response_text);
+                // Stream inference in a background thread, push tokens to queue
+                std::thread([inf, msg_copy, model_copy, response_text, token_queue, done, mtx, cv, sid]() {
+                    try {
+                        inf->chat_stream(msg_copy, [&](const std::string& token) {
+                            *response_text += token;
+                            {
+                                std::lock_guard<std::mutex> lock(*mtx);
+                                token_queue->push_back(token);
+                            }
+                            cv->notify_one();
+                        }, model_copy);
+                    } catch (const std::exception& e) {
+                        std::lock_guard<std::mutex> lock(*mtx);
+                        token_queue->push_back(""); // sentinel for error
+                    }
+                    done->store(true);
+                    cv->notify_one();
+                }).detach();
 
-                    // Store turn if configured
-                    const auto& cfg = config();
-                    if (cfg.chat_store_turns != "false") {
-                        try {
-                            json turn_meta = {
-                                {"collection", "conversation"},
-                                {"category", "chat-turn"},
-                                {"source", "chat-http-" + user->username}
-                            };
-                            auto& mem = _get_memory(user->username);
-                            mem.store(
-                                "User: " + message + "\n\nAssistant: " + response_text,
-                                turn_meta
-                            );
-                        } catch (const std::exception& e) {
-                            log_error(std::string("Turn storage failed: ") + e.what());
+                res.set_chunked_content_provider("text/event-stream",
+                    [token_queue, done, mtx, cv, response_text, sid,
+                     this, username, msg_text](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+                        while (true) {
+                            std::vector<std::string> batch;
+                            {
+                                std::unique_lock<std::mutex> lock(*mtx);
+                                cv->wait_for(lock, std::chrono::milliseconds(50),
+                                    [&] { return !token_queue->empty() || done->load(); });
+                                batch.swap(*token_queue);
+                            }
+
+                            // Send any queued tokens
+                            for (const auto& token : batch) {
+                                if (token.empty() && done->load()) continue; // error sentinel
+                                json event = {{"token", token}};
+                                std::string sse = "data: " + event.dump() + "\n\n";
+                                if (!sink.write(sse.data(), sse.size())) return false;
+                            }
+
+                            // If done and queue drained, send done event and finish
+                            if (done->load()) {
+                                // Drain any remaining
+                                std::vector<std::string> remaining;
+                                {
+                                    std::lock_guard<std::mutex> lock(*mtx);
+                                    remaining.swap(*token_queue);
+                                }
+                                for (const auto& token : remaining) {
+                                    if (token.empty()) continue;
+                                    json event = {{"token", token}};
+                                    std::string sse = "data: " + event.dump() + "\n\n";
+                                    if (!sink.write(sse.data(), sse.size())) return false;
+                                }
+
+                                // Done event
+                                json done_event = {{"done", true}, {"session_id", sid}};
+                                std::string sse = "data: " + done_event.dump() + "\n\n";
+                                sink.write(sse.data(), sse.size());
+                                sink.done();
+
+                                // Post-stream: update session and store turn
+                                if (!response_text->empty()) {
+                                    session_mgr_.get_or_create(sid, username)
+                                        .add_assistant_message(*response_text);
+                                    const auto& cfg = config();
+                                    if (cfg.chat_store_turns != "false") {
+                                        try {
+                                            json turn_meta = {
+                                                {"collection", "conversation"},
+                                                {"category", "chat-turn"},
+                                                {"source", "chat-http-" + username}
+                                            };
+                                            auto& mem = _get_memory(username);
+                                            mem.store("User: " + msg_text + "\n\nAssistant: " + *response_text,
+                                                      turn_meta);
+                                        } catch (const std::exception& e) {
+                                            log_error(std::string("Turn storage failed: ") + e.what());
+                                        }
+                                    }
+                                }
+                                log_http("POST /chat 200");
+                                return false; // done streaming
+                            }
                         }
                     }
-                }
-
-                crow::response res(200);
-                res.set_header("Content-Type", "text/event-stream");
-                res.set_header("Cache-Control", "no-cache");
-                res.set_header("X-Session-Id", session.session_id);
-                res.body = sse_body;
-                log_http("POST /chat 200");
-                return res;
+                );
 
             } catch (const json::exception& e) {
                 log_http("POST /chat 400");
-                return crow::response(400, std::string("JSON error: ") + e.what());
+                res.status = 400; res.set_content(std::string("JSON error: ") + e.what(), "text/plain");
             } catch (const std::exception& e) {
                 log_http("POST /chat 500");
                 log_error(std::string("POST /chat failed: ") + e.what());
-                return crow::response(500, std::string("Error: ") + e.what());
+                res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
         });
 
-        // /register endpoint removed — user management is CLI-only (sudo ragger add-user)
-
-        // POST /auth/login — password authentication → session token
-        CROW_ROUTE(app, "/auth/login").methods(crow::HTTPMethod::POST)
-        ([this](const crow::request& req) -> crow::response {
+        // POST /auth/login
+        svr.Post("/auth/login", [this](const httplib::Request& req, httplib::Response& res) {
             try {
                 auto body = json::parse(req.body);
                 std::string username = body.value("username", "");
                 std::string password = body.value("password", "");
-
                 if (username.empty() || password.empty()) {
-                    return crow::response(400, R"({"error":"username and password required"})");
+                    res.status = 400; res.set_content(R"({"error":"username and password required"})", "application/json"); return;
                 }
-
                 auto user = memory.backend()->get_user_by_username(username);
-                if (!user) {
-                    return crow::response(401, R"({"error":"invalid credentials"})");
-                }
-
+                if (!user) { res.status = 401; res.set_content(R"({"error":"invalid credentials"})", "application/json"); return; }
                 auto stored_hash = memory.backend()->get_user_password(username);
-                if (!stored_hash) {
-                    return crow::response(401, R"({"error":"no password set — use 'ragger passwd' first"})");
-                }
-
-                if (!verify_password(password, *stored_hash)) {
-                    return crow::response(401, R"({"error":"invalid credentials"})");
-                }
-
-                // Generate session token
+                if (!stored_hash) { res.status = 401; res.set_content(R"({"error":"no password set — use 'ragger passwd' first"})", "application/json"); return; }
+                if (!verify_password(password, *stored_hash)) { res.status = 401; res.set_content(R"({"error":"invalid credentials"})", "application/json"); return; }
                 std::string session_token = generate_random_token(32);
                 {
                     std::lock_guard<std::mutex> lock(web_sessions_mutex_);
@@ -1182,73 +1082,18 @@ struct Server::Impl {
                         std::chrono::steady_clock::now() + std::chrono::seconds(WEB_SESSION_TTL)
                     };
                 }
-
-                json result = {
-                    {"token", session_token},
-                    {"username", username},
-                    {"expires_in", WEB_SESSION_TTL}
-                };
+                json result = {{"token", session_token}, {"username", username}, {"expires_in", WEB_SESSION_TTL}};
                 log_http("POST /auth/login 200 (" + username + ")");
-                return crow::response(200, result.dump());
+                res.set_content(result.dump(), "application/json");
             } catch (const std::exception& e) {
                 log_error(std::string("Login error: ") + e.what());
-                return crow::response(500, R"({"error":"login failed"})");
+                res.status = 500; res.set_content(R"({"error":"login failed"})", "application/json");
             }
         });
 
-        // Static file serving (web UI) — no auth required
-        CROW_ROUTE(app, "/<path>")
-        ([this](const crow::request& req, const std::string& path) -> crow::response {
-            std::string web_root = resolve_web_root();
-            if (web_root.empty()) {
-                return crow::response(404, "Not found");
-            }
-
-            // Map / to index.html
-            std::string safe_path = path.empty() ? "index.html" : path;
-
-            // Prevent directory traversal
-            if (safe_path.find("..") != std::string::npos) {
-                return crow::response(403, "Forbidden");
-            }
-
-            fs::path file_path = fs::path(web_root) / safe_path;
-            if (!fs::is_regular_file(file_path)) {
-                return crow::response(404, "Not found");
-            }
-
-            std::ifstream file(file_path, std::ios::binary);
-            if (!file) {
-                return crow::response(500, "Cannot read file");
-            }
-
-            std::ostringstream ss;
-            ss << file.rdbuf();
-            auto resp = crow::response(200, ss.str());
-            resp.set_header("Content-Type", mime_type(file_path.string()));
-            return resp;
-        });
-
-        // Root path
-        CROW_ROUTE(app, "/")
-        ([this](const crow::request& req) -> crow::response {
-            std::string web_root = resolve_web_root();
-            if (web_root.empty()) {
-                return crow::response(200, R"({"status":"ok","message":"Ragger API"})");
-            }
-
-            fs::path file_path = fs::path(web_root) / "index.html";
-            if (!fs::is_regular_file(file_path)) {
-                return crow::response(200, R"({"status":"ok","message":"Ragger API"})");
-            }
-
-            std::ifstream file(file_path, std::ios::binary);
-            std::ostringstream ss;
-            ss << file.rdbuf();
-            auto resp = crow::response(200, ss.str());
-            resp.set_header("Content-Type", "text/html; charset=utf-8");
-            return resp;
-        });
+        // Static file serving — use httplib's built-in mount if web root exists
+        // We set this up as a catch-all handler for unmatched GET requests
+        svr.set_mount_point("/", resolve_web_root());
     }
 };
 
@@ -1291,28 +1136,12 @@ void Server::run() {
     
     const auto& cfg = config();
 
-    auto& a = pImpl->app;
-    a.loglevel(crow::LogLevel::Warning)
-     .bindaddr(pImpl->host)
-     .port(pImpl->port)
-     .multithreaded();
-
-    if (!cfg.server_name.empty()) {
-        a.server_name(cfg.server_name);
-    }
-
-    // TLS support
+    // TLS support — if certs configured, create SSLServer instead
+    // Note: httplib::Server is already created in Impl. For TLS we'd need
+    // httplib::SSLServer. For now, TLS is handled via reverse proxy (Caddy/nginx).
+    // TODO: To support native TLS, conditionally create SSLServer in Impl constructor.
     if (!cfg.tls_cert.empty() && !cfg.tls_key.empty()) {
-        auto cert_path = expand_path(cfg.tls_cert);
-        auto key_path = expand_path(cfg.tls_key);
-        if (fs::exists(cert_path) && fs::exists(key_path)) {
-            a.ssl_file(cert_path, key_path);
-            log_info("TLS enabled: " + cert_path);
-        } else {
-            log_error("TLS certificates not found — starting without encryption");
-            if (!fs::exists(cert_path)) log_error("  Missing: " + cert_path);
-            if (!fs::exists(key_path))  log_error("  Missing: " + key_path);
-        }
+        log_info("TLS config present — native TLS not yet supported with httplib. Use reverse proxy.");
     }
 
     // Write PID file (per-port)
@@ -1341,7 +1170,7 @@ void Server::run() {
     // Start housekeeping timer (runs every 60s + on SIGUSR1)
     pImpl->start_housekeeping_timer();
 
-    a.run();
+    pImpl->svr.listen(pImpl->host, pImpl->port);
 
     // Cleanup
     pImpl->stop_housekeeping_timer();
@@ -1350,7 +1179,7 @@ void Server::run() {
 
 void Server::stop() {
     pImpl->stop_housekeeping_timer();
-    pImpl->app.stop();
+    pImpl->svr.stop();
 }
 
 } // namespace ragger
