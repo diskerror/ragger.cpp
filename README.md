@@ -10,7 +10,7 @@ Faster startup, lower memory footprint, single static binary. Everything else �
 
 - **Local embeddings** — all-MiniLM-L6-v2 via ONNX Runtime (384-dim)
 - **Hybrid search** — BM25 keyword + vector cosine similarity (Eigen3, configurable blend)
-- **HTTP & MCP servers** — Crow REST API and JSON-RPC over stdin/stdout
+- **HTTP & MCP servers** — cpp-httplib REST API and JSON-RPC over stdin/stdout
 - **Collection filtering** — Organize memories into searchable collections
 - **Chat with memory** — REPL with turn persistence, summarization, dynamic context sizing
 - **Token auth** — Bearer token authentication with SHA-256 hashing
@@ -63,7 +63,7 @@ ragger serve
 |---------|---------|--------|
 | **SQLite3** | Storage backend | System (MacPorts/apt) |
 | **Eigen3** | Vector math (cosine similarity) | System (MacPorts/apt) |
-| **Boost** | ProgramOptions, Asio (via Crow) | System (MacPorts/apt) |
+| **Boost** | ProgramOptions | System (MacPorts/apt) |
 | **OpenSSL** | SHA-256 hashing (token auth) | System (MacPorts/apt) |
 | **libcurl** | HTTP client (inference proxy) | System (MacPorts/apt) |
 | **Rust** | Required by tokenizers-cpp | System (MacPorts/apt) |

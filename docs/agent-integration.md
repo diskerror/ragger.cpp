@@ -17,12 +17,13 @@ memory entries with specific tags so they're findable later:
 
 ```bash
 # Bad: buried in a session summary
-"Session 2026-03-17: discussed architecture, chose Crow for HTTP..."
+"Session 2026-03-17: discussed architecture, chose cpp-httplib for HTTP..."
 
 # Good: standalone decision
-"Ragger C++ port: chose Crow for HTTP (FetchContent), Eigen for vectors,
-ONNX Runtime for embeddings. Rationale: Crow is Flask-like routing,
-Eigen replaces NumPy, ONNX avoids Python dependency."
+"Ragger C++ HTTP server: migrated from Crow to cpp-httplib (2026-03-31)
+for native SSE streaming. Rationale: Crow lacked chunked transfer support,
+cpp-httplib provides set_chunked_content_provider() with identical routing API.
+Single-header, no Boost.Asio dependency."
 ```
 
 ## Reference the Source
