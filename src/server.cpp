@@ -933,6 +933,86 @@ struct Server::Impl {
             }
         });
 
+        // GET /user/token — show current token
+        CROW_ROUTE(app, "/user/token").methods(crow::HTTPMethod::GET)
+        ([this](const crow::request& req) {
+            auto user = _check_auth(req);
+            if (!user) {
+                log_http("GET /user/token 401");
+                return crow::response(401, "Unauthorized");
+            }
+            try {
+                struct passwd* pw = getpwnam(user->username.c_str());
+                if (!pw) {
+                    log_http("GET /user/token 404");
+                    return crow::response(404, "{\"error\": \"system user not found\"}");
+                }
+                std::string token_file = std::string(pw->pw_dir) + "/.ragger/token";
+                std::ifstream f(token_file);
+                if (!f) {
+                    log_http("GET /user/token 404");
+                    return crow::response(404, "{\"error\": \"no token file\"}");
+                }
+                std::string token;
+                std::getline(f, token);
+                // trim
+                size_t s = token.find_first_not_of(" \t\r\n");
+                size_t e = token.find_last_not_of(" \t\r\n");
+                if (s != std::string::npos) token = token.substr(s, e - s + 1);
+
+                json response = {{"token", token}, {"username", user->username}};
+                log_http("GET /user/token 200");
+                return crow::response(200, response.dump());
+            } catch (const std::exception& ex) {
+                log_http("GET /user/token 500");
+                return crow::response(500, std::string("Error: ") + ex.what());
+            }
+        });
+
+        // POST /user/rotate-token — rotate authenticated user's token
+        CROW_ROUTE(app, "/user/rotate-token").methods(crow::HTTPMethod::POST)
+        ([this](const crow::request& req) {
+            auto user = _check_auth(req);
+            if (!user) {
+                log_http("POST /user/rotate-token 401");
+                return crow::response(401, "Unauthorized");
+            }
+            try {
+                struct passwd* pw = getpwnam(user->username.c_str());
+                if (!pw) {
+                    log_http("POST /user/rotate-token 404");
+                    return crow::response(404, "{\"error\": \"system user not found\"}");
+                }
+                std::string home = pw->pw_dir;
+                // Generate new token
+                std::string new_token = ragger::generate_random_token();
+                std::string token_path = home + "/.ragger/token";
+                // Write new token file
+                std::ofstream tf(token_path, std::ios::trunc);
+                if (!tf) {
+                    log_http("POST /user/rotate-token 500");
+                    return crow::response(500, "{\"error\": \"cannot write token file\"}");
+                }
+                tf << new_token << "\n";
+                tf.close();
+                // Update DB
+                std::string new_hash = ragger::hash_token(new_token);
+                memory.backend()->update_user_token(user->username, new_hash);
+
+                json response = {
+                    {"token", new_token},
+                    {"username", user->username},
+                    {"status", "rotated"}
+                };
+                log_http("POST /user/rotate-token 200");
+                return crow::response(200, response.dump());
+            } catch (const std::exception& ex) {
+                log_http("POST /user/rotate-token 500");
+                log_error(std::string("rotate-token failed: ") + ex.what());
+                return crow::response(500, std::string("Error: ") + ex.what());
+            }
+        });
+
         // POST /chat — memory-augmented chat with SSE streaming
         CROW_ROUTE(app, "/chat").methods(crow::HTTPMethod::POST)
         ([this](const crow::request& req) -> crow::response {

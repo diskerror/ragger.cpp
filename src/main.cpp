@@ -1076,6 +1076,9 @@ int main(int argc, char** argv) {
                 std::cout << "✓ Created ~/.ragger/token for " << username << "\n";
             else
                 std::cout << "Token already exists for " << username << "\n";
+            std::cout << "\nYour token: " << token << "\n"
+                      << "Use this in your client config (OpenClaw, Claude Desktop, etc.).\n"
+                      << "Token file: ~/.ragger/token\n";
             // Register directly in DB
             try {
                 std::string reg_db = cfg.resolved_common_db_path();
@@ -1137,6 +1140,8 @@ int main(int argc, char** argv) {
                 std::cerr << "Error: " << e.what() << "\n";
                 return 1;
             }
+            std::cout << "\nToken file: ~" << username << "/.ragger/token\n"
+                      << "The user will need to update their client config if the token is rotated.\n";
 
         } else if (command == "add-all") {
             ragger::setup_logging(false, false);

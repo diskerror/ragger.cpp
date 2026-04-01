@@ -99,6 +99,30 @@
         const text = input.value.trim();
         if (!text || streaming) return;
 
+        // Handle /token and /rotate-token commands
+        if (text === "/token" || text === "/rotate-token") {
+            input.value = "";
+            input.style.height = "auto";
+            var tokenUrl = text === "/token" ? "/user/token" : "/user/rotate-token";
+            var tokenMethod = text === "/token" ? "GET" : "POST";
+            var tokenHeaders = {};
+            if (AUTH_TOKEN) tokenHeaders["Authorization"] = "Bearer " + AUTH_TOKEN;
+            addMessage("user", text);
+            fetch(tokenUrl, { method: tokenMethod, headers: tokenHeaders })
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    if (data.token) {
+                        var msg = "**Token for " + data.username + ":**\n`" + data.token + "`";
+                        if (data.status === "rotated") msg += "\n\n⚠️ Token rotated. Update your client configs.";
+                        addMessage("assistant", msg);
+                    } else {
+                        addMessage("assistant", "Error: " + (data.error || "unknown"));
+                    }
+                })
+                .catch(function (err) { addMessage("assistant", "Error: " + err); });
+            return;
+        }
+
         // Show user message
         addMessage("user", text);
         input.value = "";
