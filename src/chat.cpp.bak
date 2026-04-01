@@ -370,6 +370,82 @@ void Chat::check_orphaned_turns() {
     }
 }
 
+void Chat::expire_old_turns() {
+    if (store_turns_ == "false" || store_turns_ == "session") {
+        return;  // Only applies to per-turn mode
+    }
+    
+    try {
+        // Find all conversation turns
+        json filter = {
+            {"category", "conversation"},
+            {"source", "ragger-chat"}
+        };
+        auto turns = memory_.search_by_metadata(filter);
+        
+        // Filter out session-mode entries
+        std::vector<SearchResult> per_turn_results;
+        for (const auto& turn : turns) {
+            if (turn.metadata.value("mode", "") != "session") {
+                per_turn_results.push_back(turn);
+            }
+        }
+        
+        if (per_turn_results.empty()) {
+            return;
+        }
+        
+        // Calculate cutoff time
+        auto now = std::chrono::system_clock::now();
+        auto cutoff = now - std::chrono::minutes(max_turn_retention_minutes_);
+        
+        // Parse timestamps and find expired
+        std::vector<int> expired_ids;
+        for (const auto& turn : per_turn_results) {
+            // Parse ISO timestamp
+            std::tm tm = {};
+            std::istringstream ss(turn.timestamp);
+            ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
+            
+            if (ss.fail()) continue;  // couldn't parse
+            
+            auto tp = std::chrono::system_clock::from_time_t(std::mktime(&tm));
+            if (tp < cutoff) {
+                expired_ids.push_back(turn.id);
+            }
+        }
+        
+        // Check count limit
+        if (per_turn_results.size() > static_cast<size_t>(max_turns_stored_)) {
+            // Sort by timestamp (oldest first)
+            std::sort(per_turn_results.begin(), per_turn_results.end(),
+                     [](const SearchResult& a, const SearchResult& b) {
+                         return a.timestamp < b.timestamp;
+                     });
+            
+            size_t excess = per_turn_results.size() - max_turns_stored_;
+            for (size_t i = 0; i < excess && i < per_turn_results.size(); ++i) {
+                int id = per_turn_results[i].id;
+                if (std::find(expired_ids.begin(), expired_ids.end(), id) == expired_ids.end()) {
+                    expired_ids.push_back(id);
+                }
+            }
+        }
+        
+        if (expired_ids.empty()) {
+            return;
+        }
+        
+        // Batch delete
+        int deleted = memory_.delete_batch(expired_ids);
+        if (deleted > 0) {
+            std::cerr << "Expired " << deleted << " old conversation turns\n";
+        }
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: failed to expire old turns: " << e.what() << "\n";
+    }
+}
 
 void Chat::bg_summarize(
         const std::vector<std::pair<std::string, std::string>>& turns_to_summarize) {
@@ -533,6 +609,8 @@ void Chat::run() {
     // Check for orphaned turns from previous session (crash recovery)
     check_orphaned_turns();
     
+    // Clean up old turns at startup
+    expire_old_turns();
     
     // Main REPL loop
     std::string line;
@@ -766,7 +844,7 @@ void Chat::run() {
         std::cout << "\n";  // blank line between exchanges
     }
     
-    // Final summary
+    // Final summary (will also call expire_old_turns internally)
     quit_summary();
 }
 

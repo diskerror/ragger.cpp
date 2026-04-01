@@ -221,8 +221,6 @@ static const ServerLockedKey SERVER_LOCKED[] = {
     {"embedding", "dimensions"},
     {"embedding", "model_dir"},
     // System ceilings
-    {"chat", "max_turn_retention_minutes"},
-    {"chat", "max_turns_stored"},
     {"chat", "max_persona_chars_limit"},
     {"chat", "max_memory_results_limit"},
     {"search", "max_search_limit"},
@@ -426,8 +424,6 @@ Config load_config(const std::string& path) {
             else if (key == "summarize_on_pause") cfg.chat_summarize_on_pause = parse_bool(val);
             else if (key == "pause_minutes") cfg.chat_pause_minutes = std::stoi(val);
             else if (key == "summarize_on_quit") cfg.chat_summarize_on_quit = parse_bool(val);
-            else if (key == "max_turn_retention_minutes") cfg.chat_max_turn_retention_minutes = std::stoi(val);
-            else if (key == "max_turns_stored") cfg.chat_max_turns_stored = std::stoi(val);
             else if (key == "cleanup_max_age_hours") cfg.cleanup_max_age_hours = std::stof(val);
             else if (key == "housekeeping_interval") {
                 int v = std::stoi(val);
@@ -597,8 +593,6 @@ int reload_config() {
     RELOAD(chat_summarize_on_pause);
     RELOAD(chat_pause_minutes);
     RELOAD(chat_summarize_on_quit);
-    RELOAD(chat_max_turn_retention_minutes);
-    RELOAD(chat_max_turns_stored);
     RELOAD(cleanup_max_age_hours);
     RELOAD(housekeeping_interval);
     RELOAD(chat_max_persona_chars);

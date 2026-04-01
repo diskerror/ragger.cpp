@@ -42,8 +42,6 @@ private:
     bool summarize_on_pause_;
     int pause_minutes_;
     bool summarize_on_quit_;
-    int max_turn_retention_minutes_;
-    int max_turns_stored_;
     int max_memory_results_;
     
     /// Load workspace files with dynamic context sizing
@@ -54,9 +52,6 @@ private:
     
     /// Check for orphaned turns from previous session (crash recovery)
     void check_orphaned_turns();
-    
-    /// Expire old turns based on age and count limits
-    void expire_old_turns();
     
     /// Fork a background process to summarize turns
     void bg_summarize(const std::vector<std::pair<std::string, std::string>>& turns);

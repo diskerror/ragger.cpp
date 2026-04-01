@@ -766,7 +766,7 @@ void Chat::run() {
         std::cout << "\n";  // blank line between exchanges
     }
     
-    // Final summary
+    // Final summary (will also call expire_old_turns internally)
     quit_summary();
 }
 

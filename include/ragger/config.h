@@ -90,8 +90,6 @@ struct Config {
     bool chat_summarize_on_pause = true;
     int  chat_pause_minutes      = 10;
     bool chat_summarize_on_quit  = true;
-    int  chat_max_turn_retention_minutes = 60;
-    int  chat_max_turns_stored   = 100;
     float cleanup_max_age_hours  = 336.0f;  // 2 weeks
     int   housekeeping_interval  = 60;      // seconds; 0 = disabled, <10 clamped to 10
     int  chat_max_persona_chars  = 0;   // 0 = unlimited

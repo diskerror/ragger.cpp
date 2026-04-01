@@ -35,6 +35,7 @@ the source of truth.
 ## Usage Scenarios
 
 **Solo developer + AI assistant (local):**
+
 - One Ragger instance at `~/.ragger/memories.db`
 - Agent stores conversation context, decisions, and lessons learned
 - Import reference docs into named collections (`--collection docs`)
@@ -42,23 +43,27 @@ the source of truth.
   when the question calls for it
 
 **Solo developer + multiple AI tools:**
+
 - Same Ragger server (port 8432) shared across tools
 - OpenClaw, CLI scripts, editor plugins all use the same HTTP API
 - Collections separate concerns: `memory` for agent notes, `docs` for
   reference material, `work` for project-specific context
 
 **Team / shared server:**
+
 - Ragger runs as a system service with multi-user support
 - Per-user memory via auth token → user isolation
 - Shared reference collections available to all users
 - Private memories stay private
 
 **Offline / air-gapped:**
+
 - Everything runs locally — no network calls
 - Download the embedding model once, then disconnect
 - SQLite database is a single file — easy to backup, move, or encrypt
 
 **Development + production split:**
+
 - Dev instance for experimentation, separate prod database
 - Export/import via CLI for promoting curated memories
 - Same binary, different `--db` paths
@@ -67,12 +72,12 @@ the source of truth.
 
 Start simple and add collections as needs emerge:
 
-| Stage | Collections |
-|-------|-------------|
-| Getting started | Just `memory` (the default) |
-| Adding reference docs | `memory` + `docs` |
-| Multiple doc sources | `memory` + `sibelius` + `orchestration` + ... |
-| Team use | Per-user `memory` + shared `reference` |
+| Stage                 | Collections                                   |
+|-----------------------|-----------------------------------------------|
+| Getting started       | Just `memory` (the default)                   |
+| Adding reference docs | `memory` + `docs`                             |
+| Multiple doc sources  | `memory` + `sibelius` + `orchestration` + ... |
+| Team use              | Per-user `memory` + shared `reference`        |
 
 The agent should know what collections exist and when to search them.
 Store this knowledge as a memory entry so it persists across sessions.
@@ -96,7 +101,7 @@ timeout, compaction, crash).
    collection as it happens. Keep it lightweight — decisions, questions,
    answers, not "Great question! Let me think about that."
 
-2. **Summarize on pause** — After a period of inactivity (20 minutes
+2. **Summarize on pause** — After a period of inactivity (10 minutes
    works well), summarize the buffered conversation. Extract decisions,
    facts, lessons, and action items into proper memory entries in the
    `memory` collection with appropriate categories. Delete the raw
@@ -112,6 +117,10 @@ timeout, compaction, crash).
    these as they happen with specific tags. They're the most valuable
    and most easily lost.
 
+5. **Split summaries** — Conversations often have tangential or even
+   unrelated moments. These turns will have clearly different embeddings.
+   Summarize these moments separately from the rest of the conversation.
+
 ### Open Questions
 
 The right approach depends on your use case and is worth experimenting
@@ -119,7 +128,7 @@ with:
 
 - **What's the right pause interval?** Too short and you're
   summarizing mid-thought. Too long and compaction gets there first.
-  20 minutes is a starting point.
+  10 minutes is a starting point.
 
 - **What level of detail to keep?** A summary of "we discussed the
   database schema" is useless. "Chose SQLite over Postgres because
