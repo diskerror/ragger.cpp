@@ -108,12 +108,27 @@ ChatSession& ChatSessionManager::get_or_create(
 }
 
 std::string ChatSessionManager::load_workspace_files() {
-    std::string ragger_dir = expand_path("~/.ragger");
+    std::string user_dir = expand_path("~/.ragger");
+    std::string common_dir = "/var/ragger";
     std::vector<std::string> files = {"SOUL.md", "USER.md", "AGENTS.md", "TOOLS.md"};
     std::string result;
 
     for (const auto& fname : files) {
-        std::string fpath = ragger_dir + "/" + fname;
+        std::string fpath;
+        
+        // SOUL.md: prefer common directory, fallback to user
+        if (fname == "SOUL.md") {
+            std::string common_path = common_dir + "/SOUL.md";
+            if (fs::exists(common_path)) {
+                fpath = common_path;
+            } else {
+                fpath = user_dir + "/SOUL.md";
+            }
+        } else {
+            // All other files: user directory only
+            fpath = user_dir + "/" + fname;
+        }
+        
         if (fs::exists(fpath)) {
             std::ifstream f(fpath);
             if (f.is_open()) {
