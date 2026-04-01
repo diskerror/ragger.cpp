@@ -1349,31 +1349,37 @@ int main(int argc, char** argv) {
 
         } else if (command == "housekeeping") {
             ragger::setup_logging(false, false);
-            // Send SIGUSR1 to the process holding our user's housekeeping lock
-            struct passwd* pw = getpwuid(getuid());
-            std::string username = pw ? pw->pw_name : "default";
-            std::string lock_path = "/tmp/ragger/housekeeping-" + username + ".lock";
-
+            // Send SIGUSR1 to the running daemon via server PID file
+            namespace fs = std::filesystem;
             pid_t daemon_pid = 0;
-            {
-                std::ifstream pf(lock_path);
-                if (pf) pf >> daemon_pid;
-            }
+            try {
+                for (const auto& entry : fs::directory_iterator("/tmp/ragger")) {
+                    auto name = entry.path().filename().string();
+                    if (name.rfind("server-", 0) == 0 &&
+                        name.size() > 4 && name.substr(name.size() - 4) == ".pid") {
+                        std::ifstream pf(entry.path());
+                        if (pf) pf >> daemon_pid;
+                        break;
+                    }
+                }
+            } catch (...) {}
             if (daemon_pid <= 0) {
-                std::cerr << "Error: no instance owns housekeeping for user '"
-                          << username << "'\n";
+                std::cerr << "Error: no running ragger daemon found\n";
                 return 1;
             }
             if (kill(daemon_pid, 0) != 0) {
-                std::cerr << "Error: process (pid " << daemon_pid << ") is not running\n";
+                std::cerr << "Error: daemon (pid " << daemon_pid << ") is not running\n";
                 return 1;
             }
             if (kill(daemon_pid, SIGUSR1) != 0) {
-                std::cerr << "Error: failed to signal process: " << strerror(errno) << "\n";
+                if (errno == EPERM) {
+                    std::cerr << "Error: permission denied. Use sudo to signal the daemon.\n";
+                } else {
+                    std::cerr << "Error: failed to signal process: " << strerror(errno) << "\n";
+                }
                 return 1;
             }
-            std::cout << "✓ Housekeeping triggered for " << username
-                      << " (pid " << daemon_pid << ")\n";
+            std::cout << "✓ Housekeeping triggered (pid " << daemon_pid << ")\n";
 
         } else if (command == "reload") {
             // Send SIGHUP to running daemon to reload config
