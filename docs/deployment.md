@@ -94,7 +94,7 @@ The install script is idempotent (safe to run multiple times) and handles:
 
 ### Step 2: Add users
 
-Register each user who will use Ragger:
+Register each user who will use Ragger (requires sudo):
 
 ```bash
 sudo ragger add-user <username>
@@ -103,7 +103,8 @@ sudo ragger add-user <username>
 Or provision all users on the system at once:
 
 ```bash
-sudo ragger add-all
+sudo ragger add-all        # confirms each user (default: yes)
+sudo ragger add-all -y     # skip prompts, add all
 ```
 
 This does three things for each user:

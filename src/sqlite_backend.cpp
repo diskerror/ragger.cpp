@@ -108,7 +108,6 @@ struct SqliteBackend::Impl {
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 username   TEXT NOT NULL UNIQUE,
                 token_hash TEXT NOT NULL,
-                is_admin   INTEGER NOT NULL DEFAULT 0,
                 created    TEXT NOT NULL,
                 modified   TEXT NOT NULL
             )
@@ -350,7 +349,6 @@ struct SqliteBackend::Impl {
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 username   TEXT NOT NULL UNIQUE,
                 token_hash TEXT NOT NULL,
-                is_admin   INTEGER NOT NULL DEFAULT 0,
                 created    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
                 modified   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
             )
@@ -1107,18 +1105,16 @@ std::vector<SearchResult> SqliteBackend::search_by_metadata(const json& metadata
 }
 
 int SqliteBackend::create_user(const std::string& username,
-                                const std::string& token_hash,
-                                bool is_admin) {
+                                const std::string& token_hash) {
     auto now = pImpl->now_iso();
-    std::string sql = "INSERT INTO users (username, token_hash, is_admin, created, modified) "
-                      "VALUES (?, ?, ?, ?, ?)";
+    std::string sql = "INSERT INTO users (username, token_hash, created, modified) "
+                      "VALUES (?, ?, ?, ?)";
     sqlite3_stmt* stmt;
     sqlite3_prepare_v2(pImpl->db, sql.c_str(), -1, &stmt, nullptr);
     sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, token_hash.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 3, is_admin ? 1 : 0);
+    sqlite3_bind_text(stmt, 3, now.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 4, now.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 5, now.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
     return static_cast<int>(sqlite3_last_insert_rowid(pImpl->db));
@@ -1128,16 +1124,15 @@ std::optional<SqliteBackend::UserInfo> SqliteBackend::get_user_by_token_hash(
         const std::string& token_hash) {
     sqlite3_stmt* stmt;
     sqlite3_prepare_v2(pImpl->db,
-        "SELECT id, username, is_admin, preferred_model FROM users WHERE token_hash = ?",
+        "SELECT id, username, preferred_model FROM users WHERE token_hash = ?",
         -1, &stmt, nullptr);
     sqlite3_bind_text(stmt, 1, token_hash.c_str(), -1, SQLITE_TRANSIENT);
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         UserInfo u;
         u.id = sqlite3_column_int(stmt, 0);
         u.username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        u.is_admin = sqlite3_column_int(stmt, 2) != 0;
         u.token_hash = token_hash;
-        const char* pref_model = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        const char* pref_model = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
         u.preferred_model = (pref_model && pref_model[0] != '\0') ? std::string(pref_model) : "";
         sqlite3_finalize(stmt);
         return u;
@@ -1150,16 +1145,15 @@ std::optional<SqliteBackend::UserInfo> SqliteBackend::get_user_by_username(
         const std::string& username) {
     sqlite3_stmt* stmt;
     sqlite3_prepare_v2(pImpl->db,
-        "SELECT id, username, is_admin, token_hash, preferred_model FROM users WHERE username = ?",
+        "SELECT id, username, token_hash, preferred_model FROM users WHERE username = ?",
         -1, &stmt, nullptr);
     sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         UserInfo u;
         u.id = sqlite3_column_int(stmt, 0);
         u.username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        u.is_admin = sqlite3_column_int(stmt, 2) != 0;
-        u.token_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-        const char* pref_model = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        u.token_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        const char* pref_model = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
         u.preferred_model = (pref_model && pref_model[0] != '\0') ? std::string(pref_model) : "";
         sqlite3_finalize(stmt);
         return u;
@@ -1293,6 +1287,16 @@ std::optional<std::string> SqliteBackend::get_user_password(
     }
     sqlite3_finalize(stmt);
     return result;
+}
+
+int SqliteBackend::get_user_count() {
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(pImpl->db, "SELECT count(*) FROM users", -1, &stmt, nullptr);
+    int count = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        count = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return count;
 }
 
 void SqliteBackend::delete_user(const std::string& username) {

@@ -80,14 +80,13 @@ public:
     struct UserInfo {
         int         id;
         std::string username;
-        bool        is_admin;
+        // is_admin removed — sudo is the admin gate
         std::string token_hash;
         std::string preferred_model;  // empty = system default
     };
 
     /// Create a user. Returns user id.
-    int create_user(const std::string& username, const std::string& token_hash,
-                    bool is_admin = false);
+    int create_user(const std::string& username, const std::string& token_hash);
 
     /// Look up user by token hash. Returns nullopt if not found.
     std::optional<UserInfo> get_user_by_token_hash(const std::string& token_hash);
@@ -96,6 +95,7 @@ public:
     std::optional<UserInfo> get_user_by_username(const std::string& username);
 
     /// Update a user's token hash.
+    // set_user_admin removed — sudo is the admin gate
     void update_user_token(const std::string& username, const std::string& token_hash);
 
     /// Get when a user's token was last rotated. Returns nullopt if not set.
@@ -117,6 +117,7 @@ public:
     std::optional<std::string> get_user_password(const std::string& username);
 
     /// Remove a user from the users table.
+    int get_user_count();
     void delete_user(const std::string& username);
 
     /// Delete a memory by ID. Returns true if deleted.

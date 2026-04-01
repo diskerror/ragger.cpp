@@ -167,10 +167,10 @@ std::vector<SearchResult> RaggerClient::search_by_metadata(const json& metadata_
     return results;
 }
 
-json RaggerClient::register_user(const std::string& username, bool is_admin) {
+json RaggerClient::register_user(const std::string& username) {
     json payload;
     payload["username"] = username;
-    if (is_admin) payload["is_admin"] = true;
+    // admin flag removed — sudo is the admin gate
 
     auto resp = http_post("/register", payload.dump());
     if (resp.status < 200 || resp.status >= 300) {

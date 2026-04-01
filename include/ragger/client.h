@@ -45,7 +45,7 @@ public:
     std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit = 0);
 
     /// Register user via HTTP POST /register.
-    json register_user(const std::string& username, bool is_admin = false);
+    json register_user(const std::string& username);
 
 private:
     std::string host_;

@@ -370,10 +370,10 @@ void test_user_management(ragger::Embedder& emb) {
     ragger::SqliteBackend db(emb, TEMP_DB);
 
     // create_user → returns valid ID
-    int user_id = db.create_user("testuser", "abc123hash", false);
+    int user_id = db.create_user("testuser", "abc123hash");
     assert(user_id > 0);
 
-    int admin_id = db.create_user("adminuser", "def456hash", true);
+    int admin_id = db.create_user("adminuser", "def456hash");
     assert(admin_id > 0);
     assert(admin_id != user_id);
 
@@ -381,14 +381,12 @@ void test_user_management(ragger::Embedder& emb) {
     auto user_opt = db.get_user_by_token_hash("abc123hash");
     assert(user_opt.has_value());
     assert(user_opt->username == "testuser");
-    assert(user_opt->is_admin == false);
     assert(user_opt->token_hash == "abc123hash");
 
     // get_user_by_username → finds created user
     user_opt = db.get_user_by_username("adminuser");
     assert(user_opt.has_value());
     assert(user_opt->username == "adminuser");
-    assert(user_opt->is_admin == true);
     assert(user_opt->token_hash == "def456hash");
 
     // get_user_by_token_hash with wrong hash → nullopt

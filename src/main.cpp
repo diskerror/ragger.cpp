@@ -739,7 +739,7 @@ int main(int argc, char** argv) {
         ("collection", Diskerror::po::value<std::string>()->default_value(""), "Collection name")
         ("min-chunk-size", Diskerror::po::value<int>(), "Min chunk size for import")
         ("group-by", Diskerror::po::value<std::string>()->default_value("date"), "Grouping for export (date|category|collection)")
-        ("admin", "Grant admin privileges (for add-user)")
+        // admin flags removed — sudo is the admin gate
         ("yes,y", "Skip confirmation prompts (for scripting)")
     ;
     opts.add_hidden_options()
@@ -747,10 +747,9 @@ int main(int argc, char** argv) {
         ("args", Diskerror::po::value<std::vector<std::string>>(), CLI_ARGS)
         ("ids", Diskerror::po::value<std::string>(), "Comma-separated IDs (move)")
         ("source", Diskerror::po::value<std::string>(), "Source pattern (move)")
-        ("category", Diskerror::po::value<std::string>(), "Category filter (move/cleanup)")
-        ("user", Diskerror::po::value<std::string>(), "Target user (move/cleanup)")
+        ("category", Diskerror::po::value<std::string>(), "Category filter (move)")
+        ("user", Diskerror::po::value<std::string>(), "Target user (move)")
         ("dry-run", "Show what would happen without doing it")
-        ("max-age", Diskerror::po::value<float>(), "Max age in hours (cleanup)")
         // --keep-data removed: always keep user data, sudoer can rm manually
     ;
     opts.add_positional("command", 1);
@@ -779,7 +778,8 @@ int main(int argc, char** argv) {
         std::cout << "  mcp                Start MCP server (JSON-RPC over stdin/stdout)\n";
         std::cout << "  add-self           Provision yourself (create token)\n";
         std::cout << "  add-user <name>    Provision a user (requires sudo)\n";
-        std::cout << "  add-all            Provision all users (requires sudo)\n";
+        std::cout << "  add-all            Provision all users (requires sudo, confirms each)\n";
+        std::cout << "                     -y/--yes to skip prompts\n";
         std::cout << "  remove-user <name> Remove a user (requires sudo)\n";
         std::cout << "  passwd [<name>]    Change password (own or another user's with sudo)\n";
         std::cout << "  housekeeping       Trigger housekeeping on running daemon\n";
@@ -788,9 +788,11 @@ int main(int argc, char** argv) {
         std::cout << "                     direction: to-common | to-user\n";
         std::cout << "                     filters: --ids, --source, --collection, --category\n";
         std::cout << "                     options: --user <name>, --dry-run\n";
-        std::cout << "  cleanup            Delete old conversation entries by age\n";
+        // cleanup verb removed — use SQLite CLI or agent-mediated deletion
         std::cout << "  rebuild-bm25       Rebuild the BM25 keyword index\n";
         std::cout << "  rebuild-embeddings Rebuild embeddings for all memories\n";
+        std::cout << "  show-embedding-model  Show current embedding model info\n";
+        std::cout << "  show-embedding-model  Show current embedding model info\n";
         // (llama and model verbs removed — use external providers)
         std::cout << "  help               Show this help\n";
         std::cout << "  version            Show version\n";
@@ -1049,6 +1051,16 @@ int main(int argc, char** argv) {
             int count = memory.rebuild_embeddings();
             std::cout << "✓ Embeddings rebuilt: " << count << " documents\n";
 
+        } else if (command == "show-embedding-model") {
+            ragger::setup_logging(false, false);
+            std::cout << "Model: " << cfg.embedding_model << "\n";
+            std::cout << "Dimensions: " << cfg.embedding_dimensions << "\n";
+            std::string model_path = model_dir.empty() ? cfg.model_dir : model_dir;
+            if (!model_path.empty() && fs::is_directory(model_path))
+                std::cout << "Path: " << model_path << "\n";
+            else
+                std::cout << "Path: (default)\n";
+
         } else if (command == "add-self") {
             ragger::setup_logging(false, false);
             // getpwuid is more reliable than getlogin in non-TTY contexts
@@ -1086,11 +1098,10 @@ int main(int argc, char** argv) {
             ragger::setup_logging(false, false);
             auto args = opts.getParams("args");
             if (args.empty()) {
-                std::cerr << "Usage: ragger add-user <username> [--admin]\n";
+                std::cerr << "Usage: ragger add-user <username>\n";
                 return 1;
             }
             std::string username = args[0];
-            bool is_admin = opts.count("admin") > 0;
             try {
                 auto [token, created] = provision_user(username);
                 if (created)
@@ -1109,7 +1120,7 @@ int main(int argc, char** argv) {
                     else
                         std::cerr << "Warning: could not add " << username << " to ragger group\n";
                 }
-                // Register directly in DB (works whether daemon is running or not)
+                // Register in DB
                 std::string reg_db = cfg.resolved_common_db_path();
                 ragger::SqliteBackend memory(reg_db);
                 std::string token_hash = ragger::hash_token(token);
@@ -1119,7 +1130,7 @@ int main(int argc, char** argv) {
                         memory.update_user_token(username, token_hash);
                     std::cout << "✓ User exists in database (id: " << existing->id << ")\n";
                 } else {
-                    int user_id = memory.create_user(username, token_hash, is_admin);
+                    int user_id = memory.create_user(username, token_hash);
                     std::cout << "✓ Registered in database (user_id: " << user_id << ")\n";
                 }
             } catch (const std::exception& e) {
@@ -1147,8 +1158,9 @@ int main(int argc, char** argv) {
             // Open DB directly for registration
             std::string reg_db = cfg.resolved_common_db_path();
             ragger::SqliteBackend memory(reg_db);
-            
+
             int count = 0;
+            bool auto_yes = opts.count("yes") > 0;
             setpwent();
             while (struct passwd* pw = getpwent()) {
                 // Skip users with non-login shells
@@ -1163,6 +1175,18 @@ int main(int argc, char** argv) {
                 if (skip_homes.count(pw->pw_dir)) continue;
 
                 std::string uname(pw->pw_name);
+                if (!auto_yes) {
+                    std::cout << "  Add " << uname << "? [Y/n] ";
+                    std::string answer;
+                    std::getline(std::cin, answer);
+                    // Trim
+                    while (!answer.empty() && std::isspace(answer.back())) answer.pop_back();
+                    while (!answer.empty() && std::isspace(answer.front())) answer.erase(answer.begin());
+                    if (!answer.empty() && std::tolower(answer[0]) != 'y') {
+                        std::cout << "  " << uname << ": skipped\n";
+                        continue;
+                    }
+                }
                 try {
                     auto [token, created] = provision_user(uname, pw->pw_dir);
                     std::string status = created ? "created" : "exists";
@@ -1267,7 +1291,7 @@ int main(int argc, char** argv) {
             // Determine target user
             std::string target_user;
             if (!args.empty()) {
-                // Changing another user's password — requires sudo or admin
+                // Changing another user's password — requires sudo
                 target_user = args[0];
                 if (getuid() != 0) {
                     std::cerr << "Error: changing another user's password requires sudo\n";
