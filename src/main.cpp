@@ -578,7 +578,7 @@ static void do_mcp(ragger::RaggerMemory& memory) {
                     result = {
                         {"protocolVersion", "2024-11-05"},
                         {"capabilities", {{"tools", nlohmann::json::object()}}},
-                        {"serverInfo", {{"name", "ragger-memory"}, {"version", "0.7.0"}}}
+                        {"serverInfo", {{"name", "ragger-memory"}, {"version", RAGGER_VERSION}}}
                     };
 
                 } else if (method == "tools/list") {
