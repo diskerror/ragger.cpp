@@ -163,6 +163,7 @@ struct SqliteBackend::Impl {
         migrate_add_preferred_model();
         migrate_add_password_hash();
         migrate_add_web_sessions();
+        migrate_add_chat_sessions();
     }
 
     void migrate_add_user_id() {
@@ -357,6 +358,20 @@ struct SqliteBackend::Impl {
         )");
     }
 
+    void migrate_add_chat_sessions() {
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                session_id TEXT PRIMARY KEY,
+                web_token  TEXT,
+                username   TEXT NOT NULL,
+                messages   TEXT NOT NULL,
+                created    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                updated    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                FOREIGN KEY (web_token) REFERENCES web_sessions(token) ON DELETE SET NULL
+            )
+        )");
+    }
+
     /// Minimal schema for user management only (no memories/BM25).
     void create_users_schema() {
         exec(R"(
@@ -372,6 +387,7 @@ struct SqliteBackend::Impl {
         migrate_add_preferred_model();
         migrate_add_password_hash();
         migrate_add_web_sessions();
+        migrate_add_chat_sessions();
     }
 
     // ---- path normalization -------------------------------------------
@@ -988,7 +1004,9 @@ struct SqliteBackend::Impl {
         return changes;
     }
 
-    std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit) {
+    std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit,
+                                                 const std::string& after = "",
+                                                 const std::string& before = "") {
         std::vector<SearchResult> results;
 
         // Build SQL WHERE using dedicated columns where possible
@@ -1010,7 +1028,17 @@ struct SqliteBackend::Impl {
             }
         }
 
-        sql += where + " ORDER BY id";
+        // Add temporal filtering
+        if (!after.empty()) {
+            where += (where.empty() ? " WHERE " : " AND ") + std::string("timestamp >= ?");
+            binds.push_back(after);
+        }
+        if (!before.empty()) {
+            where += (where.empty() ? " WHERE " : " AND ") + std::string("timestamp < ?");
+            binds.push_back(before);
+        }
+
+        sql += where + " ORDER BY timestamp DESC";
         if (limit > 0) sql += " LIMIT " + std::to_string(limit * 2);  // over-fetch for C++ filtering
 
         sqlite3_stmt* stmt = nullptr;
@@ -1116,8 +1144,10 @@ int SqliteBackend::delete_batch(const std::vector<int>& memory_ids) {
     return pImpl->delete_batch(memory_ids);
 }
 
-std::vector<SearchResult> SqliteBackend::search_by_metadata(const json& metadata_filter, int limit) {
-    return pImpl->search_by_metadata(metadata_filter, limit);
+std::vector<SearchResult> SqliteBackend::search_by_metadata(const json& metadata_filter, int limit,
+                                                           const std::string& after,
+                                                           const std::string& before) {
+    return pImpl->search_by_metadata(metadata_filter, limit, after, before);
 }
 
 int SqliteBackend::create_user(const std::string& username,
@@ -1406,6 +1436,79 @@ int SqliteBackend::cleanup_web_sessions() {
     int count = sqlite3_changes(pImpl->db);
     sqlite3_finalize(stmt);
     return count;
+}
+
+// --- Chat sessions ---
+
+void SqliteBackend::save_chat_session(const std::string& session_id, const std::string& username,
+                                     const std::string& messages_json, const std::string& web_token) {
+    auto now = std::chrono::system_clock::now();
+    auto now_t = std::chrono::system_clock::to_time_t(now);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&now_t));
+
+    // Check if session exists
+    sqlite3_stmt* check_stmt;
+    sqlite3_prepare_v2(pImpl->db,
+        "SELECT session_id FROM chat_sessions WHERE session_id = ?",
+        -1, &check_stmt, nullptr);
+    sqlite3_bind_text(check_stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    bool exists = (sqlite3_step(check_stmt) == SQLITE_ROW);
+    sqlite3_finalize(check_stmt);
+
+    sqlite3_stmt* stmt;
+    if (exists) {
+        // Update
+        sqlite3_prepare_v2(pImpl->db,
+            "UPDATE chat_sessions SET messages = ?, updated = ?, web_token = ? WHERE session_id = ?",
+            -1, &stmt, nullptr);
+        sqlite3_bind_text(stmt, 1, messages_json.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, buf, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, web_token.empty() ? nullptr : web_token.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    } else {
+        // Insert
+        sqlite3_prepare_v2(pImpl->db,
+            "INSERT INTO chat_sessions (session_id, username, messages, web_token, created, updated) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            -1, &stmt, nullptr);
+        sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, messages_json.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, web_token.empty() ? nullptr : web_token.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, buf, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 6, buf, -1, SQLITE_TRANSIENT);
+    }
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+std::optional<std::string> SqliteBackend::get_chat_session(const std::string& session_id) {
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(pImpl->db,
+        "SELECT messages FROM chat_sessions WHERE session_id = ?",
+        -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+
+    std::optional<std::string> result;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* msgs = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        if (msgs) {
+            result = std::string(msgs);
+        }
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+void SqliteBackend::delete_chat_session(const std::string& session_id) {
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(pImpl->db,
+        "DELETE FROM chat_sessions WHERE session_id = ?",
+        -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
 }
 
 } // namespace ragger

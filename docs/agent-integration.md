@@ -32,6 +32,53 @@ When storing a decision, include where the details live (file paths,
 commit hashes). The memory entry is a pointer; the project file is
 the source of truth.
 
+## Session Initialization
+
+At the start of each session, restore recent context to create continuity:
+
+### Recommended Startup Sequence
+
+1. **Load recent summaries** (last 24-48 hours):
+   ```python
+   from datetime import datetime, timedelta, timezone
+   
+   after = datetime.now(timezone.utc) - timedelta(hours=24)
+   summaries = memory.search_by_metadata(
+       {"category": "session-summary"},
+       limit=5,
+       after=after
+   )
+   ```
+
+2. **Load recent raw turns** (last 1-2 hours):
+   ```python
+   after = datetime.now(timezone.utc) - timedelta(hours=2)
+   turns = memory.search_by_metadata(
+       {"collection": "conversation"},
+       limit=10,
+       after=after
+   )
+   ```
+
+3. **Build initial context** from summaries + turns:
+   - Summaries provide high-level context (what we discussed yesterday)
+   - Recent turns provide immediate context (what we were just working on)
+   - Combine both for seamless resumption
+
+### Tuning Parameters
+
+- `summary_window_hours` — How far back to pull summaries (24-48h typical)
+- `turn_window_hours` — Recent conversation depth (1-2h typical)
+- `max_summaries` — Cap for long gaps (5-10 default)
+- `max_turns` — Keep context bounded (10-20 default)
+
+### Benefits
+
+- Sessions feel like continuations, not fresh starts
+- Cross-device continuity (resume on laptop what you started on phone)
+- Reduces "AI forgetting" problem
+- User doesn't repeat context after every restart
+
 ## Usage Scenarios
 
 **Solo developer + AI assistant (local):**

@@ -3,6 +3,8 @@
  */
 #include "ragger/chat_sessions.h"
 #include "ragger/config.h"
+#include "ragger/sqlite_backend.h"
+#include "nlohmann_json.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -90,10 +92,12 @@ std::string ChatSessionManager::generate_id() {
 }
 
 ChatSession& ChatSessionManager::get_or_create(
-    const std::string& session_id, const std::string& username)
+    const std::string& session_id, const std::string& username,
+    SqliteBackend* backend)
 {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    // Check in-memory cache first
     if (!session_id.empty()) {
         auto it = sessions_.find(session_id);
         if (it != sessions_.end()) {
@@ -102,6 +106,34 @@ ChatSession& ChatSessionManager::get_or_create(
         }
     }
 
+    // Try to restore from database
+    if (!session_id.empty() && backend) {
+        auto messages_json = backend->get_chat_session(session_id);
+        if (messages_json) {
+            try {
+                auto messages_array = json::parse(*messages_json);
+                ChatSession restored(session_id, username);
+                // Parse messages array into ChatSession
+                for (const auto& msg : messages_array) {
+                    if (msg.contains("role") && msg.contains("content")) {
+                        std::string role = msg["role"];
+                        std::string content = msg["content"];
+                        if (role == "user") {
+                            restored.add_user_message(content);
+                        } else if (role == "assistant") {
+                            restored.add_assistant_message(content);
+                        }
+                    }
+                }
+                sessions_.emplace(session_id, std::move(restored));
+                return sessions_[session_id];
+            } catch (const std::exception&) {
+                // Fall through to create new session
+            }
+        }
+    }
+
+    // Create new session
     std::string id = session_id.empty() ? generate_id() : session_id;
     sessions_.emplace(id, ChatSession(id, username));
     return sessions_[id];

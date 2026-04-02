@@ -127,14 +127,22 @@ public:
     void delete_web_session(const std::string& token);
     int cleanup_web_sessions();
 
+    // --- Chat sessions (persistent conversation state) ---
+    void save_chat_session(const std::string& session_id, const std::string& username,
+                          const std::string& messages_json, const std::string& web_token = "");
+    std::optional<std::string> get_chat_session(const std::string& session_id);
+    void delete_chat_session(const std::string& session_id);
+
     /// Delete a memory by ID. Returns true if deleted.
     bool delete_memory(int memory_id);
 
     /// Delete multiple memories by ID. Returns count deleted.
     int delete_batch(const std::vector<int>& memory_ids);
 
-    /// Search by metadata field matching. Returns vector of results.
-    std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit = 0);
+    /// Search by metadata field matching with optional temporal filtering. Returns vector of results.
+    std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit = 0,
+                                                 const std::string& after = "",
+                                                 const std::string& before = "");
 
     void close();
 

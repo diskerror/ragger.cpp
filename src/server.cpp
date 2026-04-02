@@ -746,8 +746,10 @@ struct Server::Impl {
                 }
                 json metadata_filter = body["metadata"];
                 int limit = body.value("limit", 0);
+                std::string after = body.value("after", "");
+                std::string before = body.value("before", "");
                 auto& mem = _get_memory(user->username);
-                auto results = mem.search_by_metadata(metadata_filter, limit);
+                auto results = mem.search_by_metadata(metadata_filter, limit, after, before);
                 json results_json = json::array();
                 for (const auto& r : results) {
                     results_json.push_back({{"id", r.id}, {"text", r.text},
@@ -887,7 +889,7 @@ struct Server::Impl {
 
                 std::string session_id = body.value("session_id", "");
                 std::string request_model = body.value("model", "");
-                auto& session = session_mgr_.get_or_create(session_id, user->username);
+                auto& session = session_mgr_.get_or_create(session_id, user->username, memory.backend());
 
                 // Search memory for context
                 std::string memory_context;
@@ -934,6 +936,7 @@ struct Server::Impl {
                 auto username = user->username;
                 auto sid = session.session_id;
                 auto msg_text = message;
+                auto* backend_ptr = memory.backend();
 
                 // Use chunked content provider for real SSE streaming
                 res.set_header("Cache-Control", "no-cache");
@@ -968,7 +971,7 @@ struct Server::Impl {
 
                 res.set_chunked_content_provider("text/event-stream",
                     [token_queue, done, mtx, cv, response_text, sid,
-                     this, username, msg_text](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+                     this, username, msg_text, backend_ptr](size_t /*offset*/, httplib::DataSink& sink) -> bool {
                         while (true) {
                             std::vector<std::string> batch;
                             {
@@ -1009,8 +1012,23 @@ struct Server::Impl {
 
                                 // Post-stream: update session and store turn
                                 if (!response_text->empty()) {
-                                    session_mgr_.get_or_create(sid, username)
-                                        .add_assistant_message(*response_text);
+                                    auto& updated_session = session_mgr_.get_or_create(sid, username);
+                                    updated_session.add_assistant_message(*response_text);
+                                    
+                                    // Save session to database for persistence
+                                    try {
+                                        json messages_array = json::array();
+                                        for (const auto& msg : updated_session.messages) {
+                                            messages_array.push_back({
+                                                {"role", msg.role},
+                                                {"content", msg.content}
+                                            });
+                                        }
+                                        backend_ptr->save_chat_session(sid, username, messages_array.dump());
+                                    } catch (const std::exception& e) {
+                                        log_error(std::string("Session save failed: ") + e.what());
+                                    }
+                                    
                                     const auto& cfg = config();
                                     if (cfg.chat_store_turns != "false") {
                                         try {

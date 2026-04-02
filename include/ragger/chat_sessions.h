@@ -15,6 +15,9 @@
 
 namespace ragger {
 
+// Forward declaration
+class SqliteBackend;
+
 struct ChatSession {
     std::string session_id;
     std::string username;
@@ -38,8 +41,9 @@ struct ChatSession {
 
 class ChatSessionManager {
 public:
-    /// Get existing session or create a new one
-    ChatSession& get_or_create(const std::string& session_id, const std::string& username);
+    /// Get existing session or create a new one (optionally restore from DB)
+    ChatSession& get_or_create(const std::string& session_id, const std::string& username,
+                               SqliteBackend* backend = nullptr);
 
     /// Generate a new session ID
     static std::string generate_id();

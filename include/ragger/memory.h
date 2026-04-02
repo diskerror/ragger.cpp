@@ -58,7 +58,9 @@ public:
     int delete_batch(const std::vector<int>& memory_ids);
 
     /// Search by metadata field matching. In multi-DB mode, merges results from both DBs.
-    std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit = 0);
+    std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit = 0,
+                                                 const std::string& after = "",
+                                                 const std::string& before = "");
 
     /// Create a user-scoped view sharing this instance's embedder and common backend.
     /// Opens ~username/.ragger/memories.db as the user's private DB.

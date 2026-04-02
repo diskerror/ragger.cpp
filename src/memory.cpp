@@ -180,14 +180,16 @@ int RaggerMemory::delete_batch(const std::vector<int>& memory_ids) {
     return total;
 }
 
-std::vector<SearchResult> RaggerMemory::search_by_metadata(const json& metadata_filter, int limit) {
+std::vector<SearchResult> RaggerMemory::search_by_metadata(const json& metadata_filter, int limit,
+                                                           const std::string& after,
+                                                           const std::string& before) {
     if (!user_backend_) {
-        return backend_->search_by_metadata(metadata_filter, limit);
+        return backend_->search_by_metadata(metadata_filter, limit, after, before);
     }
 
     // Multi-DB: query both, merge results
-    auto common_results = backend_->search_by_metadata(metadata_filter, limit);
-    auto user_results = user_backend_->search_by_metadata(metadata_filter, limit);
+    auto common_results = backend_->search_by_metadata(metadata_filter, limit, after, before);
+    auto user_results = user_backend_->search_by_metadata(metadata_filter, limit, after, before);
 
     // Merge results
     common_results.insert(common_results.end(), user_results.begin(), user_results.end());
