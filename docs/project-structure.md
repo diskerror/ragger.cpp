@@ -1,47 +1,5 @@
 # Project Structure
 
-## Directory Layout
-
-```
-Ragger/
-├── ragger_memory/              # Python package
-│   ├── __init__.py             # Package exports
-│   ├── backend.py              # MemoryBackend ABC (NumPy cosine similarity)
-│   ├── sqlite_backend.py       # SqliteBackend (SQLite)
-│   ├── bm25.py                 # Pure Python BM25 (Okapi) implementation
-│   ├── config.py               # Config file loader (INI format)
-│   ├── embedding.py            # Embedder class (sentence-transformers)
-│   ├── memory.py               # RaggerMemory facade/factory
-│   ├── server.py               # HTTP server
-│   ├── mcp_server.py           # MCP JSON-RPC server
-│   ├── cli.py                  # Verb-style CLI
-│   └── lang/                   # i18n language strings
-│       ├── __init__.py         # Language selector
-│       └── en.py               # English strings
-├── docs/                       # Documentation
-│   ├── getting-started.md      # Installation and setup
-│   ├── configuration.md        # Config file reference
-│   ├── collections.md          # Collections guide
-│   ├── search-and-rag.md       # How search works
-│   ├── http-api.md             # REST API reference
-│   ├── python-api.md           # Library usage
-│   ├── chat-persistence.md     # Turn storage and summarization
-│   ├── deployment.md           # Production setup
-│   ├── agent-integration.md    # AI agent best practices
-│   ├── testing-your-install.md # Verify with your own data
-│   ├── design-decisions.md     # Why things are the way they are
-│   ├── project-structure.md    # This file
-│   ├── conceptual.dot          # Architecture diagram (Graphviz)
-│   ├── dataflow.dot            # Data flow diagram
-│   └── er.dot                  # Entity-relationship diagram
-├── example-system.ini          # System config example
-├── example-user.ini            # User config example
-├── install.sh                  # Idempotent install script
-├── ragger.py                   # Entry point (chmod +x)
-├── requirements.txt            # Python dependencies
-└── README.md                   # This is now the landing page
-```
-
 ## Database Schema
 
 Ragger uses a simple SQLite schema optimized for hybrid search.
