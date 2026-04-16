@@ -10,141 +10,78 @@
 #include <string>
 #include <vector>
 
+#include "ragger/storage_types.h"
+#include "ragger/storage_backend.h"
 #include "nlohmann_json.hpp"
 
 namespace ragger {
 
 using json = nlohmann::json;
 
-struct SearchResult {
-    int         id;
-    std::string text;
-    float       score;
-    json        metadata;
-    std::string timestamp;
-};
-
-struct SearchResponse {
-    std::vector<SearchResult> results;
-    json                      timing;
-};
-
-struct AllEmbeddings {
-    std::vector<int>                ids;
-    std::vector<std::string>        texts;
-    std::vector<std::vector<float>> embeddings;
-    std::vector<json>               metadata;
-    std::vector<std::string>        timestamps;
-};
-
 class Embedder;
 class BM25Index;
 
-class SqliteBackend {
+class SqliteBackend : public StorageBackend {
 public:
     SqliteBackend(Embedder& embedder, const std::string& db_path = "");
 
     /// DB-only constructor — no embedder required.
-    /// Only user management operations work; store/search will throw.
+    /// Only schema/migration operations work; store/search will throw.
     explicit SqliteBackend(const std::string& db_path);
-    ~SqliteBackend();
+    ~SqliteBackend() override;
 
     /// Path to the database file.
-    std::string db_path() const;
+    std::string db_path() const override;
 
     /// Store text with metadata. Returns memory ID.
-    std::string store(const std::string& text, json metadata = {});
+    std::string store(const std::string& text, json metadata = {}) override;
 
     /// Search with hybrid vector + BM25. collections={} means all.
     SearchResponse search(const std::string& query,
                           int limit = 5,
                           float min_score = 0.0f,
-                          std::vector<std::string> collections = {});
+                          std::vector<std::string> collections = {}) override;
 
     /// Number of stored memories.
-    int count() const;
+    int count() const override;
 
     /// Load all memories (for export). Returns vector of SearchResult (score=0).
-    std::vector<SearchResult> load_all(const std::string& collection = "");
+    std::vector<SearchResult> load_all(const std::string& collection = "") override;
 
     /// Rebuild BM25 index from all stored documents. Returns doc count.
-    int rebuild_bm25();
+    int rebuild_bm25() override;
 
     /// Rebuild embeddings for all stored documents. Returns doc count.
-    int rebuild_embeddings(Embedder& embedder);
+    int rebuild_embeddings(Embedder& embedder) override;
 
     /// Get distinct collection names.
-    std::vector<std::string> collections() const;
-
-    /// User management
-    struct UserInfo {
-        int         id;
-        std::string username;
-        // is_admin removed — sudo is the admin gate
-        std::string token_hash;
-        std::string preferred_model;  // empty = system default
-    };
-
-    /// Create a user. Returns user id.
-    int create_user(const std::string& username, const std::string& token_hash);
-
-    /// Look up user by token hash. Returns nullopt if not found.
-    std::optional<UserInfo> get_user_by_token_hash(const std::string& token_hash);
-
-    /// Look up user by username. Returns nullopt if not found.
-    std::optional<UserInfo> get_user_by_username(const std::string& username);
-
-    /// Update a user's token hash.
-    // set_user_admin removed — sudo is the admin gate
-    void update_user_token(const std::string& username, const std::string& token_hash);
-
-    /// Get when a user's token was last rotated. Returns nullopt if not set.
-    std::optional<std::string> get_user_token_rotated_at(const std::string& username);
-
-    /// Update when a user's token was last rotated (ISO timestamp).
-    void update_user_token_rotated_at(const std::string& username, const std::string& timestamp);
-
-    /// Get a user's preferred model. Returns nullopt if not set.
-    std::optional<std::string> get_user_preferred_model(const std::string& username);
-
-    /// Update a user's preferred model.
-    void update_user_preferred_model(const std::string& username, const std::string& model);
-
-    /// Set a user's password hash. Empty string clears it.
-    void set_user_password(const std::string& username, const std::string& password_hash);
-
-    /// Get a user's password hash. Returns nullopt if not set.
-    std::optional<std::string> get_user_password(const std::string& username);
-
-    /// Remove a user from the users table.
-    int get_user_count();
-    void delete_user(const std::string& username);
-
-    // --- Web sessions (password login, DB-backed) ---
-    void create_web_session(const std::string& token, const std::string& username,
-                            int user_id, int ttl_seconds = 86400);
-    std::optional<UserInfo> get_web_session(const std::string& token);
-    void delete_web_session(const std::string& token);
-    int cleanup_web_sessions();
+    std::vector<std::string> collections() const override;
 
     // --- Chat sessions (persistent conversation state) ---
     void save_chat_session(const std::string& session_id, const std::string& username,
-                          const std::string& messages_json, const std::string& web_token = "");
-    std::optional<std::string> get_chat_session(const std::string& session_id);
-    void delete_chat_session(const std::string& session_id);
+                          const std::string& messages_json, const std::string& web_token = "") override;
+    std::optional<std::string> get_chat_session(const std::string& session_id) override;
+    void delete_chat_session(const std::string& session_id) override;
 
     /// Delete a memory by ID. Returns true if deleted.
-    bool delete_memory(int memory_id);
+    bool delete_memory(int memory_id) override;
 
     /// Delete multiple memories by ID. Returns count deleted.
-    int delete_batch(const std::vector<int>& memory_ids);
+    int delete_batch(const std::vector<int>& memory_ids) override;
 
     /// Search by metadata field matching with optional temporal filtering. Returns vector of results.
     std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit = 0,
                                                  const std::string& after = "",
-                                                 const std::string& before = "");
+                                                 const std::string& before = "") override;
 
-    void close();
+    void close() override;
+
+    /// Delete old conversation entries older than specified hours. Returns count deleted.
+    int cleanup_old_conversations(int max_age_hours) override;
+
+    // --- Bulk export / import ---
+    std::vector<MemoryRecord> export_memories(const MemoryFilter& filter) override;
+    int import_memories(const std::vector<MemoryRecord>& records, int user_id = -1) override;
 
 private:
     struct Impl;

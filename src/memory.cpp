@@ -3,6 +3,8 @@
  */
 
 #include "ragger/memory.h"
+#include "ragger/sqlite_backend.h"
+#include "ragger/sqlite_user_manager.h"
 #include "ragger/embedder.h"
 #include "ragger/config.h"
 #include "ragger/logs.h"
@@ -28,6 +30,9 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     // Create primary backend (common DB in multi-user, only DB in single-user)
     backend_ = std::make_unique<SqliteBackend>(*embedder_, db_path);
 
+    // Create user manager on the same DB as the primary backend
+    user_manager_ = std::make_unique<SqliteUserManager>(backend_->db_path());
+
     // Multi-user: create user backend
     if (!user_db_path.empty()) {
         user_backend_ = std::make_unique<SqliteBackend>(*embedder_, user_db_path);
@@ -35,7 +40,7 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
 }
 
 // Private constructor for for_user() — shares embedder and common backend
-RaggerMemory::RaggerMemory(Embedder* shared_embedder, SqliteBackend* shared_common,
+RaggerMemory::RaggerMemory(Embedder* shared_embedder, StorageBackend* shared_common,
                            const std::string& user_db_path)
     : shared_embedder_(shared_embedder)
 {
@@ -49,6 +54,7 @@ RaggerMemory::RaggerMemory(Embedder* shared_embedder, SqliteBackend* shared_comm
     // The common DB supports concurrent readers via WAL mode.
     backend_ = std::make_unique<SqliteBackend>(*shared_embedder, shared_common->db_path());
     user_backend_ = std::make_unique<SqliteBackend>(*shared_embedder, user_db_path);
+    user_manager_ = std::make_unique<SqliteUserManager>(backend_->db_path());
 }
 
 std::string RaggerMemory::resolve_user_home(const std::string& username) {

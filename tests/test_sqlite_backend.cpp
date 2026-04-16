@@ -7,6 +7,7 @@
 #include "ragger/config.h"
 #include "ragger/embedder.h"
 #include "ragger/sqlite_backend.h"
+#include "ragger/sqlite_user_manager.h"
 #include "ragger/auth.h"
 #include <cassert>
 #include <filesystem>
@@ -367,37 +368,37 @@ void test_search_by_metadata(ragger::Embedder& emb) {
 
 void test_user_management(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    // User management now uses SqliteUserManager (separate from storage backend)
+    ragger::SqliteUserManager umgr(TEMP_DB);
 
     // create_user → returns valid ID
-    int user_id = db.create_user("testuser", "abc123hash");
+    int user_id = umgr.create_user("testuser", "abc123hash");
     assert(user_id > 0);
 
-    int admin_id = db.create_user("adminuser", "def456hash");
+    int admin_id = umgr.create_user("adminuser", "def456hash");
     assert(admin_id > 0);
     assert(admin_id != user_id);
 
     // get_user_by_token_hash → finds created user
-    auto user_opt = db.get_user_by_token_hash("abc123hash");
+    auto user_opt = umgr.get_user_by_token_hash("abc123hash");
     assert(user_opt.has_value());
     assert(user_opt->username == "testuser");
     assert(user_opt->token_hash == "abc123hash");
 
     // get_user_by_username → finds created user
-    user_opt = db.get_user_by_username("adminuser");
+    user_opt = umgr.get_user_by_username("adminuser");
     assert(user_opt.has_value());
     assert(user_opt->username == "adminuser");
     assert(user_opt->token_hash == "def456hash");
 
     // get_user_by_token_hash with wrong hash → nullopt
-    user_opt = db.get_user_by_token_hash("wronghash");
+    user_opt = umgr.get_user_by_token_hash("wronghash");
     assert(!user_opt.has_value());
 
     // get_user_by_username with wrong name → nullopt
-    user_opt = db.get_user_by_username("nonexistent");
+    user_opt = umgr.get_user_by_username("nonexistent");
     assert(!user_opt.has_value());
 
-    db.close();
     cleanup();
 }
 

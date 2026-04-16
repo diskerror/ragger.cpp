@@ -84,8 +84,21 @@ public:
     /// Resolve which endpoint handles a given model name
     Endpoint& resolve_endpoint(const std::string& model);
 
+    // LM Proxy pass-through (OpenAI-compatible routes)
+    void set_lm_proxy_url(const std::string& url) { lm_proxy_url_ = url; }
+    const std::string& lm_proxy_url() const { return lm_proxy_url_; }
+    struct ProxyResponse {
+        long        status_code;
+        std::string body;
+    };
+    ProxyResponse proxy_request(const std::string& path,
+                                const std::string& method = "GET",
+                                const std::string& body = "");
+    std::vector<std::string> proxy_list_models();
+
 private:
     std::string forced_endpoint_;
+    std::string lm_proxy_url_;  // LM proxy URL for OpenAI-compatible pass-through
 };
 
 } // namespace ragger

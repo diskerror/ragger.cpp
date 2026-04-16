@@ -106,8 +106,6 @@ void test_chat_section_parsing() {
           << "summarize_on_pause = false\n"
           << "pause_minutes = 15\n"
           << "summarize_on_quit = false\n"
-          << "max_turn_retention_minutes = 120\n"
-          << "max_turns_stored = 200\n"
           << "max_persona_chars = 500\n"
           << "max_memory_results = 10\n"
           << "persona_pct = 30\n"
@@ -119,8 +117,6 @@ void test_chat_section_parsing() {
     assert(cfg.chat_summarize_on_pause == false);
     assert(cfg.chat_pause_minutes == 15);
     assert(cfg.chat_summarize_on_quit == false);
-    assert(cfg.chat_max_turn_retention_minutes == 120);
-    assert(cfg.chat_max_turns_stored == 200);
     assert(cfg.chat_max_persona_chars == 500);
     assert(cfg.chat_max_memory_results == 10);
     assert(cfg.chat_persona_pct == 30);
@@ -268,7 +264,7 @@ void test_default_values() {
     assert(cfg.host == "127.0.0.1");
     assert(cfg.port == 8432);
     assert(cfg.single_user == true);
-    assert(cfg.db_path == "~/.ragger/memories.db");
+    assert(cfg.db_path.empty());  // resolved at runtime via resolved_db_path()
     assert(cfg.default_collection == "memory");
     assert(cfg.embedding_dimensions == 384);
     assert(cfg.default_search_limit == 5);

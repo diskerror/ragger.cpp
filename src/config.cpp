@@ -468,6 +468,13 @@ const Config& config() {
     return *g_config;
 }
 
+Config& mutable_config() {
+    if (!g_config) {
+        throw std::runtime_error(lang::ERR_CONFIG_NOT_INIT);
+    }
+    return *g_config;
+}
+
 void init_config(const std::string& cli_config_path, bool quiet) {
     // Load system config first
     std::string system_path = find_system_config(cli_config_path);

@@ -116,6 +116,7 @@ add_library(ragger_core STATIC
     src/embedder.cpp
     src/tokenizer_wrapper.cpp
     src/sqlite_backend.cpp
+    src/sqlite_user_manager.cpp
     src/bm25.cpp
     src/import.cpp
     src/memory.cpp

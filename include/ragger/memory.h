@@ -9,9 +9,12 @@
 #include <string>
 #include <vector>
 
-#include "sqlite_backend.h"
+#include "storage_backend.h"
+#include "user_manager.h"
 
 namespace ragger {
+
+using json = nlohmann::json;
 
 class RaggerMemory {
 public:
@@ -67,9 +70,12 @@ public:
     /// Returns nullptr if no user DB exists (caller should fall back to this instance).
     std::unique_ptr<RaggerMemory> for_user(const std::string& username);
 
-    /// Access primary backend (for user management, etc.)
-    SqliteBackend* backend() { return backend_.get(); }
-    SqliteBackend* user_backend() { return user_backend_.get(); }
+    /// Access primary backend (for storage operations).
+    StorageBackend* backend() { return backend_.get(); }
+    StorageBackend* user_backend() { return user_backend_.get(); }
+
+    /// Access user manager (for user/auth/session operations).
+    UserManager* user_manager() { return user_manager_.get(); }
 
     void close();
 
@@ -78,13 +84,14 @@ public:
 
 private:
     /// Private constructor for for_user() — shares embedder and common backend.
-    RaggerMemory(Embedder* shared_embedder, SqliteBackend* shared_common,
+    RaggerMemory(Embedder* shared_embedder, StorageBackend* shared_common,
                  const std::string& user_db_path);
 
     Embedder*                      shared_embedder_{nullptr}; // non-owning, set by for_user()
     std::unique_ptr<Embedder>      embedder_;
-    std::unique_ptr<SqliteBackend> backend_;      // common DB (or only DB in single-user)
-    std::unique_ptr<SqliteBackend> user_backend_;  // user's private DB (nullptr = single-user)
+    std::unique_ptr<StorageBackend> backend_;      // common DB (or only DB in single-user)
+    std::unique_ptr<StorageBackend> user_backend_;  // user's private DB (nullptr = single-user)
+    std::unique_ptr<UserManager>    user_manager_;  // user/auth management (common DB)
 };
 
 } // namespace ragger

@@ -4,6 +4,7 @@
 
 #include "ragger/server.h"
 #include "ragger/memory.h"
+#include "ragger/sqlite_backend.h"
 #include "ragger/lang.h"
 #include "ragger/logs.h"
 #include "ragger/auth.h"
@@ -12,7 +13,6 @@
 #include "ragger/chat_sessions.h"
 #include "nlohmann_json.hpp"
 
-#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.h"
 
 #include <chrono>
@@ -28,7 +28,6 @@
 #include <unordered_map>
 #include <atomic>
 #include <signal.h>
-#include <sqlite3.h>
 #include <sys/file.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -58,7 +57,7 @@ struct Server::Impl {
     std::string     host;
     int             port;
     std::string     server_token_;
-    std::optional<SqliteBackend::UserInfo> default_user_;
+    std::optional<UserInfo> default_user_;
     std::unique_ptr<InferenceClient> inference_;
     ChatSessionManager session_mgr_;
 
@@ -204,22 +203,14 @@ struct Server::Impl {
 
             for (const auto& db_path : db_paths) {
                 try {
-                    sqlite3* db = nullptr;
-                    if (sqlite3_open(db_path.c_str(), &db) != SQLITE_OK) continue;
-                    std::string sql = "DELETE FROM memories WHERE collection = 'conversation' AND timestamp < ?";
-                    sqlite3_stmt* stmt = nullptr;
-                    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
-                        sqlite3_bind_text(stmt, 1, cutoff_str, -1, SQLITE_STATIC);
-                        sqlite3_step(stmt);
-                        int deleted = sqlite3_changes(db);
-                        conversations_cleaned += deleted;
-                        if (deleted > 0) {
-                            log_info("Cleaned " + std::to_string(deleted)
-                                   + " expired conversations from " + db_path);
-                        }
+                    // Re-open the DB with a new backend instance
+                    ragger::SqliteBackend temp_backend(db_path);
+                    int deleted = temp_backend.cleanup_old_conversations(max_age_hours);
+                    conversations_cleaned += deleted;
+                    if (deleted > 0) {
+                        log_info("Cleaned " + std::to_string(deleted)
+                               + " expired conversations from " + db_path);
                     }
-                    sqlite3_finalize(stmt);
-                    sqlite3_close(db);
                 } catch (const std::exception& e) {
                     log_error("Cleanup failed for " + db_path + ": " + e.what());
                 }
@@ -326,6 +317,16 @@ struct Server::Impl {
             inference_ = std::make_unique<InferenceClient>(std::move(client));
             log_info("Inference: enabled (" + std::to_string(inference_->_endpoints.size()) + " endpoint(s))");
         }
+        
+        // LM Proxy pass-through (if configured)
+        if (!cfg.lm_proxy_url.empty()) {
+            if (inference_) {
+                inference_->set_lm_proxy_url(cfg.lm_proxy_url);
+                log_info("LM proxy: enabled (" + cfg.lm_proxy_url + ")");
+            } else {
+                log_error("LM proxy configured but no inference endpoint available");
+            }
+        }
     }
 
     void bootstrap_auth() {
@@ -337,7 +338,7 @@ struct Server::Impl {
             
             if (!server_token_.empty()) {
                 std::string token_hash = hash_token(server_token_);
-                auto user = memory.backend()->get_user_by_token_hash(token_hash);
+                auto user = memory.user_manager()->get_user_by_token_hash(token_hash);
                 
                 if (!user) {
                     // Auto-create the single user
@@ -346,8 +347,8 @@ struct Server::Impl {
                     struct passwd* pw = getpwuid(getuid());
                     if (pw) username = pw->pw_name;
                     
-                    int user_id = memory.backend()->create_user(username, token_hash);
-                    user = SqliteBackend::UserInfo{user_id, username, token_hash, ""};
+                    int user_id = memory.user_manager()->create_user(username, token_hash);
+                    user = UserInfo{user_id, username, token_hash, ""};
                     log_info("Created user: " + username + " (id=" + std::to_string(user_id) + ")");
                 }
                 default_user_ = user;
@@ -363,8 +364,8 @@ struct Server::Impl {
     // --- Web sessions (password login, DB-backed) ---
     static constexpr int WEB_SESSION_TTL = 86400; // 24 hours
 
-    std::optional<SqliteBackend::UserInfo> _check_web_session(const std::string& token) {
-        return memory.backend()->get_web_session(token);
+    std::optional<UserInfo> _check_web_session(const std::string& token) {
+        return memory.user_manager()->get_web_session(token);
     }
 
     // --- Web root resolution ---
@@ -397,7 +398,7 @@ struct Server::Impl {
         return "application/octet-stream";
     }
 
-    std::optional<SqliteBackend::UserInfo> _check_auth(const httplib::Request& req) {
+    std::optional<UserInfo> _check_auth(const httplib::Request& req) {
         const auto& cfg = config();
         
         // Extract Authorization header
@@ -405,7 +406,7 @@ struct Server::Impl {
         
         // If single-user mode with no token configured, auth is disabled
         if (cfg.single_user && server_token_.empty()) {
-            return SqliteBackend::UserInfo{0, "anonymous", "", ""};
+            return UserInfo{0, "anonymous", "", ""};
         }
         
         // Check cookie for web session token
@@ -422,7 +423,7 @@ struct Server::Impl {
                 auto ws = _check_web_session(cookie_token);
                 if (ws) return ws;
                 // Also try as bearer token
-                auto user = memory.backend()->get_user_by_token_hash(hash_token(cookie_token));
+                auto user = memory.user_manager()->get_user_by_token_hash(hash_token(cookie_token));
                 if (user) return user;
             }
             return std::nullopt;
@@ -441,7 +442,7 @@ struct Server::Impl {
 
         // Hash and lookup in database (works for both modes)
         std::string token_hash = hash_token(token);
-        auto user = memory.backend()->get_user_by_token_hash(token_hash);
+        auto user = memory.user_manager()->get_user_by_token_hash(token_hash);
         if (user) {
             // Check if token rotation is needed (async, after this request)
             _check_token_rotation(*user);
@@ -456,13 +457,13 @@ struct Server::Impl {
         return std::nullopt;
     }
 
-    void _check_token_rotation(const SqliteBackend::UserInfo& user) {
+    void _check_token_rotation(const UserInfo& user) {
         const auto& cfg = config();
         if (cfg.token_rotation_minutes <= 0) return;  // Rotation disabled
 
-        auto* backend = memory.backend();
-        auto rotated_at_opt = backend->get_user_token_rotated_at(user.username);
-        
+        auto* umgr = memory.user_manager();
+        auto rotated_at_opt = umgr->get_user_token_rotated_at(user.username);
+
         // Get current time as ISO timestamp
         auto now = std::chrono::system_clock::now();
         auto now_tt = std::chrono::system_clock::to_time_t(now);
@@ -471,11 +472,11 @@ struct Server::Impl {
         char now_buf[32];
         std::strftime(now_buf, sizeof(now_buf), "%Y-%m-%dT%H:%M:%SZ", &now_gm);
         std::string now_str(now_buf);
-        
+
         bool needs_rotation = false;
         if (!rotated_at_opt) {
             // Never rotated — initialize with current time
-            backend->update_user_token_rotated_at(user.username, now_str);
+            umgr->update_user_token_rotated_at(user.username, now_str);
             return;
         }
         
@@ -499,9 +500,9 @@ struct Server::Impl {
             std::thread([this, username = user.username, now_str]() {
                 try {
                     auto [new_token, new_hash] = rotate_token_for_user(username);
-                    auto* backend = memory.backend();
-                    backend->update_user_token(username, new_hash);
-                    backend->update_user_token_rotated_at(username, now_str);
+                    auto* umgr = memory.user_manager();
+                    umgr->update_user_token(username, new_hash);
+                    umgr->update_user_token_rotated_at(username, now_str);
                     log_info("Rotated token for user: " + std::string(username));
                 } catch (const std::exception& e) {
                     log_error(std::string("Token rotation failed for ") + username + ": " + e.what());
@@ -538,6 +539,8 @@ struct Server::Impl {
         user_memories_[username] = std::move(user_mem);
         return ref;
     }
+
+    void setup_lm_proxy_routes();
 
     void setup_routes() {
         // GET /health
@@ -778,7 +781,7 @@ struct Server::Impl {
                 std::string model = body.value("model", "");
                 if (model.empty()) { res.status = 400; res.set_content("Missing 'model' field", "text/plain"); return; }
                 std::string resolved = config().resolve_model(model);
-                memory.backend()->update_user_preferred_model(user->username, resolved);
+                memory.user_manager()->update_user_preferred_model(user->username, resolved);
                 preload_local_model(resolved);
                 json response = {{"status", "updated"}, {"model", resolved}};
                 log_http("PUT /user/model 200");
@@ -796,7 +799,7 @@ struct Server::Impl {
             auto user = _check_auth(req);
             if (!user) { res.status = 401; res.set_content("Unauthorized", "text/plain"); return; }
             try {
-                auto model_opt = memory.backend()->get_user_preferred_model(user->username);
+                auto model_opt = memory.user_manager()->get_user_preferred_model(user->username);
                 json response = model_opt ? json{{"model", *model_opt}} : json{{"model", nullptr}};
                 log_http("GET /user/model 200");
                 res.set_content(response.dump(), "application/json");
@@ -811,7 +814,7 @@ struct Server::Impl {
             auto user = _check_auth(req);
             if (!user) { res.status = 401; res.set_content("Unauthorized", "text/plain"); return; }
             try {
-                memory.backend()->update_user_preferred_model(user->username, "");
+                memory.user_manager()->update_user_preferred_model(user->username, "");
                 log_http("DELETE /user/model 200");
                 res.set_content(R"({"status":"cleared"})", "application/json");
             } catch (const std::exception& e) {
@@ -857,7 +860,7 @@ struct Server::Impl {
                 tf << new_token << "\n";
                 tf.close();
                 std::string new_hash = ragger::hash_token(new_token);
-                memory.backend()->update_user_token(user->username, new_hash);
+                memory.user_manager()->update_user_token(user->username, new_hash);
                 json response = {{"token", new_token}, {"username", user->username}, {"status", "rotated"}};
                 log_http("POST /user/rotate-token 200");
                 res.set_content(response.dump(), "application/json");
@@ -906,7 +909,7 @@ struct Server::Impl {
                 }
 
                 // Resolve model
-                auto preferred_model = memory.backend()->get_user_preferred_model(user->username);
+                auto preferred_model = memory.user_manager()->get_user_preferred_model(user->username);
                 std::string use_model = preferred_model.value_or("");
                 if (use_model.empty()) use_model = request_model;
                 if (use_model.empty()) use_model = inference_->model;
@@ -1071,13 +1074,13 @@ struct Server::Impl {
                 if (username.empty() || password.empty()) {
                     res.status = 400; res.set_content(R"({"error":"username and password required"})", "application/json"); return;
                 }
-                auto user = memory.backend()->get_user_by_username(username);
+                auto user = memory.user_manager()->get_user_by_username(username);
                 if (!user) { res.status = 401; res.set_content(R"({"error":"invalid credentials"})", "application/json"); return; }
-                auto stored_hash = memory.backend()->get_user_password(username);
+                auto stored_hash = memory.user_manager()->get_user_password(username);
                 if (!stored_hash) { res.status = 401; res.set_content(R"({"error":"no password set — use 'ragger passwd' first"})", "application/json"); return; }
                 if (!verify_password(password, *stored_hash)) { res.status = 401; res.set_content(R"({"error":"invalid credentials"})", "application/json"); return; }
                 std::string session_token = generate_random_token(32);
-                memory.backend()->create_web_session(
+                memory.user_manager()->create_web_session(
                     session_token, username, user->id, WEB_SESSION_TTL);
                 json result = {{"token", session_token}, {"username", username}, {"expires_in", WEB_SESSION_TTL}};
                 log_http("POST /auth/login 200 (" + username + ")");
@@ -1091,8 +1094,73 @@ struct Server::Impl {
         // Static file serving — use httplib's built-in mount if web root exists
         // We set this up as a catch-all handler for unmatched GET requests
         svr.set_mount_point("/", resolve_web_root());
+
+        // LM Proxy: OpenAI-compatible pass-through routes (if configured)
+        if (inference_ && !inference_->lm_proxy_url().empty()) {
+            setup_lm_proxy_routes();
+        }
     }
 };
+
+// -----------------------------------------------------------------------
+// LM Proxy: OpenAI-compatible pass-through routes
+// -----------------------------------------------------------------------
+void Server::Impl::setup_lm_proxy_routes() {
+    // Helper: forward a POST to upstream, propagate status, sanitize errors
+    auto forward_post = [this](const std::string& path,
+                               const httplib::Request& req,
+                               httplib::Response& res) {
+        try {
+            // Reject streaming requests — buffered proxy can't stream SSE
+            auto body_json = json::parse(req.body, nullptr, false);
+            if (!body_json.is_discarded() &&
+                body_json.contains("stream") && body_json["stream"] == true) {
+                res.status = 400;
+                res.set_content(
+                    R"({"error":"streaming not supported via proxy — connect directly to the inference service"})",
+                    "application/json");
+                log_http("POST " + path + " 400 (streaming rejected)");
+                return;
+            }
+
+            auto resp = inference_->proxy_request(path, "POST", req.body);
+            res.status = static_cast<int>(resp.status_code);
+            log_http("POST " + path + " " + std::to_string(resp.status_code));
+            res.set_content(resp.body, "application/json");
+        } catch (const std::exception& e) {
+            log_error("LM proxy " + path + " failed: " + e.what());
+            res.status = 502;
+            res.set_content(R"({"error":"upstream unavailable"})", "application/json");
+        }
+    };
+
+    // GET /v1/models - list available models from upstream
+    svr.Get("/v1/models", [this](const httplib::Request&, httplib::Response& res) {
+        try {
+            auto models = inference_->proxy_list_models();
+            json response = {{"object", "list"}, {"data", json::array()}};
+            for (const auto& model : models) {
+                response["data"].push_back({{"id", model}, {"object", "model"}, {"owned_by", "lm-proxy"}});
+            }
+            log_http("GET /v1/models 200");
+            res.set_content(response.dump(), "application/json");
+        } catch (const std::exception& e) {
+            log_error(std::string("LM proxy /v1/models failed: ") + e.what());
+            res.status = 502;
+            res.set_content(R"({"error":"upstream unavailable"})", "application/json");
+        }
+    });
+
+    // POST /v1/chat/completions - forward to upstream
+    svr.Post("/v1/chat/completions", [this, forward_post](const httplib::Request& req, httplib::Response& res) {
+        forward_post("/v1/chat/completions", req, res);
+    });
+
+    // POST /v1/completions - forward to upstream
+    svr.Post("/v1/completions", [this, forward_post](const httplib::Request& req, httplib::Response& res) {
+        forward_post("/v1/completions", req, res);
+    });
+}
 
 Server::Server(RaggerMemory& memory,
                const std::string& host,

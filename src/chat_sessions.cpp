@@ -93,7 +93,7 @@ std::string ChatSessionManager::generate_id() {
 
 ChatSession& ChatSessionManager::get_or_create(
     const std::string& session_id, const std::string& username,
-    SqliteBackend* backend)
+    StorageBackend* backend)
 {
     std::lock_guard<std::mutex> lock(mutex_);
 

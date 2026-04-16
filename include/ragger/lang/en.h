@@ -17,6 +17,7 @@ constexpr const char* CLI_HOST                = "Server bind address (overrides 
 constexpr const char* CLI_PORT                = "Server port (overrides config)";
 constexpr const char* CLI_DB                  = "SQLite database path (overrides config)";
 constexpr const char* CLI_MODEL_DIR           = "Model directory path (overrides config)";
+constexpr const char* CLI_LM_PROXY_URL        = "LM proxy upstream URL (OpenAI-compatible pass-through)";
 constexpr const char* CLI_COMMAND             = "Command";
 constexpr const char* CLI_ARGS                = "Command arguments";
 constexpr const char* CLI_USAGE_SEARCH        = "Usage: ragger search <query>";

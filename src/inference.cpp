@@ -529,4 +529,93 @@ void InferenceClient::chat_stream(const std::vector<Message>& messages,
     }
 }
 
+// -----------------------------------------------------------------------
+// LM Proxy: OpenAI-compatible pass-through (if configured)
+// -----------------------------------------------------------------------
+namespace {
+    InferenceClient::ProxyResponse forward_request(
+            const std::string& lm_proxy_url,
+            const std::string& path,
+            const std::string& method,
+            const std::string& body) {
+        if (lm_proxy_url.empty()) {
+            throw std::runtime_error("LM proxy not configured");
+        }
+
+        // Strip trailing slash from base URL
+        std::string base = lm_proxy_url;
+        if (!base.empty() && base.back() == '/') {
+            base.pop_back();
+        }
+
+        std::string url = base + path;
+
+        CURL* curl = curl_easy_init();
+        if (!curl) {
+            throw std::runtime_error("Failed to initialize libcurl for proxy");
+        }
+
+        std::string response_buffer;
+        WriteCallbackData write_data{&response_buffer};
+
+        struct curl_slist* headers = nullptr;
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_data);
+
+        if (method == "POST" || method == "PUT") {
+            curl_easy_setopt(curl, CURLOPT_POST, 1L);
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
+        }
+
+        CURLcode res = curl_easy_perform(curl);
+        long http_code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
+        if (res != CURLE_OK) {
+            throw std::runtime_error("Proxy connection failed");
+        }
+
+        return {http_code, std::move(response_buffer)};
+    }
+} // anonymous namespace
+
+InferenceClient::ProxyResponse InferenceClient::proxy_request(
+        const std::string& path,
+        const std::string& method,
+        const std::string& body) {
+    if (lm_proxy_url_.empty()) {
+        throw std::runtime_error("LM proxy not configured");
+    }
+    return forward_request(lm_proxy_url_, path, method, body);
+}
+
+std::vector<std::string> InferenceClient::proxy_list_models() {
+    auto resp = proxy_request("/v1/models", "GET", "");
+    if (resp.status_code != 200) {
+        throw std::runtime_error("Upstream returned status " + std::to_string(resp.status_code));
+    }
+    try {
+        auto json_response = nlohmann::json::parse(resp.body);
+        std::vector<std::string> models;
+        if (json_response.contains("data") && json_response["data"].is_array()) {
+            for (const auto& item : json_response["data"]) {
+                if (item.is_object() && item.contains("id")) {
+                    models.push_back(item["id"].get<std::string>());
+                }
+            }
+        }
+        return models;
+    } catch (const std::exception& e) {
+        throw std::runtime_error("Failed to parse upstream model list");
+    }
+}
+
 } // namespace ragger

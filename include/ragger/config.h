@@ -50,7 +50,7 @@ struct Config {
         int max_context = 0; // 0 = unknown. Context window in tokens.
         int max_tokens = 0;  // 0 = use global default
     };
-    std::string inference_model = "claude-sonnet-4-5";
+    std::string inference_model = "";
     std::string inference_default = "";
     std::string inference_api_url = "";
     std::string inference_api_key = "";
@@ -75,6 +75,9 @@ struct Config {
 
     // --- Import ---
     int  minimum_chunk_size    = 300;
+
+    // --- LM Proxy (OpenAI-compatible pass-through) ---
+    std::string lm_proxy_url = "";  // if set, forward /v1/* to this URL
 
     // --- Llama.cpp (subprocess inference) ---
     // [llama] removed — use external inference providers (LM Studio, Ollama, etc.)
@@ -130,6 +133,8 @@ void apply_user_overrides(Config& cfg, const Config& user);
 
 /// Global config instance. Must call init_config() before use.
 const Config& config();
+/// Mutable access for CLI overrides applied at startup.
+Config& mutable_config();
 
 /// Initialize global config. Call once at startup.
 void init_config(const std::string& cli_config_path = "", bool quiet = false);

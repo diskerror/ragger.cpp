@@ -19,7 +19,6 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/file.h>
-#include <sqlite3.h>
 #include <thread>
 #include <iomanip>
 #include <curl/curl.h>
@@ -34,9 +33,12 @@
 #include "ragger/lang.h"
 #include "ragger/logs.h"
 #include "ragger/memory.h"
+#include "ragger/sqlite_backend.h"
 #include "ragger/server.h"
 #include "ragger/embedder.h"
+#include "ragger/storage_types.h"
 #include "ragger/sqlite_backend.h"
+#include "ragger/sqlite_user_manager.h"
 #include "nlohmann_json.hpp"
 
 using namespace ragger::lang;
@@ -530,23 +532,72 @@ static void mcp_housekeeping_thread(ragger::RaggerMemory& memory, const std::str
         std::strftime(cutoff_str, sizeof(cutoff_str), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&cutoff_t));
 
         try {
-            sqlite3* db = nullptr;
-            if (sqlite3_open(db_path.c_str(), &db) != SQLITE_OK) continue;
-            std::string sql = "DELETE FROM memories WHERE collection = 'conversation' AND timestamp < ?";
-            sqlite3_stmt* stmt = nullptr;
-            if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
-                sqlite3_bind_text(stmt, 1, cutoff_str, -1, SQLITE_STATIC);
-                sqlite3_step(stmt);
-                int deleted = sqlite3_changes(db);
-                if (deleted > 0) {
-                    ragger::log_info("MCP housekeeping: cleaned " + std::to_string(deleted)
-                                   + " expired conversations");
-                }
+            // Re-open the DB with a new backend instance
+            ragger::SqliteBackend temp_backend(db_path);
+            int deleted = temp_backend.cleanup_old_conversations(max_age_hours);
+            if (deleted > 0) {
+                ragger::log_info("MCP housekeeping: cleaned " + std::to_string(deleted)
+                               + " expired conversations");
             }
-            sqlite3_finalize(stmt);
-            sqlite3_close(db);
         } catch (...) {}
     }
+}
+
+/**
+ * Database migration helper - moves memories between user and common databases.
+ * Uses StorageBackend::export_memories / import_memories + delete_batch.
+ */
+static int migrate_memories(const std::string& src_path, const std::string& dst_path,
+                            const std::string& direction, const std::string& username,
+                            const ragger::MemoryFilter& filter, bool dry_run) {
+    ragger::SqliteBackend src(src_path);
+    ragger::SqliteBackend dst(dst_path);
+
+    // Export matching records from source
+    auto records = src.export_memories(filter);
+    if (records.empty()) {
+        std::cout << "No matching records in source DB\n";
+        return 0;
+    }
+
+    if (dry_run) {
+        std::cout << "Would move " << records.size() << " records:\n";
+        int shown = 0;
+        for (const auto& r : records) {
+            if (shown++ >= 10) {
+                std::cout << "  ... and " << (records.size() - 10) << " more\n";
+                break;
+            }
+            std::string preview = r.text.substr(0, 70);
+            std::cout << "  id=" << r.id << " " << preview << "...\n";
+        }
+        return 0;
+    }
+
+    // Resolve user_id for provenance when moving to common
+    int user_id = -1;
+    if (direction == "to-common") {
+        ragger::SqliteUserManager dst_umgr(dst_path);
+        auto user_info = dst_umgr.get_user_by_username(username);
+        if (user_info) {
+            user_id = user_info->id;
+        } else {
+            std::cout << "Warning: user '" << username << "' not found in common DB. "
+                      << "Records will be moved without user_id.\n";
+        }
+    }
+
+    // Import into destination
+    int imported = dst.import_memories(records, user_id);
+
+    // Delete from source
+    std::vector<int> ids;
+    ids.reserve(records.size());
+    for (const auto& r : records) ids.push_back(static_cast<int>(r.id));
+    src.delete_batch(ids);
+
+    std::cout << "Moved " << imported << " records\n";
+    return 0;
 }
 
 static void do_mcp(ragger::RaggerMemory& memory) {
@@ -736,6 +787,7 @@ int main(int argc, char** argv) {
         ("port,p", Diskerror::po::value<int>(), CLI_PORT)
         ("db", Diskerror::po::value<std::string>(), CLI_DB)
         ("model-dir", Diskerror::po::value<std::string>(), CLI_MODEL_DIR)
+        ("lm-proxy-url", Diskerror::po::value<std::string>(), CLI_LM_PROXY_URL)
         ("collection", Diskerror::po::value<std::string>()->default_value(""), "Collection name")
         ("min-chunk-size", Diskerror::po::value<int>(), "Min chunk size for import")
         ("group-by", Diskerror::po::value<std::string>()->default_value("date"), "Grouping for export (date|category|collection)")
@@ -792,7 +844,6 @@ int main(int argc, char** argv) {
         std::cout << "  rebuild-bm25       Rebuild the BM25 keyword index\n";
         std::cout << "  rebuild-embeddings Rebuild embeddings for all memories\n";
         std::cout << "  show-embedding-model  Show current embedding model info\n";
-        std::cout << "  show-embedding-model  Show current embedding model info\n";
         // (llama and model verbs removed — use external providers)
         std::cout << "  help               Show this help\n";
         std::cout << "  version            Show version\n";
@@ -820,6 +871,9 @@ int main(int argc, char** argv) {
     const auto& cfg = ragger::config();
 
     // CLI overrides
+    if (opts.count("lm-proxy-url"))
+        ragger::mutable_config().lm_proxy_url = opts["lm-proxy-url"].as<std::string>();
+
     std::string host       = opts.count("host")      ? opts["host"].as<std::string>()      : cfg.host;
     int         port       = opts.count("port")      ? opts["port"].as<int>()               : cfg.port;
     std::string db_path    = opts.count("db")         ? opts["db"].as<std::string>()         : "";
@@ -1082,15 +1136,15 @@ int main(int argc, char** argv) {
             // Register directly in DB
             try {
                 std::string reg_db = cfg.resolved_common_db_path();
-                ragger::SqliteBackend memory(reg_db);
+                ragger::SqliteUserManager umgr(reg_db);
                 std::string token_hash = ragger::hash_token(token);
-                auto existing = memory.get_user_by_username(username);
+                auto existing = umgr.get_user_by_username(username);
                 if (existing) {
                     if (existing->token_hash != token_hash)
-                        memory.update_user_token(username, token_hash);
+                        umgr.update_user_token(username, token_hash);
                     std::cout << "✓ User exists in database (id: " << existing->id << ")\n";
                 } else {
-                    int user_id = memory.create_user(username, token_hash);
+                    int user_id = umgr.create_user(username, token_hash);
                     std::cout << "✓ Registered in database (user_id: " << user_id << ")\n";
                 }
             } catch (const std::exception& e) {
@@ -1125,15 +1179,15 @@ int main(int argc, char** argv) {
                 }
                 // Register in DB
                 std::string reg_db = cfg.resolved_common_db_path();
-                ragger::SqliteBackend memory(reg_db);
+                ragger::SqliteUserManager umgr(reg_db);
                 std::string token_hash = ragger::hash_token(token);
-                auto existing = memory.get_user_by_username(username);
+                auto existing = umgr.get_user_by_username(username);
                 if (existing) {
                     if (existing->token_hash != token_hash)
-                        memory.update_user_token(username, token_hash);
+                        umgr.update_user_token(username, token_hash);
                     std::cout << "✓ User exists in database (id: " << existing->id << ")\n";
                 } else {
-                    int user_id = memory.create_user(username, token_hash);
+                    int user_id = umgr.create_user(username, token_hash);
                     std::cout << "✓ Registered in database (user_id: " << user_id << ")\n";
                 }
             } catch (const std::exception& e) {
@@ -1162,7 +1216,7 @@ int main(int argc, char** argv) {
             };
             // Open DB directly for registration
             std::string reg_db = cfg.resolved_common_db_path();
-            ragger::SqliteBackend memory(reg_db);
+            ragger::SqliteUserManager umgr(reg_db);
 
             int count = 0;
             bool auto_yes = opts.count("yes") > 0;
@@ -1210,13 +1264,13 @@ int main(int argc, char** argv) {
                     // Register directly in DB
                     try {
                         std::string token_hash = ragger::hash_token(token);
-                        auto existing = memory.get_user_by_username(uname);
+                        auto existing = umgr.get_user_by_username(uname);
                         if (existing) {
                             if (existing->token_hash != token_hash)
-                                memory.update_user_token(uname, token_hash);
+                                umgr.update_user_token(uname, token_hash);
                             status += ", registered";
                         } else {
-                            memory.create_user(uname, token_hash);
+                            umgr.create_user(uname, token_hash);
                             status += ", registered";
                         }
                     } catch (const std::exception& e) {
@@ -1261,10 +1315,10 @@ int main(int argc, char** argv) {
             // 2. Remove from common database
             try {
                 std::string reg_db = cfg.resolved_common_db_path();
-                ragger::SqliteBackend memory(reg_db);
-                auto existing = memory.get_user_by_username(username);
+                ragger::SqliteUserManager umgr(reg_db);
+                auto existing = umgr.get_user_by_username(username);
                 if (existing) {
-                    memory.delete_user(username);
+                    umgr.delete_user(username);
                     std::cout << "✓ Removed " << username << " from database\n";
                 } else {
                     std::cout << "  " << username << " not found in database (skipped)\n";
@@ -1314,19 +1368,19 @@ int main(int argc, char** argv) {
             
             // Open common database directly (no embedder needed for user management)
             // User management always uses the common DB (/var/ragger/memories.db)
-            ragger::SqliteBackend backend(cfg.resolved_common_db_path());
-            
+            ragger::SqliteUserManager umgr(cfg.resolved_common_db_path());
+
             // Verify user exists in DB
-            auto user_info = backend.get_user_by_username(target_user);
+            auto user_info = umgr.get_user_by_username(target_user);
             if (!user_info) {
                 std::cerr << "Error: user '" << target_user << "' not found in database\n";
                 std::cerr << "Provision the user first: sudo ragger add-user " << target_user << "\n";
                 return 1;
             }
-            
+
             // If changing own password and not root, verify current password
             if (args.empty() && user_info->id > 0) {
-                auto existing = backend.get_user_password(target_user);
+                auto existing = umgr.get_user_password(target_user);
                 if (existing) {
                     std::string current = read_password("Current password: ");
                     if (!ragger::verify_password(current, *existing)) {
@@ -1340,7 +1394,7 @@ int main(int argc, char** argv) {
             std::string new_pass = read_password("New password: ");
             if (new_pass.empty()) {
                 std::cout << "Password cleared (web UI access disabled).\n";
-                backend.set_user_password(target_user, "");
+                umgr.set_user_password(target_user, "");
             } else {
                 std::string confirm = read_password("Confirm password: ");
                 if (new_pass != confirm) {
@@ -1348,7 +1402,7 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 std::string hash = ragger::hash_password(new_pass);
-                backend.set_user_password(target_user, hash);
+                umgr.set_user_password(target_user, hash);
                 std::cout << "✓ Password updated for " << target_user << "\n";
             }
 
@@ -1477,168 +1531,23 @@ int main(int argc, char** argv) {
                 label_from = "common"; label_to = "user";
             }
 
-            sqlite3 *src = nullptr, *dst = nullptr;
-            if (sqlite3_open(src_path.c_str(), &src) != SQLITE_OK) {
-                std::cerr << "Error: cannot open source DB: " << src_path << "\n";
-                return 1;
-            }
-            if (sqlite3_open(dst_path.c_str(), &dst) != SQLITE_OK) {
-                std::cerr << "Error: cannot open destination DB: " << dst_path << "\n";
-                sqlite3_close(src);
-                return 1;
-            }
-
-            // Resolve user_id for provenance when moving to common
-            int user_id = -1;
-            if (direction == "to-common") {
-                sqlite3_stmt* ustmt = nullptr;
-                sqlite3_prepare_v2(dst, "SELECT id FROM users WHERE username = ?", -1, &ustmt, nullptr);
-                sqlite3_bind_text(ustmt, 1, username.c_str(), -1, SQLITE_STATIC);
-                if (sqlite3_step(ustmt) == SQLITE_ROW) {
-                    user_id = sqlite3_column_int(ustmt, 0);
-                } else {
-                    std::cout << "Warning: user '" << username << "' not found in common DB. "
-                              << "Records will be moved without user_id.\n";
-                }
-                sqlite3_finalize(ustmt);
-            }
-
-            // Build WHERE clause
-            std::string where;
-            std::vector<std::string> params;
-            auto add_condition = [&](const std::string& cond, const std::string& val) {
-                if (!where.empty()) where += " AND ";
-                where += cond;
-                params.push_back(val);
-            };
-
+            // Build filter from CLI args
+            ragger::MemoryFilter mfilter;
             if (!filter_ids.empty()) {
-                // Split comma-separated IDs
-                std::vector<std::string> id_list;
                 std::istringstream iss(filter_ids);
                 std::string tok;
                 while (std::getline(iss, tok, ',')) {
                     tok.erase(0, tok.find_first_not_of(' '));
                     tok.erase(tok.find_last_not_of(' ') + 1);
-                    if (!tok.empty()) id_list.push_back(tok);
+                    if (!tok.empty()) mfilter.ids.push_back(std::stoi(tok));
                 }
-                std::string placeholders;
-                for (size_t i = 0; i < id_list.size(); ++i) {
-                    if (i > 0) placeholders += ",";
-                    placeholders += "?";
-                    params.push_back(id_list[i]);
-                }
-                if (!where.empty()) where += " AND ";
-                where += "id IN (" + placeholders + ")";
             }
-            if (!filter_source.empty())
-                add_condition("json_extract(metadata, '$.source') LIKE ?", filter_source);
-            if (!filter_collection.empty())
-                add_condition("collection = ?", filter_collection);
-            if (!filter_category.empty())
-                add_condition("category = ?", filter_category);
+            if (!filter_source.empty())     mfilter.source_pattern = filter_source;
+            if (!filter_collection.empty()) mfilter.collection = filter_collection;
+            if (!filter_category.empty())   mfilter.category = filter_category;
 
-            // Query matching records
-            std::string sql = "SELECT id, text, embedding, metadata, timestamp, "
-                              "collection, category, tags FROM memories WHERE " + where;
-            sqlite3_stmt* sel = nullptr;
-            sqlite3_prepare_v2(src, sql.c_str(), -1, &sel, nullptr);
-            for (size_t i = 0; i < params.size(); ++i) {
-                sqlite3_bind_text(sel, (int)i + 1, params[i].c_str(), -1, SQLITE_TRANSIENT);
-            }
-
-            struct Row {
-                int64_t id;
-                std::string text;
-                std::vector<uint8_t> embedding;
-                std::string metadata, timestamp, collection, category, tags;
-            };
-            std::vector<Row> rows;
-            while (sqlite3_step(sel) == SQLITE_ROW) {
-                Row r;
-                r.id = sqlite3_column_int64(sel, 0);
-                r.text = (const char*)sqlite3_column_text(sel, 1);
-                auto* blob = (const uint8_t*)sqlite3_column_blob(sel, 2);
-                int blob_sz = sqlite3_column_bytes(sel, 2);
-                if (blob && blob_sz > 0) r.embedding.assign(blob, blob + blob_sz);
-                auto* s3 = sqlite3_column_text(sel, 3);
-                r.metadata = s3 ? (const char*)s3 : "";
-                auto* s4 = sqlite3_column_text(sel, 4);
-                r.timestamp = s4 ? (const char*)s4 : "";
-                auto* s5 = sqlite3_column_text(sel, 5);
-                r.collection = s5 ? (const char*)s5 : "";
-                auto* s6 = sqlite3_column_text(sel, 6);
-                r.category = s6 ? (const char*)s6 : "";
-                auto* s7 = sqlite3_column_text(sel, 7);
-                r.tags = s7 ? (const char*)s7 : "";
-                rows.push_back(std::move(r));
-            }
-            sqlite3_finalize(sel);
-
-            if (rows.empty()) {
-                std::cout << "No matching records in " << label_from << " DB\n";
-                sqlite3_close(src);
-                sqlite3_close(dst);
-                return 0;
-            }
-
-            if (dry_run) {
-                std::cout << "Would move " << rows.size() << " records from "
-                          << label_from << " → " << label_to << ":\n";
-                int shown = 0;
-                for (auto& r : rows) {
-                    if (shown++ >= 10) {
-                        std::cout << "  ... and " << (rows.size() - 10) << " more\n";
-                        break;
-                    }
-                    std::string preview = r.text.substr(0, 70);
-                    std::cout << "  id=" << r.id << " " << preview << "...\n";
-                }
-            } else {
-                // Insert into destination
-                bool has_user_id_col = (direction == "to-common" && user_id >= 0);
-                std::string ins_sql = has_user_id_col
-                    ? "INSERT INTO memories (text, embedding, metadata, timestamp, collection, category, tags, user_id) "
-                      "VALUES (?,?,?,?,?,?,?,?)"
-                    : "INSERT INTO memories (text, embedding, metadata, timestamp, collection, category, tags) "
-                      "VALUES (?,?,?,?,?,?,?)";
-
-                for (auto& r : rows) {
-                    sqlite3_stmt* ins = nullptr;
-                    sqlite3_prepare_v2(dst, ins_sql.c_str(), -1, &ins, nullptr);
-                    sqlite3_bind_text(ins, 1, r.text.c_str(), -1, SQLITE_TRANSIENT);
-                    if (!r.embedding.empty())
-                        sqlite3_bind_blob(ins, 2, r.embedding.data(), (int)r.embedding.size(), SQLITE_TRANSIENT);
-                    else
-                        sqlite3_bind_null(ins, 2);
-                    if (!r.metadata.empty())
-                        sqlite3_bind_text(ins, 3, r.metadata.c_str(), -1, SQLITE_TRANSIENT);
-                    else
-                        sqlite3_bind_null(ins, 3);
-                    sqlite3_bind_text(ins, 4, r.timestamp.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(ins, 5, r.collection.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(ins, 6, r.category.c_str(), -1, SQLITE_TRANSIENT);
-                    sqlite3_bind_text(ins, 7, r.tags.c_str(), -1, SQLITE_TRANSIENT);
-                    if (has_user_id_col) sqlite3_bind_int(ins, 8, user_id);
-                    sqlite3_step(ins);
-                    sqlite3_finalize(ins);
-                }
-
-                // Delete from source
-                for (auto& r : rows) {
-                    sqlite3_stmt* del = nullptr;
-                    sqlite3_prepare_v2(src, "DELETE FROM memories WHERE id = ?", -1, &del, nullptr);
-                    sqlite3_bind_int64(del, 1, r.id);
-                    sqlite3_step(del);
-                    sqlite3_finalize(del);
-                }
-
-                std::cout << "Moved " << rows.size() << " records from "
-                          << label_from << " → " << label_to << "\n";
-            }
-
-            sqlite3_close(src);
-            sqlite3_close(dst);
+            return migrate_memories(src_path, dst_path, direction, username,
+                                    mfilter, dry_run);
 
         } else {
             std::cerr << CLI_UNKNOWN_COMMAND << command << "\n";
