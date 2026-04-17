@@ -51,20 +51,20 @@ std::string expand_path(const std::string& path) {
 
 std::string Config::resolved_db_path() const {
     if (db_path.empty()) {
-        return expand_path(single_user ? "~/.ragger/memories.db" : common_db_path);
+        return expand_path("~/.ragger/memories.db");
     }
     return expand_path(db_path);
 }
-std::string Config::resolved_common_db_path() const { return expand_path(common_db_path); }
+
 std::string Config::resolved_log_dir() const {
     if (log_dir.empty()) {
-        return expand_path(single_user ? "~/.ragger" : "/var/log/ragger");
+        return expand_path("~/.ragger");
     }
     return expand_path(log_dir);
 }
 std::string Config::resolved_model_dir() const {
     if (model_dir.empty()) {
-        return "/var/ragger/models";  // Always use shared location - embedding model must be consistent
+        return expand_path("~/.ragger/models");  // Use user home by default
     }
     return expand_path(model_dir);
 }
@@ -87,7 +87,7 @@ static constexpr const char* DEFAULT_CONFIG = R"(# ragger.ini — Ragger Memory 
 # First file found wins. Created automatically on first run.
 
 [server]
-host = 127.0.0.1
+socket = ~/.ragger/ragger.sock
 port = 8432
 
 [storage]
@@ -211,10 +211,8 @@ struct ServerLockedKey {
 };
 
 static const ServerLockedKey SERVER_LOCKED[] = {
-    {"server", "host"},
     {"server", "port"},
     {"storage", "db_path"},
-    {"storage", "common_db_path"},
     {"storage", "formats_dir"},
     {"logging", "log_dir"},
     {"embedding", "model"},
@@ -354,14 +352,13 @@ Config load_config(const std::string& path) {
 
         // Map to config fields
         if (section == "server") {
-            if      (key == "host") cfg.host = val;
+            if      (key == "socket") cfg.socket_path = val;
+            else if (key == "bind") cfg.bind_address = val;
             else if (key == "port") cfg.port = std::stoi(val);
             else if (key == "server_name" || key == "hostname") cfg.server_name = val;
-            else if (key == "single_user") cfg.single_user = parse_bool(val);
         }
         else if (section == "storage") {
-            if      (key == "db_path")            cfg.db_path = val;
-            else if (key == "common_db_path")     cfg.common_db_path = val;
+            if      (key == "db_path") cfg.db_path = val;
             else if (key == "default_collection") cfg.default_collection = val;
             else if (key == "formats_dir")        cfg.formats_dir = val;
         }
@@ -453,6 +450,23 @@ Config load_config(const std::string& path) {
         cfg.inference_endpoints.push_back(ep);
     }
 
+    // Validate: at least one of socket_path or bind_address must be set
+    std::string expanded_socket = expand_path(cfg.socket_path);
+    if (expanded_socket.empty() && cfg.bind_address.empty()) {
+        throw std::runtime_error("Config error: either [server] socket or bind must be configured");
+    }
+
+    // Expand socket_path and bind_address if they start with ~
+    if (!cfg.socket_path.empty() && cfg.socket_path[0] == '~') {
+        cfg.socket_path = expanded_socket;
+    }
+    if (!cfg.bind_address.empty() && cfg.bind_address[0] == '~') {
+        // For bind_address, expand ~ to home but keep the host part
+        std::string home = expand_path("~");
+        if (home.back() != '/') home += '/';
+        cfg.bind_address = home + cfg.bind_address.substr(1);
+    }
+
     return cfg;
 }
 
@@ -522,11 +536,8 @@ int reload_config() {
                       << "' changed but requires restart\n";
         }
     };
-    warn_restart("host", fresh.host != cfg.host);
     warn_restart("port", fresh.port != cfg.port);
-    warn_restart("single_user", fresh.single_user != cfg.single_user);
     warn_restart("db_path", fresh.db_path != cfg.db_path);
-    warn_restart("common_db_path", fresh.common_db_path != cfg.common_db_path);
     warn_restart("tls_cert", fresh.tls_cert != cfg.tls_cert);
     warn_restart("tls_key", fresh.tls_key != cfg.tls_key);
     warn_restart("embedding_model", fresh.embedding_model != cfg.embedding_model);

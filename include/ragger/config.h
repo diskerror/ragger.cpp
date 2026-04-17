@@ -15,14 +15,14 @@ namespace ragger {
 
 struct Config {
     // --- Server ---
-    std::string host           = "127.0.0.1";
-    int         port           = 8432;
+    std::string socket_path     = "~/.ragger/ragger.sock";
+    std::string bind_address   = "";  // empty = no TCP listener
+    int         port           = 8432;  // only meaningful when bind_address is set
     std::string server_name;   // hostname for Crow (e.g. "ragger.local")
-    bool        single_user    = true;
 
     // --- Storage ---
-    std::string db_path;     // empty = resolved at runtime (single_user: ~/.ragger/memories.db)
-    std::string common_db_path = "/var/ragger/memories.db";
+    std::string db_path;  // empty = resolved at runtime (user home dir)
+
     std::string default_collection = "memory";
     std::string formats_dir    = "/var/ragger/formats";
 
@@ -107,7 +107,6 @@ struct Config {
 
     /// Resolved paths (~ expanded)
     std::string resolved_db_path() const;
-    std::string resolved_common_db_path() const;
     std::string resolved_log_dir() const;
     std::string resolved_model_dir() const;
 
