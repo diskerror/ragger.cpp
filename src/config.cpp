@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <pwd.h>
 #include <unistd.h>
+#include <format>
 
 // Standalone timestamp — usable before logging is initialized
 static std::string ts() {
