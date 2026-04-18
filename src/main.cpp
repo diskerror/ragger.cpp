@@ -518,11 +518,8 @@ static void mcp_housekeeping_thread(ragger::RaggerMemory& memory, const std::str
 
         if (max_age_hours <= 0) continue;
 
-        // Clean expired conversations from user DB
-        auto* user_be = memory.user_backend();
-        if (!user_be) user_be = memory.backend();
-
-        std::string db_path = user_be->db_path();
+        // Single-user mode: clean expired conversations from the main DB
+        std::string db_path = memory.backend()->db_path();
         auto now = std::chrono::system_clock::now();
         auto cutoff = now - std::chrono::duration_cast<std::chrono::system_clock::duration>(
             std::chrono::duration<double, std::ratio<3600>>(max_age_hours));
@@ -576,14 +573,7 @@ static int migrate_memories(const std::string& src_path, const std::string& dst_
     // Resolve user_id for provenance when moving to common
     int user_id = -1;
     if (direction == "to-common") {
-        ragger::SqliteUserManager dst_umgr(dst_path);
-        auto user_info = dst_umgr.get_user_by_username(username);
-        if (user_info) {
-            user_id = user_info->id;
-        } else {
-            std::cout << "Warning: user '" << username << "' not found in common DB. "
-                      << "Records will be moved without user_id.\n";
-        }
+        std::cout << "Note: multi-user mode has been removed. Records will be moved without user_id.\n";
     }
 
     // Import into destination
@@ -873,7 +863,7 @@ int main(int argc, char** argv) {
     if (opts.count("lm-proxy-url"))
         ragger::mutable_config().lm_proxy_url = opts["lm-proxy-url"].as<std::string>();
 
-    std::string host       = opts.count("host")      ? opts["host"].as<std::string>()      : cfg.host;
+    std::string host       = opts.count("host")      ? opts["host"].as<std::string>()      : cfg.bind_address;
     int         port       = opts.count("port")      ? opts["port"].as<int>()               : cfg.port;
     std::string db_path    = opts.count("db")         ? opts["db"].as<std::string>()         : "";
     std::string model_dir  = opts.count("model-dir")  ? opts["model-dir"].as<std::string>()  : "";
@@ -888,15 +878,8 @@ int main(int argc, char** argv) {
             ragger::setup_logging(false, true);
             const auto& cfg = ragger::config();
             std::unique_ptr<ragger::RaggerMemory> mem_ptr;
-            if (!cfg.single_user) {
-                auto common_path = cfg.resolved_common_db_path();
-                auto user_path = cfg.resolved_db_path();
-                mem_ptr = std::make_unique<ragger::RaggerMemory>(
-                    common_path, model_dir, user_path);
-                ragger::log_info("Multi-user mode: common=" + common_path + ", user=" + user_path);
-            } else {
-                mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path, model_dir);
-            }
+            // Single-user mode only
+            mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path, model_dir);
             auto& memory = *mem_ptr;
             char buf[128];
             std::snprintf(buf, sizeof(buf), MSG_LOADED_MEMORIES, memory.count());
@@ -927,7 +910,7 @@ int main(int argc, char** argv) {
 
             // Try daemon first (thin client — no model loading)
             auto token = ragger::load_token();
-            ragger::RaggerClient client(cfg.host, cfg.port, token);
+            ragger::RaggerClient client(cfg.bind_address, cfg.port, token);
             ragger::SearchResponse response;
 
             if (client.is_available()) {
@@ -967,7 +950,7 @@ int main(int argc, char** argv) {
 
             // Try daemon first (thin client — no model loading)
             auto token = ragger::load_token();
-            ragger::RaggerClient client(cfg.host, cfg.port, token);
+            ragger::RaggerClient client(cfg.bind_address, cfg.port, token);
             std::string id;
 
             if (client.is_available()) {
@@ -984,7 +967,7 @@ int main(int argc, char** argv) {
             
             // Try daemon first (thin client — no model loading)
             auto token = ragger::load_token();
-            ragger::RaggerClient client(cfg.host, cfg.port, token);
+            ragger::RaggerClient client(cfg.bind_address, cfg.port, token);
             int count;
 
             if (client.is_available()) {
@@ -1037,15 +1020,8 @@ int main(int argc, char** argv) {
         } else if (command == "mcp") {
             ragger::setup_logging(false, false);
             std::unique_ptr<ragger::RaggerMemory> mem_ptr;
-            if (!cfg.single_user) {
-                // Multi-user MCP: use common DB for shared memories
-                auto common_path = cfg.resolved_common_db_path();
-                auto user_path = cfg.resolved_db_path();
-                mem_ptr = std::make_unique<ragger::RaggerMemory>(
-                    common_path, model_dir, user_path);
-            } else {
-                mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path, model_dir);
-            }
+            // Single-user mode only
+            mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path, model_dir);
             // Start housekeeping thread if no HTTP server is running
             if (!is_http_server_running()) {
                 struct passwd* mcp_pw = getpwuid(getuid());
@@ -1133,23 +1109,27 @@ int main(int argc, char** argv) {
                       << "Use this in your client config (OpenClaw, Claude Desktop, etc.).\n"
                       << "Token file: ~/.ragger/token\n";
             // Register directly in DB
+            // Note: Multi-user mode removed. These user management commands are deprecated.
             try {
-                std::string reg_db = cfg.resolved_common_db_path();
-                ragger::SqliteUserManager umgr(reg_db);
+                std::string reg_db = cfg.resolved_db_path();
+                ragger::SqliteBackend backend(reg_db);
                 std::string token_hash = ragger::hash_token(token);
-                auto existing = umgr.get_user_by_username(username);
+                auto existing = backend.get_user_by_username(username);
                 if (existing) {
                     if (existing->token_hash != token_hash)
-                        umgr.update_user_token(username, token_hash);
+                        backend.update_user_token(username, token_hash);
                     std::cout << "✓ User exists in database (id: " << existing->id << ")\n";
                 } else {
-                    int user_id = umgr.create_user(username, token_hash);
+                    int user_id = backend.create_user(username, token_hash);
                     std::cout << "✓ Registered in database (user_id: " << user_id << ")\n";
                 }
             } catch (const std::exception& e) {
                 std::cout << "Warning: DB registration deferred (" << e.what() << ")\n";
             }
 
+        // DEPRECATED: Multi-user mode removed. User management commands are no longer needed.
+        // Keeping code for reference but commented out.
+#if 0
         } else if (command == "add-user") {
             ragger::setup_logging(false, false);
             auto args = opts.getParams("args");
@@ -1177,8 +1157,8 @@ int main(int argc, char** argv) {
                         std::cerr << "Warning: could not add " << username << " to ragger group\n";
                 }
                 // Register in DB
-                std::string reg_db = cfg.resolved_common_db_path();
-                ragger::SqliteUserManager umgr(reg_db);
+                std::string reg_db = cfg.resolved_db_path();
+                ragger::SqliteBackend umgr(reg_db);
                 std::string token_hash = ragger::hash_token(token);
                 auto existing = umgr.get_user_by_username(username);
                 if (existing) {
@@ -1195,6 +1175,7 @@ int main(int argc, char** argv) {
             }
             std::cout << "\nToken file: ~" << username << "/.ragger/token\n"
                       << "The user will need to update their client config if the token is rotated.\n";
+#endif
 
         } else if (command == "add-all") {
             ragger::setup_logging(false, false);
@@ -1214,8 +1195,8 @@ int main(int argc, char** argv) {
                 "/", "/var", "/var/empty", "/dev/null", "/nonexistent",
             };
             // Open DB directly for registration
-            std::string reg_db = cfg.resolved_common_db_path();
-            ragger::SqliteUserManager umgr(reg_db);
+            std::string reg_db = cfg.resolved_db_path();
+            ragger::SqliteBackend umgr(reg_db);
 
             int count = 0;
             bool auto_yes = opts.count("yes") > 0;
@@ -1313,8 +1294,8 @@ int main(int argc, char** argv) {
 
             // 2. Remove from common database
             try {
-                std::string reg_db = cfg.resolved_common_db_path();
-                ragger::SqliteUserManager umgr(reg_db);
+                std::string reg_db = cfg.resolved_db_path();
+                ragger::SqliteBackend umgr(reg_db);
                 auto existing = umgr.get_user_by_username(username);
                 if (existing) {
                     umgr.delete_user(username);
@@ -1367,7 +1348,7 @@ int main(int argc, char** argv) {
             
             // Open common database directly (no embedder needed for user management)
             // User management always uses the common DB (/var/ragger/memories.db)
-            ragger::SqliteUserManager umgr(cfg.resolved_common_db_path());
+            ragger::SqliteBackend umgr(cfg.resolved_db_path());
 
             // Verify user exists in DB
             auto user_info = umgr.get_user_by_username(target_user);
@@ -1510,7 +1491,7 @@ int main(int argc, char** argv) {
                 user_db = ragger::expand_path("~/.ragger/memories.db");
             }
 
-            std::string common_db = cfg.resolved_common_db_path();
+            std::string common_db = cfg.resolved_db_path();
 
             if (!fs::exists(user_db)) {
                 std::cerr << "Error: user DB not found at " << user_db << "\n";

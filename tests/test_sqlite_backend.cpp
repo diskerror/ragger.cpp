@@ -367,8 +367,8 @@ void test_search_by_metadata(ragger::Embedder& emb) {
 
 void test_user_management(ragger::Embedder& emb) {
     cleanup();
-    // User management now uses SqliteUserManager (separate from storage backend)
-    ragger::SqliteUserManager umgr(TEMP_DB);
+    // User management now uses SqliteBackend (separate from storage backend)
+    ragger::SqliteBackend umgr(TEMP_DB);
 
     // create_user → returns valid ID
     int user_id = umgr.create_user("testuser", "abc123hash");

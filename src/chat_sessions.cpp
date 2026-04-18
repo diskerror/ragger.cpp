@@ -140,46 +140,20 @@ ChatSession& ChatSessionManager::get_or_create(
 }
 
 std::string ChatSessionManager::load_workspace_files() {
-    // TODO: Make persona file load pattern configurable via common config
-    // Current pattern: SOUL common→user, others user→common (multi-user only)
+    // Single-user mode: read from user directory only
     
     const auto& cfg = config();
     std::string user_dir = expand_path("~/.ragger");
-    std::string common_dir = "/var/ragger";
     std::vector<std::string> files = {"SOUL.md", "USER.md", "AGENTS.md", "TOOLS.md"};
     std::string result;
 
     for (const auto& fname : files) {
         std::string fpath;
         
-        if (cfg.single_user) {
-            // Single-user mode: only read from user directory
-            std::string user_path = user_dir + "/" + fname;
-            if (fs::exists(user_path)) {
-                fpath = user_path;
-            }
-        } else if (fname == "SOUL.md") {
-            // Multi-user SOUL.md: common first (shared personality), user fallback
-            std::string common_path = common_dir + "/SOUL.md";
-            if (fs::exists(common_path)) {
-                fpath = common_path;
-            } else {
-                std::string user_path = user_dir + "/SOUL.md";
-                if (fs::exists(user_path)) {
-                    fpath = user_path;
-                }
-            }
-        } else {
-            // Multi-user other files: user first (override), common fallback
-            std::string user_path = user_dir + "/" + fname;
-            if (fs::exists(user_path)) {
-                fpath = user_path;
-            } else {
-                std::string common_path = common_dir + "/" + fname;
-                if (fs::exists(common_path)) {
-                    fpath = common_path;
-                }
-            }
+        // Single-user mode: only read from user directory
+        std::string user_path = user_dir + "/" + fname;
+        if (fs::exists(user_path)) {
+            fpath = user_path;
         }
         
         if (fs::exists(fpath)) {

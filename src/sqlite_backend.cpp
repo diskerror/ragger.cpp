@@ -1343,4 +1343,237 @@ int SqliteBackend::import_memories(const std::vector<MemoryRecord>& records, int
     return imported;
 }
 
+// --- User management methods (single-user mode) ---
+std::optional<UserInfo> SqliteBackend::get_user_by_username(const std::string& username) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "SELECT id, username, token_hash FROM users WHERE username = ?";
+    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return std::nullopt;
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        UserInfo user;
+        user.id = sqlite3_column_int(stmt, 0);
+        user.username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        const char* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        user.token_hash = hash ? std::string(hash) : "";
+        sqlite3_finalize(stmt);
+        return user;
+    }
+    sqlite3_finalize(stmt);
+    return std::nullopt;
+}
+
+std::optional<std::string> SqliteBackend::get_user_password(const std::string& username) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "SELECT password_hash FROM users WHERE username = ?";
+    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return std::nullopt;
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        sqlite3_finalize(stmt);
+        return hash ? std::make_optional(std::string(hash)) : std::nullopt;
+    }
+    sqlite3_finalize(stmt);
+    return std::nullopt;
+}
+
+void SqliteBackend::update_user_token(const std::string& username, const std::string& new_hash) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "UPDATE users SET token_hash = ? WHERE username = ?";
+    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, new_hash.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(stmt);
+    }
+    sqlite3_finalize(stmt);
+}
+
+void SqliteBackend::create_web_session(const std::string& token, const std::string& username,
+                                        int user_id, int ttl_seconds) {
+    auto now = std::chrono::system_clock::now();
+    auto now_tt = std::chrono::system_clock::to_time_t(now);
+    std::tm now_gm{};
+    gmtime_r(&now_tt, &now_gm);
+    char now_buf[32];
+    std::strftime(now_buf, sizeof(now_buf), "%Y-%m-%dT%H:%M:%SZ", &now_gm);
+    std::string created(now_buf);
+    
+    auto expires_tp = now + std::chrono::seconds(ttl_seconds);
+    auto expires_tt = std::chrono::system_clock::to_time_t(expires_tp);
+    std::tm expires_gm{};
+    gmtime_r(&expires_tt, &expires_gm);
+    char expires_buf[32];
+    std::strftime(expires_buf, sizeof(expires_buf), "%Y-%m-%dT%H:%M:%SZ", &expires_gm);
+    std::string expires(expires_buf);
+    
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "INSERT OR REPLACE INTO web_sessions (token, username, user_id, created, expires) VALUES (?,?,?,?,?)";
+    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 3, user_id);
+        sqlite3_bind_text(stmt, 4, created.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, expires.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(stmt);
+    }
+    sqlite3_finalize(stmt);
+}
+
+std::optional<std::string> SqliteBackend::get_user_preferred_model(const std::string& username) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "SELECT preferred_model FROM users WHERE username = ?";
+    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return std::nullopt;
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* model = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        sqlite3_finalize(stmt);
+        return model ? std::make_optional(std::string(model)) : std::nullopt;
+    }
+    sqlite3_finalize(stmt);
+    return std::nullopt;
+}
+
+void SqliteBackend::update_user_preferred_model(const std::string& username, const std::string& model) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "INSERT OR REPLACE INTO users (username, preferred_model) VALUES (?,?)";
+    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, model.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(stmt);
+    }
+    sqlite3_finalize(stmt);
+}
+
+std::optional<std::string> SqliteBackend::get_user_token_rotated_at(const std::string& username) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "SELECT token_rotated_at FROM users WHERE username = ?";
+    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return std::nullopt;
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* rotated = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        sqlite3_finalize(stmt);
+        return rotated ? std::make_optional(std::string(rotated)) : std::nullopt;
+    }
+    sqlite3_finalize(stmt);
+    return std::nullopt;
+}
+
+void SqliteBackend::update_user_token_rotated_at(const std::string& username, const std::string& timestamp) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "UPDATE users SET token_rotated_at = ? WHERE username = ?";
+    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, timestamp.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(stmt);
+    }
+    sqlite3_finalize(stmt);
+}
+
+int SqliteBackend::create_user(const std::string& username, const std::string& token_hash) {
+    auto now = std::chrono::system_clock::now();
+    auto now_tt = std::chrono::system_clock::to_time_t(now);
+    std::tm now_gm{};
+    gmtime_r(&now_tt, &now_gm);
+    char now_buf[32];
+    std::strftime(now_buf, sizeof(now_buf), "%Y-%m-%dT%H:%M:%SZ", &now_gm);
+    std::string timestamp(now_buf);
+    
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "INSERT INTO users (username, token_hash, created, modified) VALUES (?,?,?,?)";
+    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, token_hash.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, timestamp.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, timestamp.c_str(), -1, SQLITE_TRANSIENT);
+    
+    if (sqlite3_step(stmt) == SQLITE_DONE) {
+        int id = static_cast<int>(sqlite3_last_insert_rowid(pImpl->db));
+        sqlite3_finalize(stmt);
+        return id;
+    }
+    sqlite3_finalize(stmt);
+    return -1;
+}
+
+bool SqliteBackend::delete_user(const std::string& username) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "DELETE FROM users WHERE username = ?";
+    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return false;
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    
+    sqlite3_step(stmt);
+    int changes = sqlite3_changes(pImpl->db);
+    sqlite3_finalize(stmt);
+    return changes > 0;
+}
+
+void SqliteBackend::set_user_password(const std::string& username, const std::string& password_hash) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "UPDATE users SET password_hash = ? WHERE username = ?";
+    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, password_hash.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(stmt);
+    }
+    sqlite3_finalize(stmt);
+}
+
+std::optional<UserInfo> SqliteBackend::get_user_by_token_hash(const std::string& token_hash) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "SELECT id, username, token_hash FROM users WHERE token_hash = ?";
+    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return std::nullopt;
+    sqlite3_bind_text(stmt, 1, token_hash.c_str(), -1, SQLITE_TRANSIENT);
+    
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        UserInfo user;
+        user.id = sqlite3_column_int(stmt, 0);
+        user.username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        const char* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        user.token_hash = hash ? std::string(hash) : "";
+        sqlite3_finalize(stmt);
+        return user;
+    }
+    sqlite3_finalize(stmt);
+    return std::nullopt;
+}
+
+std::optional<UserInfo> SqliteBackend::get_web_session(const std::string& token) {
+    auto now = std::chrono::system_clock::now();
+    auto now_tt = std::chrono::system_clock::to_time_t(now);
+    std::tm now_gm{};
+    gmtime_r(&now_tt, &now_gm);
+    char now_buf[32];
+    std::strftime(now_buf, sizeof(now_buf), "%Y-%m-%dT%H:%M:%SZ", &now_gm);
+    std::string now_str(now_buf);
+    
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "SELECT u.id, u.username, u.token_hash FROM users u JOIN web_sessions ws ON u.id = ws.user_id WHERE ws.token = ? AND ws.expires > ?";
+    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return std::nullopt;
+    sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, now_str.c_str(), -1, SQLITE_TRANSIENT);
+    
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        UserInfo user;
+        user.id = sqlite3_column_int(stmt, 0);
+        user.username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        const char* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        user.token_hash = hash ? std::string(hash) : "";
+        sqlite3_finalize(stmt);
+        return user;
+    }
+    sqlite3_finalize(stmt);
+    return std::nullopt;
+}
+
 } // namespace ragger

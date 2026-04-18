@@ -100,6 +100,47 @@ public:
     /// Import memory records (with raw embeddings). Returns count imported.
     /// If user_id >= 0, the user_id column is set on each inserted row.
     virtual int import_memories(const std::vector<MemoryRecord>& records, int user_id = -1) = 0;
+
+    // --- User management (single-user mode) ---
+    /// Get user info by username. Returns nullopt if not found.
+    virtual std::optional<UserInfo> get_user_by_username(const std::string& username) = 0;
+
+    /// Get hashed password for a user.
+    virtual std::optional<std::string> get_user_password(const std::string& username) = 0;
+
+    /// Update user's token hash.
+    virtual void update_user_token(const std::string& username, const std::string& new_hash) = 0;
+
+    /// Create a web session with given token.
+    virtual void create_web_session(const std::string& token, const std::string& username,
+                                    int user_id, int ttl_seconds) = 0;
+
+    /// Get user's preferred model (empty string if none set).
+    virtual std::optional<std::string> get_user_preferred_model(const std::string& username) = 0;
+
+    /// Set/clear user's preferred model.
+    virtual void update_user_preferred_model(const std::string& username, const std::string& model) = 0;
+
+    /// Get timestamp when token was last rotated.
+    virtual std::optional<std::string> get_user_token_rotated_at(const std::string& username) = 0;
+
+    /// Update the token rotated timestamp.
+    virtual void update_user_token_rotated_at(const std::string& username, const std::string& timestamp) = 0;
+
+    /// Create a new user. Returns user_id or -1 on error.
+    virtual int create_user(const std::string& username, const std::string& token_hash) = 0;
+
+    /// Delete a user by username. Returns true if deleted.
+    virtual bool delete_user(const std::string& username) = 0;
+
+    /// Set/clear password hash for a user.
+    virtual void set_user_password(const std::string& username, const std::string& password_hash) = 0;
+
+    /// Get user info by token hash. Returns nullopt if not found.
+    virtual std::optional<UserInfo> get_user_by_token_hash(const std::string& token_hash) = 0;
+
+    /// Get web session by token. Returns nullopt if not found or expired.
+    virtual std::optional<UserInfo> get_web_session(const std::string& token) = 0;
 };
 
 } // namespace ragger

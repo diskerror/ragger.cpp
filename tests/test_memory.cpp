@@ -67,7 +67,7 @@ void test_search_merging_dual_db() {
 
     // user_db_path is 3rd param — TEMP_DB1 = common, TEMP_DB2 = user
     ragger::RaggerMemory mem(TEMP_DB1, "", TEMP_DB2);
-    assert(mem.is_multi_db());
+    (void)0;
 
     // Store to common DB
     mem.store("The speed of light is 299792458 meters per second.", {}, true);

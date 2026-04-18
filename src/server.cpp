@@ -725,7 +725,7 @@ struct Server::Impl {
                 std::string model = body.value("model", "");
                 if (model.empty()) { res.status = 400; res.set_content("Missing 'model' field", "text/plain"); return; }
                 std::string resolved = config().resolve_model(model);
-                memory.user_manager()->update_user_preferred_model(user->username, resolved);
+                memory.backend()->update_user_preferred_model(user->username, resolved);
                 preload_local_model(resolved);
                 json response = {{"status", "updated"}, {"model", resolved}};
                 log_http("PUT /user/model 200");
@@ -743,7 +743,7 @@ struct Server::Impl {
             auto user = _check_auth(req);
             if (!user) { res.status = 401; res.set_content("Unauthorized", "text/plain"); return; }
             try {
-                auto model_opt = memory.user_manager()->get_user_preferred_model(user->username);
+                auto model_opt = memory.backend()->get_user_preferred_model(user->username);
                 json response = model_opt ? json{{"model", *model_opt}} : json{{"model", nullptr}};
                 log_http("GET /user/model 200");
                 res.set_content(response.dump(), "application/json");
@@ -758,7 +758,7 @@ struct Server::Impl {
             auto user = _check_auth(req);
             if (!user) { res.status = 401; res.set_content("Unauthorized", "text/plain"); return; }
             try {
-                memory.user_manager()->update_user_preferred_model(user->username, "");
+                memory.backend()->update_user_preferred_model(user->username, "");
                 log_http("DELETE /user/model 200");
                 res.set_content(R"({"status":"cleared"})", "application/json");
             } catch (const std::exception& e) {
@@ -804,7 +804,7 @@ struct Server::Impl {
                 tf << new_token << "\n";
                 tf.close();
                 std::string new_hash = ragger::hash_token(new_token);
-                memory.user_manager()->update_user_token(user->username, new_hash);
+                memory.backend()->update_user_token(user->username, new_hash);
                 json response = {{"token", new_token}, {"username", user->username}, {"status", "rotated"}};
                 log_http("POST /user/rotate-token 200");
                 res.set_content(response.dump(), "application/json");
@@ -853,7 +853,7 @@ struct Server::Impl {
                 }
 
                 // Resolve model
-                auto preferred_model = memory.user_manager()->get_user_preferred_model(user->username);
+                auto preferred_model = memory.backend()->get_user_preferred_model(user->username);
                 std::string use_model = preferred_model.value_or("");
                 if (use_model.empty()) use_model = request_model;
                 if (use_model.empty()) use_model = inference_->model;
@@ -1018,13 +1018,13 @@ struct Server::Impl {
                 if (username.empty() || password.empty()) {
                     res.status = 400; res.set_content(R"({"error":"username and password required"})", "application/json"); return;
                 }
-                auto user = memory.user_manager()->get_user_by_username(username);
+                auto user = memory.backend()->get_user_by_username(username);
                 if (!user) { res.status = 401; res.set_content(R"({"error":"invalid credentials"})", "application/json"); return; }
-                auto stored_hash = memory.user_manager()->get_user_password(username);
+                auto stored_hash = memory.backend()->get_user_password(username);
                 if (!stored_hash) { res.status = 401; res.set_content(R"({"error":"no password set — use 'ragger passwd' first"})", "application/json"); return; }
                 if (!verify_password(password, *stored_hash)) { res.status = 401; res.set_content(R"({"error":"invalid credentials"})", "application/json"); return; }
                 std::string session_token = generate_random_token(32);
-                memory.user_manager()->create_web_session(
+                memory.backend()->create_web_session(
                     session_token, username, user->id, WEB_SESSION_TTL);
                 json result = {{"token", session_token}, {"username", username}, {"expires_in", WEB_SESSION_TTL}};
                 log_http("POST /auth/login 200 (" + username + ")");
