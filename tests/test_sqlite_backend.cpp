@@ -11,6 +11,7 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include <print>
 
 namespace fs = std::filesystem;
 
@@ -595,7 +596,7 @@ int main() {
 
     if (!fs::exists(model_dir + "/model.onnx")) {
         std::cerr << "Skipping backend tests: model not found at " << model_dir << "\n";
-        std::cout << "test_sqlite_backend: SKIPPED (no model)\n";
+        std::println("test_sqlite_backend: SKIPPED (no model)");
         return 0;
     }
 
@@ -626,6 +627,6 @@ int main() {
     test_preferred_model(emb);
     test_user_info_includes_preferred_model(emb);
 
-    std::cout << "test_sqlite_backend: all passed\n";
+    std::println("test_sqlite_backend: all passed");
     return 0;
 }

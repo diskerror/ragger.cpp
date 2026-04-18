@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <filesystem>
+#include <print>
 
 namespace fs = std::filesystem;
 
@@ -12,7 +13,7 @@ namespace fs = std::filesystem;
 // -----------------------------------------------------------------------
 
 void test_server_locked_override() {
-    std::cout << "  test_server_locked_override..." << std::flush;
+    std::print("  test_server_locked_override...");
 
     std::string sys_path = "/tmp/ragger_test_system.ini";
     std::string usr_path = "/tmp/ragger_test_user.ini";
@@ -37,11 +38,11 @@ void test_server_locked_override() {
 
     fs::remove(sys_path);
     fs::remove(usr_path);
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_system_ceilings() {
-    std::cout << "  test_system_ceilings..." << std::flush;
+    std::print("  test_system_ceilings...");
 
     std::string sys_path = "/tmp/ragger_test_ceil_sys.ini";
     std::string usr_path = "/tmp/ragger_test_ceil_usr.ini";
@@ -64,11 +65,11 @@ void test_system_ceilings() {
 
     fs::remove(sys_path);
     fs::remove(usr_path);
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_ceiling_zero_means_no_limit() {
-    std::cout << "  test_ceiling_zero_means_no_limit..." << std::flush;
+    std::print("  test_ceiling_zero_means_no_limit...");
 
     std::string sys_path = "/tmp/ragger_test_ceil0_sys.ini";
     std::string usr_path = "/tmp/ragger_test_ceil0_usr.ini";
@@ -91,11 +92,11 @@ void test_ceiling_zero_means_no_limit() {
 
     fs::remove(sys_path);
     fs::remove(usr_path);
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_chat_section_parsing() {
-    std::cout << "  test_chat_section_parsing..." << std::flush;
+    std::print("  test_chat_section_parsing...");
 
     std::string path = "/tmp/ragger_test_chat.ini";
     {
@@ -123,11 +124,11 @@ void test_chat_section_parsing() {
     assert(cfg.chat_chars_per_token == 3.5f);
 
     fs::remove(path);
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_inference_endpoint_parsing() {
-    std::cout << "  test_inference_endpoint_parsing..." << std::flush;
+    std::print("  test_inference_endpoint_parsing...");
 
     std::string path = "/tmp/ragger_test_ep.ini";
     {
@@ -172,17 +173,17 @@ void test_inference_endpoint_parsing() {
     assert(found_local && found_anthropic);
 
     fs::remove(path);
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_single_user_parsing() {
     // DEPRECATED: single_user config option removed - all mode is single-user
-    std::cout << "  test_single_user_parsing (deprecated)..." << std::flush;
-    std::cout << " OK\n";
+    std::print("  test_single_user_parsing (deprecated)...");
+    std::println(" OK");
 }
 
 void test_bool_parsing_variants() {
-    std::cout << "  test_bool_parsing_variants..." << std::flush;
+    std::print("  test_bool_parsing_variants...");
 
     auto test = [](const std::string& val, bool expected) {
         std::string path = "/tmp/ragger_test_bool.ini";
@@ -203,11 +204,11 @@ void test_bool_parsing_variants() {
     test("no", false);
     test("0", false);
 
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_inline_comments() {
-    std::cout << "  test_inline_comments..." << std::flush;
+    std::print("  test_inline_comments...");
 
     std::string path = "/tmp/ragger_test_inline.ini";
     {
@@ -220,11 +221,11 @@ void test_inline_comments() {
     (void)0;
 
     fs::remove(path);
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_common_db_path_parsing() {
-    std::cout << "  test_common_db_path_parsing..." << std::flush;
+    std::print("  test_common_db_path_parsing...");
 
     std::string path = "/tmp/ragger_test_cdb.ini";
     {
@@ -237,11 +238,11 @@ void test_common_db_path_parsing() {
     
 
     fs::remove(path);
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_default_values() {
-    std::cout << "  test_default_values..." << std::flush;
+    std::print("  test_default_values...");
 
     std::string path = "/tmp/ragger_test_defaults.ini";
     {
@@ -272,11 +273,11 @@ void test_default_values() {
     assert(cfg.minimum_chunk_size == 300);
 
     fs::remove(path);
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 int main() {
-    std::cout << "Running config tests:\n";
+    std::print("Running config tests:\n");
 
     test_server_locked_override();
     test_system_ceilings();
@@ -352,6 +353,6 @@ int main() {
     }
     assert(threw);
 
-    std::cout << "test_config: all passed\n";
+    std::println("test_config: all passed\n");
     return 0;
 }

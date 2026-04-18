@@ -22,6 +22,7 @@
 #include <thread>
 #include <iomanip>
 #include <curl/curl.h>
+#include <print>
 
 #include "ProgramOptions.h"
 #include "ragger/auth.h"
@@ -61,7 +62,7 @@ static void do_import(ragger::RaggerMemory& memory,
     auto chunks = ragger::chunk_markdown(text, min_chunk_size);
 
     auto filename = fs::path(filepath).filename().string();
-    std::cout << "Importing " << chunks.size() << " chunks from " << filename << "...\n";
+    std::println("Importing {} chunks from {}...", chunks.size(), filename);
 
     for (size_t i = 0; i < chunks.size(); ++i) {
         nlohmann::json meta = {
@@ -73,9 +74,9 @@ static void do_import(ragger::RaggerMemory& memory,
         if (!chunks[i].section.empty()) meta["section"] = chunks[i].section;
 
         auto id = memory.store(chunks[i].text, meta);
-        std::cout << "  Chunk " << (i + 1) << "/" << chunks.size() << ": " << id << "\n";
+        std::println("  Chunk {}/{}: {}", (i + 1), chunks.size(), id);
     }
-    std::cout << "✓ Imported " << chunks.size() << " chunks\n";
+    std::println("✓ Imported {} chunks", chunks.size());
 }
 
 // -----------------------------------------------------------------------
@@ -172,7 +173,7 @@ static void do_export_docs(ragger::RaggerMemory& memory,
 
     auto all = memory.load_all(collection);
     if (all.empty()) {
-        std::cout << "No documents found in collection '" << collection << "'\n";
+        std::println("No documents found in collection '{}'", collection);
         return;
     }
 
@@ -183,7 +184,7 @@ static void do_export_docs(ragger::RaggerMemory& memory,
         files[source].push_back(&r);
     }
 
-    std::cout << "Exporting " << files.size() << " documents from '" << collection << "'...\n";
+    std::println("Exporting {} documents from '{}'...", files.size(), collection);
 
     for (auto& [source, chunks] : files) {
         std::set<std::string> seen_headings;
@@ -266,10 +267,9 @@ static void do_export_docs(ragger::RaggerMemory& memory,
         auto out_path = fs::path(dest_dir) / fs::path(source).filename();
         std::ofstream f(out_path);
         f << collapsed;
-        std::cout << "  " << fs::path(source).filename().string()
-                  << " (" << chunks.size() << " chunks)\n";
+        std::println("  {} ({} chunks)", fs::path(source).filename().string(), chunks.size());
     }
-    std::cout << "✓ Exported " << files.size() << " documents to " << dest_dir << "\n";
+    std::println("✓ Exported {} documents to {}", files.size(), dest_dir);
 }
 
 static void do_export_memories(ragger::RaggerMemory& memory,
@@ -279,7 +279,7 @@ static void do_export_memories(ragger::RaggerMemory& memory,
 
     auto all = memory.load_all("memory");
     if (all.empty()) {
-        std::cout << "No memories to export\n";
+        std::println("No memories to export");
         return;
     }
 
@@ -299,8 +299,7 @@ static void do_export_memories(ragger::RaggerMemory& memory,
         groups[key].push_back(&r);
     }
 
-    std::cout << "Exporting " << all.size() << " memories ("
-              << groups.size() << " groups by " << group_by << ")...\n";
+    std::println("Exporting {} memories ({} groups by {})...", all.size(), groups.size(), group_by);
 
     for (auto& [key, entries] : groups) {
         auto out_path = fs::path(dest_dir) / (key + ".md");
@@ -320,9 +319,9 @@ static void do_export_memories(ragger::RaggerMemory& memory,
             f << "### " << header << "\n\n" << r->text << "\n\n---\n\n";
         }
 
-        std::cout << "  " << key << ".md (" << entries.size() << " entries)\n";
+        std::println("  {}.md ({} entries)", key, entries.size());
     }
-    std::cout << "✓ Exported " << all.size() << " memories to " << dest_dir << "\n";
+    std::println("✓ Exported {} memories to {}", all.size(), dest_dir);
 }
 
 static void do_export_all(ragger::RaggerMemory& memory,
@@ -348,16 +347,19 @@ static void do_chat(const std::string& db_path, const std::string& model_dir) {
     ragger::InferenceClient inference = ragger::InferenceClient::from_config(cfg);
 
     if (inference._endpoints.empty()) {
-        std::cout << "Error: no inference endpoints configured.\n";
-        std::cout << "Add to ragger.ini:\n\n";
-        std::cout << "  [inference]\n";
-        std::cout << "  api_url = http://localhost:1234/v1\n";
-        std::cout << "  api_key = lmstudio-local\n\n";
-        std::cout << "Or for multiple endpoints:\n\n";
-        std::cout << "  [inference.local]\n";
-        std::cout << "  api_url = http://localhost:1234/v1\n";
-        std::cout << "  api_key = lmstudio-local\n";
-        std::cout << "  models = qwen/*, llama/*\n";
+        std::println("Error: no inference endpoints configured.");
+        std::println("Add to ragger.ini:");
+        std::println("");
+        std::println("  [inference]");
+        std::println("  api_url = http://localhost:1234/v1");
+        std::println("  api_key = lmstudio-local");
+        std::println("");
+        std::println("Or for multiple endpoints:");
+        std::println("");
+        std::println("  [inference.local]");
+        std::println("  api_url = http://localhost:1234/v1");
+        std::println("  api_key = lmstudio-local");
+        std::println("  models = qwen/*, llama/*");
         return;
     }
 
@@ -552,20 +554,20 @@ static int migrate_memories(const std::string& src_path, const std::string& dst_
     // Export matching records from source
     auto records = src.export_memories(filter);
     if (records.empty()) {
-        std::cout << "No matching records in source DB\n";
+        std::println("No matching records in source DB");
         return 0;
     }
 
     if (dry_run) {
-        std::cout << "Would move " << records.size() << " records:\n";
+        std::println("Would move {} records:", records.size());
         int shown = 0;
         for (const auto& r : records) {
             if (shown++ >= 10) {
-                std::cout << "  ... and " << (records.size() - 10) << " more\n";
+                std::println("  ... and {} more", (records.size() - 10));
                 break;
             }
             std::string preview = r.text.substr(0, 70);
-            std::cout << "  id=" << r.id << " " << preview << "...\n";
+            std::println("  id={} {}", r.id, preview);
         }
         return 0;
     }
@@ -573,7 +575,7 @@ static int migrate_memories(const std::string& src_path, const std::string& dst_
     // Resolve user_id for provenance when moving to common
     int user_id = -1;
     if (direction == "to-common") {
-        std::cout << "Note: multi-user mode has been removed. Records will be moved without user_id.\n";
+        std::println("Note: multi-user mode has been removed. Records will be moved without user_id.");
     }
 
     // Import into destination
@@ -585,13 +587,13 @@ static int migrate_memories(const std::string& src_path, const std::string& dst_
     for (const auto& r : records) ids.push_back(static_cast<int>(r.id));
     src.delete_batch(ids);
 
-    std::cout << "Moved " << imported << " records\n";
+    std::println("Moved {} records", imported);
     return 0;
 }
 
 static void do_mcp(ragger::RaggerMemory& memory) {
     auto send_response = [](const nlohmann::json& response) {
-        std::cout << response.dump() << std::endl;
+        std::println("{}", response.dump());
     };
 
     std::string line;
@@ -651,23 +653,23 @@ static void do_mcp(ragger::RaggerMemory& memory) {
             try {
                 auto response = memory.search(line);
                 if (response.results.empty()) {
-                    std::cout << "No results found." << std::endl;
+                    std::println("No results found.");
                 } else {
                     for (size_t i = 0; i < response.results.size(); ++i) {
                         auto& r = response.results[i];
                         auto source = r.metadata.value("source", "");
                         auto collection = r.metadata.value("collection", "");
-                        std::cout << (i + 1) << ". [score: "
-                                  << std::fixed << std::setprecision(3) << r.score << "]";
-                        if (!source.empty()) std::cout << " (" << source << ")";
-                        if (!collection.empty()) std::cout << " [" << collection << "]";
-                        std::cout << "\n   " << r.text.substr(0, 200);
-                        if (r.text.size() > 200) std::cout << "...";
-                        std::cout << "\n\n";
+                        std::print("{}. [score: {:.3f}]", (i + 1), r.score);
+                        if (!source.empty()) std::print(" ({})", source);
+                        if (!collection.empty()) std::print(" [{}]", collection);
+                        std::println("");
+                        std::print("   {}", r.text.substr(0, 200));
+                        if (r.text.size() > 200) std::print("...");
+                        std::println("\n");
                     }
                 }
             } catch (const std::exception& e) {
-                std::cout << "Error: " << e.what() << std::endl;
+                std::println("Error: {}", e.what());
             }
         }
     }
@@ -1046,21 +1048,20 @@ int main(int argc, char** argv) {
             memory_temp.close();
             
             // Warning + confirmation prompt
-            std::cout << "This will re-embed all " << total_count 
-                      << " memories. The server should be stopped first.\n";
+            std::println("This will re-embed all {} memories. The server should be stopped first.", total_count);
             
             bool proceed = false;
             if (opts.count("yes")) {
                 proceed = true;
             } else {
-                std::cout << "Continue? [y/N] ";
+                std::print("Continue? [y/N] ");
                 std::string answer;
                 std::getline(std::cin, answer);
                 proceed = (answer == "y" || answer == "Y");
             }
             
             if (!proceed) {
-                std::cout << "Aborted.\n";
+                std::println("Aborted.");
                 return 0;
             }
             
@@ -1070,7 +1071,7 @@ int main(int argc, char** argv) {
             try {
                 fs::copy_file(actual_db_path, backup_path, 
                              fs::copy_options::overwrite_existing);
-                std::cout << "Database backed up to: " << backup_path << "\n";
+                std::println("Database backed up to: {}", backup_path);
             } catch (const std::exception& e) {
                 std::cerr << "Warning: Failed to create backup: " << e.what() << "\n";
             }
@@ -1082,13 +1083,13 @@ int main(int argc, char** argv) {
 
         } else if (command == "show-embedding-model") {
             ragger::setup_logging(false, false);
-            std::cout << "Model: " << cfg.embedding_model << "\n";
-            std::cout << "Dimensions: " << cfg.embedding_dimensions << "\n";
+            std::println("Model: {}", cfg.embedding_model);
+            std::println("Dimensions: {}", cfg.embedding_dimensions);
             std::string model_path = model_dir.empty() ? cfg.model_dir : model_dir;
             if (!model_path.empty() && fs::is_directory(model_path))
-                std::cout << "Path: " << model_path << "\n";
+                std::println("Path: {}", model_path);
             else
-                std::cout << "Path: (default)\n";
+                std::println("Path: (default)");
 
         } else if (command == "add-self") {
             ragger::setup_logging(false, false);
@@ -1102,12 +1103,12 @@ int main(int argc, char** argv) {
             std::string username(login);
             auto [token, created] = provision_user(username);
             if (created)
-                std::cout << "✓ Created ~/.ragger/token for " << username << "\n";
+                std::println("✓ Created ~/.ragger/token for {}", username);
             else
-                std::cout << "Token already exists for " << username << "\n";
-            std::cout << "\nYour token: " << token << "\n"
-                      << "Use this in your client config (OpenClaw, Claude Desktop, etc.).\n"
-                      << "Token file: ~/.ragger/token\n";
+                std::println("Token already exists for {}", username);
+            std::println("\nYour token: {}", token);
+            std::println("Use this in your client config (OpenClaw, Claude Desktop, etc).");
+            std::println("Token file: ~/.ragger/token");
             // Register directly in DB
             // Note: Multi-user mode removed. These user management commands are deprecated.
             try {
@@ -1118,13 +1119,13 @@ int main(int argc, char** argv) {
                 if (existing) {
                     if (existing->token_hash != token_hash)
                         backend.update_user_token(username, token_hash);
-                    std::cout << "✓ User exists in database (id: " << existing->id << ")\n";
+                    std::println("✓ User exists in database (id: {})", existing->id);
                 } else {
                     int user_id = backend.create_user(username, token_hash);
-                    std::cout << "✓ Registered in database (user_id: " << user_id << ")\n";
+                    std::println("✓ Registered in database (user_id: {})", user_id);
                 }
             } catch (const std::exception& e) {
-                std::cout << "Warning: DB registration deferred (" << e.what() << ")\n";
+                std::println("Warning: DB registration deferred ({})", e.what());
             }
 
         // DEPRECATED: Multi-user mode removed. User management commands are no longer needed.
@@ -1141,9 +1142,9 @@ int main(int argc, char** argv) {
             try {
                 auto [token, created] = provision_user(username);
                 if (created)
-                    std::cout << "✓ Created token for " << username << "\n";
+                    std::println("✓ Created token for {}", username);
                 else
-                    std::cout << "Token already exists for " << username << "\n";
+                    std::println("Token already exists for {}", username);
                 // Add user to ragger group (requires root)
                 if (getuid() == 0) {
 #ifdef __APPLE__
@@ -1152,7 +1153,7 @@ int main(int argc, char** argv) {
                     std::string cmd = "usermod -aG ragger " + username;
 #endif
                     if (std::system(cmd.c_str()) == 0)
-                        std::cout << "✓ Added " << username << " to ragger group\n";
+                        std::println("✓ Added {} to ragger group", username);
                     else
                         std::cerr << "Warning: could not add " << username << " to ragger group\n";
                 }
@@ -1164,17 +1165,17 @@ int main(int argc, char** argv) {
                 if (existing) {
                     if (existing->token_hash != token_hash)
                         umgr.update_user_token(username, token_hash);
-                    std::cout << "✓ User exists in database (id: " << existing->id << ")\n";
+                    std::println("✓ User exists in database (id: {})", existing->id);
                 } else {
                     int user_id = umgr.create_user(username, token_hash);
-                    std::cout << "✓ Registered in database (user_id: " << user_id << ")\n";
+                    std::println("✓ Registered in database (user_id: {})", user_id);
                 }
             } catch (const std::exception& e) {
                 std::cerr << "Error: " << e.what() << "\n";
                 return 1;
             }
-            std::cout << "\nToken file: ~" << username << "/.ragger/token\n"
-                      << "The user will need to update their client config if the token is rotated.\n";
+            std::println("\nToken file: ~{}/.ragger/token", username);
+            std::println("The user will need to update their client config if the token is rotated.");
 #endif
 
         } else if (command == "add-all") {
@@ -1215,14 +1216,14 @@ int main(int argc, char** argv) {
 
                 std::string uname(pw->pw_name);
                 if (!auto_yes) {
-                    std::cout << "  Add " << uname << "? [Y/n] ";
+                    std::print("  Add {}? [Y/n] ", uname);
                     std::string answer;
                     std::getline(std::cin, answer);
                     // Trim
                     while (!answer.empty() && std::isspace(answer.back())) answer.pop_back();
                     while (!answer.empty() && std::isspace(answer.front())) answer.erase(answer.begin());
                     if (!answer.empty() && std::tolower(answer[0]) != 'y') {
-                        std::cout << "  " << uname << ": skipped\n";
+                        std::println("  {}: skipped", uname);
                         continue;
                     }
                 }
@@ -1256,14 +1257,14 @@ int main(int argc, char** argv) {
                     } catch (const std::exception& e) {
                         status += ", db error: " + std::string(e.what());
                     }
-                    std::cout << "  " << uname << ": " << status << "\n";
+                    std::println("  {}: {}", uname, status);
                     ++count;
                 } catch (const std::exception& e) {
-                    std::cout << "  " << uname << ": error (" << e.what() << ")\n";
+                    std::println("  {}: error ({})", uname, e.what());
                 }
             }
             endpwent();
-            std::cout << "✓ Processed " << count << " users\n";
+            std::println("✓ Processed {} users", count);
 
         } else if (command == "remove-user") {
             ragger::setup_logging(false, false);
@@ -1287,9 +1288,9 @@ int main(int argc, char** argv) {
 #endif
                 int rc = std::system(cmd.c_str());
                 if (rc == 0)
-                    std::cout << "✓ Removed " << username << " from ragger group\n";
+                    std::println("✓ Removed {} from ragger group", username);
                 else
-                    std::cout << "  " << username << " was not in ragger group (skipped)\n";
+                    std::println("  {} was not in ragger group (skipped)", username);
             }
 
             // 2. Remove from common database
@@ -1299,9 +1300,9 @@ int main(int argc, char** argv) {
                 auto existing = umgr.get_user_by_username(username);
                 if (existing) {
                     umgr.delete_user(username);
-                    std::cout << "✓ Removed " << username << " from database\n";
+                    std::println("✓ Removed {} from database", username);
                 } else {
-                    std::cout << "  " << username << " not found in database (skipped)\n";
+                    std::println("  {} not found in database (skipped)", username);
                 }
             } catch (const std::exception& e) {
                 std::cerr << "Warning: database removal: " << e.what() << "\n";
@@ -1313,15 +1314,15 @@ int main(int argc, char** argv) {
                 std::string token_path = std::string(pw->pw_dir) + "/.ragger/token";
                 if (fs::exists(token_path)) {
                     fs::remove(token_path);
-                    std::cout << "✓ Removed token (" << token_path << ")\n";
+                    std::println("✓ Removed token ({})", token_path);
                 } else {
-                    std::cout << "  No token file found (skipped)\n";
+                    std::println("  No token file found (skipped)");
                 }
             } else {
-                std::cout << "  User " << username << " not found in system passwd (skipped token)\n";
+                std::println("  User {} not found in system passwd (skipped token)", username);
             }
 
-            std::cout << "\n✓ User " << username << " removed\n";
+            std::println("\n✓ User {} removed", username);
 
         } else if (command == "passwd") {
             ragger::setup_logging(false, false);
@@ -1373,7 +1374,7 @@ int main(int argc, char** argv) {
             // Read new password
             std::string new_pass = read_password("New password: ");
             if (new_pass.empty()) {
-                std::cout << "Password cleared (web UI access disabled).\n";
+                std::println("Password cleared (web UI access disabled).");
                 umgr.set_user_password(target_user, "");
             } else {
                 std::string confirm = read_password("Confirm password: ");
@@ -1383,7 +1384,7 @@ int main(int argc, char** argv) {
                 }
                 std::string hash = ragger::hash_password(new_pass);
                 umgr.set_user_password(target_user, hash);
-                std::cout << "✓ Password updated for " << target_user << "\n";
+                std::println("✓ Password updated for {}", target_user);
             }
 
         } else if (command == "housekeeping") {
@@ -1418,7 +1419,7 @@ int main(int argc, char** argv) {
                 }
                 return 1;
             }
-            std::cout << "✓ Housekeeping triggered (pid " << daemon_pid << ")\n";
+            std::println("✓ Housekeeping triggered (pid {})", daemon_pid);
 
         } else if (command == "reload") {
             // Send SIGHUP to running daemon to reload config
@@ -1446,7 +1447,7 @@ int main(int argc, char** argv) {
                 std::cerr << "Error: failed to signal process: " << strerror(errno) << "\n";
                 return 1;
             }
-            std::cout << "✓ Config reload triggered (pid " << daemon_pid << ")\n";
+            std::println("✓ Config reload triggered (pid {})", daemon_pid);
 
         } else if (command == "move") {
             auto args = opts.getParams("args");
