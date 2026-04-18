@@ -84,21 +84,10 @@ std::string Chat::load_workspace_files(int max_context) {
         max_persona_chars = cfg.chat_max_persona_chars;
     }
     
-    // Multi-user mode requires SOUL.md in common dir
-    if (!cfg.single_user) {
-        std::string soul_path = common_dir + "/SOUL.md";
-        if (!fs::exists(soul_path)) {
-            throw std::runtime_error(
-                "Multi-user mode requires SOUL.md in " + common_dir + "\n"
-                "SOUL.md defines the assistant's personality and must be present for consistent behavior."
-            );
-        }
-    }
-    
-    // File list with priority order and search locations
+    // File list with priority order - user dir first, fall back to common where allowed
     struct FileSpec {
         std::string filename;
-        bool search_common;  // true = allow common dir, false = user only
+        bool search_common;  // true = allow common dir as fallback
     };
     std::vector<FileSpec> file_list = {
         {"SOUL.md", true},
@@ -112,35 +101,15 @@ std::string Chat::load_workspace_files(int max_context) {
     int total_chars = 0;
     
     for (const auto& spec : file_list) {
-        // Find file path based on single_user mode
+        // Single-user mode: user dir first, fall back to common
         std::string path;
-        
-        if (cfg.single_user) {
-            // Single-user mode: user dir first, fall back to common
-            std::string user_candidate = user_dir + "/" + spec.filename;
-            if (fs::exists(user_candidate)) {
-                path = user_candidate;
-            } else if (spec.search_common) {
-                std::string common_candidate = common_dir + "/" + spec.filename;
-                if (fs::exists(common_candidate)) {
-                    path = common_candidate;
-                }
-            }
-        } else {
-            // Multi-user mode: common dir first, NO fallback to user for SOUL.md
-            if (spec.search_common) {
-                std::string common_candidate = common_dir + "/" + spec.filename;
-                if (fs::exists(common_candidate)) {
-                    path = common_candidate;
-                }
-            }
-            // For non-SOUL files with search_common, fall back to user
-            // For SOUL.md in multi-user mode, stop here (no fallback)
-            if (path.empty() && (spec.filename != "SOUL.md" || !spec.search_common)) {
-                std::string user_candidate = user_dir + "/" + spec.filename;
-                if (fs::exists(user_candidate)) {
-                    path = user_candidate;
-                }
+        std::string user_candidate = user_dir + "/" + spec.filename;
+        if (fs::exists(user_candidate)) {
+            path = user_candidate;
+        } else if (spec.search_common) {
+            std::string common_candidate = common_dir + "/" + spec.filename;
+            if (fs::exists(common_candidate)) {
+                path = common_candidate;
             }
         }
         

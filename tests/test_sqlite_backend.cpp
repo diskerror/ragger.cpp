@@ -7,7 +7,6 @@
 #include "ragger/config.h"
 #include "ragger/embedder.h"
 #include "ragger/sqlite_backend.h"
-#include "ragger/sqlite_user_manager.h"
 #include "ragger/auth.h"
 #include <cassert>
 #include <filesystem>
@@ -618,7 +617,6 @@ int main() {
     test_delete_memory(emb);
     test_delete_batch(emb);
     test_search_by_metadata(emb);
-    test_user_management(emb);
     test_delete_respects_keep(emb);
     test_delete_batch_respects_keep(emb);
     test_timestamp_format(emb);

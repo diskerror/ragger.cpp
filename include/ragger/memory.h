@@ -10,7 +10,6 @@
 #include <vector>
 
 #include "storage_backend.h"
-#include "user_manager.h"
 
 namespace ragger {
 
@@ -19,26 +18,22 @@ using json = nlohmann::json;
 class RaggerMemory {
 public:
     /// Construct with optional override for DB path and model dir.
-    /// If user_db_path is set, db_path = common DB, user_db_path = user's private DB.
     explicit RaggerMemory(const std::string& db_path = "",
                           const std::string& model_dir = "",
                           const std::string& user_db_path = "");
     ~RaggerMemory();
 
-    /// Store a memory. In multi-DB mode, stores to user DB unless common=true.
+    /// Store a memory. Stores to the configured DB.
     std::string    store(const std::string& text, json metadata = {},
                          bool common = false);
 
-    /// Search. In multi-DB mode, merges results from both DBs by score.
+    /// Search. Returns results from the single configured DB.
     SearchResponse search(const std::string& query,
                           int limit = 5,
                           float min_score = 0.0f,
                           std::vector<std::string> collections = {});
-    /// Total count across all DBs.
+    /// Total count in the single DB.
     int  count() const;
-
-    /// True if operating with separate common + user databases.
-    bool is_multi_db() const { return user_backend_ != nullptr; }
 
     /// Load all memories (for export). Optionally filter by collection.
     std::vector<SearchResult> load_all(const std::string& collection = "");
@@ -52,46 +47,25 @@ public:
     /// Get distinct collection names.
     std::vector<std::string> collections() const;
 
-    /// Delete a memory by ID. In multi-DB mode, tries user DB first, then common.
-    /// Returns true if deleted from either DB.
+    /// Delete a memory by ID.
     bool delete_memory(int memory_id);
 
-    /// Delete multiple memories by ID. In multi-DB mode, tries user DB first, then common.
-    /// Returns total count deleted from both DBs.
+    /// Delete multiple memories by ID.
     int delete_batch(const std::vector<int>& memory_ids);
 
-    /// Search by metadata field matching. In multi-DB mode, merges results from both DBs.
+    /// Search by metadata field matching.
     std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit = 0,
                                                  const std::string& after = "",
                                                  const std::string& before = "");
 
-    /// Create a user-scoped view sharing this instance's embedder and common backend.
-    /// Opens ~username/.ragger/memories.db as the user's private DB.
-    /// Returns nullptr if no user DB exists (caller should fall back to this instance).
-    std::unique_ptr<RaggerMemory> for_user(const std::string& username);
-
     /// Access primary backend (for storage operations).
     StorageBackend* backend() { return backend_.get(); }
-    StorageBackend* user_backend() { return user_backend_.get(); }
-
-    /// Access user manager (for user/auth/session operations).
-    UserManager* user_manager() { return user_manager_.get(); }
 
     void close();
 
-    /// Resolve a username to their home directory (macOS + Linux).
-    static std::string resolve_user_home(const std::string& username);
-
 private:
-    /// Private constructor for for_user() — shares embedder and common backend.
-    RaggerMemory(Embedder* shared_embedder, StorageBackend* shared_common,
-                 const std::string& user_db_path);
-
-    Embedder*                      shared_embedder_{nullptr}; // non-owning, set by for_user()
     std::unique_ptr<Embedder>      embedder_;
-    std::unique_ptr<StorageBackend> backend_;      // common DB (or only DB in single-user)
-    std::unique_ptr<StorageBackend> user_backend_;  // user's private DB (nullptr = single-user)
-    std::unique_ptr<UserManager>    user_manager_;  // user/auth management (common DB)
+    std::unique_ptr<StorageBackend> backend_;      // single user DB
 };
 
 } // namespace ragger

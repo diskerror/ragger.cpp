@@ -189,31 +189,17 @@ struct Server::Impl {
             char cutoff_str[32];
             std::strftime(cutoff_str, sizeof(cutoff_str), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&cutoff_t));
 
-            // Collect user DB paths only for users we hold housekeeping locks for
-            std::vector<std::string> db_paths;
-            {
-                std::lock_guard<std::mutex> hk_lock(housekeeping_locks_mutex_);
-                std::lock_guard<std::mutex> mem_lock(user_memories_mutex_);
-                for (auto& [username, mem] : user_memories_) {
-                    if (mem && mem->user_backend() && housekeeping_locks_.count(username)) {
-                        db_paths.push_back(mem->user_backend()->db_path());
-                    }
+            // Single-user mode: clean up the main memory's DB
+            try {
+                ragger::SqliteBackend temp_backend(memory.backend()->db_path());
+                int deleted = temp_backend.cleanup_old_conversations(max_age_hours);
+                conversations_cleaned += deleted;
+                if (deleted > 0) {
+                    log_info("Cleaned " + std::to_string(deleted)
+                           + " expired conversations from main DB");
                 }
-            }
-
-            for (const auto& db_path : db_paths) {
-                try {
-                    // Re-open the DB with a new backend instance
-                    ragger::SqliteBackend temp_backend(db_path);
-                    int deleted = temp_backend.cleanup_old_conversations(max_age_hours);
-                    conversations_cleaned += deleted;
-                    if (deleted > 0) {
-                        log_info("Cleaned " + std::to_string(deleted)
-                               + " expired conversations from " + db_path);
-                    }
-                } catch (const std::exception& e) {
-                    log_error("Cleanup failed for " + db_path + ": " + e.what());
-                }
+            } catch (const std::exception& e) {
+                log_error(std::string("Cleanup failed for main DB: ") + e.what());
             }
         }
 
@@ -330,42 +316,33 @@ struct Server::Impl {
     }
 
     void bootstrap_auth() {
-        const auto& cfg = config();
+        // Single-user mode: ensure token exists
+        server_token_ = ensure_token();
         
-        if (cfg.single_user) {
-            // Single-user mode: ensure token exists, create default user if needed
-            server_token_ = ensure_token();
+        if (!server_token_.empty()) {
+            std::string token_hash = hash_token(server_token_);
+            auto user = memory.backend()->get_user_by_token_hash(token_hash);
             
-            if (!server_token_.empty()) {
-                std::string token_hash = hash_token(server_token_);
-                auto user = memory.user_manager()->get_user_by_token_hash(token_hash);
+            if (!user) {
+                // Auto-create the single user
+                std::string username = "default";
+                struct passwd* pw = getpwuid(getuid());
+                if (pw) username = pw->pw_name;
                 
-                if (!user) {
-                    // Auto-create the single user
-                    std::string username = "default";
-                    // Try to use actual username
-                    struct passwd* pw = getpwuid(getuid());
-                    if (pw) username = pw->pw_name;
-                    
-                    int user_id = memory.user_manager()->create_user(username, token_hash);
-                    user = UserInfo{user_id, username, token_hash, ""};
-                    log_info("Created user: " + username + " (id=" + std::to_string(user_id) + ")");
-                }
-                default_user_ = user;
+                int user_id = memory.backend()->create_user(username, token_hash);
+                user = UserInfo{user_id, username, token_hash, ""};
+                log_info("Created user: " + username + " (id=" + std::to_string(user_id) + ")");
             }
-        } else {
-            // Multi-user mode: don't create tokens or default users.
-            // Users are provisioned via install.sh / add-user.
-            // Auth is validated per-request against the common DB.
-            log_info("Multi-user mode: auth via provisioned user tokens");
+            default_user_ = user;
         }
+        log_info("Single-user mode initialized");
     }
 
     // --- Web sessions (password login, DB-backed) ---
     static constexpr int WEB_SESSION_TTL = 86400; // 24 hours
 
     std::optional<UserInfo> _check_web_session(const std::string& token) {
-        return memory.user_manager()->get_web_session(token);
+        return memory.backend()->get_web_session(token);
     }
 
     // --- Web root resolution ---
@@ -404,11 +381,6 @@ struct Server::Impl {
         // Extract Authorization header
         auto auth_header = req.get_header_value("Authorization");
         
-        // If single-user mode with no token configured, auth is disabled
-        if (cfg.single_user && server_token_.empty()) {
-            return UserInfo{0, "anonymous", "", ""};
-        }
-        
         // Check cookie for web session token
         if (auth_header.empty()) {
             auto cookie = req.get_header_value("Cookie");
@@ -423,7 +395,7 @@ struct Server::Impl {
                 auto ws = _check_web_session(cookie_token);
                 if (ws) return ws;
                 // Also try as bearer token
-                auto user = memory.user_manager()->get_user_by_token_hash(hash_token(cookie_token));
+                auto user = memory.backend()->get_user_by_token_hash(hash_token(cookie_token));
                 if (user) return user;
             }
             return std::nullopt;
@@ -440,17 +412,17 @@ struct Server::Impl {
         auto ws = _check_web_session(token);
         if (ws) return ws;
 
-        // Hash and lookup in database (works for both modes)
+        // Hash and lookup in database
         std::string token_hash = hash_token(token);
-        auto user = memory.user_manager()->get_user_by_token_hash(token_hash);
+        auto user = memory.backend()->get_user_by_token_hash(token_hash);
         if (user) {
             // Check if token rotation is needed (async, after this request)
             _check_token_rotation(*user);
             return user;
         }
 
-        // Fallback: direct comparison with server token (single-user only)
-        if (cfg.single_user && token == server_token_ && default_user_) {
+        // Fallback: direct comparison with server token
+        if (token == server_token_ && default_user_) {
             return default_user_;
         }
 
@@ -461,8 +433,7 @@ struct Server::Impl {
         const auto& cfg = config();
         if (cfg.token_rotation_minutes <= 0) return;  // Rotation disabled
 
-        auto* umgr = memory.user_manager();
-        auto rotated_at_opt = umgr->get_user_token_rotated_at(user.username);
+        auto rotated_at_opt = memory.backend()->get_user_token_rotated_at(user.username);
 
         // Get current time as ISO timestamp
         auto now = std::chrono::system_clock::now();
@@ -476,7 +447,7 @@ struct Server::Impl {
         bool needs_rotation = false;
         if (!rotated_at_opt) {
             // Never rotated — initialize with current time
-            umgr->update_user_token_rotated_at(user.username, now_str);
+            memory.backend()->update_user_token_rotated_at(user.username, now_str);
             return;
         }
         
@@ -500,9 +471,8 @@ struct Server::Impl {
             std::thread([this, username = user.username, now_str]() {
                 try {
                     auto [new_token, new_hash] = rotate_token_for_user(username);
-                    auto* umgr = memory.user_manager();
-                    umgr->update_user_token(username, new_hash);
-                    umgr->update_user_token_rotated_at(username, now_str);
+                    memory.backend()->update_user_token(username, new_hash);
+                    memory.backend()->update_user_token_rotated_at(username, now_str);
                     log_info("Rotated token for user: " + std::string(username));
                 } catch (const std::exception& e) {
                     log_error(std::string("Token rotation failed for ") + username + ": " + e.what());
@@ -513,31 +483,9 @@ struct Server::Impl {
 
     /// Get per-user memory (or fallback to common).
     /// In single-user mode, always returns the main memory instance.
-    RaggerMemory& _get_memory(const std::string& username) {
-        if (config().single_user) return memory;
-
-        std::lock_guard<std::mutex> lock(user_memories_mutex_);
-        auto it = user_memories_.find(username);
-        if (it != user_memories_.end()) {
-            return it->second ? *it->second : memory;
-        }
-
-        // Try to open user's private DB
-        auto user_mem = memory.for_user(username);
-        if (!user_mem) {
-            // Cache the miss so we don't retry every request
-            user_memories_[username] = nullptr;
-            return memory;
-        }
-
-        // Try to acquire housekeeping lock for this user (only if housekeeping enabled)
-        if (config().housekeeping_interval > 0) {
-            acquire_user_housekeeping_lock(username);
-        }
-
-        auto& ref = *user_mem;
-        user_memories_[username] = std::move(user_mem);
-        return ref;
+    RaggerMemory& _get_memory(const std::string& /*username*/) {
+        // Single-user mode: always return the main memory
+        return memory;
     }
 
     void setup_lm_proxy_routes();
@@ -569,10 +517,6 @@ struct Server::Impl {
             json response = {
                 {"count", mem.count()}
             };
-            if (mem.is_multi_db()) {
-                response["user"] = mem.user_backend()->count();
-                response["common"] = mem.backend()->count();
-            }
             log_http("GET /count 200");
             res.set_content(response.dump(), "application/json");
         });

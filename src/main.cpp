@@ -38,7 +38,6 @@
 #include "ragger/embedder.h"
 #include "ragger/storage_types.h"
 #include "ragger/sqlite_backend.h"
-#include "ragger/sqlite_user_manager.h"
 #include "nlohmann_json.hpp"
 
 using namespace ragger::lang;

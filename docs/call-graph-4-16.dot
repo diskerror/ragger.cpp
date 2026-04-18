@@ -1,0 +1,157 @@
+// Ragger call graph — classes / header-file granularity
+ //
+ // Render:  dot -Tsvg call-graph.dot -o call-graph.svg
+ //          dot -Tpng call-graph.dot -o call-graph.png
+ //
+ // Layout: rankdir=BT so inputs sit at the bottom and the external
+ // inference services sit at the top. Edges point in the direction
+ // of calls (caller -> callee).
+
+digraph RaggerCallGraph {
+    rankdir = BT;
+    bgcolor = "white";
+    splines = ortho;
+    nodesep = 0.35;
+    ranksep = 0.55;
+    fontname = "Helvetica";
+
+    node [
+		shape = box,
+		style = "filled",
+		fillcolor = "white",
+		color = "black",
+		fontname = "Helvetica",
+		fontsize = 10
+    ];
+    edge [
+		color = "black",
+		fontname = "Helvetica",
+		fontsize = 9
+    ];
+
+    // =============================================================
+ //  TOP — external inference services
+ // =============================================================
+
+    inference_service [label = "External inference services\nAnthropic,OpenAI,\nLM Studio, Ollama",   shape = ellipse, style = "filled,bold", fillcolor = "white"];
+
+    // =============================================================
+ //  Inference layer
+ // =============================================================
+    subgraph cluster_inference {
+		label = "Inference layer";
+		style = "dashed";
+		color = "black";
+		fontname = "Helvetica-Bold";
+		fontsize = 11;
+		labelloc = "t";
+
+		inference [label = "inference.h\nInferenceClient"];
+		client [label = "client.h\nRaggerClient\n(HTTP client to our own API)"];
+    }
+
+    // =============================================================
+ //  RAG core
+ // =============================================================
+    subgraph cluster_rag {
+		label = "RAG core";
+		style = "dashed";
+		color = "black";
+		fontname = "Helvetica-Bold";
+		fontsize = 11;
+		labelloc = "t";
+
+		chat [label = "chat.h\nChat REPL"];
+		chat_sessions [label = "chat_sessions.h\nSessionStore"];
+		memory [label = "memory.h\nRaggerMemory"];
+		embedder [label = "embedder.h\nEmbedder"];
+		bm25 [label = "bm25.h\nBM25 ranker"];
+		import [label = "import.h\nChunker"];
+        { rank=max; embedder; bm25; }
+    }
+
+
+    // =============================================================
+ //  Storage / auth
+ // =============================================================
+    subgraph cluster_storage {
+		labelloc = "t";
+		label = "Storage";
+		style = "dashed";
+		color = "black";
+		fontname = "Helvetica-Bold";
+		fontsize = 11;
+		labelloc = "t";
+
+		db_backend [label = "db_backend.h\n(sqlite_backend.h)"];
+		storage [label = "Storage\nClasses"];
+		user_manager [label = "user_manager.h"];
+    }
+
+    // =============================================================
+ //  BOTTOM — inputs
+ // =============================================================
+    subgraph cluster_entry {
+		label = "Entry points (inputs)";
+		style = "dashed";
+		color = "black";
+		fontname = "Helvetica-Bold";
+		fontsize = 11;
+		labelloc = "t";
+
+		cli_input [label = "CLI\n(argv)", shape = ellipse, style = "filled,bold", fillcolor = "white"];
+		http_input [label = "HTTP / MCP\n(requests)", shape = ellipse, style = "filled,bold", fillcolor = "white"];
+		main [label = "main.cpp\nCLI dispatcher"];
+		server [label = "server.h\nhttplib"];
+    }
+
+    // =============================================================
+ //  Pin ranks so the diagram flows bottom -> top correctly.
+ // =============================================================
+
+    // =============================================================
+ //  Edges — caller -> callee
+ // =============================================================
+
+    // Inputs into entry points
+    cli_input -> main;
+    http_input -> server;
+
+    // main dispatches to nearly everything
+    main -> server;
+    main -> chat;
+    main -> import;
+    main -> memory;
+    main -> client;
+    main -> inference;
+    main -> db_backend;
+    main -> user_manager;
+
+    // server — HTTP routes
+    server -> memory;
+    server -> inference;
+    server -> chat_sessions;
+    server -> db_backend;
+
+    // RAG core
+    chat -> inference;
+    chat -> memory;
+    chat_sessions -> db_backend;
+    chat_sessions -> inference;
+
+    memory -> db_backend;
+    memory -> user_manager;
+    memory -> embedder;
+
+    // Storage
+    db_backend -> storage;
+    db_backend -> embedder;
+    db_backend -> bm25;
+    user_manager -> storage;
+
+    // Inference layer to external services
+    inference -> inference_service;
+
+    // client is an HTTP client back into our own server (used by CLI for search/etc.)
+    client -> storage;
+}

@@ -1,0 +1,186 @@
+// Ragger call graph v2 — post-refactoring architecture
+ //
+ // Changes from v1:
+ //   - storage_types.h extracted (SearchResult, UserInfo, MemoryRecord, etc.)
+ //   - StorageBackend abstract interface separates storage contract from SQLite impl
+ //   - UserManager abstract interface separates user/auth from storage
+ //   - SqliteUserManager is the concrete user management implementation
+ //   - SqliteBackend is memory-only (no user management methods)
+ //   - RaggerMemory holds both StorageBackend and UserManager
+ //   - main.cpp / server.cpp route user ops through UserManager interface
+ //   - No raw sqlite3_* calls outside sqlite_backend.cpp / sqlite_user_manager.cpp
+ //
+ // Render:  dot -Tsvg call-graph-4-16-v2.dot -o call-graph-4-16-v2.svg
+ //          dot -Tpng call-graph-4-16-v2.dot -o call-graph-4-16-v2.png
+
+digraph RaggerCallGraph_v2 {
+    rankdir = BT;
+    bgcolor = "white";
+    splines = ortho;
+    nodesep = 0.35;
+    ranksep = 0.60;
+    fontname = "Helvetica";
+
+    node [
+        shape = box,
+        style = "filled",
+        fillcolor = "white",
+        color = "black",
+        fontname = "Helvetica",
+        fontsize = 10
+    ];
+    edge [
+        color = "black",
+        fontname = "Helvetica",
+        fontsize = 9
+    ];
+
+    // =============================================================
+    //  TOP — external inference services
+    // =============================================================
+
+    inference_service [label = "External inference services\nAnthropic, OpenAI,\nLM Studio, Ollama",
+                       shape = ellipse, style = "filled,bold", fillcolor = "white"];
+
+    // =============================================================
+    //  Inference layer
+    // =============================================================
+    subgraph cluster_inference {
+        label = "Inference layer";
+        style = "dashed";
+        color = "black";
+        fontname = "Helvetica-Bold";
+        fontsize = 11;
+        labelloc = "t";
+
+        inference [label = "inference.h\nInferenceClient"];
+        client    [label = "client.h\nRaggerClient\n(HTTP client to own API)"];
+    }
+
+    // =============================================================
+    //  RAG core
+    // =============================================================
+    subgraph cluster_rag {
+        label = "RAG core";
+        style = "dashed";
+        color = "black";
+        fontname = "Helvetica-Bold";
+        fontsize = 11;
+        labelloc = "t";
+
+        chat          [label = "chat.h\nChat REPL"];
+        chat_sessions [label = "chat_sessions.h\nSessionStore"];
+        memory        [label = "memory.h\nRaggerMemory\n(holds StorageBackend\n+ UserManager)"];
+        embedder      [label = "embedder.h\nEmbedder"];
+        bm25          [label = "bm25.h\nBM25 ranker"];
+        import_h      [label = "import.h\nChunker"];
+        { rank=max; embedder; bm25; }
+    }
+
+    // =============================================================
+    //  Storage — interface + implementation
+    // =============================================================
+    subgraph cluster_storage {
+        label = "Storage";
+        style = "dashed";
+        color = "black";
+        fontname = "Helvetica-Bold";
+        fontsize = 11;
+        labelloc = "t";
+
+        storage_types   [label = "storage_types.h\nSearchResult · SearchResponse\nAllEmbeddings · UserInfo\nMemoryRecord · MemoryFilter",
+                          fillcolor = "#f0f0f0"];
+        storage_backend [label = "storage_backend.h\n« interface »\nStorageBackend",
+                          fillcolor = "#e8f4e8", style = "filled,bold"];
+        sqlite_backend  [label = "sqlite_backend.h\nSqliteBackend\n(memory ops only)"];
+    }
+
+    // =============================================================
+    //  User management — interface + implementation
+    // =============================================================
+    subgraph cluster_usermgmt {
+        label = "User management";
+        style = "dashed";
+        color = "black";
+        fontname = "Helvetica-Bold";
+        fontsize = 11;
+        labelloc = "t";
+
+        user_manager      [label = "user_manager.h\n« interface »\nUserManager",
+                            fillcolor = "#e8f4e8", style = "filled,bold"];
+        sqlite_user_mgr   [label = "sqlite_user_manager.h\nSqliteUserManager\n(tokens · passwords\nweb sessions)"];
+    }
+
+    // =============================================================
+    //  BOTTOM — entry points
+    // =============================================================
+    subgraph cluster_entry {
+        label = "Entry points (inputs)";
+        style = "dashed";
+        color = "black";
+        fontname = "Helvetica-Bold";
+        fontsize = 11;
+        labelloc = "t";
+
+        cli_input  [label = "CLI\n(argv)",          shape = ellipse, style = "filled,bold", fillcolor = "white"];
+        http_input [label = "HTTP / MCP\n(requests)", shape = ellipse, style = "filled,bold", fillcolor = "white"];
+        main_cpp   [label = "main.cpp\nCLI dispatcher\n(no raw sqlite3_*)"];
+        server_h   [label = "server.h\nhttplib\n(no raw sqlite3_*)"];
+    }
+
+    // =============================================================
+    //  Edges — caller -> callee
+    //  Dashed = «implements» / inherits
+    //  Solid  = uses / calls
+    // =============================================================
+
+    // Inputs
+    cli_input  -> main_cpp;
+    http_input -> server_h;
+
+    // main dispatches
+    main_cpp -> server_h;
+    main_cpp -> chat;
+    main_cpp -> import_h;
+    main_cpp -> memory;
+    main_cpp -> client;
+    main_cpp -> inference;
+    main_cpp -> sqlite_user_mgr   [xlabel = "user\nprovisioning"];
+
+    // server routes by concern
+    server_h -> memory;
+    server_h -> inference;
+    server_h -> chat_sessions;
+    server_h -> user_manager     [xlabel = "user/auth ops"];
+    server_h -> storage_backend  [xlabel = "memory ops"];
+
+    // RAG core
+    chat          -> inference;
+    chat          -> memory;
+    chat_sessions -> storage_backend;
+    chat_sessions -> inference;
+
+    // RaggerMemory owns both interfaces
+    memory -> storage_backend  [xlabel = "store/search"];
+    memory -> user_manager     [xlabel = "user mgmt"];
+    memory -> embedder;
+
+    // Storage implementations
+    sqlite_backend -> storage_backend [style = dashed, xlabel = "implements", color = "gray50"];
+    sqlite_backend -> storage_types;
+    sqlite_backend -> embedder;
+    sqlite_backend -> bm25;
+
+    storage_backend -> storage_types;
+
+    // User management implementations
+    sqlite_user_mgr -> user_manager  [style = dashed, xlabel = "implements", color = "gray50"];
+    sqlite_user_mgr -> storage_types [xlabel = "uses UserInfo"];
+    user_manager    -> storage_types;
+
+    // Inference to external
+    inference -> inference_service;
+
+    // HTTP client calls back into own server
+    client -> storage_backend;
+}
