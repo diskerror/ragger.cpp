@@ -533,7 +533,7 @@ void test_path_normalization(ragger::Embedder& emb) {
 }
 
 void test_token_rotated_at(ragger::Embedder& emb) {
-    std::cout << "test_token_rotated_at...SKIPPED (debugging)\n";
+    std::println("test_token_rotated_at...SKIPPED (debugging)");
     return;
     // FIXME: This test is causing a segfault. Temporarily disabled for commit.
     /*
@@ -569,12 +569,12 @@ void test_token_rotated_at(ragger::Embedder& emb) {
 
     db.close();
     cleanup();
-    std::cout << " OK\n";
+    std::println(" OK");
     */
 }
 
 void test_preferred_model(ragger::Embedder& emb) {
-    std::cout << "test_preferred_model...SKIPPED (debugging)\n";
+    std::println("test_preferred_model...SKIPPED (debugging)");
     return;
     // FIXME: This test is causing a segfault. Temporarily disabled for commit.
 }

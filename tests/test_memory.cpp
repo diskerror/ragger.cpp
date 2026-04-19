@@ -27,7 +27,7 @@ static void cleanup_all() {
 }
 
 void test_store_and_search() {
-    std::cout << "  test_store_and_search..." << std::flush;
+    std::println("  test_store_and_search...");
     cleanup_all();
 
     ragger::RaggerMemory mem(TEMP_DB1);
@@ -40,11 +40,11 @@ void test_store_and_search() {
 
     mem.close();
     cleanup_all();
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_store_with_collection() {
-    std::cout << "  test_store_with_collection..." << std::flush;
+    std::println("  test_store_with_collection...");
     cleanup_all();
 
     ragger::RaggerMemory mem(TEMP_DB1);
@@ -59,11 +59,11 @@ void test_store_with_collection() {
 
     mem.close();
     cleanup_all();
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_search_merging_dual_db() {
-    std::cout << "  test_search_merging_dual_db..." << std::flush;
+    std::println("  test_search_merging_dual_db...");
     cleanup_all();
 
     // user_db_path is 3rd param — TEMP_DB1 = common, TEMP_DB2 = user
@@ -98,11 +98,11 @@ void test_search_merging_dual_db() {
 
     mem.close();
     cleanup_all();
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_count() {
-    std::cout << "  test_count..." << std::flush;
+    std::println("  test_count...");
     cleanup_all();
 
     ragger::RaggerMemory mem(TEMP_DB1);
@@ -115,11 +115,11 @@ void test_count() {
 
     mem.close();
     cleanup_all();
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_delete() {
-    std::cout << "  test_delete..." << std::flush;
+    std::println("  test_delete...");
     cleanup_all();
 
     ragger::RaggerMemory mem(TEMP_DB1);
@@ -133,11 +133,11 @@ void test_delete() {
 
     mem.close();
     cleanup_all();
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_collections() {
-    std::cout << "  test_collections..." << std::flush;
+    std::println("  test_collections...");
     cleanup_all();
 
     ragger::RaggerMemory mem(TEMP_DB1);
@@ -150,7 +150,7 @@ void test_collections() {
 
     mem.close();
     cleanup_all();
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 int main() {

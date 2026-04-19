@@ -26,7 +26,7 @@ static void cleanup() {
 }
 
 void test_export_basic(ragger::Embedder& emb) {
-    std::print("  test_export_basic..."); std::cout.flush();
+    std::println("  test_export_basic...");
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
 
@@ -45,11 +45,11 @@ void test_export_basic(ragger::Embedder& emb) {
 
     db.close();
     cleanup();
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_export_heading_deduplication(ragger::Embedder& emb) {
-    std::print("  test_export_heading_deduplication..."); std::cout.flush();
+    std::println("  test_export_heading_deduplication...");
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
 
@@ -84,11 +84,11 @@ void test_export_heading_deduplication(ragger::Embedder& emb) {
 
     db.close();
     cleanup();
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_export_by_collection(ragger::Embedder& emb) {
-    std::print("  test_export_by_collection..."); std::cout.flush();
+    std::println("  test_export_by_collection...");
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
 
@@ -108,7 +108,7 @@ void test_export_by_collection(ragger::Embedder& emb) {
 
     db.close();
     cleanup();
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 int main() {

@@ -25,7 +25,7 @@ static void cleanup() {
 }
 
 void test_normalize_home_in_stored_text(ragger::Embedder& emb) {
-    std::cout << "  test_normalize_home_in_stored_text..." << std::flush;
+    std::println("  test_normalize_home_in_stored_text...");
     cleanup();
 
     ragger::SqliteBackend db(emb, TEMP_DB);
@@ -41,11 +41,11 @@ void test_normalize_home_in_stored_text(ragger::Embedder& emb) {
 
     db.close();
     cleanup();
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_normalize_preserves_non_home_paths(ragger::Embedder& emb) {
-    std::cout << "  test_normalize_preserves_non_home_paths..." << std::flush;
+    std::println("  test_normalize_preserves_non_home_paths...");
     cleanup();
 
     ragger::SqliteBackend db(emb, TEMP_DB);
@@ -58,11 +58,11 @@ void test_normalize_preserves_non_home_paths(ragger::Embedder& emb) {
 
     db.close();
     cleanup();
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_normalize_multiple_occurrences(ragger::Embedder& emb) {
-    std::cout << "  test_normalize_multiple_occurrences..." << std::flush;
+    std::println("  test_normalize_multiple_occurrences...");
     cleanup();
 
     ragger::SqliteBackend db(emb, TEMP_DB);
@@ -82,11 +82,11 @@ void test_normalize_multiple_occurrences(ragger::Embedder& emb) {
 
     db.close();
     cleanup();
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_normalize_partial_match_not_replaced(ragger::Embedder& emb) {
-    std::cout << "  test_normalize_partial_match_not_replaced..." << std::flush;
+    std::println("  test_normalize_partial_match_not_replaced...");
     cleanup();
 
     ragger::SqliteBackend db(emb, TEMP_DB);
@@ -104,11 +104,11 @@ void test_normalize_partial_match_not_replaced(ragger::Embedder& emb) {
 
     db.close();
     cleanup();
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_normalize_embedded_in_longer_text(ragger::Embedder& emb) {
-    std::cout << "  test_normalize_embedded_in_longer_text..." << std::flush;
+    std::println("  test_normalize_embedded_in_longer_text...");
     cleanup();
 
     ragger::SqliteBackend db(emb, TEMP_DB);
@@ -125,7 +125,7 @@ void test_normalize_embedded_in_longer_text(ragger::Embedder& emb) {
 
     db.close();
     cleanup();
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 int main() {

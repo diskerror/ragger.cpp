@@ -30,7 +30,7 @@
 #include <print>
 
 void test_server_instantiation() {
-    std::print("  test_server_instantiation..."); std::cout.flush();
+    std::println("  test_server_instantiation...");
 
     // Verify we can create a Server object without crashing
     // This tests the basic pImpl pattern and constructor
@@ -39,7 +39,7 @@ void test_server_instantiation() {
 
     // Skip if no model
     if (!std::filesystem::exists(model_dir + "/model.onnx")) {
-        std::cout << " SKIPPED (no model)\n";
+        std::println(" SKIPPED (no model)");
         return;
     }
 
@@ -55,7 +55,7 @@ void test_server_instantiation() {
     std::filesystem::remove(temp_db + "-wal");
     std::filesystem::remove(temp_db + "-shm");
 
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 // TODO: Add more C++-only server tests here if we extract testable

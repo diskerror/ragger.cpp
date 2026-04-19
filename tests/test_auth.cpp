@@ -15,7 +15,7 @@
 namespace fs = std::filesystem;
 
 void test_hash_token() {
-    std::print("  test_hash_token..."); std::cout.flush();
+    std::println("  test_hash_token...");
 
     // Known SHA-256 of "test" = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
     auto hash = ragger::hash_token("test");
@@ -36,7 +36,7 @@ void test_hash_token() {
 }
 
 void test_generate_token() {
-    std::print("  test_generate_token..."); std::cout.flush();
+    std::println("  test_generate_token...");
 
     auto t1 = ragger::generate_token();
     auto t2 = ragger::generate_token();
@@ -50,7 +50,7 @@ void test_generate_token() {
 }
 
 void test_token_path() {
-    std::print("  test_token_path..."); std::cout.flush();
+    std::println("  test_token_path...");
 
     auto path = ragger::token_path();
     assert(!path.empty());
@@ -60,7 +60,7 @@ void test_token_path() {
 }
 
 void test_load_token() {
-    std::print("  test_load_token..."); std::cout.flush();
+    std::println("  test_load_token...");
 
     // This test depends on whether ~/.ragger/token exists
     // We'll just verify it doesn't crash and returns a string
@@ -71,7 +71,7 @@ void test_load_token() {
 }
 
 void test_ensure_token_with_temp_dir() {
-    std::print("  test_ensure_token_with_temp_dir..."); std::cout.flush();
+    std::println("  test_ensure_token_with_temp_dir...");
 
     // Save original HOME
     const char* original_home = std::getenv("HOME");
@@ -106,7 +106,7 @@ void test_ensure_token_with_temp_dir() {
 }
 
 void test_rotate_token() {
-    std::print("  test_rotate_token..."); std::cout.flush();
+    std::println("  test_rotate_token...");
 
     // Save original HOME
     const char* original_home = std::getenv("HOME");

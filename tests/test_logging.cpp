@@ -52,45 +52,45 @@ int main() {
     ragger::setup_logging(false, true);
 
     // 1. Log files should exist
-    std::cout << "  test_log_files_created..." << std::flush;
+    std::println("  test_log_files_created...");
     assert(fs::exists(TEMP_DIR + "/error.log"));
     assert(fs::exists(TEMP_DIR + "/query.log"));
     assert(fs::exists(TEMP_DIR + "/http.log"));
     assert(fs::exists(TEMP_DIR + "/mcp.log"));
-    std::cout << " OK\n";
+    std::println(" OK");
 
     // 2. Query log writes
-    std::cout << "  test_query_log_writes..." << std::flush;
+    std::println("  test_query_log_writes...");
     ragger::log_query("search query: test embedding lookup");
     auto content = read_file(TEMP_DIR + "/query.log");
     assert(content.find("test embedding lookup") != std::string::npos);
     assert(content.find("[INFO]") != std::string::npos);
-    std::cout << " OK\n";
+    std::println(" OK");
 
     // 3. HTTP log writes
-    std::cout << "  test_http_log_writes..." << std::flush;
+    std::println("  test_http_log_writes...");
     ragger::log_http("POST /store 200");
     content = read_file(TEMP_DIR + "/http.log");
     assert(content.find("POST /store 200") != std::string::npos);
-    std::cout << " OK\n";
+    std::println(" OK");
 
     // 4. MCP log writes
-    std::cout << "  test_mcp_log_writes..." << std::flush;
+    std::println("  test_mcp_log_writes...");
     ragger::log_mcp("tools/list request");
     content = read_file(TEMP_DIR + "/mcp.log");
     assert(content.find("tools/list request") != std::string::npos);
-    std::cout << " OK\n";
+    std::println(" OK");
 
     // 5. Error log writes
-    std::cout << "  test_error_log_writes..." << std::flush;
+    std::println("  test_error_log_writes...");
     ragger::log_error("test error message");
     content = read_file(TEMP_DIR + "/error.log");
     assert(content.find("test error message") != std::string::npos);
     assert(content.find("[ERROR]") != std::string::npos);
-    std::cout << " OK\n";
+    std::println(" OK");
 
     // 6. Timestamp format (YYYY-MM-DD HH:MM:SS.mmm)
-    std::cout << "  test_timestamp_format..." << std::flush;
+    std::println("  test_timestamp_format...");
     content = read_file(TEMP_DIR + "/query.log");
     // Should start with a date like "2026-"
     assert(content.find("202") != std::string::npos);  // year prefix
@@ -99,10 +99,10 @@ int main() {
     assert(dot_pos != std::string::npos);
     // 3 digits after the dot, then space
     assert(content[dot_pos + 4] == ' ');
-    std::cout << " OK\n";
+    std::println(" OK");
 
     // 7. Multiple log entries accumulate
-    std::cout << "  test_log_accumulation..." << std::flush;
+    std::println("  test_log_accumulation...");
     ragger::log_query("query one");
     ragger::log_query("query two");
     ragger::log_query("query three");
@@ -110,7 +110,7 @@ int main() {
     assert(content.find("query one") != std::string::npos);
     assert(content.find("query two") != std::string::npos);
     assert(content.find("query three") != std::string::npos);
-    std::cout << " OK\n";
+    std::println(" OK");
 
     cleanup();
     fs::remove(ini_path);
