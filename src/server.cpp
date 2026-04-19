@@ -417,8 +417,6 @@ struct Server::Impl {
         std::string token_hash = hash_token(token);
         auto user = memory.backend()->get_user_by_token_hash(token_hash);
         if (user) {
-            // Check if token rotation is needed (async, after this request)
-            _check_token_rotation(*user);
             return user;
         }
 
@@ -428,58 +426,6 @@ struct Server::Impl {
         }
 
         return std::nullopt;
-    }
-
-    void _check_token_rotation(const UserInfo& user) {
-        const auto& cfg = config();
-        if (cfg.token_rotation_minutes <= 0) return;  // Rotation disabled
-
-        auto rotated_at_opt = memory.backend()->get_user_token_rotated_at(user.username);
-
-        // Get current time as ISO timestamp
-        auto now = std::chrono::system_clock::now();
-        auto now_tt = std::chrono::system_clock::to_time_t(now);
-        std::tm now_gm{};
-        gmtime_r(&now_tt, &now_gm);
-        char now_buf[32];
-        std::strftime(now_buf, sizeof(now_buf), "%Y-%m-%dT%H:%M:%SZ", &now_gm);
-        std::string now_str(now_buf);
-
-        bool needs_rotation = false;
-        if (!rotated_at_opt) {
-            // Never rotated — initialize with current time
-            memory.backend()->update_user_token_rotated_at(user.username, now_str);
-            return;
-        }
-        
-        // Parse rotated_at timestamp
-        std::string rotated_at = *rotated_at_opt;
-        std::tm rotated_tm{};
-        strptime(rotated_at.c_str(), "%Y-%m-%dT%H:%M:%SZ", &rotated_tm);
-        auto rotated_tp = std::chrono::system_clock::from_time_t(timegm(&rotated_tm));
-        
-        auto age_minutes = std::chrono::duration_cast<std::chrono::minutes>(now - rotated_tp).count();
-        
-        // Grace window: skip rotation if rotated within last 60 seconds
-        if (age_minutes < 1) return;
-        
-        if (age_minutes >= cfg.token_rotation_minutes) {
-            needs_rotation = true;
-        }
-        
-        if (needs_rotation) {
-            // Rotate in background thread to not block this request
-            std::thread([this, username = user.username, now_str]() {
-                try {
-                    auto [new_token, new_hash] = rotate_token_for_user(username);
-                    memory.backend()->update_user_token(username, new_hash);
-                    memory.backend()->update_user_token_rotated_at(username, now_str);
-                    log_info("Rotated token for user: " + std::string(username));
-                } catch (const std::exception& e) {
-                    log_error(std::string("Token rotation failed for ") + username + ": " + e.what());
-                }
-            }).detach();
-        }
     }
 
     /// Get per-user memory (or fallback to common).
@@ -787,30 +733,6 @@ struct Server::Impl {
                 log_http("GET /user/token 200");
                 res.set_content(response.dump(), "application/json");
             } catch (const std::exception& ex) {
-                res.status = 500; res.set_content(std::string("Error: ") + ex.what(), "text/plain");
-            }
-        });
-
-        // POST /user/rotate-token
-        svr.Post("/user/rotate-token", [this](const httplib::Request& req, httplib::Response& res) {
-            auto user = _check_auth(req);
-            if (!user) { res.status = 401; res.set_content("Unauthorized", "text/plain"); return; }
-            try {
-                struct passwd* pw = getpwnam(user->username.c_str());
-                if (!pw) { res.status = 404; res.set_content(R"({"error":"system user not found"})", "application/json"); return; }
-                std::string new_token = ragger::generate_random_token();
-                std::string token_path = std::string(pw->pw_dir) + "/.ragger/token";
-                std::ofstream tf(token_path, std::ios::trunc);
-                if (!tf) { res.status = 500; res.set_content(R"({"error":"cannot write token file"})", "application/json"); return; }
-                tf << new_token << "\n";
-                tf.close();
-                std::string new_hash = ragger::hash_token(new_token);
-                memory.backend()->update_user_token(user->username, new_hash);
-                json response = {{"token", new_token}, {"username", user->username}, {"status", "rotated"}};
-                log_http("POST /user/rotate-token 200");
-                res.set_content(response.dump(), "application/json");
-            } catch (const std::exception& ex) {
-                log_error(std::string("rotate-token failed: ") + ex.what());
                 res.status = 500; res.set_content(std::string("Error: ") + ex.what(), "text/plain");
             }
         });

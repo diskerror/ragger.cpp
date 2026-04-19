@@ -105,66 +105,6 @@ void test_ensure_token_with_temp_dir() {
     std::println(" OK");
 }
 
-void test_rotate_token() {
-    std::println("  test_rotate_token...");
-
-    // Save original HOME
-    const char* original_home = std::getenv("HOME");
-    assert(original_home != nullptr);
-
-    // Create temp directory for testing
-    std::string temp_home = "/tmp/ragger_test_rotate_" + std::to_string(getpid());
-    fs::create_directories(temp_home + "/.ragger");
-
-    // Set temp HOME
-    setenv("HOME", temp_home.c_str(), 1);
-
-    // Create initial token
-    std::string initial_token = ragger::generate_token();
-    std::string token_file = temp_home + "/.ragger/token";
-    std::ofstream f(token_file);
-    f << initial_token << std::endl;
-    f.close();
-
-    // For testing, pass a fake username and ensure HOME is set correctly
-    // The rotate_token_for_user will use $HOME when the username lookup fails
-    std::string test_username = "nonexistent_test_user";
-
-    // Rotate the token
-    auto [new_token, new_hash] = ragger::rotate_token_for_user(test_username);
-
-    // Verify new token is different
-    assert(new_token != initial_token);
-    assert(!new_token.empty());
-    assert(!new_hash.empty());
-
-    // Verify token file was updated
-    std::ifstream f_read(token_file);
-    std::string file_token;
-    std::getline(f_read, file_token);
-    f_read.close();
-    
-    // Trim whitespace
-    size_t start = file_token.find_first_not_of(" \t\r\n");
-    size_t end = file_token.find_last_not_of(" \t\r\n");
-    if (start != std::string::npos) {
-        file_token = file_token.substr(start, end - start + 1);
-    }
-
-    assert(file_token == new_token);
-
-    // Verify hash is correct
-    assert(new_hash == ragger::hash_token(new_token));
-
-    // Clean up
-    fs::remove_all(temp_home);
-
-    // Restore original HOME
-    setenv("HOME", original_home, 1);
-
-    std::println(" OK");
-}
-
 int main() {
     std::println("Running auth tests:");
 
@@ -173,7 +113,6 @@ int main() {
     test_token_path();
     test_load_token();
     test_ensure_token_with_temp_dir();
-    test_rotate_token();
 
     std::println("test_auth: all passed");
     return 0;

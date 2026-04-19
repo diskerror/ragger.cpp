@@ -3,6 +3,8 @@
  */
 #include "ragger/auth.h"
 #include "ragger/config.h"
+#include "ragger/storage_backend.h"
+#include "ragger/storage_types.h"
 
 #include <openssl/sha.h>
 #include <openssl/evp.h>
@@ -14,6 +16,8 @@
 #include <random>
 #include <cstdio>
 #include <cstring>
+#include <chrono>
+#include <mutex>
 #include <pwd.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -133,45 +137,64 @@ std::string ensure_token() {
     return token;
 }
 
-std::pair<std::string, std::string> rotate_token_for_user(const std::string& username) {
-    // Generate new token
-    std::string new_token = generate_token();
-    std::string new_hash = hash_token(new_token);
-    
-    // Determine token file path for the user
-    // For multi-user setup, tokens live in each user's home directory
-    // Get user's home directory
-    std::string user_home;
-    struct passwd* pw = getpwnam(username.c_str());
-    if (pw) {
-        user_home = pw->pw_dir;
-    } else {
-        // Fallback: assume current user if username lookup fails
-        const char* home = std::getenv("HOME");
-        if (home) user_home = home;
+// --- Server secret (for time-seeded token hashing) ---
+
+static std::mutex            g_secret_mutex;
+static std::vector<uint8_t>  g_server_secret;
+
+static const std::vector<uint8_t>& get_server_secret() {
+    std::lock_guard<std::mutex> lock(g_secret_mutex);
+    if (!g_server_secret.empty()) return g_server_secret;
+
+    std::string path = expand_path("~/.ragger/server.secret");
+    if (fs::exists(path)) {
+        std::ifstream f(path, std::ios::binary);
+        g_server_secret.assign(std::istreambuf_iterator<char>(f),
+                               std::istreambuf_iterator<char>());
+        if (g_server_secret.size() == 32) return g_server_secret;
+        g_server_secret.clear();  // corrupt — regenerate
     }
-    
-    if (user_home.empty()) {
-        throw std::runtime_error("Cannot determine home directory for user: " + username);
+
+    fs::create_directories(fs::path(path).parent_path());
+    g_server_secret.resize(32);
+    if (RAND_bytes(g_server_secret.data(), 32) != 1) {
+        throw std::runtime_error("Failed to generate server secret");
     }
-    
-    std::string token_file = user_home + "/.ragger/token";
-    
-    // Ensure .ragger directory exists
-    fs::create_directories(fs::path(token_file).parent_path());
-    
-    // Write new token
-    std::ofstream f(token_file);
-    if (!f.is_open()) {
-        throw std::runtime_error("Failed to write token file: " + token_file);
-    }
-    f << new_token << std::endl;
+
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) throw std::runtime_error("Failed to write server.secret: " + path);
+    f.write(reinterpret_cast<const char*>(g_server_secret.data()), 32);
     f.close();
-    
-    // Set permissions to 0640
-    chmod(token_file.c_str(), 0640);
-    
-    return {new_token, new_hash};
+    chmod(path.c_str(), 0600);
+
+    return g_server_secret;
+}
+
+static int64_t current_epoch_minute() {
+    return std::chrono::duration_cast<std::chrono::minutes>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+static std::string token_for_minute(const std::string& user, int64_t minute) {
+    const auto& secret = get_server_secret();
+    std::string buf;
+    buf.reserve(user.size() + 1 + 20 + 1 + secret.size());
+    buf.append(user);
+    buf.push_back(':');
+    buf.append(std::to_string(minute));
+    buf.push_back(':');
+    buf.append(reinterpret_cast<const char*>(secret.data()), secret.size());
+    return hash_token(buf);
+}
+
+static std::string iso_timestamp(std::chrono::system_clock::time_point tp) {
+    auto tt = std::chrono::system_clock::to_time_t(tp);
+    std::tm gm{};
+    gmtime_r(&tt, &gm);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &gm);
+    return buf;
 }
 
 // PBKDF2 password hashing
@@ -256,6 +279,58 @@ bool verify_password(const std::string& password, const std::string& stored_hash
     // Constant-time comparison
     return CRYPTO_memcmp(key, expected_key.data(),
                          std::min(static_cast<size_t>(PBKDF2_KEY_LEN), expected_key.size())) == 0;
+}
+
+// --- DB-backed API ---
+
+void useradd(StorageBackend& db, const std::string& user, const std::string& pw) {
+    std::string pwhash = hash_password(pw);
+    auto existing = db.get_user_by_username(user);
+    if (existing) {
+        db.set_user_password(user, pwhash);
+    } else {
+        // create_user takes a token_hash; leave it empty until issue_token is called
+        db.create_user(user, "");
+        db.set_user_password(user, pwhash);
+    }
+}
+
+void userdel(StorageBackend& db, const std::string& user) {
+    db.delete_user(user);
+}
+
+bool verify_password(StorageBackend& db, const std::string& user, const std::string& pw) {
+    auto stored = db.get_user_password(user);
+    if (!stored || stored->empty()) return false;
+    return verify_password(pw, *stored);
+}
+
+std::string issue_token(StorageBackend& db, const std::string& user) {
+    int64_t minute = current_epoch_minute();
+    std::string token = token_for_minute(user, minute);
+    // The token IS the hash — there's no separate raw token. Clients send
+    // this value back as their credential; the server re-derives candidate
+    // hashes for the 24h window and matches.
+    db.update_user_token(user, token);
+    db.update_user_token_rotated_at(user,
+        iso_timestamp(std::chrono::system_clock::now()));
+    return token;
+}
+
+AuthResult verify_token(StorageBackend& db, const std::string& token) {
+    auto user_info = db.get_user_by_token_hash(token);
+    if (!user_info) return {};
+
+    auto rotated_at = db.get_user_token_rotated_at(user_info->username);
+    if (!rotated_at) return {};
+
+    std::tm tm{};
+    if (!strptime(rotated_at->c_str(), "%Y-%m-%dT%H:%M:%SZ", &tm)) return {};
+    auto rotated_tp = std::chrono::system_clock::from_time_t(timegm(&tm));
+    auto age = std::chrono::system_clock::now() - rotated_tp;
+    if (age > std::chrono::hours(24)) return {};
+
+    return {true, user_info->username};
 }
 
 } // namespace ragger
