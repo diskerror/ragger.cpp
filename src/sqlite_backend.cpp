@@ -1432,8 +1432,9 @@ std::optional<std::string> SqliteBackend::get_user_preferred_model(const std::st
     
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         const char* model = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        auto result = model ? std::make_optional(std::string(model)) : std::nullopt;
         sqlite3_finalize(stmt);
-        return model ? std::make_optional(std::string(model)) : std::nullopt;
+        return result;
     }
     sqlite3_finalize(stmt);
     return std::nullopt;
@@ -1459,8 +1460,9 @@ std::optional<std::string> SqliteBackend::get_user_token_rotated_at(const std::s
     
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         const char* rotated = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        auto result = rotated ? std::make_optional(std::string(rotated)) : std::nullopt;
         sqlite3_finalize(stmt);
-        return rotated ? std::make_optional(std::string(rotated)) : std::nullopt;
+        return result;
     }
     sqlite3_finalize(stmt);
     return std::nullopt;

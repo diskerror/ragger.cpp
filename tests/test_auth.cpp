@@ -4,6 +4,7 @@
  * Tests token generation, hashing, and persistence.
  */
 #include "ragger/auth.h"
+#include "ragger/sqlite_backend.h"
 #include <cassert>
 #include <cstdlib>
 #include <filesystem>
@@ -105,6 +106,82 @@ void test_ensure_token_with_temp_dir() {
     std::println(" OK");
 }
 
+void test_useradd_and_verify_password() {
+    std::print("  test_useradd_and_verify_password...");
+    
+    std::string db_path = "/tmp/ragger_test_auth_useradd.db";
+    fs::remove(db_path);
+    {
+        ragger::SqliteBackend db(db_path);
+        ragger::useradd(db, "alice", "correct-horse");
+        assert(ragger::verify_password(db, "alice", "correct-horse"));
+        assert(!ragger::verify_password(db, "alice", "wrong-password"));
+        assert(!ragger::verify_password(db, "bob", "anything")); // no such user
+    }
+    fs::remove(db_path);
+    std::println(" OK");
+}
+
+void test_useradd_update_existing() {
+    std::print("  test_useradd_update_existing...");
+    
+    std::string db_path = "/tmp/ragger_test_auth_update.db";
+    fs::remove(db_path);
+    {
+        ragger::SqliteBackend db(db_path);
+        ragger::useradd(db, "alice", "pw1");
+        ragger::useradd(db, "alice", "pw2"); // same user, new password — should update
+        assert(ragger::verify_password(db, "alice", "pw2"));
+        assert(!ragger::verify_password(db, "alice", "pw1"));
+    }
+    fs::remove(db_path);
+    std::println(" OK");
+}
+
+void test_userdel() {
+    std::print("  test_userdel...");
+    
+    std::string db_path = "/tmp/ragger_test_auth_del.db";
+    fs::remove(db_path);
+    {
+        ragger::SqliteBackend db(db_path);
+        ragger::useradd(db, "alice", "pw");
+        ragger::userdel(db, "alice");
+        assert(!ragger::verify_password(db, "alice", "pw"));
+        // userdel should not throw on nonexistent user
+        ragger::userdel(db, "nonexistent");
+    }
+    fs::remove(db_path);
+    std::println(" OK");
+}
+
+void test_token_roundtrip() {
+    std::print("  test_token_roundtrip...");
+    
+    std::string db_path = "/tmp/ragger_test_auth_tokens.db";
+    fs::remove(db_path);
+    {
+        ragger::SqliteBackend db(db_path);
+        ragger::useradd(db, "alice", "pw");
+        auto token = ragger::issue_token(db, "alice");
+        assert(!token.empty());
+        
+        // FIXME: verify_token is failing even for valid tokens.
+        // This appears to be a bug in the token verification logic,
+        // possibly related to token rotation timestamp handling or
+        // time-seeded token hashing. The token is issued correctly
+        // and stored in the database, but verify_token returns false.
+        auto result = ragger::verify_token(db, token);
+        assert(result.ok);  // BUG: This assertion fails - investigate verify_token logic
+        assert(result.username == "alice");
+        
+        auto bad = ragger::verify_token(db, "not-a-real-token");
+        assert(!bad.ok);
+    }
+    fs::remove(db_path);
+    std::println(" OK");
+}
+
 int main() {
     std::println("Running auth tests:");
 
@@ -113,6 +190,11 @@ int main() {
     test_token_path();
     test_load_token();
     test_ensure_token_with_temp_dir();
+
+    test_useradd_and_verify_password();
+    test_useradd_update_existing();
+    test_userdel();
+    test_token_roundtrip();
 
     std::println("test_auth: all passed");
     return 0;
