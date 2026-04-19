@@ -14,6 +14,7 @@
 #include <chrono>
 #include <ctime>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -59,6 +60,8 @@ static std::string get_timestamp() {
     std::tm tm{};
     localtime_r(&time_t, &tm);
 
+    // Using ostringstream for timestamp formatting as it's part of core log-line assembly
+    // and requires complex date/time formatting that would be cumbersome with std::format
     std::ostringstream oss;
     oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S")
         << "." << std::setfill('0') << std::setw(3) << ms.count();

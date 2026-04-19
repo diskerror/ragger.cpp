@@ -4,6 +4,7 @@
 #include "ragger/client.h"
 
 #include <cstring>
+#include <format>
 #include <stdexcept>
 #include <sstream>
 #include <sys/socket.h>
@@ -227,28 +228,25 @@ RaggerClient::HttpResponse RaggerClient::http_request(const std::string& method,
     }
     
     // Build HTTP request
-    std::ostringstream request;
-    request << method << " " << path << " HTTP/1.1\r\n";
-    request << "Host: " << host_ << ":" << port_ << "\r\n";
-    request << "Content-Type: application/json\r\n";
+    std::string request = std::format("{0} {1} HTTP/1.1\r\nHost: {2}:{3}\r\nContent-Type: application/json\r\n", method, path, host_, port_);
     
     if (!token_.empty()) {
-        request << "Authorization: Bearer " << token_ << "\r\n";
+        request += std::format("Authorization: Bearer {} \r\n", token_);
     }
     
     if (!body.empty()) {
-        request << "Content-Length: " << body.length() << "\r\n";
+        request += std::format("Content-Length: {} \r\n", body.length());
     }
     
-    request << "Connection: close\r\n";
-    request << "\r\n";
+    request += "Connection: close\r\n";
+    request += "\r\n";
     
     if (!body.empty()) {
-        request << body;
+        request += body;
     }
     
     // Send request
-    std::string req_str = request.str();
+    std::string req_str = request;
     ssize_t sent = send(sock, req_str.c_str(), req_str.length(), 0);
     if (sent < 0) {
         close(sock);

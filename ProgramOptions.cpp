@@ -3,6 +3,7 @@
 //
 
 #include "ProgramOptions.h"
+#include <format>
 #include <sstream>
 
 namespace Diskerror {

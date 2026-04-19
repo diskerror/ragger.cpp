@@ -23,6 +23,7 @@
 #include <iostream>
 #include <optional>
 #include <pwd.h>
+#include <format>
 #include <sstream>
 #include <thread>
 #include <unordered_map>
@@ -261,7 +262,7 @@ struct Server::Impl {
                     if (g_config_reload_requested.exchange(false)) {
                         int n = reload_config();
                         if (n > 0) {
-                            log_info("Config reloaded: " + std::to_string(n) + " value(s) changed");
+                            log_info(std::format("Config reloaded: {} value(s) changed", n));
                             // Re-initialize inference client if endpoints changed
                             try {
                                 inference_ = std::make_unique<InferenceClient>(
