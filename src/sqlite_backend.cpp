@@ -1373,8 +1373,9 @@ std::optional<std::string> SqliteBackend::get_user_password(const std::string& u
     
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         const char* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        std::string result = hash ? std::string(hash) : "";
         sqlite3_finalize(stmt);
-        return hash ? std::make_optional(std::string(hash)) : std::nullopt;
+        return !result.empty() ? std::make_optional(result) : std::nullopt;
     }
     sqlite3_finalize(stmt);
     return std::nullopt;

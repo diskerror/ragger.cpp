@@ -832,6 +832,8 @@ int main(int argc, char** argv) {
         std::cout << "                     filters: --ids, --source, --collection, --category\n";
         std::cout << "                     options: --user <name>, --dry-run\n";
         // cleanup verb removed — use SQLite CLI or agent-mediated deletion
+        std::cout << "  useradd <username>  Add or update a user account (prompts for password)\n";
+        std::cout << "  userdel <username>  Remove a user account\n";
         std::cout << "  rebuild-bm25       Rebuild the BM25 keyword index\n";
         std::cout << "  rebuild-embeddings Rebuild embeddings for all memories\n";
         std::cout << "  show-embedding-model  Show current embedding model info\n";
@@ -1090,6 +1092,49 @@ int main(int argc, char** argv) {
                 std::println("Path: {}", model_path);
             else
                 std::println("Path: (default)");
+
+        } else if (command == "useradd") {
+            ragger::setup_logging(false, false);
+            auto args = opts.getParams("args");
+            if (args.empty()) {
+                std::cerr << "Usage: ragger useradd <username>\n";
+                return 1;
+            }
+            std::string username = args[0];
+            
+            // Read password with echo disabled
+            std::string password = read_password("Password: ");
+            if (password.empty()) {
+                std::cerr << "Error: password cannot be empty\n";
+                return 1;
+            }
+            
+            try {
+                ragger::SqliteBackend storage(cfg.resolved_db_path());
+                ragger::useradd(storage, username, password);
+                std::println("✓ User {} added/updated", username);
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << "\n";
+                return 1;
+            }
+
+        } else if (command == "userdel") {
+            ragger::setup_logging(false, false);
+            auto args = opts.getParams("args");
+            if (args.empty()) {
+                std::cerr << "Usage: ragger userdel <username>\n";
+                return 1;
+            }
+            std::string username = args[0];
+
+            try {
+                ragger::SqliteBackend storage(cfg.resolved_db_path());
+                ragger::userdel(storage, username);
+                std::println("✓ User {} removed", username);
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << "\n";
+                return 1;
+            }
 
         } else if (command == "add-self") {
             ragger::setup_logging(false, false);

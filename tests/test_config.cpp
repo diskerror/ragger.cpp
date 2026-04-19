@@ -176,9 +176,35 @@ void test_inference_endpoint_parsing() {
     std::println(" OK");
 }
 
-void test_single_user_parsing() {
-    // DEPRECATED: single_user config option removed - all mode is single-user
-    std::print("  test_single_user_parsing (deprecated)...");
+void test_socket_bind_config() {
+    std::print("  test_socket_bind_config...");
+
+    // Test: socket only, no bind leaves bind_address empty
+    std::string path1 = "/tmp/ragger_test_socket.ini";
+    {
+        std::ofstream f(path1);
+        f << "[server]\n"
+          << "socket = /tmp/test.sock\n";
+    }
+
+    ragger::Config cfg1 = ragger::load_config(path1).value();
+    assert(cfg1.bind_address.empty());  // bind should be empty when only socket is set
+    fs::remove(path1);
+
+    // Test: bind + port populate both fields
+    std::string path2 = "/tmp/ragger_test_bind.ini";
+    {
+        std::ofstream f(path2);
+        f << "[server]\n"
+          << "bind = 0.0.0.0\n"
+          << "port = 9000\n";
+    }
+
+    ragger::Config cfg2 = ragger::load_config(path2).value();
+    assert(cfg2.bind_address == "0.0.0.0");
+    assert(cfg2.port == 9000);
+    fs::remove(path2);
+
     std::println(" OK");
 }
 
@@ -224,22 +250,7 @@ void test_inline_comments() {
     std::println(" OK");
 }
 
-void test_common_db_path_parsing() {
-    std::print("  test_common_db_path_parsing...");
 
-    std::string path = "/tmp/ragger_test_cdb.ini";
-    {
-        std::ofstream f(path);
-        f << "[server]\nport = 8432\n"
-          << "[storage]\ncommon_db_path = /data/shared/memories.db\n";
-    }
-
-    ragger::Config cfg = ragger::load_config(path).value();
-    
-
-    fs::remove(path);
-    std::println(" OK");
-}
 
 void test_default_values() {
     std::print("  test_default_values...");
@@ -284,10 +295,10 @@ int main() {
     test_ceiling_zero_means_no_limit();
     test_chat_section_parsing();
     test_inference_endpoint_parsing();
-    test_single_user_parsing();
+    test_socket_bind_config();
     test_bool_parsing_variants();
     test_inline_comments();
-    test_common_db_path_parsing();
+
     test_default_values();
 
     // expand_path with ~
