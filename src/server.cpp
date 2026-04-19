@@ -376,9 +376,25 @@ struct Server::Impl {
         return "application/octet-stream";
     }
 
+    /// True if this request must present a valid token. False for requests
+    /// arriving on the unix socket (empty remote_addr) or from localhost.
+    bool request_requires_auth(const httplib::Request& req) const {
+        if (req.remote_addr.empty()) return false;  // unix socket
+        if (req.remote_addr == "127.0.0.1" || req.remote_addr == "::1") {
+            return false;
+        }
+        return true;
+    }
+
     std::optional<UserInfo> _check_auth(const httplib::Request& req) {
         const auto& cfg = config();
-        
+
+        // Auth bypass: unix socket and localhost requests are pre-authenticated
+        // as the default (single) user.
+        if (!request_requires_auth(req) && default_user_) {
+            return default_user_;
+        }
+
         // Extract Authorization header
         auto auth_header = req.get_header_value("Authorization");
         
@@ -1057,16 +1073,23 @@ static bool is_port_available(const std::string& host, int port) {
 }
 
 void Server::run() {
-    if (!is_port_available(pImpl->host, pImpl->port)) {
+    const auto& cfg = config();
+    const bool use_unix = !cfg.socket_path.empty();
+
+    if (!use_unix && !is_port_available(pImpl->host, pImpl->port)) {
         log_error(std::string(lang::ERR_PORT_IN_USE_1) + std::to_string(pImpl->port) + lang::ERR_PORT_IN_USE_2);
         std::exit(1);
     }
 
-    std::string addr = pImpl->host + ":" + std::to_string(pImpl->port);
+    std::string addr = use_unix
+        ? expand_path(cfg.socket_path)
+        : (pImpl->host + ":" + std::to_string(pImpl->port));
     log_info(std::string(lang::MSG_SERVER_STARTING) + addr);
-    log_info("  Health check: curl http://" + addr + "/health");
-    
-    const auto& cfg = config();
+    if (!use_unix) {
+        log_info("  Health check: curl http://" + addr + "/health");
+    } else {
+        log_info("  Health check: curl --unix-socket " + addr + " http://localhost/health");
+    }
 
     // TLS support — if certs configured, create SSLServer instead
     // Note: httplib::Server is already created in Impl. For TLS we'd need
@@ -1102,7 +1125,30 @@ void Server::run() {
     // Start housekeeping timer (runs every 60s + on SIGUSR1)
     pImpl->start_housekeeping_timer();
 
-    pImpl->svr.listen(pImpl->host, pImpl->port);
+    if (use_unix) {
+        std::string sock_path = expand_path(cfg.socket_path);
+        fs::create_directories(fs::path(sock_path).parent_path());
+        std::filesystem::remove(sock_path);  // clear stale socket
+        pImpl->svr.set_address_family(AF_UNIX);
+
+        // Chmod the socket 0600 once it appears. httplib::listen blocks,
+        // so do this from a short-lived helper thread.
+        std::thread chmod_thread([sock_path]() {
+            for (int i = 0; i < 50; ++i) {  // up to ~1s
+                if (std::filesystem::exists(sock_path)) {
+                    ::chmod(sock_path.c_str(), 0600);
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            log_info("Unix socket chmod 0600 timed out; check " + sock_path);
+        });
+        chmod_thread.detach();
+
+        pImpl->svr.listen(sock_path, 0);  // port ignored for AF_UNIX
+    } else {
+        pImpl->svr.listen(pImpl->host, pImpl->port);
+    }
 
     // Cleanup
     pImpl->stop_housekeeping_timer();
