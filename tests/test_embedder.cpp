@@ -11,9 +11,10 @@
 #include <cmath>
 #include <iostream>
 #include <numeric>
+#include <print>
 
 void test_output_shape(ragger::Embedder& emb) {
-    std::cout << "  test_output_shape..." << std::flush;
+    std::print("  test_output_shape..."); std::cout.flush();
     auto vec = emb.encode("test text");
     assert(vec.size() == 384);
     assert(emb.dimensions() == 384);
@@ -21,7 +22,7 @@ void test_output_shape(ragger::Embedder& emb) {
 }
 
 void test_deterministic(ragger::Embedder& emb) {
-    std::cout << "  test_deterministic..." << std::flush;
+    std::print("  test_deterministic..."); std::cout.flush();
     auto v1 = emb.encode("hello world");
     auto v2 = emb.encode("hello world");
     assert(v1.size() == v2.size());
@@ -32,7 +33,7 @@ void test_deterministic(ragger::Embedder& emb) {
 }
 
 void test_different_texts_different_vectors(ragger::Embedder& emb) {
-    std::cout << "  test_different_texts_different_vectors..." << std::flush;
+    std::print("  test_different_texts_different_vectors..."); std::cout.flush();
     auto v1 = emb.encode("hello world");
     auto v2 = emb.encode("goodbye moon");
     // At least some dimensions must differ
@@ -48,7 +49,7 @@ void test_different_texts_different_vectors(ragger::Embedder& emb) {
 }
 
 void test_unit_normalized(ragger::Embedder& emb) {
-    std::cout << "  test_unit_normalized..." << std::flush;
+    std::print("  test_unit_normalized..."); std::cout.flush();
     auto vec = emb.encode("test normalization");
     float sum_sq = 0.0f;
     for (float v : vec) sum_sq += v * v;
@@ -58,7 +59,7 @@ void test_unit_normalized(ragger::Embedder& emb) {
 }
 
 void test_empty_string(ragger::Embedder& emb) {
-    std::cout << "  test_empty_string..." << std::flush;
+    std::print("  test_empty_string..."); std::cout.flush();
     auto vec = emb.encode("");
     assert(vec.size() == 384);
     // Should still produce a valid vector (not NaN/inf)
@@ -70,7 +71,7 @@ void test_empty_string(ragger::Embedder& emb) {
 }
 
 void test_long_text(ragger::Embedder& emb) {
-    std::cout << "  test_long_text..." << std::flush;
+    std::print("  test_long_text..."); std::cout.flush();
     // MiniLM has 512 token limit; verify it handles longer input gracefully
     std::string long_text;
     for (int i = 0; i < 1000; ++i) long_text += "word ";
@@ -84,7 +85,7 @@ void test_long_text(ragger::Embedder& emb) {
 }
 
 void test_semantic_similarity(ragger::Embedder& emb) {
-    std::cout << "  test_semantic_similarity..." << std::flush;
+    std::print("  test_semantic_similarity..."); std::cout.flush();
     auto v_cat   = emb.encode("The cat sat on the mat");
     auto v_kitten = emb.encode("A kitten rested on the rug");
     auto v_sql    = emb.encode("SELECT * FROM users WHERE id = 1");
@@ -105,7 +106,7 @@ void test_semantic_similarity(ragger::Embedder& emb) {
 }
 
 int main() {
-    std::cout << "Running embedder tests:\n";
+    std::println("Running embedder tests:");
 
     ragger::init_config("", true);
     auto cfg = ragger::config();
@@ -119,6 +120,6 @@ int main() {
     test_long_text(emb);
     test_semantic_similarity(emb);
 
-    std::cout << "test_embedder: all passed\n";
+    std::println("test_embedder: all passed");
     return 0;
 }

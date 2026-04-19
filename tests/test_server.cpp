@@ -27,9 +27,10 @@
 #include "ragger/server.h"
 #include <cassert>
 #include <iostream>
+#include <print>
 
 void test_server_instantiation() {
-    std::cout << "  test_server_instantiation..." << std::flush;
+    std::print("  test_server_instantiation..."); std::cout.flush();
 
     // Verify we can create a Server object without crashing
     // This tests the basic pImpl pattern and constructor
@@ -62,12 +63,12 @@ void test_server_instantiation() {
 // For now, the Python integration tests provide comprehensive coverage.
 
 int main() {
-    std::cout << "Running server tests:\n";
-    std::cout << "NOTE: Full HTTP endpoint testing is in tests/python/test_http_api.py\n\n";
+    std::println("Running server tests:");
+    std::println("NOTE: Full HTTP endpoint testing is in tests/python/test_http_api.py");
 
     test_server_instantiation();
 
-    std::cout << "\ntest_server: basic checks passed\n";
-    std::cout << "For complete server testing, run: cd tests/python && python test_http_api.py\n";
+    std::println("test_server: basic checks passed");
+    std::println("For complete server testing, run: cd tests/python && python test_http_api.py");
     return 0;
 }

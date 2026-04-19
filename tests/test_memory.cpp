@@ -8,6 +8,7 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include <print>
 
 namespace fs = std::filesystem;
 
@@ -158,11 +159,11 @@ int main() {
 
     if (!fs::exists(model_dir + "/model.onnx")) {
         std::cerr << "Skipping memory tests: model not found at " << model_dir << "\n";
-        std::cout << "test_memory: SKIPPED (no model)\n";
+        std::println("test_memory: SKIPPED (no model)");
         return 0;
     }
 
-    std::cout << "Running memory facade tests:\n";
+    std::println("Running memory facade tests:");
 
     test_store_and_search();
     test_store_with_collection();
@@ -171,6 +172,6 @@ int main() {
     test_delete();
     test_collections();
 
-    std::cout << "test_memory: all passed\n";
+    std::println("test_memory: all passed");
     return 0;
 }

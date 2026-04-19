@@ -7,9 +7,10 @@
 #include "ragger/client.h"
 #include <cassert>
 #include <iostream>
+#include <print>
 
 void test_client_construction() {
-    std::cout << "  test_client_construction..." << std::flush;
+    std::print("  test_client_construction..."); std::cout.flush();
 
     // Should be able to construct with default args
     ragger::RaggerClient client1;
@@ -24,7 +25,7 @@ void test_client_construction() {
 }
 
 void test_is_available_when_no_server() {
-    std::cout << "  test_is_available_when_no_server..." << std::flush;
+    std::print("  test_is_available_when_no_server..."); std::cout.flush();
 
     // Use an unlikely port to ensure nothing is listening
     ragger::RaggerClient client("127.0.0.1", 59999, "");
@@ -37,7 +38,7 @@ void test_is_available_when_no_server() {
 }
 
 void test_http_response_parsing() {
-    std::cout << "  test_http_response_parsing..." << std::flush;
+    std::print("  test_http_response_parsing..."); std::cout.flush();
 
     // This just tests that we can create a client without errors
     // Actual HTTP parsing is tested implicitly by the other methods
@@ -82,7 +83,7 @@ void test_integration_store_and_search() {
 */
 
 int main() {
-    std::cout << "Running client tests:\n";
+    std::println("Running client tests:");
 
     test_client_construction();
     test_is_available_when_no_server();

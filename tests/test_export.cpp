@@ -11,6 +11,7 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include <print>
 #include <set>
 #include <sstream>
 
@@ -25,7 +26,7 @@ static void cleanup() {
 }
 
 void test_export_basic(ragger::Embedder& emb) {
-    std::cout << "  test_export_basic..." << std::flush;
+    std::print("  test_export_basic..."); std::cout.flush();
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
 
@@ -48,7 +49,7 @@ void test_export_basic(ragger::Embedder& emb) {
 }
 
 void test_export_heading_deduplication(ragger::Embedder& emb) {
-    std::cout << "  test_export_heading_deduplication..." << std::flush;
+    std::print("  test_export_heading_deduplication..."); std::cout.flush();
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
 
@@ -87,7 +88,7 @@ void test_export_heading_deduplication(ragger::Embedder& emb) {
 }
 
 void test_export_by_collection(ragger::Embedder& emb) {
-    std::cout << "  test_export_by_collection..." << std::flush;
+    std::print("  test_export_by_collection..."); std::cout.flush();
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
 
@@ -116,18 +117,18 @@ int main() {
 
     if (!fs::exists(model_dir + "/model.onnx")) {
         std::cerr << "Skipping export tests: model not found at " << model_dir << "\n";
-        std::cout << "test_export: SKIPPED (no model)\n";
+        std::println("test_export: SKIPPED (no model)");
         return 0;
     }
 
     ragger::Embedder emb(model_dir);
 
-    std::cout << "Running export tests:\n";
+    std::println("Running export tests:");
 
     test_export_basic(emb);
     test_export_heading_deduplication(emb);
     test_export_by_collection(emb);
 
-    std::cout << "test_export: all passed\n";
+    std::println("test_export: all passed");
     return 0;
 }

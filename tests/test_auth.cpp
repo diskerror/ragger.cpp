@@ -9,12 +9,13 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <print>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
 
 void test_hash_token() {
-    std::cout << "  test_hash_token..." << std::flush;
+    std::print("  test_hash_token..."); std::cout.flush();
 
     // Known SHA-256 of "test" = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
     auto hash = ragger::hash_token("test");
@@ -31,11 +32,11 @@ void test_hash_token() {
     assert(!empty_hash.empty());
     assert(empty_hash == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
 
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_generate_token() {
-    std::cout << "  test_generate_token..." << std::flush;
+    std::print("  test_generate_token..."); std::cout.flush();
 
     auto t1 = ragger::generate_token();
     auto t2 = ragger::generate_token();
@@ -45,32 +46,32 @@ void test_generate_token() {
     assert(t1 != t2);  // Unique each time
     assert(t1.length() >= 20);  // Reasonable length
 
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_token_path() {
-    std::cout << "  test_token_path..." << std::flush;
+    std::print("  test_token_path..."); std::cout.flush();
 
     auto path = ragger::token_path();
     assert(!path.empty());
     assert(path.find("/.ragger/token") != std::string::npos);
 
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_load_token() {
-    std::cout << "  test_load_token..." << std::flush;
+    std::print("  test_load_token..."); std::cout.flush();
 
     // This test depends on whether ~/.ragger/token exists
     // We'll just verify it doesn't crash and returns a string
     auto token = ragger::load_token();
     // Token might be empty if file doesn't exist, which is fine
 
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_ensure_token_with_temp_dir() {
-    std::cout << "  test_ensure_token_with_temp_dir..." << std::flush;
+    std::print("  test_ensure_token_with_temp_dir..."); std::cout.flush();
 
     // Save original HOME
     const char* original_home = std::getenv("HOME");
@@ -101,11 +102,11 @@ void test_ensure_token_with_temp_dir() {
     // Restore original HOME
     setenv("HOME", original_home, 1);
 
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 void test_rotate_token() {
-    std::cout << "  test_rotate_token..." << std::flush;
+    std::print("  test_rotate_token..."); std::cout.flush();
 
     // Save original HOME
     const char* original_home = std::getenv("HOME");
@@ -161,11 +162,11 @@ void test_rotate_token() {
     // Restore original HOME
     setenv("HOME", original_home, 1);
 
-    std::cout << " OK\n";
+    std::println(" OK");
 }
 
 int main() {
-    std::cout << "Running auth tests:\n";
+    std::println("Running auth tests:");
 
     test_hash_token();
     test_generate_token();
@@ -174,6 +175,6 @@ int main() {
     test_ensure_token_with_temp_dir();
     test_rotate_token();
 
-    std::cout << "test_auth: all passed\n";
+    std::println("test_auth: all passed");
     return 0;
 }

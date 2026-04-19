@@ -4,6 +4,7 @@
 #include "ragger/bm25.h"
 #include <cassert>
 #include <iostream>
+#include <print>
 #include <algorithm>
 #include <cmath>
 
@@ -174,6 +175,6 @@ int main() {
     test_load_from_prebuilt();
     test_not_built();
 
-    std::cout << "test_bm25: all passed\n";
+    std::println("test_bm25: all passed");
     return 0;
 }

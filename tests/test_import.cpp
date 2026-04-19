@@ -4,6 +4,7 @@
 #include "ragger/import.h"
 #include <cassert>
 #include <iostream>
+#include <print>
 
 using ragger::heading_level;
 using ragger::heading_text;
@@ -171,6 +172,6 @@ int main() {
     test_whitespace_collapsing();
     test_tiny_file();
 
-    std::cout << "test_import: all passed\n";
+    std::println("test_import: all passed");
     return 0;
 }

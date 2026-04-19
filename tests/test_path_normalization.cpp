@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <print>
 
 namespace fs = std::filesystem;
 
@@ -128,7 +129,7 @@ void test_normalize_embedded_in_longer_text(ragger::Embedder& emb) {
 }
 
 int main() {
-    std::cout << "Running path normalization tests:\n";
+    std::println("Running path normalization tests:");
 
     ragger::init_config("", true);  // quiet
     auto cfg = ragger::config();
@@ -143,6 +144,6 @@ int main() {
     test_normalize_partial_match_not_replaced(emb);
     test_normalize_embedded_in_longer_text(emb);
 
-    std::cout << "test_path_normalization: all passed\n";
+    std::println("test_path_normalization: all passed");
     return 0;
 }

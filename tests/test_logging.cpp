@@ -11,7 +11,9 @@
 #include <cassert>
 #include <filesystem>
 #include <fstream>
+#include <format>
 #include <iostream>
+#include <print>
 #include <sstream>
 
 namespace fs = std::filesystem;
@@ -24,13 +26,13 @@ static void cleanup() {
 
 static std::string read_file(const std::string& path) {
     std::ifstream f(path);
-    std::ostringstream ss;
+    std::ostringstream ss;  // Cannot use std::format with file streams
     ss << f.rdbuf();
     return ss.str();
 }
 
 int main() {
-    std::cout << "Running logging tests:\n";
+    std::println("Running logging tests:");
     cleanup();
 
     // Create INI with all logging enabled, pointing to temp dir
@@ -113,6 +115,6 @@ int main() {
     cleanup();
     fs::remove(ini_path);
 
-    std::cout << "test_logging: all passed\n";
+    std::println("test_logging: all passed");
     return 0;
 }

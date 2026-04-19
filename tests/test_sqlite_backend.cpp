@@ -580,7 +580,7 @@ void test_preferred_model(ragger::Embedder& emb) {
 }
 
 void test_user_info_includes_preferred_model(ragger::Embedder& emb) {
-    std::cout << "test_user_info_includes_preferred_model...SKIPPED (debugging)\n";
+    std::println("test_user_info_includes_preferred_model...SKIPPED (debugging)");
     return;
     // FIXME: This test is causing a segfault. Temporarily disabled for commit.
 }
