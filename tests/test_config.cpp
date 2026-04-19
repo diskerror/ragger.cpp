@@ -29,8 +29,8 @@ void test_server_locked_override() {
           << "[search]\ndefault_limit = 20\n";
     }
 
-    auto sys_cfg = ragger::load_config(sys_path);
-    auto usr_cfg = ragger::load_config(usr_path);
+    ragger::Config sys_cfg = ragger::load_config(sys_path).value();
+    ragger::Config usr_cfg = ragger::load_config(usr_path).value();
     ragger::apply_user_overrides(sys_cfg, usr_cfg);
 
     assert(sys_cfg.port == 8432);  // SERVER_LOCKED — not overridden
@@ -57,8 +57,8 @@ void test_system_ceilings() {
         f << "[search]\ndefault_limit = 50\n";
     }
 
-    auto sys_cfg = ragger::load_config(sys_path);
-    auto usr_cfg = ragger::load_config(usr_path);
+    ragger::Config sys_cfg = ragger::load_config(sys_path).value();
+    ragger::Config usr_cfg = ragger::load_config(usr_path).value();
     ragger::apply_user_overrides(sys_cfg, usr_cfg);
 
     assert(sys_cfg.default_search_limit == 10);  // clamped to ceiling
@@ -84,8 +84,8 @@ void test_ceiling_zero_means_no_limit() {
         f << "[search]\ndefault_limit = 999\n";
     }
 
-    auto sys_cfg = ragger::load_config(sys_path);
-    auto usr_cfg = ragger::load_config(usr_path);
+    ragger::Config sys_cfg = ragger::load_config(sys_path).value();
+    ragger::Config usr_cfg = ragger::load_config(usr_path).value();
     ragger::apply_user_overrides(sys_cfg, usr_cfg);
 
     assert(sys_cfg.default_search_limit == 999);  // no ceiling applied
@@ -113,7 +113,7 @@ void test_chat_section_parsing() {
           << "chars_per_token = 3.5\n";
     }
 
-    auto cfg = ragger::load_config(path);
+    ragger::Config cfg = ragger::load_config(path).value();
     assert(cfg.chat_store_turns == "session");
     assert(cfg.chat_summarize_on_pause == false);
     assert(cfg.chat_pause_minutes == 15);
@@ -148,7 +148,7 @@ void test_inference_endpoint_parsing() {
           << "format = anthropic\n";
     }
 
-    auto cfg = ragger::load_config(path);
+    ragger::Config cfg = ragger::load_config(path).value();
     assert(cfg.inference_model == "gpt-4");
     assert(cfg.inference_endpoints.size() == 2);
 
@@ -192,7 +192,7 @@ void test_bool_parsing_variants() {
             f << "[server]\nport = 8432\n"
               << "[search]\nbm25_enabled = " << val << "\n";
         }
-        auto cfg = ragger::load_config(path);
+        ragger::Config cfg = ragger::load_config(path).value();
         assert(cfg.bm25_enabled == expected);
         fs::remove(path);
     };
@@ -216,7 +216,7 @@ void test_inline_comments() {
         f << "[server]\nport = 8432 # main port\nhost = 0.0.0.0 # bind all\n";
     }
 
-    auto cfg = ragger::load_config(path);
+    ragger::Config cfg = ragger::load_config(path).value();
     assert(cfg.port == 8432);
     (void)0;
 
@@ -234,7 +234,7 @@ void test_common_db_path_parsing() {
           << "[storage]\ncommon_db_path = /data/shared/memories.db\n";
     }
 
-    auto cfg = ragger::load_config(path);
+    ragger::Config cfg = ragger::load_config(path).value();
     
 
     fs::remove(path);
@@ -250,7 +250,7 @@ void test_default_values() {
         f << "[server]\n";  // minimal — just a section header
     }
 
-    auto cfg = ragger::load_config(path);
+    ragger::Config cfg = ragger::load_config(path).value();
     // All defaults from Config struct
     (void)0;
     assert(cfg.port == 8432);
@@ -317,7 +317,7 @@ int main() {
           << "default_min_score = 0.5\n";
     }
 
-    auto cfg = ragger::load_config(tmp_conf);
+    ragger::Config cfg = ragger::load_config(tmp_conf).value();
 
     (void)0;
     assert(cfg.port == 9999);
@@ -331,27 +331,20 @@ int main() {
 
     std::filesystem::remove(tmp_conf);
 
-    // Test find_system_config — explicit path takes priority (and throws if missing)
-    bool threw_find = false;
-    try {
-        ragger::find_system_config("/nonexistent/ragger.ini");
-    } catch (const std::runtime_error&) {
-        threw_find = true;
-    }
-    assert(threw_find);
+    // Test find_system_config — explicit path takes priority (and returns error if missing)
+    auto result_find = ragger::find_system_config("/nonexistent/ragger.ini");
+    assert(!result_find.has_value());
+    assert(result_find.error() == ragger::ConfigError::NotFound);
 
     // Test find_system_config — no explicit path finds /etc/ragger.ini or ~/.ragger/ragger.ini (or bootstraps)
-    auto found = ragger::find_system_config("");
-    assert(!found.empty());
+    auto result_found = ragger::find_system_config("");
+    assert(result_found.has_value());
+    assert(!result_found->empty());
 
     // Test load_config with nonexistent file
-    bool threw = false;
-    try {
-        ragger::load_config("/nonexistent/ragger.ini");
-    } catch (const std::runtime_error&) {
-        threw = true;
-    }
-    assert(threw);
+    auto result_load = ragger::load_config("/nonexistent/ragger.ini");
+    assert(!result_load.has_value());
+    assert(result_load.error() == ragger::ConfigError::IOError);
 
     std::println("test_config: all passed\n");
     return 0;

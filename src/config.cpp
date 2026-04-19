@@ -172,13 +172,12 @@ static std::string bootstrap_user_config() {
 // -----------------------------------------------------------------------
 // Config file search
 // -----------------------------------------------------------------------
-std::string find_system_config(const std::string& cli_path) {
+std::expected<std::string, ConfigError> find_system_config(const std::string& cli_path) {
     // 1. Explicit --config= takes highest priority
     if (!cli_path.empty()) {
         std::string resolved = expand_path(cli_path);
         if (!fs::exists(resolved)) {
-            throw std::runtime_error(
-                std::string(lang::ERR_CONFIG_FILE_MISSING) + resolved);
+            return std::unexpected(ConfigError::NotFound);
         }
         return resolved;
     }
@@ -189,10 +188,14 @@ std::string find_system_config(const std::string& cli_path) {
     }
 
     // 3. First run — bootstrap default user config (acts as system config)
-    return bootstrap_user_config();
+    try {
+        return bootstrap_user_config();
+    } catch (...) {
+        return std::unexpected(ConfigError::IOError);
+    }
 }
 
-std::string find_user_config() {
+std::expected<std::string, ConfigError> find_user_config() {
     std::string user_conf = expand_path("~/.ragger/ragger.ini");
     try {
         if (fs::exists(user_conf)) {
@@ -201,7 +204,7 @@ std::string find_user_config() {
     } catch (const fs::filesystem_error&) {
         // Permission denied or inaccessible — skip user config silently
     }
-    return "";
+    return std::unexpected(ConfigError::NotFound);
 }
 
 // Server infrastructure keys — system config always wins (blacklist)
@@ -311,10 +314,10 @@ static bool parse_bool(const std::string& val) {
     return lower == "true" || lower == "yes" || lower == "1";
 }
 
-Config load_config(const std::string& path) {
+std::expected<Config, ConfigError> load_config(const std::string& path) {
     std::ifstream file(path);
     if (!file.is_open()) {
-        throw std::runtime_error(std::string(lang::ERR_CONFIG_OPEN) + path);
+        return std::unexpected(ConfigError::IOError);
     }
 
     Config cfg;
@@ -492,18 +495,42 @@ Config& mutable_config() {
 
 void init_config(const std::string& cli_config_path, bool quiet) {
     // Load system config first
-    std::string system_path = find_system_config(cli_config_path);
-    static Config cfg = load_config(system_path);
+    auto system_result = find_system_config(cli_config_path);
+    if (!system_result.has_value()) {
+        throw std::runtime_error("Failed to find system config");
+    }
+    std::string system_path = *system_result;
+    
+    auto sys_cfg_result = load_config(system_path);
+    if (!sys_cfg_result.has_value()) {
+        switch (sys_cfg_result.error()) {
+            case ConfigError::IOError:
+                throw std::runtime_error("Failed to load system config: " + system_path);
+            case ConfigError::ParseError:
+                throw std::runtime_error("Failed to parse system config: " + system_path);
+            default:
+                throw std::runtime_error("Unknown error loading system config: " + system_path);
+        }
+    }
+    static Config cfg = *sys_cfg_result;
     if (!quiet)
         std::cout << ts() << " [INFO] " << lang::MSG_CONFIG_LOADED << system_path << std::endl;
     
     // Then overlay user-specific overrides
-    std::string user_path = find_user_config();
-    if (!user_path.empty() && user_path != system_path) {
-        Config user_cfg = load_config(user_path);
-        apply_user_overrides(cfg, user_cfg);
-        if (!quiet)
-            std::cout << ts() << " [INFO] Applied user overrides from " << user_path << std::endl;
+    auto user_result = find_user_config();
+    if (user_result.has_value()) {
+        std::string user_path = *user_result;
+        if (user_path != system_path) {
+            auto user_cfg_result = load_config(user_path);
+            if (user_cfg_result.has_value()) {
+                Config user_cfg = *user_cfg_result;
+                apply_user_overrides(cfg, user_cfg);
+                if (!quiet)
+                    std::cout << ts() << " [INFO] Applied user overrides from " << user_path << std::endl;
+            } else {
+                // Log but don't fail on user config errors
+            }
+        }
     }
 
     g_config = &cfg;
@@ -514,17 +541,31 @@ int reload_config() {
 
     // Re-read from the same files
     std::string sys_path, user_path;
-    try {
-        sys_path = find_system_config("");
-    } catch (...) {
+    auto sys_result = find_system_config("");
+    if (!sys_result.has_value()) {
         return 0;
     }
-    user_path = find_user_config();
+    sys_path = *sys_result;
+    
+    auto user_result = find_user_config();
+    if (user_result.has_value()) {
+        user_path = *user_result;
+    }
 
-    Config fresh = load_config(sys_path);
-    if (!user_path.empty() && user_path != sys_path) {
-        Config user_cfg = load_config(user_path);
-        apply_user_overrides(fresh, user_cfg);
+    auto fresh_result = load_config(sys_path);
+    if (!fresh_result.has_value()) {
+        return 0;
+    }
+    Config fresh = *fresh_result;
+    if (user_result.has_value()) {
+        std::string user_path = *user_result;
+        if (!user_path.empty() && user_path != sys_path) {
+            auto user_cfg_result = load_config(user_path);
+            if (user_cfg_result.has_value()) {
+                Config user_cfg = *user_cfg_result;
+                apply_user_overrides(fresh, user_cfg);
+            }
+        }
     }
 
     Config& cfg = *g_config;

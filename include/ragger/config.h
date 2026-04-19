@@ -10,8 +10,16 @@
 #include <vector>
 #include <map>
 #include <stdexcept>
+#include <expected>
 
 namespace ragger {
+
+// Configuration error types
+enum class ConfigError {
+    NotFound,
+    ParseError,
+    IOError
+};
 
 struct Config {
     // --- Server ---
@@ -119,13 +127,13 @@ std::string expand_path(const std::string& path);
 
 /// Find system config file using search order. Returns path or throws.
 /// @param cli_path  Path from --config (empty if not given)
-std::string find_system_config(const std::string& cli_path = "");
+std::expected<std::string, ConfigError> find_system_config(const std::string& cli_path = "");
 
 /// Find user config file. Returns empty string if not found.
-std::string find_user_config();
+std::expected<std::string, ConfigError> find_user_config();
 
 /// Load config from an INI file.
-Config load_config(const std::string& path);
+std::expected<Config, ConfigError> load_config(const std::string& path);
 
 /// Apply user overrides to a config. Only allows specific fields.
 void apply_user_overrides(Config& cfg, const Config& user);
