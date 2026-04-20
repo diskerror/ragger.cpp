@@ -348,11 +348,15 @@ static void do_chat(const std::string& db_path, const std::string& model_dir,
     // Validate payload dump dir before doing anything else
     if (!dump_payloads_dir.empty()) {
         std::error_code ec;
+        bool existed = std::filesystem::exists(dump_payloads_dir);
         std::filesystem::create_directories(dump_payloads_dir, ec);
         if (ec) {
             std::cerr << "Error: cannot create payload dump directory '"
                       << dump_payloads_dir << "': " << ec.message() << "\n";
             return;
+        }
+        if (!existed) {
+            std::cout << "Created payload dump directory: " << dump_payloads_dir << "\n";
         }
     }
 
