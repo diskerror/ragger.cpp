@@ -1,0 +1,161 @@
+// Ragger ERD — View 4: Functional / method-level view
+//
+// What this shows:
+//   Two canonical request paths, with each node = a specific method call.
+//   Read top-to-bottom. This is the "wait, who actually embeds the query?"
+//   view — more precise than the class diagram, narrower in scope.
+//
+//   Path A (left cluster):  POST /search       → hybrid retrieval
+//   Path B (right cluster): ragger chat turn   → REPL with memory + LLM
+//
+// Render:
+//   dot -Tsvg erd-04-methods.dot -o erd-04-methods.svg
+
+digraph RaggerMethods {
+    rankdir   = TB;
+    bgcolor   = "white";
+    splines   = spline;
+    nodesep   = 0.35;
+    ranksep   = 0.45;
+    fontname  = "Helvetica";
+    labelloc  = "t";
+    label = <<FONT POINT-SIZE="18"><B>Ragger — Method-level flow</B></FONT><BR/><FONT POINT-SIZE="10" COLOR="#555555">Two canonical paths: HTTP /search (left) and a chat REPL turn (right).</FONT>>;
+
+    node [
+        shape    = box,
+        style    = "filled,rounded",
+        fontname = "Menlo,Consolas,monospace",
+        fontsize = 9,
+        margin   = "0.12,0.06",
+        penwidth = 1.0
+    ];
+    edge [
+        fontname = "Helvetica",
+        fontsize = 8,
+        color    = "#475569",
+        penwidth = 1.0
+    ];
+
+    // ========================================================================
+    // PATH A — HTTP /search hybrid retrieval
+    // ========================================================================
+    subgraph cluster_search {
+        label     = "Path A — POST /search";
+        style     = "rounded,filled";
+        fillcolor = "#f8fafc";
+        color     = "#fb923c";
+        fontcolor = "#9a3412";
+        fontsize  = 12;
+
+        a1  [label="RaggerClient::search(q, limit, …)",              fillcolor="#ffedd5"];
+        a2  [label="Server /search handler",                         fillcolor="#ffedd5"];
+        a3  [label="Server::request_requires_auth(req)",             fillcolor="#fee2e2"];
+        a4  [label="auth::verify_token(db, token)",                  fillcolor="#fee2e2"];
+        a5  [label="RaggerMemory::search(q, limit, min, cols)",      fillcolor="#dbeafe"];
+        a6  [label="SqliteBackend::search(q, limit, …)",             fillcolor="#dbeafe"];
+        a7  [label="Embedder::encode(q) → vec&lt;float&gt;",          fillcolor="#ccfbf1"];
+        a8  [label="cosine_similarity(query_vec, cached)\n(Eigen)",  fillcolor="#dbeafe"];
+        a9  [label="BM25Index::score(q_tokens, filtered_ids)",       fillcolor="#dbeafe"];
+        a10 [label="merge(vec_score·vw + bm25·bw)\nfilter ≥ min_score, sort, top-N", fillcolor="#dbeafe"];
+        a11 [label="SearchResponse\n{results[], timing}",            fillcolor="#e0e7ff"];
+        a12 [label="JSON → HTTP 200",                                fillcolor="#ffedd5"];
+
+        a1  -> a2  [label="HTTP"];
+        a2  -> a3;
+        a3  -> a4  [label="if auth required"];
+        a3  -> a5  [label="else (unix sock / localhost)"];
+        a4  -> a5  [label="ok"];
+        a5  -> a6  [label="backend_->search"];
+        a6  -> a7;
+        a7  -> a8;
+        a6  -> a9;
+        a8  -> a10;
+        a9  -> a10;
+        a10 -> a11;
+        a11 -> a12;
+        a12 -> a1  [label="response", style=dashed, constraint=false];
+    }
+
+    // ========================================================================
+    // PATH B — ragger chat REPL turn
+    // ========================================================================
+    subgraph cluster_chat {
+        label     = "Path B — one chat turn";
+        style     = "rounded,filled";
+        fillcolor = "#f8fafc";
+        color     = "#22c55e";
+        fontcolor = "#166534";
+        fontsize  = 12;
+
+        b1  [label="Chat::run() read input",                         fillcolor="#dcfce7"];
+        b2  [label="Chat::load_workspace_files(ctx_size)\nSOUL/USER/AGENTS/TOOLS/MEMORY.md", fillcolor="#dcfce7"];
+        b3  [label="RaggerMemory::search(input, max_memory_results)", fillcolor="#dbeafe"];
+        b4  [label="ChatSession::build_messages(sys, memories, history, user)", fillcolor="#dcfce7"];
+        b5  [label="InferenceClient::chat_stream(msgs, cb, model)",  fillcolor="#fef3c7"];
+        b6  [label="InferenceClient::resolve_endpoint(model)\nglob match",       fillcolor="#fef3c7"];
+        b7  [label="get_format(endpoint.format_name)\n→ ApiFormat",   fillcolor="#fef3c7"];
+        b8  [label="build_request_body(fmt, msgs, model, max)",      fillcolor="#fef3c7"];
+        b9  [label="HTTP POST + SSE stream\n(libcurl)",              fillcolor="#fef3c7"];
+        b10 [label="on each chunk:\nextract_stream_delta → cb(token)", fillcolor="#fef3c7"];
+        b11 [label="print tokens to TTY",                            fillcolor="#dcfce7"];
+        b12 [label="Chat::store_turn(user, assistant)",              fillcolor="#dcfce7"];
+        b13 [label="RaggerMemory::store(turn_text, metadata)",       fillcolor="#dbeafe"];
+        b14 [label="SqliteBackend::store\n  Embedder::encode(text)\n  INSERT + invalidate BM25 cache", fillcolor="#dbeafe"];
+        b15 [label="Chat::check_pause_summary()\nif idle &gt; pause → bg_summarize()", fillcolor="#dcfce7"];
+        b16 [label="InferenceClient::chat(summary_msgs)\n(fork/bg child)",      fillcolor="#fef3c7"];
+
+        b1  -> b2;
+        b2  -> b3;
+        b3  -> b4;
+        b4  -> b5;
+        b5  -> b6;
+        b6  -> b7;
+        b7  -> b8;
+        b8  -> b9;
+        b9  -> b10;
+        b10 -> b11;
+        b11 -> b12 [label="on completion"];
+        b12 -> b13;
+        b13 -> b14;
+        b14 -> b15;
+        b15 -> b16 [label="on pause", style=dashed];
+        b15 -> b1  [label="next turn", style=dashed, constraint=false];
+    }
+
+    // ========================================================================
+    // Shared-substrate note
+    // ========================================================================
+    note [shape=note, fillcolor="#fef9c3", style="filled",
+          fontname="Helvetica", fontsize=9,
+          label=<
+            <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0" CELLPADDING="2">
+              <TR><TD ALIGN="LEFT"><B>Shared substrate</B> (not edges — just facts):</TD></TR>
+              <TR><TD ALIGN="LEFT">• Both paths call <FONT FACE="Menlo">Embedder::encode</FONT> at some point</TD></TR>
+              <TR><TD ALIGN="LEFT">• Both paths go through <FONT FACE="Menlo">SqliteBackend</FONT></TD></TR>
+              <TR><TD ALIGN="LEFT">• Housekeeping thread runs every <FONT FACE="Menlo">cfg.housekeeping_interval</FONT> s:</TD></TR>
+              <TR><TD ALIGN="LEFT">    rebuild_bm25 · cleanup_old_conversations · ChatSessionManager::cleanup_expired</TD></TR>
+              <TR><TD ALIGN="LEFT">• Auth bypass: <FONT FACE="Menlo">remote_addr</FONT> empty (unix sock) or 127.0.0.1 / ::1</TD></TR>
+            </TABLE>>];
+
+    // Anchor note below both clusters without warping layout
+    a12 -> note [style=invis];
+    b16 -> note [style=invis];
+
+    // Color key
+    subgraph cluster_legend {
+        label     = "Module colors";
+        style     = "rounded,filled";
+        fillcolor = "#fafafa";
+        color     = "#cbd5e1";
+        fontcolor = "#334155";
+        fontsize  = 10;
+
+        k1 [label="Core / storage",     fillcolor="#dbeafe", fontname="Helvetica"];
+        k2 [label="Embedding",          fillcolor="#ccfbf1", fontname="Helvetica"];
+        k3 [label="Network",            fillcolor="#ffedd5", fontname="Helvetica"];
+        k4 [label="Chat",               fillcolor="#dcfce7", fontname="Helvetica"];
+        k5 [label="Inference",          fillcolor="#fef3c7", fontname="Helvetica"];
+        k6 [label="Auth",               fillcolor="#fee2e2", fontname="Helvetica"];
+        k1 -> k2 -> k3 -> k4 -> k5 -> k6 [style=invis];
+    }
+}

@@ -1,0 +1,175 @@
+// Ragger ERD — View 1: Overview (no auth, no logging)
+//
+// What this shows:
+//   The essential data path for the two things Ragger actually does:
+//     1. Remember things        (client → server → memory → {storage, embedder, bm25})
+//     2. Chat with memory       (chat → {memory, inference → endpoints})
+//
+// Deliberately omitted: auth, logging, config, housekeeping, sessions.
+//   Those get their own views — here we want "what does Ragger do?" in one glance.
+//
+// Render:
+//   dot -Tsvg erd-01-overview.dot -o erd-01-overview.svg
+//   dot -Tpng erd-01-overview.dot -o erd-01-overview.png
+
+digraph RaggerOverview {
+    rankdir = TB;
+    bgcolor = "white";
+    splines = spline;
+    nodesep = 0.45;
+    ranksep = 0.70;
+    fontname = "Helvetica";
+    labelloc = "t";
+    label = <<FONT POINT-SIZE="18"><B>Ragger — Overview</B></FONT><BR/><FONT POINT-SIZE="10" COLOR="#555555">Core data flow. Auth, logging, housekeeping omitted.</FONT>>;
+
+    node [
+        shape      = box,
+        style      = "filled,rounded",
+        fontname   = "Helvetica",
+        fontsize   = 11,
+        margin     = "0.15,0.08",
+        penwidth   = 1.2
+    ];
+    edge [
+        fontname = "Helvetica",
+        fontsize = 9,
+        color    = "#444444",
+        penwidth = 1.1
+    ];
+
+    // ---- Module color palette ------------------------------------------------
+    // Core      #dbeafe (blue-100)
+    // Embedding #ccfbf1 (teal-100)
+    // Network   #ffedd5 (orange-100)
+    // Chat      #dcfce7 (green-100)
+    // Inference #fef3c7 (amber-100)
+    // External  #f1f5f9 (slate-100, dashed)
+
+    // ---- User surface --------------------------------------------------------
+    subgraph cluster_ui {
+        label    = "User surface";
+        style    = "rounded,dashed";
+        color    = "#94a3b8";
+        fontcolor= "#475569";
+        fontsize = 11;
+
+        cli      [label="ragger <verb>\n(store/search/import/useradd/…)", fillcolor="#f1f5f9"];
+        chat_ui  [label="ragger chat\n(REPL — blocking loop)",            fillcolor="#dcfce7"];
+        http_ui  [label="HTTP / MCP client\n(external; no session state)",fillcolor="#f1f5f9"];
+    }
+
+    // ---- Network module ------------------------------------------------------
+    subgraph cluster_net {
+        label    = "Network";
+        style    = "rounded";
+        color    = "#fb923c";
+        fontcolor= "#9a3412";
+        fontsize = 11;
+
+        client   [label="RaggerClient\n(HTTP shim)", fillcolor="#ffedd5"];
+        server   [label="Server\n(httplib daemon)",  fillcolor="#ffedd5"];
+    }
+
+    // ---- Chat module ---------------------------------------------------------
+    subgraph cluster_chat {
+        label    = "Chat";
+        style    = "rounded";
+        color    = "#22c55e";
+        fontcolor= "#166534";
+        fontsize = 11;
+
+        chat     [label="Chat (REPL)",       fillcolor="#dcfce7"];
+    }
+
+    // ---- Core module ---------------------------------------------------------
+    subgraph cluster_core {
+        label    = "Core";
+        style    = "rounded";
+        color    = "#3b82f6";
+        fontcolor= "#1e40af";
+        fontsize = 11;
+
+        memory   [label="RaggerMemory\n(facade)",      fillcolor="#dbeafe", penwidth=2];
+        backend  [label="StorageBackend\n«interface»", fillcolor="#dbeafe", style="filled,rounded,dashed"];
+        sqlite   [label="SqliteBackend",               fillcolor="#dbeafe"];
+        bm25     [label="BM25Index",                   fillcolor="#dbeafe"];
+    }
+
+    // ---- Embedding module ----------------------------------------------------
+    subgraph cluster_emb {
+        label    = "Embedding";
+        style    = "rounded";
+        color    = "#14b8a6";
+        fontcolor= "#0f766e";
+        fontsize = 11;
+
+        embedder [label="Embedder\n(ONNX + tokenizer)", fillcolor="#ccfbf1"];
+    }
+
+    // ---- Inference module ----------------------------------------------------
+    subgraph cluster_inf {
+        label    = "Inference";
+        style    = "rounded";
+        color    = "#f59e0b";
+        fontcolor= "#92400e";
+        fontsize = 11;
+
+        inf      [label="InferenceClient\n(endpoint router)",     fillcolor="#fef3c7"];
+        endpoint [label="Endpoint × N\n(OpenAI / Anthropic / …)", fillcolor="#fef3c7"];
+    }
+
+    // ---- External providers --------------------------------------------------
+    providers [label="LM Studio / Ollama /\nOpenAI / Anthropic",
+               fillcolor="#f1f5f9", style="filled,rounded,dashed",
+               fontcolor="#475569"];
+
+    sqlite_db [label="SQLite\n~/.ragger/ragger.db",
+               shape=cylinder, fillcolor="#e0e7ff", style="filled"];
+
+    // ---- Edges: user surface → network ---------------------------------------
+    cli      -> client  [label="fork/exec"];
+    // HTTP/MCP: passes payloads only — session state is managed server-side
+    // by ChatSessionManager (keyed by session ID in the request).
+    http_ui  -> server  [label="HTTP /store /search /chat\n(session ID in request; state server-side)", style=dashed];
+
+    // ---- Edges: client ↔ server ---------------------------------------------
+    client   -> server  [label="HTTP /store /search /chat"];
+
+    // ---- Edges: server → core + inference -----------------------------------
+    server   -> memory  [label="store / search"];
+    server   -> inf     [label="/chat"];
+    server   -> chat    [style=invis];  // layout hint
+
+    // ---- Chat's two halves --------------------------------------------------
+    chat_ui  -> chat    [label="REPL"];
+    chat     -> memory  [label="search(query)"];
+    chat     -> inf     [label="chat(messages)"];
+
+    // ---- Core internals (◆ at owner/tail) -----------------------------------
+    memory   -> backend  [label="owns", arrowtail=diamond, arrowhead=none, dir=back];
+    backend  -> sqlite   [label="implemented by", arrowhead=empty, style=dashed];
+    memory   -> embedder [label="owns", arrowtail=diamond, arrowhead=none, dir=back];
+    sqlite   -> bm25     [label="uses"];
+    sqlite   -> embedder [label="encode(text)"];
+    sqlite   -> sqlite_db[label="SQL"];
+
+    // ---- Inference internals -------------------------------------------------
+    inf      -> endpoint [label="owns N", arrowtail=diamond, arrowhead=none, dir=back];
+    endpoint -> providers[label="HTTP / SSE", style=dashed];
+
+    // ---- Legend --------------------------------------------------------------
+    subgraph cluster_legend {
+        label     = "Legend";
+        style     = "rounded,filled";
+        fillcolor = "#fafafa";
+        color     = "#cbd5e1";
+        fontcolor = "#334155";
+        fontsize  = 10;
+
+        l_own  [label="◆── owns (composition)",   shape=box, style="filled,rounded", fillcolor="#dbeafe",  fontsize=9];
+        l_impl [label="──▷ implemented by",        shape=box, style="filled,rounded", fillcolor="#ccfbf1",  fontsize=9];
+        l_use  [label="──▶ calls / uses",          shape=box, style="filled,rounded", fillcolor="#ffedd5",  fontsize=9];
+        l_ext  [label="- - external / dashed",     shape=box, style="filled,rounded", fillcolor="#f1f5f9",  fontsize=9, color="#94a3b8"];
+        l_own -> l_impl -> l_use -> l_ext [style=invis];
+    }
+}

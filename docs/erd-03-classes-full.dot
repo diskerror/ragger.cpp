@@ -1,0 +1,374 @@
+// Ragger ERD — View 3: Full class diagram (with auth + logging)
+//
+// What this shows:
+//   UML-ish class boxes (name / attributes / key methods) for every
+//   meaningful type in the project, including the auth and logging
+//   layers that view 1 deliberately hides. Edges distinguish:
+//     ─◆   composition (owns)
+//     ──▷  inheritance
+//     ───  uses / calls
+//     ···  free function call
+//
+// This is the "I'm about to change X, what does it touch?" view.
+//
+// Render:
+//   dot -Tsvg erd-03-classes-full.dot -o erd-03-classes-full.svg
+
+digraph RaggerClassesFull {
+    rankdir = LR;
+    bgcolor = "white";
+    splines = spline;
+    nodesep = 0.35;
+    ranksep = 0.70;
+    fontname = "Helvetica";
+    labelloc = "t";
+    label = <<FONT POINT-SIZE="18"><B>Ragger — Full class diagram</B></FONT><BR/><FONT POINT-SIZE="10" COLOR="#555555">Includes auth and logging. See erd-01-overview.dot for the lighter view.</FONT>>;
+
+    node [
+        shape    = plaintext,
+        fontname = "Helvetica",
+        fontsize = 10
+    ];
+    edge [
+        fontname = "Helvetica",
+        fontsize = 9,
+        color    = "#475569",
+        penwidth = 1.1
+    ];
+
+    // ===================== CORE =====================
+    RaggerMemory [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+        <TR><TD BGCOLOR="#3b82f6"><FONT COLOR="white"><B>RaggerMemory</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT" BGCOLOR="#dbeafe">
+          − embedder_: unique_ptr&lt;Embedder&gt;<BR ALIGN="LEFT"/>
+          − backend_:  unique_ptr&lt;StorageBackend&gt;<BR ALIGN="LEFT"/>
+        </TD></TR>
+        <TR><TD ALIGN="LEFT">
+          + store(text, metadata)<BR ALIGN="LEFT"/>
+          + search(query, limit, min_score, collections)<BR ALIGN="LEFT"/>
+          + count() / load_all()<BR ALIGN="LEFT"/>
+          + rebuild_bm25() / rebuild_embeddings()<BR ALIGN="LEFT"/>
+          + delete_memory(id) / delete_batch(ids)<BR ALIGN="LEFT"/>
+          + search_by_metadata(filter)<BR ALIGN="LEFT"/>
+        </TD></TR>
+      </TABLE>>];
+
+    StorageBackend [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+        <TR><TD BGCOLOR="#1e40af"><FONT COLOR="white"><B><I>«interface» StorageBackend</I></B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT">
+          <I>+ store / search / count</I><BR ALIGN="LEFT"/>
+          <I>+ load_all / rebuild_bm25</I><BR ALIGN="LEFT"/>
+          <I>+ rebuild_embeddings / collections</I><BR ALIGN="LEFT"/>
+          <I>+ delete_memory / delete_batch</I><BR ALIGN="LEFT"/>
+          <I>+ cleanup_old_conversations</I><BR ALIGN="LEFT"/>
+          <I>+ export_memories / import_memories</I><BR ALIGN="LEFT"/>
+          <FONT COLOR="#991b1b"><I>+ user mgmt: create_user, delete_user,</I></FONT><BR ALIGN="LEFT"/>
+          <FONT COLOR="#991b1b"><I>  get_user_by_username,</I></FONT><BR ALIGN="LEFT"/>
+          <FONT COLOR="#991b1b"><I>  get_user_by_token_hash,</I></FONT><BR ALIGN="LEFT"/>
+          <FONT COLOR="#991b1b"><I>  update_user_token / _rotated_at,</I></FONT><BR ALIGN="LEFT"/>
+          <FONT COLOR="#991b1b"><I>  set_user_password / get_user_password</I></FONT><BR ALIGN="LEFT"/>
+          <I>+ save_chat_session / get_chat_session</I><BR ALIGN="LEFT"/>
+        </TD></TR>
+      </TABLE>>];
+
+    SqliteBackend [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+        <TR><TD BGCOLOR="#3b82f6"><FONT COLOR="white"><B>SqliteBackend</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT" BGCOLOR="#dbeafe">
+          − pImpl: unique_ptr&lt;Impl&gt;<BR ALIGN="LEFT"/>
+          <FONT COLOR="#555">  (sqlite3*, Embedder*, BM25Index, caches)</FONT><BR ALIGN="LEFT"/>
+        </TD></TR>
+        <TR><TD ALIGN="LEFT">
+          + (all StorageBackend methods, concrete)<BR ALIGN="LEFT"/>
+          + db_path() const<BR ALIGN="LEFT"/>
+        </TD></TR>
+      </TABLE>>];
+
+    BM25Index [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+        <TR><TD BGCOLOR="#3b82f6"><FONT COLOR="white"><B>BM25Index</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT" BGCOLOR="#dbeafe">
+          − doc_term_freqs, − idf, − doc_lens<BR ALIGN="LEFT"/>
+        </TD></TR>
+        <TR><TD ALIGN="LEFT">
+          + build(texts) / load(doc_ids, tokens, freqs)<BR ALIGN="LEFT"/>
+          + score(query, filtered_ids) → vector&lt;pair&gt;<BR ALIGN="LEFT"/>
+          + is_built()<BR ALIGN="LEFT"/>
+          + static tokenize(text)<BR ALIGN="LEFT"/>
+        </TD></TR>
+      </TABLE>>];
+
+    // ===================== EMBEDDING =====================
+    Embedder [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+        <TR><TD BGCOLOR="#14b8a6"><FONT COLOR="white"><B>Embedder</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT" BGCOLOR="#ccfbf1">
+          − pImpl: unique_ptr&lt;Impl&gt;<BR ALIGN="LEFT"/>
+          <FONT COLOR="#555">  (ONNX session + tokenizer)</FONT><BR ALIGN="LEFT"/>
+        </TD></TR>
+        <TR><TD ALIGN="LEFT">
+          + encode(text) → vector&lt;float&gt;<BR ALIGN="LEFT"/>
+          + dimensions() → int<BR ALIGN="LEFT"/>
+        </TD></TR>
+      </TABLE>>];
+
+    // ===================== NETWORK =====================
+    Server [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+        <TR><TD BGCOLOR="#fb923c"><FONT COLOR="white"><B>Server</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT" BGCOLOR="#ffedd5">
+          − memory: RaggerMemory&amp;<BR ALIGN="LEFT"/>
+          − inference_: unique_ptr&lt;InferenceClient&gt;<BR ALIGN="LEFT"/>
+          − session_mgr_: ChatSessionManager<BR ALIGN="LEFT"/>
+          − user_memories_: map&lt;string, RaggerMemory&gt;<BR ALIGN="LEFT"/>
+          − svr: httplib::Server (+TLS)<BR ALIGN="LEFT"/>
+          − timer_thread_: thread (housekeeping)<BR ALIGN="LEFT"/>
+        </TD></TR>
+        <TR><TD ALIGN="LEFT">
+          + run() / stop()<BR ALIGN="LEFT"/>
+          <FONT COLOR="#555">− routes: /store /search /chat /register /web-auth</FONT><BR ALIGN="LEFT"/>
+          <FONT COLOR="#555">− request_requires_auth(req) — bypass unix sock</FONT><BR ALIGN="LEFT"/>
+        </TD></TR>
+      </TABLE>>];
+
+    RaggerClient [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+        <TR><TD BGCOLOR="#fb923c"><FONT COLOR="white"><B>RaggerClient</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT" BGCOLOR="#ffedd5">
+          − host_, − port_, − token_<BR ALIGN="LEFT"/>
+        </TD></TR>
+        <TR><TD ALIGN="LEFT">
+          + is_available()<BR ALIGN="LEFT"/>
+          + store / search / count / delete_memory<BR ALIGN="LEFT"/>
+          + search_by_metadata / register_user<BR ALIGN="LEFT"/>
+        </TD></TR>
+      </TABLE>>];
+
+    // ===================== CHAT =====================
+    Chat [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+        <TR><TD BGCOLOR="#22c55e"><FONT COLOR="white"><B>Chat</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT" BGCOLOR="#dcfce7">
+          − memory_: RaggerMemory&amp;<BR ALIGN="LEFT"/>
+          − inference_: InferenceClient&amp;<BR ALIGN="LEFT"/>
+          − messages_, − unsummarized_turns_<BR ALIGN="LEFT"/>
+          − last_activity_, − session_memory_id_<BR ALIGN="LEFT"/>
+        </TD></TR>
+        <TR><TD ALIGN="LEFT">
+          + run()   <I>// REPL</I><BR ALIGN="LEFT"/>
+          <FONT COLOR="#555">− store_turn / summarize_conversation</FONT><BR ALIGN="LEFT"/>
+          <FONT COLOR="#555">− load_workspace_files / bg_summarize</FONT><BR ALIGN="LEFT"/>
+        </TD></TR>
+      </TABLE>>];
+
+    ChatSession [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+        <TR><TD BGCOLOR="#22c55e"><FONT COLOR="white"><B>ChatSession</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT" BGCOLOR="#dcfce7">
+          + session_id, + username<BR ALIGN="LEFT"/>
+          + messages: vector&lt;Message&gt;<BR ALIGN="LEFT"/>
+          + unsummarized_turns<BR ALIGN="LEFT"/>
+          + last_activity, + created_at<BR ALIGN="LEFT"/>
+        </TD></TR>
+        <TR><TD ALIGN="LEFT">
+          + add_user_message / add_assistant_message<BR ALIGN="LEFT"/>
+          + build_messages(sys, ctx, max_turns)<BR ALIGN="LEFT"/>
+          + idle_seconds()<BR ALIGN="LEFT"/>
+        </TD></TR>
+      </TABLE>>];
+
+    ChatSessionManager [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+        <TR><TD BGCOLOR="#22c55e"><FONT COLOR="white"><B>ChatSessionManager</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT" BGCOLOR="#dcfce7">
+          − sessions_: map&lt;id, ChatSession&gt;<BR ALIGN="LEFT"/>
+          − mutex_<BR ALIGN="LEFT"/>
+        </TD></TR>
+        <TR><TD ALIGN="LEFT">
+          + get_or_create(id, user, backend)<BR ALIGN="LEFT"/>
+          + cleanup_expired(pause_min)<BR ALIGN="LEFT"/>
+          + static generate_id()<BR ALIGN="LEFT"/>
+        </TD></TR>
+      </TABLE>>];
+
+    // ===================== INFERENCE =====================
+    InferenceClient [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+        <TR><TD BGCOLOR="#f59e0b"><FONT COLOR="white"><B>InferenceClient</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT" BGCOLOR="#fef3c7">
+          − _endpoints: vector&lt;Endpoint&gt;<BR ALIGN="LEFT"/>
+          − _forced_endpoint<BR ALIGN="LEFT"/>
+        </TD></TR>
+        <TR><TD ALIGN="LEFT">
+          + chat(messages, model)<BR ALIGN="LEFT"/>
+          + chat_stream(messages, cb, model)<BR ALIGN="LEFT"/>
+          + ensure_model_loaded / resolve_endpoint<BR ALIGN="LEFT"/>
+          + proxy_request / proxy_list_models<BR ALIGN="LEFT"/>
+          + static from_config(cfg)<BR ALIGN="LEFT"/>
+        </TD></TR>
+      </TABLE>>];
+
+    Endpoint [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+        <TR><TD BGCOLOR="#f59e0b"><FONT COLOR="white"><B>Endpoint</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT" BGCOLOR="#fef3c7">
+          + name, + api_url, + api_key<BR ALIGN="LEFT"/>
+          + models (glob), + format_name, + max_tokens<BR ALIGN="LEFT"/>
+        </TD></TR>
+        <TR><TD ALIGN="LEFT">
+          + matches(model)<BR ALIGN="LEFT"/>
+          + is_reachable() / is_local()<BR ALIGN="LEFT"/>
+          + list_models()<BR ALIGN="LEFT"/>
+        </TD></TR>
+      </TABLE>>];
+
+    ApiFormat [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+        <TR><TD BGCOLOR="#f59e0b"><FONT COLOR="white"><B>ApiFormat</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT" BGCOLOR="#fef3c7">
+          + path, + auth, + auth_header, + auth_prefix<BR ALIGN="LEFT"/>
+          + request_transform (JSON mapping)<BR ALIGN="LEFT"/>
+          + response_content (JSONPath)<BR ALIGN="LEFT"/>
+          + stream_content / stream_type_*<BR ALIGN="LEFT"/>
+        </TD></TR>
+      </TABLE>>];
+
+    // ===================== AUTH =====================
+    AuthModule [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+        <TR><TD BGCOLOR="#ef4444"><FONT COLOR="white"><B>auth.h  (free functions)</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT" BGCOLOR="#fee2e2">
+          <B>user mgmt:</B><BR ALIGN="LEFT"/>
+          + useradd(db, user, pw)<BR ALIGN="LEFT"/>
+          + userdel(db, user)<BR ALIGN="LEFT"/>
+          + verify_password(db, user, pw)<BR ALIGN="LEFT"/>
+          <B>tokens:</B><BR ALIGN="LEFT"/>
+          + issue_token(db, user) → string<BR ALIGN="LEFT"/>
+          + verify_token(db, token) → AuthResult<BR ALIGN="LEFT"/>
+          <B>primitives:</B><BR ALIGN="LEFT"/>
+          + hash_token / hash_password<BR ALIGN="LEFT"/>
+          + verify_password(pw, stored_hash)<BR ALIGN="LEFT"/>
+          + generate_token / generate_random_token<BR ALIGN="LEFT"/>
+          + ensure_token / load_token / token_path<BR ALIGN="LEFT"/>
+        </TD></TR>
+      </TABLE>>];
+
+    AuthResult [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+        <TR><TD BGCOLOR="#ef4444"><FONT COLOR="white"><B>AuthResult</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT" BGCOLOR="#fee2e2">
+          + ok: bool<BR ALIGN="LEFT"/>
+          + username: string<BR ALIGN="LEFT"/>
+        </TD></TR>
+      </TABLE>>];
+
+    UserInfo [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+        <TR><TD BGCOLOR="#ef4444"><FONT COLOR="white"><B>UserInfo</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT" BGCOLOR="#fee2e2">
+          + id, + username<BR ALIGN="LEFT"/>
+          + token_hash<BR ALIGN="LEFT"/>
+          + preferred_model<BR ALIGN="LEFT"/>
+        </TD></TR>
+      </TABLE>>];
+
+    // ===================== LOGGING =====================
+    LoggingModule [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+        <TR><TD BGCOLOR="#64748b"><FONT COLOR="white"><B>logging.h  (free functions)</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT" BGCOLOR="#e2e8f0">
+          + setup_logging(verbose, server_mode)<BR ALIGN="LEFT"/>
+          + log_query(msg)  <FONT COLOR="#555">// rag queries</FONT><BR ALIGN="LEFT"/>
+          + log_http(msg)   <FONT COLOR="#555">// HTTP access</FONT><BR ALIGN="LEFT"/>
+          + log_mcp(msg)    <FONT COLOR="#555">// MCP protocol</FONT><BR ALIGN="LEFT"/>
+          + log_error(msg)  <FONT COLOR="#555">// always on</FONT><BR ALIGN="LEFT"/>
+          + log_info(msg)<BR ALIGN="LEFT"/>
+        </TD></TR>
+      </TABLE>>];
+
+    // ===================== CONFIG =====================
+    Config [label=<
+      <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+        <TR><TD BGCOLOR="#a855f7"><FONT COLOR="white"><B>Config</B></FONT></TD></TR>
+        <TR><TD ALIGN="LEFT" BGCOLOR="#f3e8ff">
+          + socket_path, + bind_address, + port<BR ALIGN="LEFT"/>
+          + db_path, + model_dir, + log_dir<BR ALIGN="LEFT"/>
+          + embedding_model / _dimensions<BR ALIGN="LEFT"/>
+          + bm25_*, + vector_weight, + min_score<BR ALIGN="LEFT"/>
+          + inference_endpoints[]<BR ALIGN="LEFT"/>
+          + chat_* (pause, summarize, store_turns, …)<BR ALIGN="LEFT"/>
+          + tls_cert, + tls_key<BR ALIGN="LEFT"/>
+          + model_aliases<BR ALIGN="LEFT"/>
+        </TD></TR>
+        <TR><TD ALIGN="LEFT">
+          + resolved_db_path / _log_dir / _model_dir<BR ALIGN="LEFT"/>
+          + resolve_model(name)<BR ALIGN="LEFT"/>
+        </TD></TR>
+      </TABLE>>];
+
+    // ===================== EDGES =====================
+    // composition: ◆ at owner (tail), arrowhead at owned (head)
+    RaggerMemory       -> Embedder           [arrowtail=diamond, arrowhead=none, dir=back, label="owns"];
+    RaggerMemory       -> StorageBackend     [arrowtail=diamond, arrowhead=none, dir=back, label="owns"];
+    SqliteBackend      -> Embedder           [label="uses"];
+    SqliteBackend      -> BM25Index          [arrowtail=diamond, arrowhead=none, dir=back, label="owns"];
+    Server             -> RaggerMemory       [label="ref"];
+    Server             -> InferenceClient    [arrowtail=diamond, arrowhead=none, dir=back, label="owns"];
+    Server             -> ChatSessionManager [arrowtail=diamond, arrowhead=none, dir=back, label="owns"];
+    ChatSessionManager -> ChatSession        [arrowtail=diamond, arrowhead=none, dir=back, label="owns N"];
+    Chat               -> RaggerMemory       [label="ref"];
+    Chat               -> InferenceClient    [label="ref"];
+    InferenceClient    -> Endpoint           [arrowtail=diamond, arrowhead=none, dir=back, label="owns N"];
+    InferenceClient    -> ApiFormat          [label="uses"];
+
+    // inheritance
+    SqliteBackend      -> StorageBackend   [arrowhead=empty, style=dashed, label="implements"];
+
+    // auth edges
+    AuthModule         -> StorageBackend   [style=dotted, label="useradd/issue_token", color="#991b1b"];
+    AuthModule         -> AuthResult       [style=dotted, color="#991b1b"];
+    AuthModule         -> UserInfo         [style=dotted, color="#991b1b"];
+    Server             -> AuthModule       [style=dotted, label="verify_token", color="#991b1b"];
+    RaggerClient       -> AuthModule       [style=dotted, label="ensure_token", color="#991b1b"];
+
+    // logging edges (dashed, muted)
+    Server             -> LoggingModule    [style=dotted, color="#64748b"];
+    Chat               -> LoggingModule    [style=dotted, color="#64748b"];
+    AuthModule         -> LoggingModule    [style=dotted, color="#64748b"];
+
+    // config edges
+    Server             -> Config           [style=dotted, color="#6b21a8", label="config()"];
+    Chat               -> Config           [style=dotted, color="#6b21a8"];
+    InferenceClient    -> Config           [style=dotted, color="#6b21a8", label="from_config"];
+    RaggerMemory       -> Config           [style=dotted, color="#6b21a8"];
+    LoggingModule      -> Config           [style=dotted, color="#6b21a8"];
+
+    // value-object flow
+    Chat               -> ChatSession      [style=dotted, label="Message"];
+
+    // Legend
+    subgraph cluster_legend {
+        label     = "Legend";
+        style     = "rounded,filled";
+        fillcolor = "#fafafa";
+        color     = "#cbd5e1";
+        fontcolor = "#334155";
+        fontsize  = 10;
+
+        lg [label=<
+          <TABLE BORDER="0" CELLBORDER="0" CELLSPACING="2" CELLPADDING="2">
+            <TR><TD ALIGN="LEFT"><B>Edges</B></TD><TD></TD></TR>
+            <TR><TD ALIGN="LEFT">◆──  composition (owns; ◆ at owner)</TD><TD></TD></TR>
+            <TR><TD ALIGN="LEFT">──▷ inheritance / implements</TD><TD></TD></TR>
+            <TR><TD ALIGN="LEFT">───  uses / calls method</TD><TD></TD></TR>
+            <TR><TD ALIGN="LEFT">···   free function / value flow</TD><TD></TD></TR>
+            <TR><TD ALIGN="LEFT"><B>Colors = module</B></TD><TD></TD></TR>
+            <TR><TD ALIGN="LEFT" BGCOLOR="#dbeafe">Core</TD><TD ALIGN="LEFT" BGCOLOR="#ccfbf1">Embedding</TD></TR>
+            <TR><TD ALIGN="LEFT" BGCOLOR="#ffedd5">Network</TD><TD ALIGN="LEFT" BGCOLOR="#dcfce7">Chat</TD></TR>
+            <TR><TD ALIGN="LEFT" BGCOLOR="#fef3c7">Inference</TD><TD ALIGN="LEFT" BGCOLOR="#fee2e2">Auth</TD></TR>
+            <TR><TD ALIGN="LEFT" BGCOLOR="#e2e8f0">Logging</TD><TD ALIGN="LEFT" BGCOLOR="#f3e8ff">Config</TD></TR>
+          </TABLE>>];
+    }
+}

@@ -434,6 +434,252 @@ There is no universal API to query it.
 
 ---
 
+## Composable Payload Builder
+
+The inference engine is stateless. Ragger owns the entire payload.
+That means the payload isn't a fixed template — it's a **composition
+of named sources**, assembled per turn by rules the user (and the
+agent) can influence.
+
+Every piece of content that can enter a payload is a **source**.
+Sources are enumerated, typed, independently retrievable, and
+independently budgetable. `build_messages()` is not a hard-coded
+sequence of `load_persona(); load_summary(); load_turns();` — it's
+a pipeline that asks each configured source for its contribution,
+budgets the result, and emits the final message array.
+
+### Source Catalog
+
+| Source                   | Level | Output shape                       | Gating                    |
+|--------------------------|-------|------------------------------------|---------------------------|
+| `persona`                | —     | Concatenated workspace files       | Always on                 |
+| `dynamic_system`         | —     | Computed string (time, state, …)   | Hook-provided             |
+| `raw_turns`              | L1    | `[{role:user}, {role:assistant}]…` | `verbatim_turns/minutes`  |
+| `turn_summaries_recent`  | L2    | Bulleted list, newest first        | `summary_count/minutes`   |
+| `turn_summaries_search`  | L2    | Relevance-ranked list              | Query, score threshold    |
+| `session_summary`        | L3    | Single paragraph                   | Current running summary   |
+| `project_summary`        | L4    | Single paragraph                   | Topic match to query      |
+| `rag`                    | L5    | Relevance-ranked list              | Query, score threshold    |
+| `decisions`              | L6    | Bulleted list                      | `current` status + query  |
+| `tools`                  | —     | OpenAI/Anthropic tools array       | Supplied by caller (R3)   |
+| `new_user_message`       | —     | `{role:user, content}`             | Always last               |
+
+A source is a function: `(context) → { content, token_cost, priority }`.
+The context bundles the current query, session id, user id, config,
+and an embedder/search handle. Sources are pure w.r.t. the database
+(no writes), so they parallelise freely.
+
+### Dynamic System Messages
+
+`dynamic_system` is a first-class source, not a special case of
+persona. It produces text that depends on *runtime state* — things
+that are true right now and may be false next turn:
+
+- Current local time and timezone (so the model stops guessing)
+- Active project / working directory / git branch (if IDE-integrated)
+- Active tool availability (e.g. "network is offline")
+- User mood / status hints ("deep-work mode — be terse")
+- Scheduled reminders firing in this turn
+- Mode flags ("subject just switched — treat prior context as stale")
+
+Dynamic content goes in its own segment of `messages[0]`, clearly
+delimited, so a future turn's version can replace it without
+disturbing persona or memory blocks.
+
+### Recipes
+
+A **recipe** is a named, ordered list of sources with per-source
+budget caps. Ragger ships defaults; users override in config; agents
+can request a specific recipe per request via `X-Ragger-Recipe` or
+a body field.
+
+```ini
+[recipe.default]
+# The standard conversational payload (Role 2)
+sources = persona, dynamic_system, session_summary, project_summary,
+          decisions, rag, turn_summaries_search,
+          turn_summaries_recent, raw_turns, new_user_message
+
+[recipe.lean]
+# For tiny (4K) models: drop everything but the essentials
+sources = persona, session_summary, raw_turns, new_user_message
+
+[recipe.research]
+# Favor RAG breadth over recent chat continuity
+sources = persona, rag, decisions, project_summary,
+          new_user_message
+rag.max_results = 20
+turn_summaries_recent.count = 0
+
+[recipe.fresh_subject]
+# After "new subject" command: drop session context
+sources = persona, dynamic_system, project_summary,
+          new_user_message
+```
+
+A recipe is just a declarative config over the same underlying
+sources. No new machinery — it's how the existing priorities,
+budgets, and windows get packaged.
+
+### Builder API (internal)
+
+```cpp
+// include/ragger/payload_builder.h
+class PayloadSource {
+public:
+    virtual ~PayloadSource() = default;
+    virtual std::string name() const = 0;
+    virtual int priority() const = 0;            // shedding order
+    virtual std::vector<Message> produce(const BuildContext&) = 0;
+    virtual int estimate_tokens(const BuildContext&) = 0;
+};
+
+class PayloadBuilder {
+public:
+    void add(std::unique_ptr<PayloadSource>);
+    BuildResult build(const BuildContext&);      // applies budget + priority
+};
+```
+
+`ChatSession::build_messages()` becomes a thin wrapper:
+
+1. Pick the recipe (default, per-user override, or per-request)
+2. Instantiate the sources the recipe names
+3. Run them (parallel where safe)
+4. Hand results to `PayloadBuilder` which applies the shrinking
+   algorithm (see "The Shrinking Algorithm" above)
+5. Emit the final `messages` array
+
+Every current payload item becomes a `PayloadSource` subclass.
+Adding a new memory type in the future (e.g. "calendar events",
+"open file buffer") is a new source class and a recipe entry —
+no changes to the builder.
+
+### Exposing It to Agents
+
+Agents that want full control (Role 3, OpenClaw, MCP clients) can:
+
+1. **Pick a recipe** via request header/field
+2. **Override per-source params** via request body (e.g. raise
+   `rag.max_results`, narrow `verbatim_minutes`)
+3. **Inject an extra `dynamic_system` block** via a request field
+   (e.g. OC injects current tool state)
+4. **Skip sources** entirely (e.g. `skip=persona` for a diagnostic
+   probe)
+
+The HTTP contract for this is TBD — likely `X-Ragger-Recipe` +
+a `ragger_overrides` body field — but the internal builder is
+recipe-agnostic from day one.
+
+### Implementation Note
+
+This is **not a new phase** — it's a refactor of how Phase 3
+(Tiered Payload Assembly) is implemented. Instead of hard-coding
+the assembly sequence in `build_messages()`, build it as a source
+pipeline from the start. Same behavior, same budget, same priority
+rules — just composable.
+
+---
+
+## The Router: A Small Local Model That Decides
+
+A composable builder is only as good as the thing choosing the
+composition. Deterministic rules ("include last 20 turns") get you
+80% of the way. The remaining 20% — *which* recipe, *what* query to
+run against RAG, *is this a subject switch*, *does the session
+summary still cover what's being said* — needs judgment.
+
+That judgment comes from a **router model**: a small local LLM whose
+job is not to talk to the user but to make structural decisions
+about the payload before it's sent.
+
+### What the Router Decides
+
+| Decision                           | Input                                   | Output                                 |
+|------------------------------------|-----------------------------------------|----------------------------------------|
+| Recipe selection                   | New user message + running summary      | Recipe name (`default`/`research`/…)   |
+| RAG query rewrite                  | New user message + last turn            | Search query string (may differ from user wording) |
+| Subject-switch detection           | New user message + running summary      | `continue` / `switch` / `branch`       |
+| Summary-merge feasibility          | Running summary + new per-turn summary  | `merge_ok` / `start_new`               |
+| Per-source budget nudges           | Estimated total + content profile       | Which sources to widen/narrow          |
+| Capture-worthiness                 | Completed turn                          | `store` / `skip`                       |
+
+All of these are short-input, short-output, structural calls. None
+of them require reasoning quality. A 3–8B model running locally is
+overqualified.
+
+### Same Model as the Memory Model
+
+This is the same model already specified under `[inference.memory]`.
+Summarization and routing are the same skill: read a small amount
+of text, return a small structured answer. One endpoint, one model,
+two uses.
+
+The task table in **Model Separation** expands:
+
+| Task                            | Model                      |
+|---------------------------------|----------------------------|
+| Conversation with user          | `[inference] model`        |
+| Turn/session/project summaries  | `[inference.memory] model` |
+| Auto-capture classification     | `[inference.memory] model` |
+| **Recipe selection**            | `[inference.memory] model` |
+| **RAG query rewrite**           | `[inference.memory] model` |
+| **Subject-switch detection**    | `[inference.memory] model` |
+| **Summary-merge feasibility**   | `[inference.memory] model` |
+
+### External vs. Embedded
+
+The router must be **local** — it runs before every turn, so cloud
+latency would ruin the experience, and routing a user's raw prompt
+to an external service for *planning* duplicates the privacy surface
+we're trying to contain. Two ways to get there:
+
+**Option A — External local engine (default).** Point
+`[inference.memory]` at an already-running Ollama or LM Studio. User
+picks the model, swaps it freely, shares GPU with other tools. Zero
+added binary weight. Requires the user to have a local engine
+installed — currently a safe assumption for our audience, but a
+friction point for the GUI-onboarding path (see GUI priority memo).
+
+**Option B — Embedded engine (optional, shipped).** Compile
+`llama.cpp` (or a minimal GGUF runtime) into the Ragger binary and
+ship a small default model (e.g. Qwen2.5-3B-Instruct, ~2 GB GGUF) as
+an optional download on first run. The router Just Works out of the
+box. Cost: +5–20 MB binary for the runtime, one more thing to keep
+building against, and a model-download step during onboarding.
+
+**Recommendation:** Ship A as the default path and add B specifically
+for the zero-config onboarding flow — the non-technical user who
+installs Ragger and expects it to work without also installing
+Ollama. The config surface stays the same (`[inference.memory]`);
+the embedded engine is just another endpoint backend, selected by
+URL scheme (e.g. `embedded://qwen2.5-3b`). Existing code paths don't
+change.
+
+### Fallback Behavior
+
+If no router is configured and no embedded model is available,
+recipes fall back to **`default`** unconditionally and deterministic
+rules handle everything the router would have. The system still
+works — it just loses the 20% of polish the router provides.
+Explicit user commands ("new subject") still work because they don't
+need the router.
+
+### Open Questions (Router)
+
+- Does the router run *before* the conversation model (blocking the
+  turn) or *in parallel* (eating its first few hundred ms by
+  speculatively building the default recipe, then swapping if the
+  router disagrees)? Parallel is faster but wastes compute on wrong
+  guesses.
+- Can router decisions be cached per session? Recipe selection
+  probably shifts less than once per 10 turns; caching could avoid
+  90% of calls.
+- Structured output: JSON mode / grammar-constrained decoding to
+  guarantee the router returns a valid recipe name, not prose.
+
+---
+
 ## Model Separation: Conversation vs. Memory Management
 
 A critical design principle: **the model that talks to the user is

@@ -14,9 +14,9 @@
  //          dot -Tpng call-graph-4-16-v2.dot -o call-graph-4-16-v2.png
 
 digraph RaggerCallGraph_v2 {
-    rankdir = BT;
+    rankdir = TB;
     bgcolor = "white";
-    splines = ortho;
+    splines = spline;
     nodesep = 0.35;
     ranksep = 0.60;
     fontname = "Helvetica";
@@ -183,4 +183,21 @@ digraph RaggerCallGraph_v2 {
 
     // HTTP client calls back into own server
     client -> storage_backend;
+
+    // =============================================================
+    //  Legend
+    // =============================================================
+    subgraph cluster_legend {
+        label     = "Legend";
+        style     = "rounded,filled";
+        fillcolor = "#fafafa";
+        color     = "#cbd5e1";
+        fontcolor = "#334155";
+        fontsize  = 10;
+
+        l_use  [label="──▶ calls / uses",          shape=box, style="filled,rounded", fillcolor="#ffedd5",  fontsize=9];
+        l_impl [label="- -▷ implements / inherits", shape=box, style="filled,rounded", fillcolor="#ccfbf1",  fontsize=9];
+        l_ext  [label="◯   external (ellipse)",     shape=box, style="filled,rounded", fillcolor="#f1f5f9",  fontsize=9, color="#94a3b8"];
+        l_use -> l_impl -> l_ext [style=invis];
+    }
 }

@@ -1,0 +1,310 @@
+// Ragger ERD — View 2: Modules, files, classes
+//
+// What this shows:
+//   One box per header (include/ragger/*.h), clustered by module.
+//   Each box lists the classes/structs declared in that header.
+//   Arrows = "module A depends on module B" (#include + usage).
+//
+// Use this when you want to answer "where does class X live?" or
+// "if I touch module M, what might break?"
+//
+// Render:
+//   dot -Tsvg erd-02-modules.dot -o erd-02-modules.svg
+
+digraph RaggerModules {
+    rankdir = LR;
+    bgcolor = "white";
+    splines = polyline;
+    nodesep = 0.35;
+    ranksep = 0.80;
+    fontname = "Helvetica";
+    labelloc = "t";
+    label = <<FONT POINT-SIZE="18"><B>Ragger — Modules &amp; headers</B></FONT><BR/><FONT POINT-SIZE="10" COLOR="#555555">One box per include/ragger/*.h. Arrows show module-to-module dependencies.</FONT>>;
+
+    node [
+        shape      = none,
+        fontname   = "Helvetica",
+        fontsize   = 10,
+        margin     = 0
+    ];
+    edge [
+        fontname = "Helvetica",
+        fontsize = 9,
+        color    = "#64748b",
+        penwidth = 1.1
+    ];
+
+    // ---- Core module ---------------------------------------------------------
+    subgraph cluster_core {
+        label     = "Core";
+        style     = "rounded,filled";
+        fillcolor = "#eff6ff";
+        color     = "#3b82f6";
+        fontcolor = "#1e40af";
+        fontsize  = 12;
+
+        h_memory [label=<
+          <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+            <TR><TD BGCOLOR="#dbeafe"><B>memory.h</B></TD></TR>
+            <TR><TD ALIGN="LEFT">RaggerMemory</TD></TR>
+          </TABLE>>];
+
+        h_storage_backend [label=<
+          <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+            <TR><TD BGCOLOR="#dbeafe"><B>storage_backend.h</B></TD></TR>
+            <TR><TD ALIGN="LEFT">StorageBackend «interface»</TD></TR>
+          </TABLE>>];
+
+        h_sqlite [label=<
+          <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+            <TR><TD BGCOLOR="#dbeafe"><B>sqlite_backend.h</B></TD></TR>
+            <TR><TD ALIGN="LEFT">SqliteBackend</TD></TR>
+          </TABLE>>];
+
+        h_storage_types [label=<
+          <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+            <TR><TD BGCOLOR="#dbeafe"><B>storage_types.h</B></TD></TR>
+            <TR><TD ALIGN="LEFT">SearchResult</TD></TR>
+            <TR><TD ALIGN="LEFT">SearchResponse</TD></TR>
+            <TR><TD ALIGN="LEFT">MemoryRecord</TD></TR>
+            <TR><TD ALIGN="LEFT">MemoryFilter</TD></TR>
+            <TR><TD ALIGN="LEFT">AllEmbeddings</TD></TR>
+            <TR><TD ALIGN="LEFT">UserInfo</TD></TR>
+          </TABLE>>];
+
+        h_bm25 [label=<
+          <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+            <TR><TD BGCOLOR="#dbeafe"><B>bm25.h</B></TD></TR>
+            <TR><TD ALIGN="LEFT">BM25Index</TD></TR>
+          </TABLE>>];
+    }
+
+    // ---- Embedding module ----------------------------------------------------
+    subgraph cluster_emb {
+        label     = "Embedding";
+        style     = "rounded,filled";
+        fillcolor = "#f0fdfa";
+        color     = "#14b8a6";
+        fontcolor = "#0f766e";
+        fontsize  = 12;
+
+        h_embedder [label=<
+          <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+            <TR><TD BGCOLOR="#ccfbf1"><B>embedder.h</B></TD></TR>
+            <TR><TD ALIGN="LEFT">Embedder</TD></TR>
+          </TABLE>>];
+
+        h_tokenizer [label=<
+          <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+            <TR><TD BGCOLOR="#ccfbf1"><B>tokenizer_wrapper.h</B></TD></TR>
+            <TR><TD ALIGN="LEFT">TokenizerWrapper</TD></TR>
+          </TABLE>>];
+    }
+
+    // ---- Network module ------------------------------------------------------
+    subgraph cluster_net {
+        label     = "Network";
+        style     = "rounded,filled";
+        fillcolor = "#fff7ed";
+        color     = "#fb923c";
+        fontcolor = "#9a3412";
+        fontsize  = 12;
+
+        h_server [label=<
+          <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+            <TR><TD BGCOLOR="#ffedd5"><B>server.h</B></TD></TR>
+            <TR><TD ALIGN="LEFT">Server</TD></TR>
+          </TABLE>>];
+
+        h_client [label=<
+          <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+            <TR><TD BGCOLOR="#ffedd5"><B>client.h</B></TD></TR>
+            <TR><TD ALIGN="LEFT">RaggerClient</TD></TR>
+          </TABLE>>];
+    }
+
+    // ---- Chat module ---------------------------------------------------------
+    subgraph cluster_chat {
+        label     = "Chat";
+        style     = "rounded,filled";
+        fillcolor = "#f0fdf4";
+        color     = "#22c55e";
+        fontcolor = "#166534";
+        fontsize  = 12;
+
+        h_chat [label=<
+          <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+            <TR><TD BGCOLOR="#dcfce7"><B>chat.h</B></TD></TR>
+            <TR><TD ALIGN="LEFT">Chat (REPL)</TD></TR>
+          </TABLE>>];
+
+        h_chat_sessions [label=<
+          <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+            <TR><TD BGCOLOR="#dcfce7"><B>chat_sessions.h</B></TD></TR>
+            <TR><TD ALIGN="LEFT">ChatSession</TD></TR>
+            <TR><TD ALIGN="LEFT">ChatSessionManager</TD></TR>
+            <TR><TD ALIGN="LEFT">ExpiredSession</TD></TR>
+          </TABLE>>];
+    }
+
+    // ---- Inference module ----------------------------------------------------
+    subgraph cluster_inf {
+        label     = "Inference";
+        style     = "rounded,filled";
+        fillcolor = "#fffbeb";
+        color     = "#f59e0b";
+        fontcolor = "#92400e";
+        fontsize  = 12;
+
+        h_inference [label=<
+          <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+            <TR><TD BGCOLOR="#fef3c7"><B>inference.h</B></TD></TR>
+            <TR><TD ALIGN="LEFT">InferenceClient</TD></TR>
+            <TR><TD ALIGN="LEFT">Endpoint</TD></TR>
+            <TR><TD ALIGN="LEFT">Message</TD></TR>
+          </TABLE>>];
+
+        h_api_formats [label=<
+          <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+            <TR><TD BGCOLOR="#fef3c7"><B>api_formats.h</B></TD></TR>
+            <TR><TD ALIGN="LEFT">ApiFormat</TD></TR>
+            <TR><TD ALIGN="LEFT">ApiMessage</TD></TR>
+          </TABLE>>];
+    }
+
+    // ---- Auth module ---------------------------------------------------------
+    subgraph cluster_auth {
+        label     = "Auth";
+        style     = "rounded,filled";
+        fillcolor = "#fef2f2";
+        color     = "#ef4444";
+        fontcolor = "#991b1b";
+        fontsize  = 12;
+
+        h_auth [label=<
+          <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+            <TR><TD BGCOLOR="#fee2e2"><B>auth.h</B></TD></TR>
+            <TR><TD ALIGN="LEFT">AuthResult</TD></TR>
+            <TR><TD ALIGN="LEFT"><FONT COLOR="#555555">+ free functions:</FONT></TD></TR>
+            <TR><TD ALIGN="LEFT">useradd, userdel</TD></TR>
+            <TR><TD ALIGN="LEFT">verify_password</TD></TR>
+            <TR><TD ALIGN="LEFT">issue_token, verify_token</TD></TR>
+            <TR><TD ALIGN="LEFT">hash_token, hash_password</TD></TR>
+          </TABLE>>];
+    }
+
+    // ---- Logging module ------------------------------------------------------
+    subgraph cluster_log {
+        label     = "Logging";
+        style     = "rounded,filled";
+        fillcolor = "#f8fafc";
+        color     = "#64748b";
+        fontcolor = "#334155";
+        fontsize  = 12;
+
+        h_logging [label=<
+          <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+            <TR><TD BGCOLOR="#e2e8f0"><B>logging.h</B></TD></TR>
+            <TR><TD ALIGN="LEFT"><FONT COLOR="#555555">free functions:</FONT></TD></TR>
+            <TR><TD ALIGN="LEFT">setup_logging</TD></TR>
+            <TR><TD ALIGN="LEFT">log_query / log_http</TD></TR>
+            <TR><TD ALIGN="LEFT">log_mcp / log_error / log_info</TD></TR>
+          </TABLE>>];
+    }
+
+    // ---- Config module -------------------------------------------------------
+    subgraph cluster_cfg {
+        label     = "Config";
+        style     = "rounded,filled";
+        fillcolor = "#faf5ff";
+        color     = "#a855f7";
+        fontcolor = "#6b21a8";
+        fontsize  = 12;
+
+        h_config [label=<
+          <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+            <TR><TD BGCOLOR="#f3e8ff"><B>config.h</B></TD></TR>
+            <TR><TD ALIGN="LEFT">Config</TD></TR>
+            <TR><TD ALIGN="LEFT">InferenceEndpointConfig</TD></TR>
+            <TR><TD ALIGN="LEFT">ConfigError</TD></TR>
+          </TABLE>>];
+    }
+
+    // ---- Import / CLI --------------------------------------------------------
+    subgraph cluster_misc {
+        label     = "Import / CLI";
+        style     = "rounded,filled";
+        fillcolor = "#f5f5f4";
+        color     = "#78716c";
+        fontcolor = "#44403c";
+        fontsize  = 12;
+
+        h_import [label=<
+          <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+            <TR><TD BGCOLOR="#e7e5e4"><B>import.h</B></TD></TR>
+            <TR><TD ALIGN="LEFT">ImportChunk</TD></TR>
+            <TR><TD ALIGN="LEFT">chunk_markdown()</TD></TR>
+          </TABLE>>];
+
+        h_main [label=<
+          <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">
+            <TR><TD BGCOLOR="#e7e5e4"><B>src/main.cpp</B></TD></TR>
+            <TR><TD ALIGN="LEFT">CLI dispatch</TD></TR>
+            <TR><TD ALIGN="LEFT">useradd / userdel / import / …</TD></TR>
+          </TABLE>>];
+    }
+
+    // ---- Edges: module-to-module dependencies --------------------------------
+    // Core
+    h_memory            -> h_storage_backend;
+    h_memory            -> h_embedder;
+    h_storage_backend   -> h_storage_types;
+    h_sqlite            -> h_storage_backend [label="implements", style=dashed, arrowhead=empty];
+    h_sqlite            -> h_bm25;
+    h_sqlite            -> h_embedder;
+    h_sqlite            -> h_storage_types;
+
+    // Embedding
+    h_embedder          -> h_tokenizer;
+
+    // Network
+    h_server            -> h_memory;
+    h_server            -> h_inference;
+    h_server            -> h_chat_sessions;
+    h_server            -> h_auth;
+    h_server            -> h_logging;
+    h_server            -> h_config;
+    h_client            -> h_storage_types;
+
+    // Chat
+    h_chat              -> h_memory;
+    h_chat              -> h_inference;
+    h_chat              -> h_chat_sessions;
+    h_chat              -> h_config;
+    h_chat_sessions     -> h_inference     [label="Message", style=dotted];
+    h_chat_sessions     -> h_storage_backend;
+
+    // Inference
+    h_inference         -> h_api_formats;
+    h_inference         -> h_config;
+
+    // Auth
+    h_auth              -> h_storage_backend;
+    h_auth              -> h_storage_types;
+    h_auth              -> h_config;
+
+    // Logging
+    h_logging           -> h_config;
+
+    // CLI
+    h_main              -> h_memory;
+    h_main              -> h_server;
+    h_main              -> h_client;
+    h_main              -> h_chat;
+    h_main              -> h_auth;
+    h_main              -> h_config;
+    h_main              -> h_logging;
+    h_main              -> h_import;
+    h_main              -> h_sqlite;
+    h_import            -> h_storage_types [style=dotted];
+}
