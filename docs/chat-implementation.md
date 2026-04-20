@@ -101,7 +101,7 @@ Updated embedded default config in `config.cpp` to include:
 
 ✅ **Build:** Successful compilation with no errors  
 ✅ **Chat verb exists:** `./ragger chat` launches REPL  
-✅ **Config loading:** Reads inference settings from `~/.ragger/ragger.ini`  
+✅ **Config loading:** Reads inference settings from `~/.ragger/settings.ini`  
 ✅ **Endpoint routing:** Matches model names against glob patterns  
 ✅ **HTTP client:** libcurl connects to LM Studio on `localhost:1234`  
 ✅ **Streaming:** SSE parsing extracts tokens and prints them in real-time  
@@ -114,7 +114,7 @@ Updated embedded default config in `config.cpp` to include:
 ```bash
 $ cd ~/CLionProjects/Ragger/build
 $ ./ragger chat
-Config loaded from /Volumes/WDBlack2/.ragger/ragger.ini
+Config loaded from /Volumes/WDBlack2/.ragger/settings.ini
 Ragger Chat (model: qwen/qwen2.5-coder-14b)
 Type '/quit' or Ctrl+D to exit
 
@@ -159,7 +159,7 @@ models = claude-*
 ✅ **nlohmann/json** — Uses vendored header at `vendor/nlohmann_json.hpp`  
 ✅ **libcurl** — Found and linked successfully  
 ✅ **No Crow for client** — Server-only library not used  
-✅ **Same config file** — Uses existing `~/.ragger/ragger.ini`  
+✅ **Same config file** — Uses existing `~/.ragger/settings.ini`  
 ✅ **Same behavior** — Matches Python implementation exactly  
 ✅ **No service disruption** — Did not modify running server  
 ✅ **RaggerMemory instance** — Chat verb loads its own instance like other verbs

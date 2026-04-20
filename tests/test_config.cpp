@@ -343,17 +343,17 @@ int main() {
     std::filesystem::remove(tmp_conf);
 
     // Test find_system_config — explicit path takes priority (and returns error if missing)
-    auto result_find = ragger::find_system_config("/nonexistent/ragger.ini");
+    auto result_find = ragger::find_system_config("/nonexistent/settings.ini");
     assert(!result_find.has_value());
     assert(result_find.error() == ragger::ConfigError::NotFound);
 
-    // Test find_system_config — no explicit path finds /etc/ragger.ini or ~/.ragger/ragger.ini (or bootstraps)
+    // Test find_system_config — no explicit path finds /etc/ragger.ini or ~/.ragger/settings.ini (or bootstraps)
     auto result_found = ragger::find_system_config("");
     assert(result_found.has_value());
     assert(!result_found->empty());
 
     // Test load_config with nonexistent file
-    auto result_load = ragger::load_config("/nonexistent/ragger.ini");
+    auto result_load = ragger::load_config("/nonexistent/settings.ini");
     assert(!result_load.has_value());
     assert(result_load.error() == ragger::ConfigError::IOError);
 

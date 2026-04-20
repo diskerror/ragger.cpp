@@ -8,20 +8,20 @@ single-user and multi-user scenarios.
 Ragger reads config in this order (later values override earlier ones):
 
 1. **System config:** `/etc/ragger.ini` (or path specified via `--config`)
-2. **User config:** `~/.ragger/ragger.ini` (always read if it exists)
+2. **User config:** `~/.ragger/settings.ini` (always read if it exists)
 
 **Command-line override:**
 
 ```bash
-ragger serve --config /custom/path/ragger.ini
+ragger serve --config /custom/path/settings.ini
 ```
 
-This replaces the system config location. User config (`~/.ragger/ragger.ini`)
+This replaces the system config location. User config (`~/.ragger/settings.ini`)
 is still read on top if present.
 
 ## Auto-bootstrap
 
-If no config exists on first run, Ragger auto-creates `~/.ragger/ragger.ini`
+If no config exists on first run, Ragger auto-creates `~/.ragger/settings.ini`
 with default settings. This makes single-user installs work out of the box.
 
 ## SERVER_LOCKED Keys
@@ -39,7 +39,7 @@ host = 0.0.0.0            # SERVER_LOCKED
 port = 8432               # SERVER_LOCKED
 ```
 
-If a user sets `port = 9000` in `~/.ragger/ragger.ini`, the value is
+If a user sets `port = 9000` in `~/.ragger/settings.ini`, the value is
 ignored. The server still binds to port 8432.
 
 **Currently locked keys:**
@@ -82,7 +82,8 @@ For single-user setups, ceilings are rarely needed.
 ## Full Config Reference
 
 Below is a complete reference with defaults and descriptions. See also
-`example-system.ini` and `example-user.ini` in the project root.
+`example-settings.ini` in the project root — a ready-to-edit template
+that install.sh copies to `~/.ragger/settings.ini` on first run.
 
 ### `[server]`
 
@@ -183,7 +184,7 @@ max_persona_chars_limit = 10000
 max_memory_results_limit = 10
 ```
 
-### Example User Config (`~/.ragger/ragger.ini`)
+### Example User Config (`~/.ragger/settings.ini`)
 
 ```ini
 # Personal preferences

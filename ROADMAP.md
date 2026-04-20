@@ -25,7 +25,7 @@ Both Python and C++ versions at feature parity. C++ is production server.
 ### Performance
 
 - **Pre-load user configs:** At daemon startup/HUP, cache all user configurations
-  from the users table. Eliminates per-request disk I/O for `~/.ragger/ragger.ini`.
+  from the users table. Eliminates per-request disk I/O for `~/.ragger/settings.ini`.
   Tradeoff: config changes require HUP to reload.
 
 ### Potential Upgrades

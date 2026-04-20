@@ -148,7 +148,7 @@ INI config file loader with layered override support.
 
 Features:
 
-- Layered config: system (`/etc/ragger.ini`) → user (`~/.ragger/ragger.ini`)
+- Layered config: system (`/etc/ragger.ini`) → user (`~/.ragger/settings.ini`)
 - SERVER_LOCKED keys (system values can't be overridden)
 - System ceilings (hard limits on user-configurable values)
 - Auto-bootstrap (creates default user config on first run)

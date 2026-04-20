@@ -34,7 +34,7 @@ Two config files, always:
 
 1. **System config** (`/etc/ragger.ini` or `--config=`): Infrastructure
    settings. Loaded first.
-2. **User config** (`~/.ragger/ragger.ini`): Personal preferences.
+2. **User config** (`~/.ragger/settings.ini`): Personal preferences.
    Always read on top.
 
 **SERVER_LOCKED keys** (host, port, db_path, log_dir, embedding model,

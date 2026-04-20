@@ -15,9 +15,9 @@ After that, all operations are offline.
 
 | Platform | Executable location                | Config location                    |
 |----------|------------------------------------|------------------------------------|
-| macOS    | `~/.local/bin/ragger`              | `~/.ragger/ragger.ini`             |
-| Linux    | `~/.local/bin/ragger`              | `~/.ragger/ragger.ini`             |
-| Windows  | `%LOCALAPPDATA%\ragger\ragger.exe` | `%LOCALAPPDATA%\ragger\ragger.ini` |
+| macOS    | `~/.local/bin/ragger`              | `~/.ragger/settings.ini`             |
+| Linux    | `~/.local/bin/ragger`              | `~/.ragger/settings.ini`             |
+| Windows  | `%LOCALAPPDATA%\ragger\ragger.exe` | `%LOCALAPPDATA%\ragger\settings.ini` |
 
 > **Note:** Windows support is planned but not yet implemented. macOS and Linux only for now.
 

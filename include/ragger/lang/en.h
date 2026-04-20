@@ -35,7 +35,7 @@ constexpr const char* MSG_CONFIG_CREATED      = "Created default config: ";
 
 // --- Errors: config ---
 constexpr const char* ERR_CONFIG_NOT_FOUND    = "No config file found.\n"
-                                                 "Searched: /etc/ragger.ini, ~/.ragger/ragger.ini\n"
+                                                 "Searched: /etc/ragger.ini, ~/.ragger/settings.ini\n"
                                                  "Use --config-file=<path> to specify one.";
 constexpr const char* ERR_CONFIG_FILE_MISSING = "Config file not found: ";
 constexpr const char* ERR_CONFIG_OPEN         = "Cannot open config file: ";

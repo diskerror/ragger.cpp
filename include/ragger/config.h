@@ -1,8 +1,8 @@
 /**
  * Configuration for Ragger Memory (C++ port)
  *
- * Loaded from ragger.ini at runtime.
- * Search order: --config= → /etc/ragger.ini → ~/.ragger/ragger.ini
+ * Loaded from settings.ini at runtime.
+ * Search order: --config= → /etc/ragger.ini → ~/.ragger/settings.ini
  */
 #pragma once
 

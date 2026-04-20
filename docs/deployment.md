@@ -34,9 +34,9 @@ This is the default for personal use. No `sudo` required.
 
 | Platform | Executable                         | Config                             | Database                            |
 |----------|------------------------------------|------------------------------------|-------------------------------------|
-| macOS    | `~/.local/bin/ragger`              | `~/.ragger/ragger.ini`             | `~/.ragger/memories.db`             |
-| Linux    | `~/.local/bin/ragger`              | `~/.ragger/ragger.ini`             | `~/.ragger/memories.db`             |
-| Windows  | `%LOCALAPPDATA%\ragger\ragger.exe` | `%LOCALAPPDATA%\ragger\ragger.ini` | `%LOCALAPPDATA%\ragger\memories.db` |
+| macOS    | `~/.local/bin/ragger`              | `~/.ragger/settings.ini`             | `~/.ragger/memories.db`             |
+| Linux    | `~/.local/bin/ragger`              | `~/.ragger/settings.ini`             | `~/.ragger/memories.db`             |
+| Windows  | `%LOCALAPPDATA%\ragger\ragger.exe` | `%LOCALAPPDATA%\ragger\settings.ini` | `%LOCALAPPDATA%\ragger\memories.db` |
 
 > **Note:** Windows support is planned but not yet implemented. macOS and Linux only for now.
 
@@ -163,7 +163,7 @@ ragger search "test"
 - `/var/log/ragger/` — Daemon logs
 - `~/.ragger/memories.db` — Per-user memory database
 - `~/.ragger/token` — Per-user authentication token
-- `~/.ragger/ragger.ini` — Per-user config overrides
+- `~/.ragger/settings.ini` — Per-user config overrides
 
 ### Managing the Daemon
 

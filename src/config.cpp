@@ -79,11 +79,11 @@ std::string Config::resolve_model(const std::string& name) const {
 // -----------------------------------------------------------------------
 // Default config (embedded)
 // -----------------------------------------------------------------------
-static constexpr const char* DEFAULT_CONFIG = R"(# ragger.ini — Ragger Memory configuration
+static constexpr const char* DEFAULT_CONFIG = R"(# settings.ini — Ragger Memory configuration
 #
 # Search order:
 #   1. --config=<path>          (explicit override)
-#   2. ~/.ragger/ragger.ini    (per-user default)
+#   2. ~/.ragger/settings.ini    (per-user default)
 #
 # First file found wins. Created automatically on first run.
 
@@ -153,7 +153,7 @@ minimum_chunk_size = 300
 // -----------------------------------------------------------------------
 static std::string bootstrap_user_config() {
     std::string ragger_dir = expand_path("~/.ragger");
-    std::string conf_path  = ragger_dir + "/ragger.ini";
+    std::string conf_path  = ragger_dir + "/settings.ini";
 
     fs::create_directories(ragger_dir);
 
@@ -196,7 +196,7 @@ std::expected<std::string, ConfigError> find_system_config(const std::string& cl
 }
 
 std::expected<std::string, ConfigError> find_user_config() {
-    std::string user_conf = expand_path("~/.ragger/ragger.ini");
+    std::string user_conf = expand_path("~/.ragger/settings.ini");
     try {
         if (fs::exists(user_conf)) {
             return user_conf;
