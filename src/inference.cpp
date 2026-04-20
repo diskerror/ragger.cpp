@@ -534,6 +534,10 @@ void InferenceClient::chat_stream(const std::vector<Message>& messages,
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stream_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &stream_data);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);          // safe in multithreaded apps
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);     // keep connection alive during slow generation
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 30L);     // start keepalive after 30s idle
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 10L);    // probe every 10s
 
     CURLcode res = curl_easy_perform(curl);
     long http_code = 0;
