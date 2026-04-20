@@ -136,7 +136,7 @@ int main() {
     assert(cfg.normalize_home_path == true);
 
     // Embedder needed for SqliteBackend store()
-    ragger::Embedder emb(cfg.model_dir);
+    ragger::Embedder emb(cfg.resolved_model_dir());
 
     test_normalize_home_in_stored_text(emb);
     test_normalize_preserves_non_home_paths(emb);

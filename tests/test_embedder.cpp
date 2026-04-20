@@ -110,7 +110,7 @@ int main() {
 
     ragger::init_config("", true);
     auto cfg = ragger::config();
-    ragger::Embedder emb(cfg.model_dir);
+    ragger::Embedder emb(cfg.resolved_model_dir());
 
     test_output_shape(emb);
     test_deterministic(emb);
