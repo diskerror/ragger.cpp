@@ -67,7 +67,7 @@ ragger serve
 | **OpenSSL** | SHA-256 hashing (token auth) | System (MacPorts/apt) |
 | **libcurl** | HTTP client (inference proxy) | System (MacPorts/apt) |
 | **Rust** | Required by tokenizers-cpp | System (MacPorts/apt) |
-| **Crow** | HTTP server + routing | Vendored (`crow_all.h`) |
+| **cpp-httplib** | HTTP server + routing | Vendored (`httplib.h`) |
 | **ONNX Runtime** | Embedding inference | Vendored (pre-built) |
 | **tokenizers-cpp** | HuggingFace tokenizer | Vendored |
 | **nlohmann/json** | JSON serialization | Vendored (header-only) |
