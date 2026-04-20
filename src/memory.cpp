@@ -1,5 +1,5 @@
 /**
- * RaggerMemory — high-level facade implementation
+ * RaggerMemory - high-level facade implementation
  */
 
 #include "ragger/memory.h"

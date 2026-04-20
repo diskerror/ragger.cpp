@@ -126,6 +126,7 @@ add_library(ragger_core STATIC
     src/logs.cpp
     src/auth.cpp
     src/chat_sessions.cpp
+    src/mcp.cpp
 )
 target_include_directories(ragger_core PUBLIC
     "${CMAKE_SOURCE_DIR}/include"

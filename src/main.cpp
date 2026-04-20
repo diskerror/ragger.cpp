@@ -33,6 +33,7 @@
 #include "ragger/inference.h"
 #include "ragger/lang.h"
 #include "ragger/logs.h"
+#include "ragger/mcp.h"
 #include "ragger/memory.h"
 #include "ragger/sqlite_backend.h"
 #include "ragger/server.h"
@@ -348,7 +349,7 @@ static void do_chat(const std::string& db_path, const std::string& model_dir) {
 
     if (inference._endpoints.empty()) {
         std::println("Error: no inference endpoints configured.");
-        std::println("Add to ragger.ini:");
+        std::println("Add to settings.ini:");
         std::println("");
         std::println("  [inference]");
         std::println("  api_url = http://localhost:1234/v1");
@@ -413,132 +414,61 @@ static void do_chat(const std::string& db_path, const std::string& model_dir) {
 }
 
 // -----------------------------------------------------------------------
-// MCP: JSON-RPC server over stdin/stdout
+// Daemon control: start / stop / restart / status
+// Wrappers around launchctl (macOS) or systemctl --user (Linux) that
+// operate on the user-level service installed by install.sh.
+// The daemon process itself is still `ragger serve` (what launchd/systemd run).
 // -----------------------------------------------------------------------
-/// MCP tool definitions for tools/list
-static nlohmann::json mcp_tools_list() {
-    return {{"tools", nlohmann::json::array({
-        {
-            {"name", "store"},
-            {"description", "Store a memory for later semantic retrieval."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"text", {{"type", "string"}, {"description", "The text content to store."}}},
-                    {"metadata", {{"type", "object"}, {"description", "Optional metadata (category, tags, source, collection, etc.)."}}}
-                }},
-                {"required", nlohmann::json::array({"text"})}
-            }}
-        },
-        {
-            {"name", "search"},
-            {"description", "Search stored memories by semantic similarity."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"query", {{"type", "string"}, {"description", "The search query."}}},
-                    {"limit", {{"type", "integer"}, {"description", "Maximum number of results (default: 5)."}}},
-                    {"min_score", {{"type", "number"}, {"description", "Minimum similarity score 0-1 (default: 0.0)."}}},
-                    {"collections", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Filter by collection names."}}}
-                }},
-                {"required", nlohmann::json::array({"query"})}
-            }}
-        }
-    })}};
-}
+static int daemon_control(const std::string& action) {
+    struct passwd* pw = getpwuid(getuid());
+    std::string home = pw ? pw->pw_dir : (std::getenv("HOME") ? std::getenv("HOME") : "");
+    if (home.empty()) {
+        std::cerr << "Error: cannot resolve $HOME\n";
+        return 1;
+    }
 
-/// Handle tools/call dispatch
-static nlohmann::json mcp_tool_call(ragger::RaggerMemory& memory, const nlohmann::json& params) {
-    auto tool_name = params.value("name", "");
-    auto arguments = params.value("arguments", nlohmann::json::object());
+#if defined(__APPLE__)
+    const std::string label = "com.diskerror.ragger";
+    const std::string plist = home + "/Library/LaunchAgents/" + label + ".plist";
+    const std::string target = "gui/" + std::to_string(getuid()) + "/" + label;
+    const std::string domain = "gui/" + std::to_string(getuid());
 
-    if (tool_name == "store") {
-        auto text = arguments.value("text", "");
-        if (text.empty()) {
-            return {{"content", nlohmann::json::array({{{"type", "text"}, {"text", "Error: text parameter required"}}})}, {"isError", true}};
+    std::string cmd;
+    if (action == "start") {
+        if (!fs::exists(plist)) {
+            std::cerr << "Error: " << plist << " not found. Run ./install.sh first.\n";
+            return 1;
         }
-        auto metadata = arguments.value("metadata", nlohmann::json::object());
-        auto id = memory.store(text, metadata);
-        nlohmann::json result_data = {{"id", id}, {"status", "stored"}};
-        return {{"content", nlohmann::json::array({{{"type", "text"}, {"text", result_data.dump()}}})}};
-
-    } else if (tool_name == "search") {
-        auto query = arguments.value("query", "");
-        if (query.empty()) {
-            return {{"content", nlohmann::json::array({{{"type", "text"}, {"text", "Error: query parameter required"}}})}, {"isError", true}};
-        }
-        int limit = arguments.value("limit", 5);
-        float min_score = arguments.value("min_score", 0.0f);
-        auto collections = arguments.value("collections", std::vector<std::string>{});
-        auto response = memory.search(query, limit, min_score, collections);
-        nlohmann::json results_arr = nlohmann::json::array();
-        for (auto& r : response.results) {
-            results_arr.push_back({
-                {"id", r.id}, {"text", r.text}, {"score", r.score},
-                {"metadata", r.metadata}, {"timestamp", r.timestamp}
-            });
-        }
-        return {{"content", nlohmann::json::array({{{"type", "text"}, {"text", results_arr.dump()}}})}};
-
+        cmd = "launchctl bootstrap " + domain + " " + plist;
+    } else if (action == "stop") {
+        cmd = "launchctl bootout " + target;
+    } else if (action == "restart") {
+        std::system(("launchctl bootout " + target + " 2>/dev/null").c_str());
+        cmd = "launchctl bootstrap " + domain + " " + plist;
+    } else if (action == "status") {
+        cmd = "launchctl print " + target;
     } else {
-        return {{"content", nlohmann::json::array({{{"type", "text"}, {"text", "Unknown tool: " + tool_name}}})}, {"isError", true}};
+        std::cerr << "Error: unknown daemon action '" << action << "'\n";
+        return 1;
     }
-}
-
-/// Check if an HTTP server is running (any ragger PID file with a live process).
-static bool is_http_server_running() {
-    namespace fs = std::filesystem;
-    std::string dir = "/tmp/ragger";
-    try {
-        for (const auto& entry : fs::directory_iterator(dir)) {
-            auto name = entry.path().filename().string();
-            // Match {port}.pid
-            if (name.rfind("server-", 0) == 0 && name.substr(name.size() - 4) == ".pid") {
-                std::ifstream pf(entry.path());
-                pid_t pid = 0;
-                if (pf >> pid && pid > 0 && kill(pid, 0) == 0) {
-                    return true;
-                }
-            }
-        }
-    } catch (...) {}
-    return false;
-}
-
-/// MCP housekeeping: periodically clean user DB if no HTTP server is handling it.
-static void mcp_housekeeping_thread(ragger::RaggerMemory& memory, const std::string& username) {
-    const auto& cfg = ragger::config();
-    float max_age_hours = cfg.cleanup_max_age_hours;
-    int interval = cfg.housekeeping_interval;
-    if (interval == 0) return;  // disabled
-
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(interval));
-
-        // If HTTP server has started, stop doing housekeeping
-        if (is_http_server_running()) continue;
-
-        if (max_age_hours <= 0) continue;
-
-        // Single-user mode: clean expired conversations from the main DB
-        std::string db_path = memory.backend()->db_path();
-        auto now = std::chrono::system_clock::now();
-        auto cutoff = now - std::chrono::duration_cast<std::chrono::system_clock::duration>(
-            std::chrono::duration<double, std::ratio<3600>>(max_age_hours));
-        auto cutoff_t = std::chrono::system_clock::to_time_t(cutoff);
-        char cutoff_str[32];
-        std::strftime(cutoff_str, sizeof(cutoff_str), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&cutoff_t));
-
-        try {
-            // Re-open the DB with a new backend instance
-            ragger::SqliteBackend temp_backend(db_path);
-            int deleted = temp_backend.cleanup_old_conversations(max_age_hours);
-            if (deleted > 0) {
-                ragger::log_info("MCP housekeeping: cleaned " + std::to_string(deleted)
-                               + " expired conversations");
-            }
-        } catch (...) {}
+#elif defined(__linux__)
+    std::string cmd;
+    if (action == "start")   cmd = "systemctl --user start ragger.service";
+    else if (action == "stop")    cmd = "systemctl --user stop ragger.service";
+    else if (action == "restart") cmd = "systemctl --user restart ragger.service";
+    else if (action == "status")  cmd = "systemctl --user status ragger.service";
+    else {
+        std::cerr << "Error: unknown daemon action '" << action << "'\n";
+        return 1;
     }
+#else
+    std::cerr << "Error: daemon control not supported on this platform.\n"
+              << "       Run 'ragger serve' manually.\n";
+    return 1;
+#endif
+
+    int rc = std::system(cmd.c_str());
+    return WIFEXITED(rc) ? WEXITSTATUS(rc) : 1;
 }
 
 /**
@@ -589,90 +519,6 @@ static int migrate_memories(const std::string& src_path, const std::string& dst_
 
     std::println("Moved {} records", imported);
     return 0;
-}
-
-static void do_mcp(ragger::RaggerMemory& memory) {
-    auto send_response = [](const nlohmann::json& response) {
-        std::println("{}", response.dump());
-    };
-
-    std::string line;
-    while (std::getline(std::cin, line)) {
-        if (line.empty()) continue;
-
-        if (line[0] == '{') {
-            try {
-                auto request = nlohmann::json::parse(line);
-                auto method = request.value("method", "");
-                auto params = request.value("params", nlohmann::json::object());
-
-                // Check if this is a notification (no "id" field) — no response
-                bool is_notification = !request.contains("id");
-                if (is_notification) {
-                    // notifications/initialized, etc. — silently acknowledge
-                    continue;
-                }
-
-                auto req_id = request["id"];
-                nlohmann::json result;
-
-                if (method == "initialize") {
-                    result = {
-                        {"protocolVersion", "2024-11-05"},
-                        {"capabilities", {{"tools", nlohmann::json::object()}}},
-                        {"serverInfo", {{"name", "ragger-memory"}, {"version", RAGGER_VERSION}}}
-                    };
-
-                } else if (method == "tools/list") {
-                    result = mcp_tools_list();
-
-                } else if (method == "tools/call") {
-                    result = mcp_tool_call(memory, params);
-
-                } else {
-                    send_response({
-                        {"jsonrpc", "2.0"}, {"id", req_id},
-                        {"error", {{"code", -32601}, {"message", "Method not found: " + method}}}
-                    });
-                    continue;
-                }
-
-                send_response({
-                    {"jsonrpc", "2.0"}, {"id", req_id}, {"result", result}
-                });
-
-            } catch (const std::exception& e) {
-                send_response({
-                    {"jsonrpc", "2.0"},
-                    {"id", nullptr},
-                    {"error", {{"code", -32603}, {"message", e.what()}}}
-                });
-            }
-        } else {
-            // Plain text → search shortcut (interactive use)
-            try {
-                auto response = memory.search(line);
-                if (response.results.empty()) {
-                    std::println("No results found.");
-                } else {
-                    for (size_t i = 0; i < response.results.size(); ++i) {
-                        auto& r = response.results[i];
-                        auto source = r.metadata.value("source", "");
-                        auto collection = r.metadata.value("collection", "");
-                        std::print("{}. [score: {:.3f}]", (i + 1), r.score);
-                        if (!source.empty()) std::print(" ({})", source);
-                        if (!collection.empty()) std::print(" [{}]", collection);
-                        std::println("");
-                        std::print("   {}", r.text.substr(0, 200));
-                        if (r.text.size() > 200) std::print("...");
-                        std::println("\n");
-                    }
-                }
-            } catch (const std::exception& e) {
-                std::println("Error: {}", e.what());
-            }
-        }
-    }
 }
 
 // -----------------------------------------------------------------------
@@ -811,7 +657,11 @@ int main(int argc, char** argv) {
         std::cout << "ragger " << RAGGER_VERSION << "\n\n";
         std::cout << "Usage: ragger <command> [options] [args]\n\n";
         std::cout << "Commands:\n";
-        std::cout << "  serve              Start the HTTP server (default: 127.0.0.1:8432)\n";
+        std::cout << "  start              Start the background daemon (user LaunchAgent / systemd --user)\n";
+        std::cout << "  stop               Stop the background daemon\n";
+        std::cout << "  restart            Restart the background daemon\n";
+        std::cout << "  status             Show daemon status\n";
+        std::cout << "  serve              Run the server in the foreground (what the daemon invokes)\n";
         std::cout << "  search <query>     Search memories by meaning\n";
         std::cout << "  store <text>       Store a new memory\n";
         std::cout << "  count              Show number of stored memories\n";
@@ -878,7 +728,11 @@ int main(int argc, char** argv) {
     std::string group_by   = opts["group-by"].as<std::string>();
 
     try {
-        if (command == "serve") {
+        if (command == "start" || command == "stop" ||
+            command == "restart" || command == "status") {
+            return daemon_control(command);
+
+        } else if (command == "serve") {
             ragger::setup_logging(false, true);
             const auto& cfg = ragger::config();
             std::unique_ptr<ragger::RaggerMemory> mem_ptr;
@@ -1023,17 +877,8 @@ int main(int argc, char** argv) {
 
         } else if (command == "mcp") {
             ragger::setup_logging(false, false);
-            std::unique_ptr<ragger::RaggerMemory> mem_ptr;
-            // Single-user mode only
-            mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path, model_dir);
-            // Start housekeeping thread if no HTTP server is running
-            if (!is_http_server_running()) {
-                struct passwd* mcp_pw = getpwuid(getuid());
-                std::string mcp_username = mcp_pw ? mcp_pw->pw_name : "default";
-                std::thread(mcp_housekeeping_thread,
-                            std::ref(*mem_ptr), mcp_username).detach();
-            }
-            do_mcp(*mem_ptr);
+            auto mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path, model_dir);
+            ragger::run_mcp(*mem_ptr);
 
         } else if (command == "rebuild-bm25") {
             ragger::setup_logging(false, false);
