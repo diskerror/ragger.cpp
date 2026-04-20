@@ -362,6 +362,7 @@ struct StreamCallbackData {
     std::function<void(const std::string&)>* on_token;
     std::string buffer;
     ApiFormat* format;
+    std::string raw_response;   // accumulates every raw SSE line for dump
 };
 
 static size_t stream_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
@@ -380,7 +381,10 @@ static size_t stream_callback(char* ptr, size_t size, size_t nmemb, void* userda
         line.erase(line.find_last_not_of(" \t\r") + 1);
 
         if (line.empty()) continue;
-        
+
+        // Capture every raw SSE line for payload dump
+        data->raw_response += line + "\n";
+
         // Check for stream stop
         if (is_stream_stop(*data->format, line)) continue;
         
@@ -537,6 +541,20 @@ void InferenceClient::chat_stream(const std::vector<Message>& messages,
 
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
+
+    // Dump raw SSE response if requested
+    if (!payload_dump_dir_.empty()) {
+        auto now = std::chrono::system_clock::now();
+        auto tt  = std::chrono::system_clock::to_time_t(now);
+        auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       now.time_since_epoch()).count() % 1000;
+        std::ostringstream fname;
+        fname << payload_dump_dir_ << "/response_";
+        fname << std::put_time(std::localtime(&tt), "%Y%m%d_%H%M%S");
+        fname << "_" << std::setfill('0') << std::setw(3) << ms << ".txt";
+        std::ofstream f(fname.str());
+        if (f.is_open()) f << stream_data.raw_response;
+    }
 
     // CURLE_PARTIAL_FILE is normal for SSE streams — server closes after [DONE]
     if (res != CURLE_OK && res != CURLE_PARTIAL_FILE) {
