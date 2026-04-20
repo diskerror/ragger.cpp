@@ -341,11 +341,27 @@ static void do_export_all(ragger::RaggerMemory& memory,
 // -----------------------------------------------------------------------
 // Chat: simple REPL with memory context injection
 // -----------------------------------------------------------------------
-static void do_chat(const std::string& db_path, const std::string& model_dir) {
+static void do_chat(const std::string& db_path, const std::string& model_dir,
+                    const std::string& dump_payloads_dir) {
     const auto& cfg = ragger::config();
+
+    // Validate payload dump dir before doing anything else
+    if (!dump_payloads_dir.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(dump_payloads_dir, ec);
+        if (ec) {
+            std::cerr << "Error: cannot create payload dump directory '"
+                      << dump_payloads_dir << "': " << ec.message() << "\n";
+            return;
+        }
+    }
 
     // Build inference client from config
     ragger::InferenceClient inference = ragger::InferenceClient::from_config(cfg);
+
+    if (!dump_payloads_dir.empty()) {
+        inference.set_payload_dump_dir(dump_payloads_dir);
+    }
 
     if (inference._endpoints.empty()) {
         std::println("Error: no inference endpoints configured.");
@@ -630,6 +646,7 @@ int main(int argc, char** argv) {
         ("group-by", Diskerror::po::value<std::string>()->default_value("date"), "Grouping for export (date|category|collection)")
         // admin flags removed — sudo is the admin gate
         ("yes,y", "Skip confirmation prompts (for scripting)")
+        ("dump-payloads", Diskerror::po::value<std::string>(), "Write raw request JSON to this directory (one file per prompt)")
     ;
     opts.add_hidden_options()
         ("command", Diskerror::po::value<std::string>()->default_value("help"), CLI_COMMAND)
@@ -748,7 +765,9 @@ int main(int argc, char** argv) {
 
         } else if (command == "chat") {
             ragger::setup_logging(false, false);
-            do_chat(db_path, model_dir);
+            std::string dump_dir = opts.count("dump-payloads")
+                ? opts["dump-payloads"].as<std::string>() : "";
+            do_chat(db_path, model_dir, dump_dir);
 
         } else if (command == "search") {
             ragger::setup_logging(false, false);

@@ -78,6 +78,9 @@ public:
     /// Force a specific endpoint by name (empty = auto-route)
     void set_forced_endpoint(const std::string& name);
 
+    /// Set directory for raw payload dumps (empty = disabled)
+    void set_payload_dump_dir(const std::string& dir) { payload_dump_dir_ = dir; }
+
     /// Get the currently forced endpoint name (empty = auto)
     const std::string& forced_endpoint() const { return forced_endpoint_; }
 
@@ -99,6 +102,7 @@ public:
 private:
     std::string forced_endpoint_;
     std::string lm_proxy_url_;  // LM proxy URL for OpenAI-compatible pass-through
+    std::string payload_dump_dir_;  // if set, write raw request JSON here
 };
 
 } // namespace ragger

@@ -11,6 +11,12 @@
 #include <sstream>
 #include <stdexcept>
 #include <iostream>
+#include <fstream>
+#include <filesystem>
+#include <chrono>
+#include <iomanip>
+
+namespace fs = std::filesystem;
 
 namespace ragger {
 
@@ -487,7 +493,21 @@ void InferenceClient::chat_stream(const std::vector<Message>& messages,
     // Build request payload using format (endpoint max_tokens overrides global)
     int use_max_tokens = endpoint.max_tokens > 0 ? endpoint.max_tokens : max_tokens;
     nlohmann::json payload = build_request_body(fmt, api_messages, use_model, use_max_tokens, true);
-    std::string body = payload.dump();
+    std::string body = payload.dump(2);  // pretty-print for dumps
+
+    // Dump raw request payload to file if requested
+    if (!payload_dump_dir_.empty()) {
+        auto now = std::chrono::system_clock::now();
+        auto tt  = std::chrono::system_clock::to_time_t(now);
+        auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       now.time_since_epoch()).count() % 1000;
+        std::ostringstream fname;
+        fname << payload_dump_dir_ << "/request_";
+        fname << std::put_time(std::localtime(&tt), "%Y%m%d_%H%M%S");
+        fname << "_" << std::setfill('0') << std::setw(3) << ms << ".json";
+        std::ofstream f(fname.str());
+        if (f.is_open()) f << body;
+    }
 
     // Setup libcurl
     CURL* curl = curl_easy_init();
