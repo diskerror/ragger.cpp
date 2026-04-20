@@ -86,4 +86,4 @@ make -j"$JOBS"
 
 echo ""
 echo "✓ Built: $(pwd)/ragger"
-echo "  Install with: sudo ./install.sh"
+echo "  Install with: ./install.sh"
