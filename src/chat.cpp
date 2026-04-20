@@ -61,9 +61,8 @@ std::string Chat::load_workspace_files(int max_context) {
      */
     const auto& cfg = config();
     
-    std::string user_dir = expand_path("~/.ragger");
-    std::string common_dir = "/var/ragger";
-    
+    std::string ragger_dir = expand_path("~/.ragger");
+
     // Calculate persona budget
     int max_persona_chars = 0;
     if (max_context > 0 && max_context < PERSONA_SIZING_THRESHOLD) {
@@ -84,36 +83,16 @@ std::string Chat::load_workspace_files(int max_context) {
         max_persona_chars = cfg.chat_max_persona_chars;
     }
     
-    // File list with priority order - user dir first, fall back to common where allowed
-    struct FileSpec {
-        std::string filename;
-        bool search_common;  // true = allow common dir as fallback
+    std::vector<std::string> file_list = {
+        "SOUL.md", "USER.md", "AGENTS.md", "TOOLS.md", "MEMORY.md",
     };
-    std::vector<FileSpec> file_list = {
-        {"SOUL.md", true},
-        {"USER.md", false},
-        {"AGENTS.md", true},
-        {"TOOLS.md", true},
-        {"MEMORY.md", false},
-    };
-    
+
     std::vector<std::string> sections;
     int total_chars = 0;
-    
-    for (const auto& spec : file_list) {
-        // Single-user mode: user dir first, fall back to common
-        std::string path;
-        std::string user_candidate = user_dir + "/" + spec.filename;
-        if (fs::exists(user_candidate)) {
-            path = user_candidate;
-        } else if (spec.search_common) {
-            std::string common_candidate = common_dir + "/" + spec.filename;
-            if (fs::exists(common_candidate)) {
-                path = common_candidate;
-            }
-        }
-        
-        if (path.empty()) {
+
+    for (const auto& filename : file_list) {
+        std::string path = ragger_dir + "/" + filename;
+        if (!fs::exists(path)) {
             continue;  // file not found
         }
         
@@ -176,7 +155,7 @@ std::string Chat::load_workspace_files(int max_context) {
                 
                 // If we got at least some content, use it
                 if (!truncated.empty()) {
-                    truncated += "\n\n[... " + spec.filename + " truncated ...]";
+                    truncated += "\n\n[... " + filename + " truncated ...]";
                     sections.push_back(truncated);
                     total_chars += static_cast<int>(truncated.size());
                 }

@@ -157,6 +157,11 @@ static std::string bootstrap_user_config() {
 
     fs::create_directories(ragger_dir);
 
+    // Never clobber an existing config — just return its path.
+    if (fs::exists(conf_path)) {
+        return conf_path;
+    }
+
     std::ofstream out(conf_path);
     if (!out.is_open()) {
         throw std::runtime_error(
