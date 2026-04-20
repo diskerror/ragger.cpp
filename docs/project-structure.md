@@ -144,14 +144,14 @@ See [Search & RAG](search-and-rag.md) for BM25 tuning details.
 
 ### `config.py`
 
-INI config file loader with layered override support.
+INI config file loader.
 
 Features:
 
-- Layered config: system (`/etc/ragger.ini`) → user (`~/.ragger/settings.ini`)
-- SERVER_LOCKED keys (system values can't be overridden)
-- System ceilings (hard limits on user-configurable values)
-- Auto-bootstrap (creates default user config on first run)
+- Single config file: `~/.ragger/settings.ini`
+- Ceilings (hard limits the daemon owner sets to cap what sub-users
+  can request over HTTP)
+- Auto-bootstrap (copies `example-settings.ini` on first run)
 
 See [Configuration](configuration.md) for full reference.
 
@@ -220,7 +220,8 @@ Verb-style command-line interface.
 
 **Commands:**
 
-- `ragger serve` — Start HTTP server
+- `ragger start|stop|restart|status` — Control the HTTP daemon (user LaunchAgent / systemd --user)
+- `ragger serve` — Foreground HTTP server (what the daemon process itself runs)
 - `ragger store <text>` — Store a memory
 - `ragger search <query>` — Search memories
 - `ragger import <file>` — Import a text file

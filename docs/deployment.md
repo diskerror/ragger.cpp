@@ -1,279 +1,188 @@
 # Deployment
 
-Ragger operates in two modes: **single-user** and **multi-user**.
+Ragger installs per-user. Everything lives under `~/.ragger/`:
 
-## Single-user vs Multi-user
-
-In **single-user mode**, everything lives in your home directory
-(`~/.ragger/`). Your config, database, and token are all yours. No system
-user, no shared resources. This is the default when you install per-user
-or run `ragger mcp`.
-
-In **multi-user mode**, a system user (`_ragger` on macOS, `ragger` on
-Linux) owns shared resources under `/var/ragger/`. The common database
-holds the **user table** — which manages authentication tokens and
-per-user settings. Each user still has their own database
-(`~/.ragger/memories.db`) for their actual memories. The common DB
-doesn't need to be used for anything else beyond the user table.
-
-`ragger serve` (the HTTP daemon) **always requires multi-user mode**.
-It must run as the system user and needs the user table to authenticate
-connections via bearer tokens. If you just want Ragger for yourself,
-you don't need `ragger serve` — use `ragger mcp` or the CLI directly.
-
-`ragger mcp` works in **either mode**. In a multi-user environment
-(e.g., multiple users via SSH), each user can run their own `ragger mcp`
-instance. This is functionally correct but less resource-efficient since
-each instance loads its own embedding model.
-
-## Single-user Setup (Per-user Install)
-
-This is the default for personal use. No `sudo` required.
-
-### Installation Locations
-
-| Platform | Executable                         | Config                             | Database                            |
-|----------|------------------------------------|------------------------------------|-------------------------------------|
-| macOS    | `~/.local/bin/ragger`              | `~/.ragger/settings.ini`             | `~/.ragger/memories.db`             |
-| Linux    | `~/.local/bin/ragger`              | `~/.ragger/settings.ini`             | `~/.ragger/memories.db`             |
-| Windows  | `%LOCALAPPDATA%\ragger\ragger.exe` | `%LOCALAPPDATA%\ragger\settings.ini` | `%LOCALAPPDATA%\ragger\memories.db` |
-
-> **Note:** Windows support is planned but not yet implemented. macOS and Linux only for now.
-
-### Install Script
-
-On macOS/Linux, ensure `~/.local/bin` is in your `PATH`:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"  # add to ~/.zshrc or ~/.bashrc
+```
+~/.ragger/bin/ragger        # executable
+~/.ragger/settings.ini      # config
+~/.ragger/memories.db       # SQLite database
+~/.ragger/ragger.sock       # unix socket (daemon)
+~/.ragger/logs/             # daemon logs
+~/.ragger/models/           # embedding models
+~/.ragger/formats/          # inference format definitions
+~/.ragger/www/              # web UI assets
+~/.ragger/SOUL.md           # assistant persona
 ```
 
-Install the Python version as `ragger`:
+No `sudo`, no system user, no `/etc/` or `/var/` paths. The daemon
+runs as you.
 
-```bash
-mkdir -p ~/.local/bin
-cat > ~/.local/bin/ragger << 'EOF'
-#!/bin/bash
-RAGGER_PY_DIR="${RAGGER_PY_DIR:-$HOME/PyCharmProjects/Ragger}"
-exec python3 "$RAGGER_PY_DIR/ragger_memory/cli.py" "$@"
-EOF
-chmod +x ~/.local/bin/ragger
+## Multi-user: One Install, Many Clients
+
+Ragger serves additional users over HTTP with bearer tokens. There's
+still only one install and one database — the "daemon owner" runs
+`ragger` under their own account, and other humans / agents connect
+to that daemon with tokens. They don't need OS accounts on the host.
+
+```
+                    ┌──────────────────────────┐
+  sub-user A ──HTTP▶│                          │
+  sub-user B ──HTTP▶│  ragger daemon           │
+  sub-user C ──HTTP▶│  (runs as daemon-owner)  │
+  daemon-owner ─────│  ~/.ragger/memories.db   │
+  (local CLI/MCP) ─▶│                          │
+                    └──────────────────────────┘
 ```
 
-If you also have the C++ version installed, you can keep both:
+Isolation between sub-users is enforced at the API layer, not at the
+filesystem layer.
 
-- `ragger` → C++ binary (default)
-- `ragger-py` → Python version
-
-Or vice versa.
-
----
-
-## Multi-user Deployment (System-wide Install)
-
-### Step 1: Run the installer
+## Install
 
 ```bash
-cd /path/to/Ragger
-sudo ./install.sh
+cd /path/to/ragger.cpp
+./build.sh           # dependency check + cmake build
+./install.sh         # copy binary, write LaunchAgent / user systemd unit, update PATH
+ragger start         # bring the daemon up
 ```
 
-The install script is idempotent (safe to run multiple times) and handles:
+`install.sh`:
 
-- Creates system user (`_ragger` on macOS, `ragger` on Linux) and `ragger` group
-- Creates `/var/ragger/` (common database) and `/var/log/ragger/` with correct permissions
-- Installs system config at `/etc/ragger.ini` if missing
-- Installs the executable to `/usr/local/bin/ragger`
-  - C++ version: copies the compiled binary directly
-  - Python version: syncs code to `/usr/local/lib/ragger/`, creates venv, installs a wrapper script
-- Creates the daemon configuration:
-  - **macOS:** LaunchDaemon plist at `/Library/LaunchDaemons/com.diskerror.ragger.plist`
-  - **Linux:** systemd unit at `/etc/systemd/system/ragger.service`
-- Installs `SOUL.md` to `/var/ragger/` if not present (shared assistant persona)
-- Installs the OpenClaw plugin if OpenClaw is detected
+- Creates `~/.ragger/{bin,logs,models,formats,www}` if missing
+- Copies `example-settings.ini` → `~/.ragger/settings.ini` on first run
+- Copies the built binary to `~/.ragger/bin/ragger` (codesigns on macOS)
+- Adds `~/.ragger/bin` to `PATH` in your shell rc (`.zshrc` / `.bash_profile` / `.bashrc` / `.profile`)
+- Writes a user service unit:
+  - **macOS:** `~/Library/LaunchAgents/com.diskerror.ragger.plist`
+  - **Linux:** `~/.config/systemd/user/ragger.service` (+ `systemctl --user enable ragger.service`)
+- Installs the default `SOUL.md` to `~/.ragger/` if you don't already have one
+- Copies bundled formats and web assets under `~/.ragger/`
 
-### Step 2: Add users
+It's idempotent — re-run after a rebuild to update the binary. Config,
+database, SOUL.md, and custom formats are preserved.
 
-Register each user who will use Ragger (requires sudo):
+### Installation locations
+
+| Platform | Executable              | Config                    | Database                |
+|----------|-------------------------|---------------------------|-------------------------|
+| macOS    | `~/.ragger/bin/ragger`  | `~/.ragger/settings.ini`  | `~/.ragger/memories.db` |
+| Linux    | `~/.ragger/bin/ragger`  | `~/.ragger/settings.ini`  | `~/.ragger/memories.db` |
+| Windows  | not yet supported       | —                         | —                       |
+
+## Daemon Lifecycle
 
 ```bash
-sudo ragger add-user <username>
+ragger start        # bring the daemon up (via launchctl / systemctl --user)
+ragger stop         # take it down
+ragger restart      # bounce after editing settings.ini
+ragger status       # is it running?
 ```
 
-Or provision all users on the system at once:
+Under the hood these wrap `launchctl bootstrap/bootout gui/$UID` on
+macOS and `systemctl --user start/stop/restart/status ragger.service`
+on Linux. `serve` is the foreground entry the service unit itself
+invokes — you rarely run it directly.
+
+### Linger (Linux)
+
+By default, a systemd user instance stops when you log out. To keep
+the daemon running across logout / reboot:
 
 ```bash
-sudo ragger add-all        # confirms each user (default: yes)
-sudo ragger add-all -y     # skip prompts, add all
+sudo loginctl enable-linger $USER
 ```
 
-This does three things for each user:
+This is the only time `install.sh` asks you to touch `sudo` on Linux,
+and it's optional.
 
-1. Creates `~/.ragger/` and generates an authentication token
-2. Adds the user to the `ragger` OS group (for `/var/ragger/` access)
-3. Registers the user in the common database (user table)
+### Logs
 
-> **Note:** Users must log out and back in for group membership to take
-> effect. If a user was already in the `ragger` group, this is a no-op.
+- `~/.ragger/logs/stdout.log`
+- `~/.ragger/logs/stderr.log`
 
-To remove a user:
+`deploy.sh` truncates these on each deploy so a fresh run is easy to
+read.
+
+## Adding Sub-Users
 
 ```bash
-sudo ragger remove-user <username>
+ragger useradd <name>     # prints the generated token once
+ragger userdel <name>
 ```
 
-This removes the user from the `ragger` OS group, deletes their entry
-from the common database, removes their token, and deletes `~/.ragger/`.
-Use `--keep-data` to preserve `~/.ragger/` (only removes DB entry, token,
-and group membership).
-
-### Step 3: Start the daemon
-
-**macOS:**
+The token is shown exactly once at creation — hand it to the sub-user
+via whatever channel you trust. They set it in their client:
 
 ```bash
-sudo launchctl bootstrap system /Library/LaunchDaemons/com.diskerror.ragger.plist
+# Example: curl with the token
+curl -H "Authorization: Bearer <token>" \
+     http://daemon-host:8432/health
 ```
 
-**Linux:**
+For a sub-user on the same machine, the daemon can bypass token auth
+on the unix socket — see `[server] auth_bypass_socket` in
+`example-settings.ini`.
+
+## Rebuilding and Redeploying
+
+After code changes, rebuild then run `deploy.sh`:
 
 ```bash
-sudo systemctl enable ragger
-sudo systemctl start ragger
+cmake --build build --parallel
+./deploy.sh
 ```
 
-### Step 4: Verify
-
-```bash
-# Check the daemon is running
-curl -s http://localhost:8432/health
-
-# Test with your token
-ragger search "test"
-```
-
-### Installation Locations
-
-- `/usr/local/bin/ragger` — Executable (binary or wrapper script)
-- `/usr/local/lib/ragger/` — Python code and venv (Python version only)
-- `/etc/ragger.ini` — System configuration
-- `/var/ragger/memories.db` — Common database (user table)
-- `/var/ragger/SOUL.md` — Shared assistant persona
-- `/var/ragger/models/` — Embedding model cache
-- `/var/log/ragger/` — Daemon logs
-- `~/.ragger/memories.db` — Per-user memory database
-- `~/.ragger/token` — Per-user authentication token
-- `~/.ragger/settings.ini` — Per-user config overrides
-
-### Managing the Daemon
-
-**macOS:**
-
-```bash
-# Check status
-sudo launchctl list | grep ragger
-
-# View logs
-tail -f /var/log/ragger/stdout.log
-tail -f /var/log/ragger/stderr.log
-
-# Restart
-sudo launchctl bootout system/com.diskerror.ragger 2>/dev/null || true
-sudo launchctl bootstrap system /Library/LaunchDaemons/com.diskerror.ragger.plist
-
-# Stop
-sudo launchctl bootout system/com.diskerror.ragger
-```
-
-**Linux:**
-
-```bash
-# Check status
-sudo systemctl status ragger
-
-# View logs
-sudo journalctl -u ragger -f
-
-# Restart
-sudo systemctl restart ragger
-
-# Stop
-sudo systemctl stop ragger
-```
-
----
-
-## Switching from Single-user to Multi-user
-
-No reinstall needed. Three steps:
-
-1. Edit `/etc/ragger.ini` — set `single_user = false`
-2. Add users: `sudo ragger add-user <username>` for each user
-   (this handles group membership, token, and DB registration)
-3. Restart the daemon
-
-Client configs (OpenClaw, Claude Desktop) are set up manually — see
-[OpenClaw Integration](openclaw.md) for transport options.
-
----
+`deploy.sh` stops the daemon, copies the new binary in place,
+codesigns on macOS, truncates logs, starts the daemon, and
+health-checks it over the unix socket or `127.0.0.1:8432`. It does
+**not** touch config, schema, or the install layout — it's a fast
+binary swap only. Run `install.sh` again if the service unit or PATH
+entry needs updating.
 
 ## Switching Between C++ and Python Versions
 
-Both versions use the same database format, config files, HTTP API, and
-default port (8432). You can swap between them without data migration.
+Both versions use the same database format, config file, HTTP API,
+and default port (8432). You can swap between them without data
+migration — re-run the other version's `install.sh` and it overwrites
+`~/.ragger/bin/ragger` with the new binary.
 
-For per-user installs, you can keep both as separate commands:
+If you want both side by side:
 
 ```bash
-# C++ version as "ragger", Python as "ragger-py" (or vice versa)
-cp ~/.local/bin/ragger-cpp ~/.local/bin/ragger
+cp ~/.ragger/bin/ragger ~/.ragger/bin/ragger-cpp   # back up the current
+# run the other install.sh, then:
+mv ~/.ragger/bin/ragger ~/.ragger/bin/ragger-py
+mv ~/.ragger/bin/ragger-cpp ~/.ragger/bin/ragger
 ```
-
-For system installs, just re-run the other version's `install.sh` — it
-overwrites `/usr/local/bin/ragger` with the new version.
-
----
 
 ## Troubleshooting
 
-**"Permission denied" accessing `/var/ragger/`:**
-Make sure your user is in the `ragger` group (see Step 2 above). Log out
-and back in after adding group membership.
-
 **Daemon won't start:**
-Check the logs. On macOS: `tail /var/log/ragger/stderr.log`. On Linux:
-`journalctl -u ragger -e`. Common causes: port 8432 already in use,
-missing SOUL.md in multi-user mode, permission issues on `/var/ragger/`.
+Check `~/.ragger/logs/stderr.log`. Common causes: port 8432 already
+in use, missing embedding model in `~/.ragger/models/`, invalid
+`settings.ini` (run `ragger serve` in the foreground to see the
+parse error).
 
-**Embedding model download hangs:**
-The model (~90MB) downloads on first run. If the daemon can't reach
-HuggingFace, pre-download it: `ragger update-model`, then copy the
-model cache to `/var/ragger/models/`.
+**`ragger start` says "service loaded" but nothing's listening:**
+On macOS, `launchctl print gui/$UID/com.diskerror.ragger` shows the
+actual state. On Linux, `systemctl --user status ragger.service` and
+`journalctl --user -u ragger.service` are your friends.
+
+**Embedding model missing:**
+The model (~90 MB) downloads on first run. If the daemon can't reach
+HuggingFace, pre-download it somewhere with internet and copy to
+`~/.ragger/models/`.
 
 **Token issues:**
-Each user's token lives at `~/.ragger/token`. If it gets corrupted or
-lost, re-register: `ragger user add <username>` (as admin or with sudo).
+Sub-user tokens live in the database, not on disk. If a sub-user
+loses their token, the daemon owner runs `ragger userdel <name>`
+then `ragger useradd <name>` to issue a new one.
 
-**"Token rotation failed" or "attempt to write a readonly database":**
-In multi-user mode, the daemon runs as `_ragger` and needs write access
-to each user's `~/.ragger/` directory (for token rotation and per-user
-memory). The directory, database, and token must be group-writable by
-the `ragger` group:
-
-```bash
-sudo chgrp -R ragger ~/.ragger
-sudo chmod g+rwx ~/.ragger
-sudo chmod g+rw ~/.ragger/memories.db ~/.ragger/token
-```
-
-The `install.sh` script and `ragger add-user` set these permissions
-automatically. If you created `~/.ragger/` manually or permissions
-have drifted, run the commands above to fix them.
-
----
+**Daemon stops after logout (Linux):**
+Run `sudo loginctl enable-linger $USER`. See "Linger" above.
 
 ## Related
 
-- [Configuration](configuration.md) — System vs user config
-- [HTTP API](http-api.md) — Running the server
-- [Getting Started](getting-started.md) — Installation basics
+- [Configuration](configuration.md) — Single `settings.ini` reference
+- [HTTP API](http-api.md) — Endpoints and auth
+- [Getting Started](getting-started.md) — First run

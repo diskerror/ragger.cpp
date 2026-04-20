@@ -61,8 +61,7 @@ std::vector<InferenceEndpointConfig> inference_endpoints;
 ### 3. Chat Verb (`src/main.cpp`)
 
 **load_workspace_files():**
-- SOUL.md: `/var/ragger/SOUL.md` (system-wide) → `~/.ragger/SOUL.md` (fallback)
-- USER.md, AGENTS.md, TOOLS.md: `~/.ragger/` only (per-user)
+- SOUL.md, USER.md, AGENTS.md, TOOLS.md: loaded from `~/.ragger/`
 - Returns combined text for system prompt injection
 
 **do_chat():**

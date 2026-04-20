@@ -28,37 +28,34 @@ artificial weighting — relevance scores do the filtering organically.
 Collections are structural. Categories are semantic. You search
 *across* collections but filter *by* category.
 
-## Config Layering
+## Config: One File, One Owner
 
-Two config files, always:
+There's a single config file: `~/.ragger/settings.ini`. No layering,
+no system vs. user split, no SERVER_LOCKED overlay. The person who
+installs Ragger owns the daemon and owns the config.
 
-1. **System config** (`/etc/ragger.ini` or `--config=`): Infrastructure
-   settings. Loaded first.
-2. **User config** (`~/.ragger/settings.ini`): Personal preferences.
-   Always read on top.
+This was deliberately simplified. The old two-file design assumed a
+root-installed system daemon serving OS users, which no longer matches
+how Ragger is deployed — it now installs per-user under `~/.ragger/`
+with no sudo. With one install, one owner, and one config, layering
+became ceremony without benefit.
 
-**SERVER_LOCKED keys** (host, port, db_path, log_dir, embedding model,
-system ceilings) always come from the system config. Everything else:
-user wins if set.
-
-This means an admin can lock down infrastructure while letting users
-customize their search weights, chat settings, and logging toggles.
+Sub-users (provisioned via `ragger useradd` and authenticating over
+HTTP with tokens) don't have their own config files. They're clients
+of the daemon, not co-owners of it. The daemon owner sets ceilings in
+`settings.ini` to cap what those clients can request — see "System
+Ceilings" below.
 
 ### Auto-Bootstrap
 
-First run creates `~/.ragger/` and writes a default config embedded
-in the binary. No dependency on an example config file at runtime.
+First run copies `example-settings.ini` to `~/.ragger/settings.ini`.
 New users get a working setup without reading docs first.
 
-## Log Directory: Always Server-Locked
+## Log Directory
 
-One server instance = one log location. Even in no-share mode with
-multiple users connecting, all server logs go to the same directory.
-Tracking errors across multiple log files is painful — centralizing
-them is worth the trade-off.
-
-CLI commands log to `~/.ragger/` (the user's own space). Only the
-daemon uses the system log dir.
+All daemon logs go to `~/.ragger/logs/`. CLI commands log to the same
+place. One install, one log directory — no split between "system" and
+"user" logs.
 
 ## Weight Ratio Pattern
 
@@ -73,33 +70,32 @@ So `bm25_weight = 3` and `vector_weight = 7` means 30%/70%. This is
 more intuitive than requiring values that sum to 1.0, and survives
 one value changing without recalculating the other.
 
-## System Ceilings
+## Ceilings
 
-The `_clamp_to_ceiling()` pattern lets admins set maximum values that
-user config can't exceed. A ceiling of 0 means "no limit imposed."
+The `_clamp_to_ceiling()` pattern lets the daemon owner cap values
+that HTTP clients (sub-users) request. A ceiling of 0 means "no limit
+imposed."
 
-If a user sets a value of 0 (meaning "unlimited"), the ceiling still
-applies — 0 becomes the ceiling value. This prevents users from
-accidentally bypassing limits.
+If a client passes a value of 0 (meaning "unlimited"), the ceiling
+still applies — 0 is clamped to the ceiling value. This prevents a
+client from accidentally bypassing limits by omitting the parameter.
 
-## "No-Share" vs "Shared" Mode
+## One Database Per Install
 
-The `single_user` flag (better described as "no-share") controls
-whether a common/shared memory database exists. It does **not** limit
-the number of users — multiple users can each run their own instance
-in no-share mode.
+Every install has exactly one database: `~/.ragger/memories.db` under
+the daemon owner's home directory. When sub-users are provisioned with
+tokens, they read and write the same database — the daemon enforces
+per-user isolation at the API layer rather than at the filesystem
+layer.
 
-- **No-share** (`single_user = true`): Each user has their own
-  `~/.ragger/memories.db`. No system-level shared database.
-- **Shared** (`single_user = false`): A common database exists at
-  the system level. Users have personal databases that are searched
-  alongside the common one.
+This replaced an older model that split "common" (shared) and "user"
+(private) databases into separate files. That split introduced
+cross-database search merging, file-permission puzzles, and a
+`single_user` flag to pick between them. Dropping it removed a lot of
+complexity for a feature nobody was asking for.
 
-## "Common" Not "System" for Shared Memory
-
-The shared database is called "common memory," not "system memory."
-"System" sounds like hardware or OS internals. "Common" correctly
-implies shared human knowledge.
+If two people genuinely want separate stores, they each run their own
+Ragger install under their own account — no shared daemon involved.
 
 ## Bad Memories Are Marked, Not Deleted
 
@@ -165,13 +161,15 @@ the machine. Authentication for remote connections (binding to
 `0.0.0.0` or a specific interface) will be implemented soon — this
 will require TLS and stricter token/session validation.
 
-### Three Access Levels
+### Two Access Levels
 
-| Level | Capabilities |
-|-------|-------------|
-| **User** | Use ragger, change own password |
-| **Admin** | Add/remove users, reset any user's password |
-| **Root (sudo)** | Direct DB access, system config, group management |
+| Level          | Capabilities                                                     |
+|----------------|------------------------------------------------------------------|
+| **Sub-user**   | Use ragger over HTTP with a token; change own password           |
+| **Daemon owner** | All of the above, plus `ragger useradd`/`userdel`, edit `~/.ragger/settings.ini`, direct SQLite access, reset any sub-user's password |
+
+There is no root/sudo tier. The daemon runs as the owning user — no
+elevated privileges, no system-wide resources.
 
 ## Chat Scope: Memory-Aware Conversation Only
 

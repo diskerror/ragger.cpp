@@ -24,4 +24,4 @@ Search memory when relevant. Store facts, decisions, and lessons learned.
 
 ---
 
-*This file defines the assistant's personality. In multi-user mode, it applies to all users.*
+*This file defines the assistant's personality. When the daemon serves additional users via HTTP tokens, it applies to all of them.*

@@ -312,8 +312,7 @@ the array is sent as-is.
 Format definitions live at (search order):
 
 1. `~/.ragger/formats/<name>.json`  (user override)
-2. `/var/ragger/formats/<name>.json`  (system)
-3. `<install>/formats/<name>.json`  (shipped)
+2. `<install>/formats/<name>.json`  (shipped, copied here by install.sh)
 
 Minimum schema:
 

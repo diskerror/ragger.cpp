@@ -96,12 +96,17 @@ At the start of each session, restore recent context to create continuity:
 - Collections separate concerns: `memory` for agent notes, `docs` for
   reference material, `work` for project-specific context
 
-**Team / shared server:**
+**Team / shared daemon:**
 
-- Ragger runs as a system service with multi-user support
-- Per-user memory via auth token → user isolation
-- Shared reference collections available to all users
-- Private memories stay private
+- One person installs Ragger under their user account (`~/.ragger/`)
+  and runs the daemon (`ragger start`)
+- They provision additional users via `ragger useradd <name>`, each
+  of whom gets a bearer token
+- Those users connect via HTTP with their tokens; the daemon routes
+  their requests against the shared `~/.ragger/memories.db` with
+  per-user isolation at the API layer
+- Shared reference collections are available to everyone; private
+  memories stay scoped to the owning user
 
 **Offline / air-gapped:**
 

@@ -5,19 +5,28 @@ IDEs, and custom applications.
 
 ## Starting the Server
 
+Install the user daemon once (`./install.sh` writes the LaunchAgent /
+systemd-user unit), then control it with:
+
 ```bash
-# Default: 127.0.0.1:8432
-ragger serve
-
-# Custom port
-ragger serve --port 9000
-
-# Bind to all interfaces (for remote access)
-ragger serve --host 0.0.0.0
+ragger start        # bring the daemon up
+ragger status       # check whether it's running
+ragger restart      # bounce it after editing settings.ini
+ragger stop         # take it down
 ```
 
-The server runs in the foreground. Use a process manager (systemd,
-launchd, PM2) for production deployments — see [Deployment](deployment.md).
+Host, port, and bind interface come from `~/.ragger/settings.ini`.
+
+`ragger serve` is the foreground entry the daemon process itself
+invokes — you won't normally run it directly. Use it for debugging:
+
+```bash
+ragger serve                # foreground, 127.0.0.1:8432 from config
+ragger serve --port 9000    # override port
+ragger serve --host 0.0.0.0 # bind all interfaces
+```
+
+See [Deployment](deployment.md) for the full lifecycle.
 
 ## Authentication
 
@@ -209,10 +218,12 @@ curl -X POST http://localhost:8432/search \
 Ragger implements the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
 for integration with AI agents. Protocol version: `2024-11-05`.
 
-**When to use MCP vs HTTP:** MCP is ideal for single-user/local setups where
-the agent fork+execs `ragger mcp` directly — no server needed, no auth overhead.
-In multi-user mode, prefer HTTP — it already handles auth, user routing, and
-concurrent access to both user and common databases.
+**When to use MCP vs HTTP:** MCP is ideal for purely local use where
+the agent fork+execs `ragger mcp` directly against the same
+`~/.ragger/memories.db` — no daemon, no auth overhead. When the
+daemon serves additional sub-users over HTTP (with tokens), prefer
+HTTP for those clients — it already handles auth, routing, and
+concurrent access.
 
 ### Starting the MCP Server
 

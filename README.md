@@ -20,18 +20,18 @@ Faster startup, lower memory footprint, single static binary. Everything else �
 
 ## Quick Start
 
-**Production install** (creates system user/group, installs as service):
+**Install** (per-user, no sudo — everything lives under `~/.ragger/`):
 ```bash
 cd /path/to/ragger.cpp
 ./build.sh                # Check dependencies, build binary
-sudo ./install.sh         # Install to /usr/local/bin, restart daemon
+./install.sh              # Install to ~/.ragger/bin, write user LaunchAgent / systemd-user unit
+ragger start              # Bring the daemon up
 ```
 
-The installer is interactive: it asks for single-user or multi-user mode,
-creates all system resources, installs the binary, then walks through
-every user on the system — offering to add, remove, or configure client
-integrations (OpenClaw, Claude Desktop) for each. Safe to re-run on
-upgrades; only the binary is overwritten.
+`install.sh` is idempotent — re-run it after a rebuild to update the
+binary and daemon unit without touching your config or database. Open
+a new terminal (or source your rc file) so `~/.ragger/bin` is on
+`PATH`.
 
 **Development build** (manual cmake):
 ```bash
@@ -53,8 +53,8 @@ ragger search "deployment requirements"
 # Import a document
 ragger import notes.md --collection docs
 
-# Start HTTP server
-ragger serve
+# Daemon lifecycle
+ragger start | stop | restart | status
 ```
 
 ## Build Dependencies
@@ -99,7 +99,7 @@ All documentation is shared between the Python and C++ versions.
 | [Search & RAG](docs/search-and-rag.md) | How hybrid search works |
 | [HTTP API](docs/http-api.md) | REST endpoints, MCP server, auth |
 | [Chat Persistence](docs/chat-persistence.md) | Turn storage, summaries, cleanup |
-| [Deployment](docs/deployment.md) | Production setup, LaunchDaemon, multi-user |
+| [Deployment](docs/deployment.md) | Per-user install, LaunchAgent / systemd-user, provisioning sub-users |
 | [Project Structure](docs/project-structure.md) | Code layout, database schema |
 | [OpenClaw Integration](docs/openclaw.md) | Plugin setup for OpenClaw |
 | [Agent Guide](docs/agent-integration.md) | Best practices for AI agents |
@@ -112,7 +112,7 @@ All documentation is shared between the Python and C++ versions.
 
 | Suite | Coverage | What's tested |
 |-------|----------|---------------|
-| `test_config` | INI parsing, defaults, layering |
+| `test_config` | INI parsing, defaults, ceilings |
 | `test_bm25` | Indexing, scoring, tokenization |
 | `test_sqlite_backend` | CRUD, search, metadata, delete, keep tag, user mgmt |
 | `test_import` | Chunking, heading detection, edge cases |
@@ -125,9 +125,17 @@ cd build && ctest --output-on-failure
 
 ## Status
 
-**v0.8.1** — Production-ready with unified install, OpenSSL auth, rebuild-embeddings backup/warning, and comprehensive testing.
+**v0.9.x (in progress)** — Per-user install (`~/.ragger/`), no sudo,
+user-level service units. Single `settings.ini`, no config layering.
+`ragger start/stop/restart/status` control verbs around the `serve`
+foreground entry. MCP transport extracted into its own module.
 
-Features: multi-user with per-user databases and search merging, common shared memory DB, bearer token authentication (OpenSSL SHA-256), automatic token rotation, per-user inference model selection, rebuild-embeddings verb with backup and confirmation, schema-driven API formats, chat persistence with background summarization, user provisioning CLI, and idempotent install script.
+Features: bearer-token authentication (OpenSSL SHA-256) with automatic
+token rotation, additional-user provisioning via `ragger useradd` for
+daemon-sharing, per-endpoint inference model selection, rebuild-embeddings
+verb with backup and confirmation, schema-driven API formats, chat
+persistence with background summarization, and idempotent install /
+deploy scripts.
 
 ## License
 

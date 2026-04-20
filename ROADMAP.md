@@ -6,13 +6,15 @@ Both Python and C++ versions at feature parity. C++ is production server.
 
 ### Transport Model
 
-- **HTTP** — Primary transport for all modes (single-user and multi-user).
-  Runs as a daemon via launchd/systemd. Handles auth, routing, and
-  concurrent access to both user and common databases.
+- **HTTP** — Primary transport. Runs as a per-user daemon via a user
+  LaunchAgent (macOS) or systemd --user unit (Linux). Handles auth,
+  routing, and shared access when the host user provisions additional
+  sub-users via tokens.
 - **MCP** — Spec-compliant (protocol `2024-11-05`). Best suited for
-  single-user/local use where no server is needed — agent fork+execs
-  `ragger mcp` directly. In multi-user mode, HTTP is preferred since
-  it already solves auth/routing/permissions.
+  purely local use where no daemon is needed — agent fork+execs
+  `ragger mcp` directly against the same `~/.ragger/memories.db`.
+  When sub-users access the daemon from other machines or accounts,
+  HTTP is preferred since it already solves auth and routing.
 
 ## Planned
 

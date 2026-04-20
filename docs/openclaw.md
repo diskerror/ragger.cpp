@@ -15,9 +15,10 @@ Copy the `memory-ragger` plugin directory into `~/.openclaw/extensions/`:
 
 ## 2. Configure OpenClaw
 
-### Single-user Setup (Recommended)
+### Local-only (MCP, recommended for personal use)
 
-For personal use, MCP mode requires no daemon — just the `ragger` binary:
+For purely local use, MCP mode requires no daemon — just the `ragger`
+binary. OC fork+execs it on demand against your own `~/.ragger/`:
 
 ```json
 {
@@ -41,9 +42,10 @@ For personal use, MCP mode requires no daemon — just the `ragger` binary:
 
 This spawns `ragger mcp` on demand. No daemon, no ports, no auth tokens.
 
-### Multi-user Setup (Daemon)
+### Daemon (HTTP, required for remote or multi-user access)
 
-If you're running a system daemon (see [Deployment](deployment.md)), use HTTP transport:
+If the daemon is running (`ragger start` — see [Deployment](deployment.md))
+and you want to hit it over HTTP with a token, use HTTP transport:
 
 ```json
 {
@@ -85,11 +87,20 @@ Good for development — connects to daemon when running, spawns MCP when not.
 
 ### Transport Comparison
 
-- **mcp** — Single or multi-user. No daemon, no auth. Each user spawns their own instance. Simple but uses more resources in multi-user setups (each instance loads the embedding model).
-- **http** — Multi-user only. Requires `ragger serve` running as `ragger`/`_ragger` system user with user table and token auth. One daemon serves all users efficiently.
-- **auto** — Development/mixed. Tries HTTP first, falls back to MCP. Uses token for HTTP, none for MCP fallback.
+- **mcp** — No daemon, no auth. OC spawns its own `ragger mcp` process
+  against your `~/.ragger/memories.db`. Simplest for personal use.
+  Each spawn loads the embedding model, so this is wasteful when the
+  daemon is already running.
+- **http** — Connects to the running daemon (`ragger start`) with a
+  bearer token. Required when the daemon needs to serve multiple
+  users (each with their own token) or when OC runs on a different
+  machine than Ragger.
+- **auto** — Tries HTTP first, falls back to MCP. Uses token for
+  HTTP, none for MCP fallback. Good for development.
 
-**Recommendation:** Use `mcp` for personal use. Use `http` for managed multi-user deployments where `ragger serve` is running.
+**Recommendation:** Use `mcp` when you're the only user and don't
+need a daemon. Use `http` when the daemon is already running, or
+when sub-users need to connect with tokens.
 
 ## Agent Tools
 

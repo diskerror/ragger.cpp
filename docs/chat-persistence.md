@@ -85,9 +85,10 @@ deleted based on age or count.
 
 Turns with the `keep` tag are always exempt from expiration.
 
-**System ceilings:** System config can set hard limits (e.g.,
-`max_turn_retention_minutes = 60`) that users cannot exceed, preventing
-runaway database growth in multi-user deployments.
+**Ceilings:** The daemon owner can set hard limits (e.g.,
+`max_turn_retention_minutes = 60`) in `~/.ragger/settings.ini` to cap
+what sub-users can request over HTTP, preventing runaway database
+growth when the daemon serves multiple users.
 
 ## File Size and Performance Impact
 

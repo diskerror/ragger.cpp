@@ -22,8 +22,8 @@ Then configure in `~/.openclaw/openclaw.json` (see [docs/openclaw.md](../docs/op
 
 ## Transport Modes
 
-- **MCP** (recommended for single-user): Spawns `ragger mcp` on demand, no daemon needed
-- **HTTP** (multi-user): Connects to running daemon with token auth
+- **MCP** (local-only): Spawns `ragger mcp` on demand, no daemon needed
+- **HTTP** (required for remote or shared daemon): Connects to running daemon with token auth
 - **Auto** (development): Try HTTP, fall back to MCP
 
 See [docs/openclaw.md](../docs/openclaw.md) for full configuration guide.

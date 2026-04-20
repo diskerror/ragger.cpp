@@ -14,14 +14,15 @@ Generate your own certificate. No domain name or external service needed.
 ### Generate the certificate
 
 ```bash
-# Create a cert valid for 10 years
-sudo mkdir -p /etc/ragger/tls
-sudo openssl req -x509 -newkey rsa:2048 -nodes \
-    -keyout /etc/ragger/tls/key.pem \
-    -out /etc/ragger/tls/cert.pem \
+# Create a cert valid for 10 years (no sudo — lives under ~/.ragger)
+mkdir -p ~/.ragger/tls
+openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout ~/.ragger/tls/key.pem \
+    -out ~/.ragger/tls/cert.pem \
     -days 3650 \
     -subj "/CN=ragger" \
     -addext "subjectAltName=DNS:localhost,IP:192.168.0.166"
+chmod 600 ~/.ragger/tls/key.pem
 ```
 
 Replace `192.168.0.166` with your machine's LAN IP (add multiple IPs with
@@ -29,15 +30,15 @@ commas: `IP:192.168.0.166,IP:192.168.0.220`).
 
 ### Configure ragger
 
-Add to `/etc/ragger.ini`:
+Add to `~/.ragger/settings.ini`:
 
 ```ini
 [server]
-tls_cert = /etc/ragger/tls/cert.pem
-tls_key  = /etc/ragger/tls/key.pem
+tls_cert = ~/.ragger/tls/cert.pem
+tls_key  = ~/.ragger/tls/key.pem
 ```
 
-Restart the daemon. Access via `https://192.168.0.166:8432` (HTTPS works on
+Restart the daemon (`ragger restart`). Access via `https://192.168.0.166:8432` (HTTPS works on
 any port — 443 is just the convention).
 
 ### Trust the certificate
@@ -135,19 +136,24 @@ Edit the renewal config at
 `/etc/letsencrypt/renewal/chat.yourdomain.com.conf` and add a `deploy_hook`
 line under `[renewalparams]`:
 
-**macOS (launchd):**
+**macOS (user LaunchAgent):**
 
 ```ini
 [renewalparams]
-deploy_hook = launchctl kickstart -k system/com.ragger.daemon
+# $UID is your numeric user id — replace with `id -u` output
+deploy_hook = launchctl kickstart -k gui/$UID/com.diskerror.ragger
 ```
 
-**Linux (systemd):**
+**Linux (systemd --user):**
 
 ```ini
 [renewalparams]
-deploy_hook = systemctl restart ragger
+deploy_hook = systemctl --user restart ragger.service
 ```
+
+Note: certbot itself runs as root (it writes to `/etc/letsencrypt/`),
+but the deploy hook bounces Ragger in the *user* service manager
+where the daemon actually lives.
 
 The deploy hook runs only after a successful renewal, not on every check.
 
@@ -155,7 +161,7 @@ You can also set the hook globally (for all domains) by adding it to
 `/etc/letsencrypt/cli.ini`:
 
 ```ini
-deploy-hook = systemctl restart ragger
+deploy-hook = systemctl --user restart ragger.service
 ```
 
 #### Step 3: Test it
@@ -170,10 +176,21 @@ expiration (~30 days before).
 
 ### File permissions
 
-Let's Encrypt stores private keys readable only by root. Since ragger's daemon
-runs as root, this works out of the box. The certificate files are symlinks
-into `/etc/letsencrypt/archive/` — don't move or copy them; let certbot manage
-the symlinks so renewal stays automatic.
+Let's Encrypt stores private keys readable only by root, but Ragger's
+daemon runs as *your* user. You have two options:
+
+1. **Copy the cert into `~/.ragger/tls/` after each renewal** — add a
+   deploy hook that runs `cp` + `chown` before the `launchctl` / `systemctl`
+   restart. Simpler but loses the symlink-tracking that certbot prefers.
+2. **Widen permissions on the live symlinks** so your user can read
+   them (e.g., `setfacl -m u:$USER:r /etc/letsencrypt/live/.../privkey.pem`).
+   Keeps certbot's automation intact.
+
+The certificate files under `/etc/letsencrypt/live/.../` are symlinks
+into `/etc/letsencrypt/archive/` — don't move or copy them; let certbot
+manage the symlinks so renewal stays automatic. If you need the files
+inside `~/.ragger/`, option 1 (copy in the deploy hook) is the safer
+choice.
 
 ---
 
