@@ -546,12 +546,36 @@ void InferenceClient::chat_stream(const std::vector<Message>& messages,
     // Force HTTP/1.1 — LM Studio's SSE can misbehave over HTTP/2
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
 
+    // If dumping payloads, also capture curl's wire-level trace
+    std::FILE* verbose_fp = nullptr;
+    std::string verbose_path;
+    if (!payload_dump_dir_.empty()) {
+        auto now = std::chrono::system_clock::now();
+        auto tt  = std::chrono::system_clock::to_time_t(now);
+        auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       now.time_since_epoch()).count() % 1000;
+        std::ostringstream fname;
+        fname << payload_dump_dir_ << "/curl_verbose_";
+        fname << std::put_time(std::localtime(&tt), "%Y%m%d_%H%M%S");
+        fname << "_" << std::setfill('0') << std::setw(3) << ms << ".log";
+        verbose_path = fname.str();
+        verbose_fp = std::fopen(verbose_path.c_str(), "w");
+        if (verbose_fp) {
+            curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+            curl_easy_setopt(curl, CURLOPT_STDERR, verbose_fp);
+        }
+    }
+
     CURLcode res = curl_easy_perform(curl);
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
 
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
+
+    if (verbose_fp) {
+        std::fclose(verbose_fp);
+    }
 
     // Dump raw SSE response if requested
     if (!payload_dump_dir_.empty()) {
