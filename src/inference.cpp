@@ -527,6 +527,11 @@ void InferenceClient::chat_stream(const std::vector<Message>& messages,
         std::string header = key + ": " + value;
         headers = curl_slist_append(headers, header.c_str());
     }
+    // SSE best-practice headers
+    headers = curl_slist_append(headers, "Accept: text/event-stream");
+    // Suppress curl's default "Expect: 100-continue" — some servers mishandle it
+    // and hold the response stream back waiting for an ack they never send.
+    headers = curl_slist_append(headers, "Expect:");
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
@@ -534,10 +539,12 @@ void InferenceClient::chat_stream(const std::vector<Message>& messages,
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stream_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &stream_data);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);          // safe in multithreaded apps
-    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);     // keep connection alive during slow generation
-    curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 30L);     // start keepalive after 30s idle
-    curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 10L);    // probe every 10s
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 30L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 10L);
+    // Force HTTP/1.1 — LM Studio's SSE can misbehave over HTTP/2
+    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
 
     CURLcode res = curl_easy_perform(curl);
     long http_code = 0;
