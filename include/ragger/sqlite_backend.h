@@ -83,46 +83,46 @@ public:
     std::vector<MemoryRecord> export_memories(const MemoryFilter& filter) override;
     int import_memories(const std::vector<MemoryRecord>& records, int user_id = -1) override;
 
-    // --- User management (single-user mode) ---
+    // --- User management ---
     /// Get user info by username. Returns nullopt if not found.
-    std::optional<UserInfo> get_user_by_username(const std::string& username);
+    std::optional<UserInfo> get_user_by_username(const std::string& username) override;
 
     /// Get hashed password for a user.
-    std::optional<std::string> get_user_password(const std::string& username);
+    std::optional<std::string> get_user_password(const std::string& username) override;
 
     /// Update user's token hash.
-    void update_user_token(const std::string& username, const std::string& new_hash);
+    void update_user_token(const std::string& username, const std::string& new_hash) override;
 
     /// Create a web session with given token.
     void create_web_session(const std::string& token, const std::string& username,
-                           int user_id, int ttl_seconds);
+                           int user_id, int ttl_seconds) override;
 
     /// Get user's preferred model (empty string if none set).
-    std::optional<std::string> get_user_preferred_model(const std::string& username);
+    std::optional<std::string> get_user_preferred_model(const std::string& username) override;
 
     /// Set/clear user's preferred model.
-    void update_user_preferred_model(const std::string& username, const std::string& model);
+    void update_user_preferred_model(const std::string& username, const std::string& model) override;
 
     /// Get timestamp when token was last rotated.
-    std::optional<std::string> get_user_token_rotated_at(const std::string& username);
+    std::optional<std::string> get_user_token_rotated_at(const std::string& username) override;
 
     /// Update the token rotated timestamp.
-    void update_user_token_rotated_at(const std::string& username, const std::string& timestamp);
+    void update_user_token_rotated_at(const std::string& username, const std::string& timestamp) override;
 
     /// Create a new user. Returns user_id or -1 on error.
-    int create_user(const std::string& username, const std::string& token_hash);
+    int create_user(const std::string& username, const std::string& token_hash) override;
 
     /// Delete a user by username. Returns true if deleted.
-    bool delete_user(const std::string& username);
+    bool delete_user(const std::string& username) override;
 
     /// Set/clear password hash for a user.
-    void set_user_password(const std::string& username, const std::string& password_hash);
+    void set_user_password(const std::string& username, const std::string& password_hash) override;
 
     /// Get user info by token hash. Returns nullopt if not found.
-    std::optional<UserInfo> get_user_by_token_hash(const std::string& token_hash);
+    std::optional<UserInfo> get_user_by_token_hash(const std::string& token_hash) override;
 
     /// Get web session by token. Returns nullopt if not found or expired.
-    std::optional<UserInfo> get_web_session(const std::string& token);
+    std::optional<UserInfo> get_web_session(const std::string& token) override;
 
     /// Get a settings value by key. Returns nullopt if key doesn't exist.
     std::optional<std::string> get_setting(const std::string& key) override;
