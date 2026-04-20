@@ -64,10 +64,10 @@ std::string Config::resolved_log_dir() const {
     return expand_path(log_dir);
 }
 std::string Config::resolved_model_dir() const {
-    if (model_dir.empty()) {
-        return expand_path("~/.ragger/models");  // Use user home by default
-    }
-    return expand_path(model_dir);
+    std::string base = model_dir.empty()
+        ? expand_path("~/.ragger/models")
+        : expand_path(model_dir);
+    return base + "/" + resolve_model(embedding_model);
 }
 
 std::string Config::resolve_model(const std::string& name) const {

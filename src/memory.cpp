@@ -24,6 +24,19 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
 
     // Create primary backend - single user DB only now
     backend_ = std::make_unique<SqliteBackend>(*embedder_, db_path);
+    
+    // Model mismatch guard: stored embeddings are incompatible across models.
+    const std::string current_model = config().resolve_model(config().embedding_model);
+    auto stored_model = backend_->get_setting("embedding_model");
+    if (!stored_model.has_value()) {
+        // First use — record which model built this database.
+        backend_->set_setting("embedding_model", current_model);
+    } else if (*stored_model != current_model) {
+        throw std::runtime_error(
+            "Embedding model mismatch: database was built with '" + *stored_model +
+            "' but config specifies '" + current_model + "'. " +
+            "Reorganise your models directory and run 'ragger rebuild' to re-embed.");
+    }
 }
 
 RaggerMemory::~RaggerMemory() {

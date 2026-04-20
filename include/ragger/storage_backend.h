@@ -141,6 +141,12 @@ public:
 
     /// Get web session by token. Returns nullopt if not found or expired.
     virtual std::optional<UserInfo> get_web_session(const std::string& token) = 0;
+
+    /// Get a settings value by key. Returns nullopt if key doesn't exist.
+    virtual std::optional<std::string> get_setting(const std::string& key) = 0;
+
+    /// Set or update a settings value.
+    virtual void set_setting(const std::string& key, const std::string& value) = 0;
 };
 
 } // namespace ragger

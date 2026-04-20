@@ -142,6 +142,13 @@ struct SqliteBackend::Impl {
                 timestamp TEXT NOT NULL
             )
         )");
+        
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        )");
         exec("CREATE INDEX IF NOT EXISTS idx_memory_usage_memory_id ON memory_usage(memory_id)");
         exec(R"(
             CREATE TABLE IF NOT EXISTS bm25_index (
@@ -383,6 +390,14 @@ struct SqliteBackend::Impl {
                 modified   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
             )
         )");
+        
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        )");
+        
         migrate_add_token_rotated_at();
         migrate_add_preferred_model();
         migrate_add_password_hash();
@@ -1525,6 +1540,33 @@ void SqliteBackend::set_user_password(const std::string& username, const std::st
     if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, password_hash.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(stmt);
+    }
+    sqlite3_finalize(stmt);
+}
+
+std::optional<std::string> SqliteBackend::get_setting(const std::string& key) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "SELECT value FROM settings WHERE key = ?";
+    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return std::nullopt;
+    sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+    
+    std::optional<std::string> result;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* v = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        if (v) result = std::string(v);
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+void SqliteBackend::set_setting(const std::string& key, const std::string& value) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)";
+    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, value.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_step(stmt);
     }
     sqlite3_finalize(stmt);

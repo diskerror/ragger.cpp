@@ -124,6 +124,12 @@ public:
     /// Get web session by token. Returns nullopt if not found or expired.
     std::optional<UserInfo> get_web_session(const std::string& token);
 
+    /// Get a settings value by key. Returns nullopt if key doesn't exist.
+    std::optional<std::string> get_setting(const std::string& key) override;
+
+    /// Set or update a settings value.
+    void set_setting(const std::string& key, const std::string& value) override;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> pImpl;
