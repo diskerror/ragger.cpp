@@ -6,7 +6,7 @@
 # No sudo needed. Everything lives under $HOME/.ragger:
 #
 #     ~/.ragger/bin/ragger        executable
-#     ~/.ragger/settings.ini        config
+#     ~/.ragger/settings.ini      config
 #     ~/.ragger/logs/             logs
 #     ~/.ragger/models/           embedding models
 #     ~/.ragger/formats/          inference format definitions

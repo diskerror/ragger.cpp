@@ -1,5 +1,5 @@
 {
-  "id": "memory-ragger",
+  "id": "ragger",
   "kind": "memory",
   "configSchema": {
     "type": "object",

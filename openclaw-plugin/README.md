@@ -9,13 +9,13 @@ This directory contains the OpenClaw memory plugin for Ragger.
 
 ## Installation
 
-The `install.sh` script automatically installs these files to `~/.openclaw/extensions/memory-ragger/` if OpenClaw is detected.
+The `install.sh` script automatically installs these files to `~/.openclaw/extensions/ragger/` if OpenClaw is detected.
 
 ### Manual Installation
 
 ```bash
-mkdir -p ~/.openclaw/extensions/memory-ragger
-cp openclaw-plugin/* ~/.openclaw/extensions/memory-ragger/
+mkdir -p ~/.openclaw/extensions/ragger
+cp openclaw-plugin/* ~/.openclaw/extensions/ragger/
 ```
 
 Then configure in `~/.openclaw/openclaw.json` (see [docs/openclaw.md](../docs/openclaw.md)).

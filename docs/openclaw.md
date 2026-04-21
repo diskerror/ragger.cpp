@@ -5,10 +5,10 @@ memory plugin via HTTP (daemon) or MCP (per-user stdio).
 
 ## 1. Install the OpenClaw plugin
 
-Copy the `memory-ragger` plugin directory into `~/.openclaw/extensions/`:
+Copy the `ragger` plugin directory into `~/.openclaw/extensions/`:
 
 ```
-~/.openclaw/extensions/memory-ragger/
+~/.openclaw/extensions/ragger/
 ├── openclaw.plugin.json
 └── index.ts
 ```
@@ -24,10 +24,10 @@ binary. OC fork+execs it on demand against your own `~/.ragger/`:
 {
   "plugins": {
     "slots": {
-      "memory": "memory-ragger"
+      "memory": "ragger"
     },
     "entries": {
-      "memory-ragger": {
+      "ragger": {
         "enabled": true,
         "config": {
           "transport": "mcp",
@@ -51,10 +51,10 @@ and you want to hit it over HTTP with a token, use HTTP transport:
 {
   "plugins": {
     "slots": {
-      "memory": "memory-ragger"
+      "memory": "ragger"
     },
     "entries": {
-      "memory-ragger": {
+      "ragger": {
         "enabled": true,
         "config": {
           "transport": "http",
