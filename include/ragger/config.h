@@ -26,7 +26,7 @@ struct Config {
     std::string socket_path     = "~/.ragger/ragger.sock";
     std::string bind_address   = "";  // empty = no TCP listener
     int         port           = 8432;  // only meaningful when bind_address is set
-    std::string server_name;   // hostname for Crow (e.g. "ragger.local")
+    std::string server_name;   // hostname for cpp-httplib (e.g. "ragger.local")
 
     // --- Storage ---
     std::string db_path;  // empty = resolved at runtime (user home dir)
@@ -70,6 +70,7 @@ struct Config {
     bool query_log_enabled     = true;
     bool http_log_enabled      = true;
     bool mcp_log_enabled       = true;
+    bool debug_log_enabled     = false;  // opt-in verbose tracing (per-chunk, etc.)
 
     // --- Paths ---
     bool normalize_home_path   = true;
@@ -104,6 +105,8 @@ struct Config {
     int  chat_max_memory_results = 3;
     int  chat_persona_pct        = 25;  // % of context for persona
     float chat_chars_per_token   = 4.0f;
+    int  chat_stream_flush_seconds = 8;  // proxy stream: flush to DB after N idle sec (0 = flush only at end)
+    std::string system_prompt_file = "~/.ragger/SYSTEM.md";  // base system prompt file
 
     // --- System ceilings (0 = no limit) ---
     int  max_search_limit             = 0;

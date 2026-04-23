@@ -59,7 +59,7 @@ std::string Config::resolved_db_path() const {
 
 std::string Config::resolved_log_dir() const {
     if (log_dir.empty()) {
-        return expand_path("~/.ragger");
+        return expand_path("~/.ragger/logs");
     }
     return expand_path(log_dir);
 }
@@ -136,10 +136,15 @@ max_tokens = 4096
 # models = claude-*
 
 [logging]
-log_dir = /var/log/ragger
+# log_dir: where query.log / http.log / mcp.log / error.log are written.
+# Default when unset: ~/.ragger/logs (matches launchd/systemd stdout.log + stderr.log).
+# log_dir = ~/.ragger/logs
 query_log = true
 http_log = true
 mcp_log = true
+# debug_log: opt-in verbose tracing (per-chunk stream events, etc.)
+# Off by default — enable when troubleshooting.
+debug_log = false
 
 [paths]
 normalize_home = true
@@ -187,12 +192,7 @@ std::expected<std::string, ConfigError> find_system_config(const std::string& cl
         return resolved;
     }
 
-    // 2. /etc/ragger.ini
-    if (fs::exists("/etc/ragger.ini")) {
-        return "/etc/ragger.ini";
-    }
-
-    // 3. First run — bootstrap default user config (acts as system config)
+    // 2. First run — bootstrap default user config (acts as system config)
     try {
         return bootstrap_user_config();
     } catch (...) {
@@ -409,6 +409,7 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "query_log") cfg.query_log_enabled = parse_bool(val);
             else if (key == "http_log")  cfg.http_log_enabled = parse_bool(val);
             else if (key == "mcp_log")   cfg.mcp_log_enabled = parse_bool(val);
+            else if (key == "debug_log") cfg.debug_log_enabled = parse_bool(val);
         }
         else if (section == "paths") {
             if (key == "normalize_home") cfg.normalize_home_path = parse_bool(val);
@@ -437,8 +438,10 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "max_memory_results") cfg.chat_max_memory_results = std::stoi(val);
             else if (key == "persona_pct") cfg.chat_persona_pct = std::stoi(val);
             else if (key == "chars_per_token") cfg.chat_chars_per_token = std::stof(val);
+            else if (key == "stream_flush_seconds") cfg.chat_stream_flush_seconds = std::stoi(val);
             else if (key == "max_persona_chars_limit") cfg.chat_max_persona_chars_limit = std::stoi(val);
             else if (key == "max_memory_results_limit") cfg.chat_max_memory_results_limit = std::stoi(val);
+            else if (key == "system_prompt_file") cfg.system_prompt_file = val;
         }
         else if (section == "models") {
             cfg.model_aliases[key] = val;
@@ -629,6 +632,7 @@ int reload_config() {
     RELOAD(query_log_enabled);
     RELOAD(http_log_enabled);
     RELOAD(mcp_log_enabled);
+    RELOAD(debug_log_enabled);
 
     // Paths
     RELOAD(normalize_home_path);
@@ -656,6 +660,8 @@ int reload_config() {
     RELOAD(chat_max_memory_results);
     RELOAD(chat_persona_pct);
     RELOAD(chat_chars_per_token);
+    RELOAD(chat_stream_flush_seconds);
+    RELOAD(system_prompt_file);
 
     // System ceilings
     RELOAD(max_search_limit);

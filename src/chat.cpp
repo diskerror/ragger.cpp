@@ -83,25 +83,34 @@ std::string Chat::load_workspace_files(int max_context) {
         max_persona_chars = cfg.chat_max_persona_chars;
     }
     
-    std::vector<std::string> file_list = {
-        "SOUL.md", "USER.md", "AGENTS.md", "TOOLS.md", "MEMORY.md",
-    };
+    // system_prompt_file (default: SYSTEM.md) is loaded first.
+    // Persona files follow; the list excludes any file that resolves to the same path.
+    std::string sys_path = expand_path(cfg.system_prompt_file);
+    std::string sys_norm = fs::path(sys_path).lexically_normal().string();
+
+    // Build ordered list: system_prompt_file by full path, then persona files by name
+    std::vector<std::string> full_paths;
+    full_paths.push_back(sys_path);
+    for (const char* fname : {"SOUL.md", "USER.md", "MEMORY.md"}) {
+        std::string p = ragger_dir + "/" + fname;
+        if (fs::path(p).lexically_normal().string() != sys_norm) full_paths.push_back(p);
+    }
 
     std::vector<std::string> sections;
     int total_chars = 0;
 
-    for (const auto& filename : file_list) {
-        std::string path = ragger_dir + "/" + filename;
+    for (const auto& path : full_paths) {
+        std::string label = fs::path(path).filename().string();
         if (!fs::exists(path)) {
-            continue;  // file not found
+            continue;  // file not found — silently skip
         }
-        
+
         // Read file
         std::ifstream file(path);
         if (!file) continue;
         std::string content((std::istreambuf_iterator<char>(file)),
                            std::istreambuf_iterator<char>());
-        
+
         // Trim trailing whitespace
         size_t end = content.find_last_not_of(" \t\r\n");
         if (end != std::string::npos) {
@@ -109,26 +118,25 @@ std::string Chat::load_workspace_files(int max_context) {
         } else {
             content.clear();
         }
-        
+
         if (content.empty()) continue;
-        
+
         // Check if we need to truncate
         if (max_persona_chars > 0) {
             // Account for separator size (sections.size() gives count of separators needed)
             int separator_overhead = static_cast<int>(sections.size()) * 8;  // "\n\n---\n\n" = 8 chars
             int remaining = max_persona_chars - total_chars - separator_overhead;
-            
+
             if (remaining <= 0) {
                 break;  // No space left
             }
-            
+
             if (static_cast<int>(content.size()) > remaining) {
                 // Paragraph-aware truncation
                 std::vector<std::string> paragraphs;
                 std::istringstream stream(content);
-                std::string para;
                 std::string buffer;
-                
+
                 // Split by double newline
                 for (std::string line; std::getline(stream, line); ) {
                     if (line.empty() && !buffer.empty()) {
@@ -142,7 +150,7 @@ std::string Chat::load_workspace_files(int max_context) {
                 if (!buffer.empty()) {
                     paragraphs.push_back(buffer);
                 }
-                
+
                 // Keep as many complete paragraphs as fit
                 std::string truncated;
                 for (const auto& p : paragraphs) {
@@ -152,10 +160,10 @@ std::string Chat::load_workspace_files(int max_context) {
                     if (!truncated.empty()) truncated += "\n\n";
                     truncated += p;
                 }
-                
+
                 // If we got at least some content, use it
                 if (!truncated.empty()) {
-                    truncated += "\n\n[... " + filename + " truncated ...]";
+                    truncated += "\n\n[... " + label + " truncated ...]";
                     sections.push_back(truncated);
                     total_chars += static_cast<int>(truncated.size());
                 }
@@ -222,7 +230,7 @@ void Chat::store_turn(const std::string& user_text, const std::string& assistant
             session_memory_id_ = std::stoi(id_str);
         }
     } catch (const std::exception& e) {
-        std::cerr << "Warning: failed to store turn: " << e.what() << "\n";
+        std::cerr << std::format(ragger::lang::WARN_STORE_TURN, e.what()) << "\n";
     }
 }
 
@@ -314,7 +322,7 @@ void Chat::check_orphaned_turns() {
         }
         
     } catch (const std::exception& e) {
-        std::cerr << "Warning: orphan check failed: " << e.what() << "\n";
+        std::cerr << std::format(ragger::lang::WARN_ORPHAN_CHECK, e.what()) << "\n";
     }
 }
 
@@ -417,7 +425,7 @@ std::string Chat::summarize_conversation(const std::vector<std::pair<std::string
     try {
         return inference_.chat(summary_messages, model_);
     } catch (const std::exception& e) {
-        std::cerr << "Warning: summary generation failed: " << e.what() << "\n";
+        std::cerr << std::format(ragger::lang::WARN_SUMMARY, e.what()) << "\n";
         return "";
     }
 }
@@ -448,7 +456,12 @@ void Chat::run() {
     
     // Load workspace files with context sizing
     std::string workspace = load_workspace_files(max_context);
-    
+
+    if (workspace.empty()) {
+        std::cerr << ragger::lang::ERR_NO_SYSTEM_PROMPT
+                  << "Create ~/.ragger/SYSTEM.md or add SOUL.md / USER.md / MEMORY.md.\n";
+    }
+
     // Initialize conversation
     if (!workspace.empty()) {
         messages_.push_back({"system", workspace});
@@ -488,7 +501,7 @@ void Chat::run() {
         // Check for pause summary before waiting for input
         check_pause_summary();
         
-        std::cout << "You: " << std::flush;
+        std::cout << ragger::lang::CHAT_PROMPT_USER << std::flush;
         if (!std::getline(std::cin, line)) {
             std::cout << "\nGoodbye!\n";
             break;
@@ -620,14 +633,14 @@ void Chat::run() {
                 for (auto& ep : inference_._endpoints) {
                     if (ep.name == name) {
                         if (!ep.is_reachable()) {
-                            std::cout << "Warning: " << name << " is not reachable\n";
+                            std::cout << std::format(ragger::lang::WARN_ENDPOINT_DOWN, name) << "\n";
                         }
                         break;
                     }
                 }
                 std::cout << "Forced endpoint: " << name << "\n\n";
             } catch (const std::exception& e) {
-                std::cout << "Warning: " << e.what() << "\n";
+                std::cout << std::format(ragger::lang::WARN_CHAT_ERROR, e.what()) << "\n";
                 std::cout << "Available: ";
                 for (size_t i = 0; i < inference_._endpoints.size(); ++i) {
                     if (i > 0) std::cout << ", ";
@@ -662,7 +675,7 @@ void Chat::run() {
                 context_chunks.push_back(r.text);
             }
         } catch (const std::exception& e) {
-            std::cerr << "Warning: memory search failed: " << e.what() << "\n";
+            std::cerr << std::format(ragger::lang::WARN_MEMORY_SEARCH, e.what()) << "\n";
         }
         
         // Build message with context
@@ -688,7 +701,7 @@ void Chat::run() {
         current_messages.push_back({"user", line});
         
         // Send to inference API (streaming)
-        std::cout << "Assistant: " << std::flush;
+        std::cout << ragger::lang::CHAT_PROMPT_ASSISTANT << std::flush;
         std::string response_text;
         
         try {

@@ -15,6 +15,8 @@
 #include <filesystem>
 #include <chrono>
 #include <iomanip>
+#include <functional>
+#include <string_view>
 
 namespace fs = std::filesystem;
 
@@ -644,6 +646,111 @@ InferenceClient::ProxyResponse InferenceClient::proxy_request(
         throw std::runtime_error("LM proxy not configured");
     }
     return forward_request(lm_proxy_url_, path, method, body);
+}
+
+// Streaming proxy: per-chunk callback, cancellable via returning false.
+long InferenceClient::proxy_request_stream(
+        const std::string& path,
+        const std::string& method,
+        const std::string& body,
+        std::function<bool(std::string_view)> on_chunk,
+        std::function<void(long)> on_status) {
+    if (lm_proxy_url_.empty()) {
+        throw std::runtime_error("LM proxy not configured");
+    }
+
+    std::string base = lm_proxy_url_;
+    if (!base.empty() && base.back() == '/') base.pop_back();
+    const std::string url = base + path;
+
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        throw std::runtime_error("Failed to initialize libcurl for proxy stream");
+    }
+
+    // State shared with libcurl callbacks
+    struct StreamCtx {
+        std::function<bool(std::string_view)>* on_chunk;
+        std::function<void(long)>*              on_status;
+        bool status_sent = false;
+        CURL* curl;
+        bool cancelled = false;
+    } ctx{ &on_chunk, &on_status, false, curl, false };
+
+    // Header callback — pulls the final status line and fires on_status once.
+    auto header_cb = +[](char* buffer, size_t size, size_t nitems, void* userdata) -> size_t {
+        auto* c = static_cast<StreamCtx*>(userdata);
+        size_t total = size * nitems;
+        if (!c->status_sent) {
+            long code = 0;
+            curl_easy_getinfo(c->curl, CURLINFO_RESPONSE_CODE, &code);
+            if (code != 0) {
+                if (c->on_status && *c->on_status) (*c->on_status)(code);
+                c->status_sent = true;
+            }
+        }
+        return total;
+    };
+
+    // Write callback — fires on_chunk per libcurl buffer. Returning < total
+    // tells libcurl to abort. We also set cancelled so close-out logic knows.
+    auto write_cb = +[](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
+        auto* c = static_cast<StreamCtx*>(userdata);
+        size_t total = size * nmemb;
+        if (c->cancelled) return 0;
+        std::string_view chunk(ptr, total);
+        bool keep_going = (c->on_chunk && *c->on_chunk) ? (*c->on_chunk)(chunk) : true;
+        if (!keep_going) {
+            c->cancelled = true;
+            return 0;  // signal abort to libcurl
+        }
+        return total;
+    };
+
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    headers = curl_slist_append(headers, "Accept: text/event-stream");
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &ctx);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 30L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 10L);
+    // Force HTTP/1.1 — SSE over HTTP/2 has known quirks with some servers
+    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+    // No total timeout — streaming responses may legitimately be long.
+    // Client disconnect cancels via on_chunk returning false.
+
+    if (method == "POST" || method == "PUT") {
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
+    }
+
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+
+    // Fire on_status if no headers arrived (connection failure path)
+    if (!ctx.status_sent && on_status) on_status(http_code);
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    // CURLE_WRITE_ERROR is normal when we cancelled on purpose.
+    // CURLE_PARTIAL_FILE is normal for SSE — server closes after [DONE].
+    if (res != CURLE_OK &&
+        res != CURLE_PARTIAL_FILE &&
+        !(res == CURLE_WRITE_ERROR && ctx.cancelled)) {
+        throw std::runtime_error(std::string("Proxy stream failed: ") +
+                                 curl_easy_strerror(res));
+    }
+    return http_code;
 }
 
 std::vector<std::string> InferenceClient::proxy_list_models() {

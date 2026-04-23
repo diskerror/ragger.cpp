@@ -2,7 +2,7 @@
  * HTTP server for Ragger Memory
  *
  * Mirrors ragger_memory/server.py from the Python version.
- * Uses Crow for routing and built-in JSON handling.
+ * Uses httplib for routing and built-in JSON handling.
  */
 #pragma once
 

@@ -17,7 +17,6 @@
 #include <cstdio>
 #include <cstring>
 #include <chrono>
-#include <mutex>
 #include <pwd.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -137,65 +136,24 @@ std::string ensure_token() {
     return token;
 }
 
-// --- Server secret (for time-seeded token hashing) ---
+// --- Static ISO timestamp (informational use only) ---
 
-static std::mutex            g_secret_mutex;
-static std::vector<uint8_t>  g_server_secret;
-
-static const std::vector<uint8_t>& get_server_secret() {
-    std::lock_guard<std::mutex> lock(g_secret_mutex);
-    if (!g_server_secret.empty()) return g_server_secret;
-
-    std::string path = expand_path("~/.ragger/server.secret");
-    if (fs::exists(path)) {
-        std::ifstream f(path, std::ios::binary);
-        g_server_secret.assign(std::istreambuf_iterator<char>(f),
-                               std::istreambuf_iterator<char>());
-        if (g_server_secret.size() == 32) return g_server_secret;
-        g_server_secret.clear();  // corrupt — regenerate
-    }
-
-    fs::create_directories(fs::path(path).parent_path());
-    g_server_secret.resize(32);
-    if (RAND_bytes(g_server_secret.data(), 32) != 1) {
-        throw std::runtime_error("Failed to generate server secret");
-    }
-
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) throw std::runtime_error("Failed to write server.secret: " + path);
-    f.write(reinterpret_cast<const char*>(g_server_secret.data()), 32);
-    f.close();
-    chmod(path.c_str(), 0600);
-
-    return g_server_secret;
-}
-
-static int64_t current_epoch_minute() {
-    return std::chrono::duration_cast<std::chrono::minutes>(
-               std::chrono::system_clock::now().time_since_epoch())
-        .count();
-}
-
-static std::string token_for_minute(const std::string& user, int64_t minute) {
-    const auto& secret = get_server_secret();
-    std::string buf;
-    buf.reserve(user.size() + 1 + 20 + 1 + secret.size());
-    buf.append(user);
-    buf.push_back(':');
-    buf.append(std::to_string(minute));
-    buf.push_back(':');
-    buf.append(reinterpret_cast<const char*>(secret.data()), secret.size());
-    return hash_token(buf);
-}
-
-static std::string iso_timestamp(std::chrono::system_clock::time_point tp) {
-    auto tt = std::chrono::system_clock::to_time_t(tp);
+static std::string iso_timestamp_now() {
+    auto tt = std::chrono::system_clock::to_time_t(
+                  std::chrono::system_clock::now());
     std::tm gm{};
     gmtime_r(&tt, &gm);
     char buf[32];
     std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &gm);
     return buf;
 }
+
+// NOTE: The old time-seeded token rotation system (server.secret +
+// token_for_minute + 24h verify window) has been removed. Tokens are now
+// plain random values: generate_token() → hash_token() → stored in DB.
+// The framework (users.token_hash, users.token_rotated_at, issue_token,
+// verify_token) is kept for the planned labeled-token system (see GitHub
+// issue: "Labeled API tokens").
 
 // PBKDF2 password hashing
 static const int PBKDF2_ITERATIONS = 600000;
@@ -283,18 +241,6 @@ bool verify_password(const std::string& password, const std::string& stored_hash
 
 // --- DB-backed API ---
 
-void useradd(StorageBackend& db, const std::string& user, const std::string& pw) {
-    std::string pwhash = hash_password(pw);
-    auto existing = db.get_user_by_username(user);
-    if (existing) {
-        db.set_user_password(user, pwhash);
-    } else {
-        // create_user takes a token_hash; leave it empty until issue_token is called
-        db.create_user(user, "");
-        db.set_user_password(user, pwhash);
-    }
-}
-
 void userdel(StorageBackend& db, const std::string& user) {
     db.delete_user(user);
 }
@@ -306,30 +252,22 @@ bool verify_password(StorageBackend& db, const std::string& user, const std::str
 }
 
 std::string issue_token(StorageBackend& db, const std::string& user) {
-    int64_t minute = current_epoch_minute();
-    std::string token = token_for_minute(user, minute);
-    // The token IS the hash — there's no separate raw token. Clients send
-    // this value back as their credential; the server re-derives candidate
-    // hashes for the 24h window and matches.
-    db.update_user_token(user, token);
-    db.update_user_token_rotated_at(user,
-        iso_timestamp(std::chrono::system_clock::now()));
+    // Generate a fresh random token, store its hash, record issue time.
+    // Returns the raw token — caller must deliver it to the user once;
+    // only the hash is stored in the DB.
+    std::string token = generate_token();
+    std::string token_hash = hash_token(token);
+    db.update_user_token(user, token_hash);
+    db.update_user_token_rotated_at(user, iso_timestamp_now());
     return token;
 }
 
 AuthResult verify_token(StorageBackend& db, const std::string& token) {
-    auto user_info = db.get_user_by_token_hash(token);
+    // Hash the presented token and look it up. Valid until explicitly
+    // revoked — no time window. (The old 24h rotation window is gone.)
+    std::string token_hash = hash_token(token);
+    auto user_info = db.get_user_by_token_hash(token_hash);
     if (!user_info) return {};
-
-    auto rotated_at = db.get_user_token_rotated_at(user_info->username);
-    if (!rotated_at) return {};
-
-    std::tm tm{};
-    if (!strptime(rotated_at->c_str(), "%Y-%m-%dT%H:%M:%SZ", &tm)) return {};
-    auto rotated_tp = std::chrono::system_clock::from_time_t(timegm(&tm));
-    auto age = std::chrono::system_clock::now() - rotated_tp;
-    if (age > std::chrono::hours(24)) return {};
-
     return {true, user_info->username};
 }
 

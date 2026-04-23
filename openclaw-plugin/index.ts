@@ -120,7 +120,7 @@ class McpClient {
       });
 
       if (!this.process.stdout || !this.process.stdin) {
-        this.logger.error("ragger/mcp: failed to get stdio pipes");
+        this.logger.error("ragger-mcp: failed to get stdio pipes");
         resolve(false);
         return;
       }
@@ -133,18 +133,18 @@ class McpClient {
       this.process.stderr?.on("data", (chunk: Buffer) => {
         // Log stderr but don't fail — ragger prints config info to stderr
         const msg = chunk.toString().trim();
-        if (msg) this.logger.info(`ragger/mcp stderr: ${msg}`);
+        if (msg) this.logger.info(`ragger-mcp stderr: ${msg}`);
       });
 
       this.process.on("error", (err) => {
-        this.logger.error(`ragger/mcp: process error: ${err.message}`);
+        this.logger.error(`ragger-mcp: process error: ${err.message}`);
         this.rejectAll(err);
         resolve(false);
       });
 
       this.process.on("exit", (code) => {
         if (code !== 0 && code !== null) {
-          this.logger.warn(`ragger/mcp: process exited with code ${code}`);
+          this.logger.warn(`ragger-mcp: process exited with code ${code}`);
         }
         this.rejectAll(new Error(`MCP process exited (code ${code})`));
         this.process = null;
@@ -155,7 +155,7 @@ class McpClient {
         .then((result: unknown) => {
           const r = result as { protocolVersion?: string; serverInfo?: { name?: string } };
           this.logger.info(
-            `ragger/mcp: connected (protocol ${r.protocolVersion}, server ${r.serverInfo?.name})`,
+            `ragger-mcp: connected (protocol ${r.protocolVersion}, server ${r.serverInfo?.name})`,
           );
           // Send notifications/initialized (no response expected)
           this.sendNotification("notifications/initialized");
@@ -163,7 +163,7 @@ class McpClient {
           resolve(true);
         })
         .catch((err) => {
-          this.logger.error(`ragger/mcp: initialize failed: ${err.message}`);
+          this.logger.error(`ragger-mcp: initialize failed: ${err.message}`);
           resolve(false);
         });
     });

@@ -1,11 +1,12 @@
 #!/bin/bash
-# install.sh — Install Ragger to the current user's ~/.ragger directory.
+# install.sh — Install Ragger for the current user.
 #
 # Usage: ./install.sh
 #
-# No sudo needed. Everything lives under $HOME/.ragger:
+# No sudo needed. Layout follows the XDG convention:
 #
-#     ~/.ragger/bin/ragger        executable
+#     ~/.local/bin/ragger         executable (on PATH)
+#
 #     ~/.ragger/settings.ini      config
 #     ~/.ragger/logs/             logs
 #     ~/.ragger/models/           embedding models
@@ -40,7 +41,7 @@ BINARY="build/ragger"
 
 # --- Paths (single source of truth) ---
 RAGGER_HOME="$HOME/.ragger"
-BIN_DIR="$RAGGER_HOME/bin"
+BIN_DIR="$HOME/.local/bin"          # XDG user executables
 LOG_DIR="$RAGGER_HOME/logs"
 MODEL_DIR="$RAGGER_HOME/models"
 FORMATS_DIR="$RAGGER_HOME/formats"
@@ -58,6 +59,14 @@ for d in "$RAGGER_HOME" "$BIN_DIR" "$LOG_DIR" "$MODEL_DIR" "$FORMATS_DIR" "$WEB_
         mkdir -p "$d"
     fi
 done
+
+# Migration: older installs put the binary under ~/.ragger/bin. If that
+# directory exists, clean it up so we have one authoritative location.
+OLD_BIN_DIR="$RAGGER_HOME/bin"
+if [ -d "$OLD_BIN_DIR" ]; then
+    info "Removing legacy $OLD_BIN_DIR (binary now lives at $DEST)"
+    rm -rf "$OLD_BIN_DIR"
+fi
 
 # ============================================================
 # PHASE 2: Config
@@ -106,12 +115,30 @@ fi
 
 "$DEST" version 2>/dev/null || true
 
-# ============================================================
-# PHASE 4: Add ~/.ragger/bin to PATH
-# ============================================================
+# --- First-run: mint a bearer token for the daemon owner ---
+# ~/.ragger/token holds the raw bearer token the local owner uses against
+# their own daemon (needed for remote clients + any tool that speaks HTTP
+# over a non-loopback address). Local browser and unix-socket access are
+# already bypassed by the server, so this token is optional for most uses
+# — but it's cheap to create and avoids a "wait, I need a token" moment
+# the first time someone wires up an OpenClaw / Claude Desktop / curl client.
+if [ ! -f "$RAGGER_HOME/token" ]; then
+    info "Bootstrapping bearer token at $RAGGER_HOME/token"
+    "$DEST" add-self >/dev/null 2>&1 || \
+        warn "add-self failed — run 'ragger add-self' manually after install"
+fi
 
-PATH_LINE='export PATH="$HOME/.ragger/bin:$PATH"'
-PATH_MARKER='# Added by Ragger installer'
+# ============================================================
+# PHASE 4: Ensure ~/.local/bin is on PATH
+# ============================================================
+#
+# Most modern shells already put ~/.local/bin on PATH (macOS path_helper,
+# Debian/Ubuntu /etc/profile, Fedora default .bash_profile, Nix, etc.),
+# so we only touch the user's rc if the directory is NOT currently on PATH.
+# That keeps the install a no-op on systems that already follow the convention.
+
+PATH_LINE='[ -d "$HOME/.local/bin" ] && export PATH="$HOME/.local/bin:$PATH"'
+PATH_MARKER='# Added by Ragger installer — ensure ~/.local/bin is on PATH'
 
 add_to_rc() {
     local rc="$1"
@@ -123,21 +150,23 @@ add_to_rc() {
         echo "$PATH_MARKER"
         echo "$PATH_LINE"
     } >> "$rc"
-    info "Added ~/.ragger/bin to PATH in $rc"
+    info "Added ~/.local/bin to PATH in $rc"
 }
 
-# Figure out which shell rc files to touch.  Prefer the user's current shell.
-case "$(basename "${SHELL:-}")" in
-    zsh)   add_to_rc "$HOME/.zshrc" ;;
-    bash)  [ -f "$HOME/.bash_profile" ] && add_to_rc "$HOME/.bash_profile" \
-                                        || add_to_rc "$HOME/.bashrc" ;;
-    *)     add_to_rc "$HOME/.profile" ;;
-esac
-
-# Check whether the current shell already sees it
 case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *) warn "Open a new terminal (or 'source' your rc file) to pick up the new PATH." ;;
+    *":$BIN_DIR:"*)
+        info "~/.local/bin already on PATH — no shell rc changes needed"
+        ;;
+    *)
+        # Pick the appropriate rc file for the user's current shell.
+        case "$(basename "${SHELL:-}")" in
+            zsh)   add_to_rc "$HOME/.zshrc" ;;
+            bash)  [ -f "$HOME/.bash_profile" ] && add_to_rc "$HOME/.bash_profile" \
+                                                || add_to_rc "$HOME/.bashrc" ;;
+            *)     add_to_rc "$HOME/.profile" ;;
+        esac
+        warn "Open a new terminal (or 'source' your rc file) to pick up the new PATH."
+        ;;
 esac
 
 # ============================================================
@@ -206,6 +235,115 @@ EOF
     echo "    sudo loginctl enable-linger $USER"
 else
     warn "Unknown OS '$OS' — daemon file not installed. Run 'ragger serve' manually."
+fi
+
+# ============================================================
+# PHASE 6: OpenClaw plugin (if OpenClaw is installed)
+# ============================================================
+#
+# If the user has OpenClaw (~/.openclaw/ exists), install the Ragger memory
+# plugin into ~/.openclaw/extensions/ragger/ and ensure its entries are
+# wired in ~/.openclaw/openclaw.json.
+#
+# Plugin files are ALWAYS overwritten — they're versioned with the Ragger
+# repo and must match the binary. openclaw.json is merged in place: we add
+# missing ragger hooks without touching unrelated config.
+
+OPENCLAW_HOME="$HOME/.openclaw"
+OPENCLAW_PLUGIN_SRC="$SRC/openclaw-plugin"
+OPENCLAW_PLUGIN_DST="$OPENCLAW_HOME/extensions/ragger"
+OPENCLAW_CFG="$OPENCLAW_HOME/openclaw.json"
+
+if [ -d "$OPENCLAW_HOME" ] && [ -d "$OPENCLAW_PLUGIN_SRC" ]; then
+    echo ""
+    info "OpenClaw detected at $OPENCLAW_HOME — installing memory plugin"
+
+    mkdir -p "$OPENCLAW_PLUGIN_DST"
+    for f in openclaw.plugin.json index.ts; do
+        if [ -f "$OPENCLAW_PLUGIN_SRC/$f" ]; then
+            cp "$OPENCLAW_PLUGIN_SRC/$f" "$OPENCLAW_PLUGIN_DST/$f"
+            info "  wrote $OPENCLAW_PLUGIN_DST/$f"
+        fi
+    done
+
+    # Ensure openclaw.json wires the ragger memory plugin. We merge conservatively:
+    # only set keys that are missing, never clobber user-set values.
+    if [ -f "$OPENCLAW_CFG" ]; then
+        if command -v python3 >/dev/null 2>&1; then
+            python3 - "$OPENCLAW_CFG" << 'PYEOF'
+import json, sys, pathlib, shutil, datetime
+
+cfg_path = pathlib.Path(sys.argv[1])
+try:
+    data = json.loads(cfg_path.read_text())
+except Exception as e:
+    print(f"[!] Could not parse {cfg_path} ({e}) — skipping hook merge", file=sys.stderr)
+    sys.exit(0)
+
+changed = False
+plugins = data.setdefault("plugins", {})
+slots   = plugins.setdefault("slots", {})
+entries = plugins.setdefault("entries", {})
+allow   = plugins.setdefault("allow", [])
+
+# Trust allowlist: OpenClaw warns at startup about non-bundled plugins
+# that aren't explicitly trusted. Add "ragger" if it isn't already there.
+if not isinstance(allow, list):
+    print(f"[!]   plugins.allow is not a list ({type(allow).__name__}) — leaving alone")
+elif "ragger" not in allow:
+    allow.append("ragger")
+    changed = True
+    print("[+]   plugins.allow += [\"ragger\"]")
+
+if slots.get("memory") != "ragger":
+    if "memory" not in slots:
+        slots["memory"] = "ragger"
+        changed = True
+        print("[+]   plugins.slots.memory = \"ragger\"")
+    else:
+        print(f"[!]   plugins.slots.memory already set to \"{slots['memory']}\" — leaving alone")
+
+if "ragger" not in entries:
+    entries["ragger"] = {
+        "enabled": True,
+        "config": {
+            "transport": "mcp",
+            "autoRecall": True,
+            "autoCapture": True,
+        },
+    }
+    changed = True
+    print("[+]   plugins.entries.ragger added (transport=mcp)")
+else:
+    rag = entries["ragger"]
+    if not rag.get("enabled", False):
+        rag["enabled"] = True
+        changed = True
+        print("[+]   plugins.entries.ragger.enabled = true")
+    rag.setdefault("config", {})
+    print("[+]   plugins.entries.ragger already present — kept existing config")
+
+if changed:
+    # Timestamped backup once per day
+    bak = cfg_path.with_suffix(
+        f".json.bak-{datetime.date.today().isoformat()}"
+    )
+    if not bak.exists():
+        shutil.copy2(cfg_path, bak)
+        print(f"[+]   backed up → {bak.name}")
+    cfg_path.write_text(json.dumps(data, indent=2) + "\n")
+    print(f"[+]   updated {cfg_path}")
+else:
+    print(f"[+]   {cfg_path} already wired — no changes")
+PYEOF
+        else
+            warn "  python3 not found — cannot merge openclaw.json hooks automatically."
+            warn "  Ensure plugins.slots.memory=\"ragger\" and plugins.entries.ragger"
+            warn "  are set in $OPENCLAW_CFG (see docs/openclaw.md)."
+        fi
+    else
+        warn "  $OPENCLAW_CFG not found — run OpenClaw once to create it, then re-run install.sh"
+    fi
 fi
 
 echo ""

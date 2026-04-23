@@ -63,7 +63,7 @@ static void do_import(ragger::RaggerMemory& memory,
     auto chunks = ragger::chunk_markdown(text, min_chunk_size);
 
     auto filename = fs::path(filepath).filename().string();
-    std::println("Importing {} chunks from {}...", chunks.size(), filename);
+    std::println(ragger::lang::MSG_IMPORTING_CHUNKS, chunks.size(), filename);
 
     for (size_t i = 0; i < chunks.size(); ++i) {
         nlohmann::json meta = {
@@ -75,267 +75,9 @@ static void do_import(ragger::RaggerMemory& memory,
         if (!chunks[i].section.empty()) meta["section"] = chunks[i].section;
 
         auto id = memory.store(chunks[i].text, meta);
-        std::println("  Chunk {}/{}: {}", (i + 1), chunks.size(), id);
+        std::println(ragger::lang::MSG_IMPORT_CHUNK, (i + 1), chunks.size(), id);
     }
-    std::println("✓ Imported {} chunks", chunks.size());
-}
-
-// -----------------------------------------------------------------------
-// Export: reassemble chunks into files with heading deduplication
-// -----------------------------------------------------------------------
-
-/// Split a chunk's text into heading lines and body text.
-/// During import, the full heading chain is prepended to each chunk.
-static std::pair<std::vector<std::string>, std::string>
-split_heading_body(const std::string& text) {
-    std::vector<std::string> headings;
-    std::istringstream stream(text);
-    std::string line;
-    std::vector<std::string> all_lines;
-
-    while (std::getline(stream, line)) {
-        all_lines.push_back(line);
-    }
-
-    size_t i = 0;
-    while (i < all_lines.size()) {
-        // Trim whitespace for matching
-        std::string trimmed = all_lines[i];
-        auto start = trimmed.find_first_not_of(" \t");
-        if (start != std::string::npos) trimmed = trimmed.substr(start);
-        auto end = trimmed.find_last_not_of(" \t\r\n");
-        if (end != std::string::npos) trimmed = trimmed.substr(0, end + 1);
-
-        // Check if line starts with # followed by space
-        if (!trimmed.empty() && trimmed[0] == '#') {
-            auto space_pos = trimmed.find(' ');
-            bool is_heading = space_pos != std::string::npos;
-            if (is_heading) {
-                // Verify all chars before space are #
-                bool all_hash = true;
-                for (size_t j = 0; j < space_pos; j++) {
-                    if (trimmed[j] != '#') { all_hash = false; break; }
-                }
-                if (all_hash && space_pos <= 6) {
-                    headings.push_back(trimmed);
-                    i++;
-                    // Skip blank lines between headings
-                    while (i < all_lines.size()) {
-                        std::string t = all_lines[i];
-                        auto s = t.find_first_not_of(" \t\r\n");
-                        if (s == std::string::npos) { i++; continue; }
-                        break;
-                    }
-                    continue;
-                }
-            }
-        }
-        break;
-    }
-
-    // Build body from remaining lines
-    std::string body;
-    for (size_t j = i; j < all_lines.size(); j++) {
-        if (!body.empty()) body += '\n';
-        body += all_lines[j];
-    }
-    // Trim trailing whitespace
-    auto last = body.find_last_not_of(" \t\r\n");
-    if (last != std::string::npos) body = body.substr(0, last + 1);
-
-    return {headings, body};
-}
-
-/// Check if a line is a markdown heading (# through ######)
-static bool is_heading_line(const std::string& line) {
-    auto start = line.find_first_not_of(" \t");
-    if (start == std::string::npos) return false;
-    std::string trimmed = line.substr(start);
-    if (trimmed.empty() || trimmed[0] != '#') return false;
-    auto space = trimmed.find(' ');
-    if (space == std::string::npos || space > 6) return false;
-    for (size_t i = 0; i < space; i++) {
-        if (trimmed[i] != '#') return false;
-    }
-    return true;
-}
-
-static std::string trim_line(const std::string& s) {
-    auto start = s.find_first_not_of(" \t");
-    if (start == std::string::npos) return "";
-    auto end = s.find_last_not_of(" \t\r\n");
-    return s.substr(start, end - start + 1);
-}
-
-static void do_export_docs(ragger::RaggerMemory& memory,
-                           const std::string& collection,
-                           const std::string& dest_dir) {
-    fs::create_directories(dest_dir);
-
-    auto all = memory.load_all(collection);
-    if (all.empty()) {
-        std::println("No documents found in collection '{}'", collection);
-        return;
-    }
-
-    // Group by source filename
-    std::map<std::string, std::vector<ragger::SearchResult*>> files;
-    for (auto& r : all) {
-        std::string source = r.metadata.value("source", "unknown.md");
-        files[source].push_back(&r);
-    }
-
-    std::println("Exporting {} documents from '{}'...", files.size(), collection);
-
-    for (auto& [source, chunks] : files) {
-        std::set<std::string> seen_headings;
-        std::vector<std::string> output_parts;
-
-        for (auto* chunk : chunks) {
-            auto [headings, body] = split_heading_body(chunk->text);
-
-            // Emit only new headings
-            std::vector<std::string> new_headings;
-            for (const auto& h : headings) {
-                if (seen_headings.find(h) == seen_headings.end()) {
-                    seen_headings.insert(h);
-                    new_headings.push_back(h);
-                }
-            }
-
-            if (!new_headings.empty()) {
-                std::string heading_block;
-                for (const auto& h : new_headings) {
-                    if (!heading_block.empty()) heading_block += "\n\n";
-                    heading_block += h;
-                }
-                output_parts.push_back(heading_block);
-            }
-
-            if (!body.empty()) {
-                // Filter duplicate headings from body
-                std::istringstream bs(body);
-                std::string bline;
-                std::vector<std::string> filtered;
-                while (std::getline(bs, bline)) {
-                    std::string trimmed = trim_line(bline);
-                    if (is_heading_line(trimmed) &&
-                        seen_headings.find(trimmed) != seen_headings.end()) {
-                        continue;  // skip duplicate heading in body
-                    }
-                    if (is_heading_line(trimmed)) {
-                        seen_headings.insert(trimmed);
-                    }
-                    filtered.push_back(bline);
-                }
-                std::string filtered_body;
-                for (const auto& fl : filtered) {
-                    if (!filtered_body.empty()) filtered_body += '\n';
-                    filtered_body += fl;
-                }
-                // Trim
-                auto last = filtered_body.find_last_not_of(" \t\r\n");
-                if (last != std::string::npos) {
-                    filtered_body = filtered_body.substr(0, last + 1);
-                }
-                if (!filtered_body.empty()) {
-                    output_parts.push_back(filtered_body);
-                }
-            }
-        }
-
-        // Join with double newlines
-        std::string content;
-        for (const auto& part : output_parts) {
-            if (!content.empty()) content += "\n\n";
-            content += part;
-        }
-        content += "\n";
-
-        // Collapse triple+ newlines
-        std::string collapsed;
-        int newline_count = 0;
-        for (char c : content) {
-            if (c == '\n') {
-                newline_count++;
-                if (newline_count <= 2) collapsed += c;
-            } else {
-                newline_count = 0;
-                collapsed += c;
-            }
-        }
-
-        auto out_path = fs::path(dest_dir) / fs::path(source).filename();
-        std::ofstream f(out_path);
-        f << collapsed;
-        std::println("  {} ({} chunks)", fs::path(source).filename().string(), chunks.size());
-    }
-    std::println("✓ Exported {} documents to {}", files.size(), dest_dir);
-}
-
-static void do_export_memories(ragger::RaggerMemory& memory,
-                               const std::string& dest_dir,
-                               const std::string& group_by) {
-    fs::create_directories(dest_dir);
-
-    auto all = memory.load_all("memory");
-    if (all.empty()) {
-        std::println("No memories to export");
-        return;
-    }
-
-    // Group entries
-    std::map<std::string, std::vector<ragger::SearchResult*>> groups;
-    for (auto& r : all) {
-        std::string key;
-        if (group_by == "date") {
-            key = r.timestamp.substr(0, 10);  // YYYY-MM-DD
-        } else if (group_by == "category") {
-            key = r.metadata.value("category", "uncategorized");
-        } else if (group_by == "collection") {
-            key = r.metadata.value("collection", "memory");
-        } else {
-            key = "all";
-        }
-        groups[key].push_back(&r);
-    }
-
-    std::println("Exporting {} memories ({} groups by {})...", all.size(), groups.size(), group_by);
-
-    for (auto& [key, entries] : groups) {
-        auto out_path = fs::path(dest_dir) / (key + ".md");
-        std::ofstream f(out_path);
-        f << "# Memories — " << key << "\n\n";
-
-        for (auto* r : entries) {
-            std::string header;
-            if (!r->timestamp.empty()) {
-                header = r->timestamp.substr(0, 19);
-            }
-            auto cat = r->metadata.value("category", "");
-            if (!cat.empty()) {
-                if (!header.empty()) header += " | ";
-                header += "**" + cat + "**";
-            }
-            f << "### " << header << "\n\n" << r->text << "\n\n---\n\n";
-        }
-
-        std::println("  {}.md ({} entries)", key, entries.size());
-    }
-    std::println("✓ Exported {} memories to {}", all.size(), dest_dir);
-}
-
-static void do_export_all(ragger::RaggerMemory& memory,
-                          const std::string& dest_dir,
-                          const std::string& group_by) {
-    auto colls = memory.collections();
-    for (auto& col : colls) {
-        if (col == "memory") {
-            do_export_memories(memory, (fs::path(dest_dir) / "memories").string(), group_by);
-        } else {
-            do_export_docs(memory, col, (fs::path(dest_dir) / col).string());
-        }
-    }
+    std::println(ragger::lang::MSG_IMPORT_DONE, chunks.size());
 }
 
 // -----------------------------------------------------------------------
@@ -351,12 +93,11 @@ static void do_chat(const std::string& db_path, const std::string& model_dir,
         bool existed = std::filesystem::exists(dump_payloads_dir);
         std::filesystem::create_directories(dump_payloads_dir, ec);
         if (ec) {
-            std::cerr << "Error: cannot create payload dump directory '"
-                      << dump_payloads_dir << "': " << ec.message() << "\n";
+            std::cerr << std::format(ragger::lang::ERR_PAYLOAD_DUMP_DIR, dump_payloads_dir, ec.message()) << "\n";
             return;
         }
         if (!existed) {
-            std::cout << "Created payload dump directory: " << dump_payloads_dir << "\n";
+            std::cout << std::format(ragger::lang::MSG_PAYLOAD_DUMP_CREATED, dump_payloads_dir) << "\n";
         }
     }
 
@@ -368,19 +109,8 @@ static void do_chat(const std::string& db_path, const std::string& model_dir,
     }
 
     if (inference._endpoints.empty()) {
-        std::println("Error: no inference endpoints configured.");
-        std::println("Add to settings.ini:");
-        std::println("");
-        std::println("  [inference]");
-        std::println("  api_url = http://localhost:1234/v1");
-        std::println("  api_key = lmstudio-local");
-        std::println("");
-        std::println("Or for multiple endpoints:");
-        std::println("");
-        std::println("  [inference.local]");
-        std::println("  api_url = http://localhost:1234/v1");
-        std::println("  api_key = lmstudio-local");
-        std::println("  models = qwen/*, llama/*");
+        std::println("{}", ragger::lang::ERR_NO_ENDPOINTS);
+        std::println(ragger::lang::MSG_INFERENCE_HINT);
         return;
     }
 
@@ -412,14 +142,12 @@ static void do_chat(const std::string& db_path, const std::string& model_dir,
             curl_easy_cleanup(curl);
 
             if (res != CURLE_OK) {
-                std::cerr << "Error: cannot reach inference endpoint '" << ep.name
-                          << "' at " << ep.api_url << "\n"
-                          << "  " << curl_easy_strerror(res) << "\n";
+                std::cerr << std::format(ragger::lang::ERR_ENDPOINT_UNREACHABLE, ep.name, ep.api_url)
+                          << "\n  " << curl_easy_strerror(res) << "\n";
                 return;
             }
             if (http_code >= 400) {
-                std::cerr << "Error: inference endpoint '" << ep.name
-                          << "' returned HTTP " << http_code << "\n";
+                std::cerr << std::format(ragger::lang::ERR_ENDPOINT_HTTP, ep.name, http_code) << "\n";
                 return;
             }
         }
@@ -438,107 +166,301 @@ static void do_chat(const std::string& db_path, const std::string& model_dir,
 // Wrappers around launchctl (macOS) or systemctl --user (Linux) that
 // operate on the user-level service installed by install.sh.
 // The daemon process itself is still `ragger serve` (what launchd/systemd run).
+//
+// Design: idempotent + friendly.
+//   start   → "already running" if it is, else launch it
+//   stop    → "not running" if it isn't, else stop it
+//   restart → cycle it whether up or down
+//   status  → one-line summary (running pid / stopped / not loaded)
 // -----------------------------------------------------------------------
+namespace {
+
+/// Run a shell command, return captured stdout. Silent on failure (returns "").
+std::string capture_output(const std::string& cmd) {
+    FILE* pipe = popen((cmd + " 2>/dev/null").c_str(), "r");
+    if (!pipe) return "";
+    std::string out;
+    char buf[4096];
+    while (std::fgets(buf, sizeof(buf), pipe)) out += buf;
+    pclose(pipe);
+    return out;
+}
+
+/// Run a shell command, discard output, return true iff exit code 0.
+bool run_quiet(const std::string& cmd) {
+    int rc = std::system((cmd + " >/dev/null 2>&1").c_str());
+    return WIFEXITED(rc) && WEXITSTATUS(rc) == 0;
+}
+
+/// Kill every `ragger` process owned by the current user except this one.
+/// Used by `stop` and `restart` to sweep MCP servers and stray CLI
+/// invocations — MCP is typically launched by a client (OpenClaw, Claude
+/// Desktop) and has no service manager of its own, so we have to reap it here.
+/// Sends SIGTERM, waits briefly, then SIGKILL to any survivors.
+/// Returns the number of processes signaled.
+int kill_other_ragger_instances() {
+    pid_t self = getpid();
+    auto out = capture_output(
+        "pgrep -u " + std::to_string(getuid()) + " -x ragger");
+    std::vector<pid_t> pids;
+    std::istringstream iss(out);
+    std::string line;
+    while (std::getline(iss, line)) {
+        try {
+            pid_t pid = std::stoi(line);
+            if (pid != self && pid > 1) pids.push_back(pid);
+        } catch (...) { /* skip malformed */ }
+    }
+    if (pids.empty()) return 0;
+
+    for (pid_t p : pids) ::kill(p, SIGTERM);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    for (pid_t p : pids) {
+        if (::kill(p, 0) == 0) ::kill(p, SIGKILL);  // still alive → force
+    }
+    return static_cast<int>(pids.size());
+}
+
+} // anonymous namespace
+
 static int daemon_control(const std::string& action) {
     struct passwd* pw = getpwuid(getuid());
     std::string home = pw ? pw->pw_dir : (std::getenv("HOME") ? std::getenv("HOME") : "");
     if (home.empty()) {
-        std::cerr << "Error: cannot resolve $HOME\n";
+        std::cerr << ragger::lang::ERR_HOME_NOT_FOUND << "\n";
         return 1;
     }
 
 #if defined(__APPLE__)
-    const std::string label = "com.diskerror.ragger";
-    const std::string plist = home + "/Library/LaunchAgents/" + label + ".plist";
+    const std::string label  = "com.diskerror.ragger";
+    const std::string plist  = home + "/Library/LaunchAgents/" + label + ".plist";
     const std::string target = "gui/" + std::to_string(getuid()) + "/" + label;
     const std::string domain = "gui/" + std::to_string(getuid());
 
-    std::string cmd;
+    // Loaded = bootstrapped into the gui domain. Running = has a live pid.
+    auto is_loaded = [&]() { return run_quiet("launchctl print " + target); };
+    auto get_pid   = [&]() -> std::string {
+        if (!is_loaded()) return "";
+        auto out = capture_output("launchctl print " + target);
+        auto pos = out.find("\n\tpid = ");
+        if (pos == std::string::npos) pos = out.find("\n    pid = ");
+        if (pos == std::string::npos) return "";
+        auto s = out.find('=', pos) + 1;
+        while (s < out.size() && out[s] == ' ') ++s;
+        auto e = out.find('\n', s);
+        return out.substr(s, e - s);
+    };
+    auto is_running = [&]() { return !get_pid().empty(); };
+
+    auto ensure_plist = [&]() -> bool {
+        if (fs::exists(plist)) return true;
+        std::cerr << std::format(ragger::lang::ERR_PLIST_NOT_FOUND, plist) << "\n";
+        return false;
+    };
+
     if (action == "start") {
-        if (!fs::exists(plist)) {
-            std::cerr << "Error: " << plist << " not found. Run ./install.sh first.\n";
-            return 1;
+        if (!ensure_plist()) return 1;
+        if (is_running()) {
+            std::cout << std::format(ragger::lang::MSG_ALREADY_RUNNING, get_pid()) << "\n";
+            return 0;
         }
-        cmd = "launchctl bootstrap " + domain + " " + plist;
-    } else if (action == "stop") {
-        cmd = "launchctl bootout " + target;
-    } else if (action == "restart") {
-        std::system(("launchctl bootout " + target + " 2>/dev/null").c_str());
-        cmd = "launchctl bootstrap " + domain + " " + plist;
-    } else if (action == "status") {
-        cmd = "launchctl print " + target;
-    } else {
-        std::cerr << "Error: unknown daemon action '" << action << "'\n";
-        return 1;
+        if (is_loaded()) {
+            if (!run_quiet("launchctl kickstart " + target)) {
+                std::cerr << ragger::lang::ERR_LAUNCHCTL_KICKSTART << "\n"; return 1;
+            }
+        } else {
+            if (!run_quiet("launchctl bootstrap " + domain + " " + plist)) {
+                std::cerr << ragger::lang::ERR_LAUNCHCTL_BOOTSTRAP << "\n"; return 1;
+            }
+        }
+        auto pid = get_pid();
+        if (!pid.empty())
+            std::cout << std::format(ragger::lang::MSG_STARTED_PID, pid) << "\n";
+        else
+            std::cout << ragger::lang::MSG_STARTED << "\n";
+        return 0;
     }
+
+    if (action == "stop") {
+        bool daemon_was_running = is_loaded() && is_running();
+        if (daemon_was_running) {
+            if (!run_quiet("launchctl bootout " + target)) {
+                std::cerr << ragger::lang::ERR_LAUNCHCTL_BOOTOUT << "\n"; return 1;
+            }
+        }
+        // Sweep any other ragger processes this user owns (MCP servers
+        // launched by clients, stray CLI runs, etc.).
+        int extras = kill_other_ragger_instances();
+
+        if (daemon_was_running && extras > 0) {
+            if (extras == 1)
+                std::cout << std::format(ragger::lang::MSG_STOPPED_EXTRA_1, extras) << "\n";
+            else
+                std::cout << std::format(ragger::lang::MSG_STOPPED_EXTRA_N, extras) << "\n";
+        } else if (daemon_was_running) {
+            std::cout << ragger::lang::MSG_STOPPED << "\n";
+        } else if (extras > 0) {
+            if (extras == 1)
+                std::cout << std::format(ragger::lang::MSG_EXTRAS_ONLY_1, extras) << "\n";
+            else
+                std::cout << std::format(ragger::lang::MSG_EXTRAS_ONLY_N, extras) << "\n";
+        } else {
+            std::cout << ragger::lang::MSG_NOT_RUNNING << "\n";
+        }
+        return 0;
+    }
+
+    if (action == "restart") {
+        if (!ensure_plist()) return 1;
+        bool was_running = is_running();
+        if (is_loaded()) {
+            run_quiet("launchctl bootout " + target);
+            // bootout returns before launchd completes teardown — wait for
+            // the domain to actually release the label (up to 3s).
+            for (int i = 0; i < 30 && is_loaded(); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+        // Sweep MCP + stray instances before relaunching the daemon.
+        // (Clients will need to reconnect their MCP subprocess themselves.)
+        kill_other_ragger_instances();
+
+        if (!run_quiet("launchctl bootstrap " + domain + " " + plist)) {
+            std::cerr << ragger::lang::ERR_LAUNCHCTL_BOOTSTRAP << "\n"; return 1;
+        }
+        auto pid = get_pid();
+        if (!pid.empty()) {
+            if (was_running)
+                std::cout << std::format(ragger::lang::MSG_RESTARTED_PID, pid) << "\n";
+            else
+                std::cout << std::format(ragger::lang::MSG_STARTED_PID, pid) << "\n";
+        } else {
+            std::cout << (was_running ? ragger::lang::MSG_RESTARTED
+                                      : ragger::lang::MSG_STARTED) << "\n";
+        }
+        return 0;
+    }
+
+    if (action == "status") {
+        if (!is_loaded()) {
+            std::cout << ragger::lang::MSG_NOT_LOADED << "\n";
+            return 0;
+        }
+        auto pid = get_pid();
+        if (pid.empty()) {
+            std::cout << ragger::lang::MSG_LOADED_NOT_RUNNING << "\n";
+            return 0;
+        }
+        std::cout << std::format(ragger::lang::MSG_RUNNING_PID, pid) << "\n";
+        return 0;
+    }
+
+    std::cerr << std::format(ragger::lang::ERR_UNKNOWN_ACTION, action) << "\n";
+    return 1;
+
 #elif defined(__linux__)
-    std::string cmd;
-    if (action == "start")   cmd = "systemctl --user start ragger.service";
-    else if (action == "stop")    cmd = "systemctl --user stop ragger.service";
-    else if (action == "restart") cmd = "systemctl --user restart ragger.service";
-    else if (action == "status")  cmd = "systemctl --user status ragger.service";
-    else {
-        std::cerr << "Error: unknown daemon action '" << action << "'\n";
-        return 1;
+    const std::string unit = "ragger.service";
+
+    auto is_active = [&]() {
+        return run_quiet("systemctl --user is-active --quiet " + unit);
+    };
+    auto main_pid = [&]() -> std::string {
+        auto out = capture_output(
+            "systemctl --user show -p MainPID --value " + unit);
+        // trim trailing newline/whitespace
+        while (!out.empty() && (out.back() == '\n' || out.back() == ' '))
+            out.pop_back();
+        if (out == "0" || out.empty()) return "";
+        return out;
+    };
+
+    if (action == "start") {
+        if (is_active()) {
+            auto pid = main_pid();
+            if (!pid.empty())
+                std::cout << std::format(ragger::lang::MSG_ALREADY_RUNNING, pid) << "\n";
+            else
+                std::cout << ragger::lang::MSG_IS_RUNNING << "\n";
+            return 0;
+        }
+        if (!run_quiet("systemctl --user start " + unit)) {
+            std::cerr << ragger::lang::ERR_SYSTEMCTL_START << "\n"; return 1;
+        }
+        auto pid = main_pid();
+        if (!pid.empty())
+            std::cout << std::format(ragger::lang::MSG_STARTED_PID, pid) << "\n";
+        else
+            std::cout << ragger::lang::MSG_STARTED << "\n";
+        return 0;
     }
+
+    if (action == "stop") {
+        bool daemon_was_running = is_active();
+        if (daemon_was_running) {
+            if (!run_quiet("systemctl --user stop " + unit)) {
+                std::cerr << ragger::lang::ERR_SYSTEMCTL_STOP << "\n"; return 1;
+            }
+        }
+        int extras = kill_other_ragger_instances();
+
+        if (daemon_was_running && extras > 0) {
+            if (extras == 1)
+                std::cout << std::format(ragger::lang::MSG_STOPPED_EXTRA_1, extras) << "\n";
+            else
+                std::cout << std::format(ragger::lang::MSG_STOPPED_EXTRA_N, extras) << "\n";
+        } else if (daemon_was_running) {
+            std::cout << ragger::lang::MSG_STOPPED << "\n";
+        } else if (extras > 0) {
+            if (extras == 1)
+                std::cout << std::format(ragger::lang::MSG_EXTRAS_ONLY_1, extras) << "\n";
+            else
+                std::cout << std::format(ragger::lang::MSG_EXTRAS_ONLY_N, extras) << "\n";
+        } else {
+            std::cout << ragger::lang::MSG_NOT_RUNNING << "\n";
+        }
+        return 0;
+    }
+
+    if (action == "restart") {
+        bool was_active = is_active();
+        // Stop daemon and sweep MCP + strays before relaunching.
+        if (was_active) run_quiet("systemctl --user stop " + unit);
+        kill_other_ragger_instances();
+        if (!run_quiet("systemctl --user start " + unit)) {
+            std::cerr << ragger::lang::ERR_SYSTEMCTL_START << "\n"; return 1;
+        }
+        auto pid = main_pid();
+        if (!pid.empty()) {
+            if (was_active)
+                std::cout << std::format(ragger::lang::MSG_RESTARTED_PID, pid) << "\n";
+            else
+                std::cout << std::format(ragger::lang::MSG_STARTED_PID, pid) << "\n";
+        } else {
+            std::cout << (was_active ? ragger::lang::MSG_RESTARTED
+                                     : ragger::lang::MSG_STARTED) << "\n";
+        }
+        return 0;
+    }
+
+    if (action == "status") {
+        if (is_active()) {
+            auto pid = main_pid();
+            if (!pid.empty())
+                std::cout << std::format(ragger::lang::MSG_RUNNING_PID, pid) << "\n";
+            else
+                std::cout << ragger::lang::MSG_IS_RUNNING << "\n";
+        } else {
+            std::cout << ragger::lang::MSG_NOT_RUNNING << "\n";
+        }
+        return 0;
+    }
+
+    std::cerr << std::format(ragger::lang::ERR_UNKNOWN_ACTION, action) << "\n";
+    return 1;
 #else
-    std::cerr << "Error: daemon control not supported on this platform.\n"
-              << "       Run 'ragger serve' manually.\n";
+    std::cerr << ragger::lang::ERR_DAEMON_UNSUPPORTED << "\n";
     return 1;
 #endif
-
-    int rc = std::system(cmd.c_str());
-    return WIFEXITED(rc) ? WEXITSTATUS(rc) : 1;
-}
-
-/**
- * Database migration helper - moves memories between user and common databases.
- * Uses StorageBackend::export_memories / import_memories + delete_batch.
- */
-static int migrate_memories(const std::string& src_path, const std::string& dst_path,
-                            const std::string& direction, const std::string& username,
-                            const ragger::MemoryFilter& filter, bool dry_run) {
-    ragger::SqliteBackend src(src_path);
-    ragger::SqliteBackend dst(dst_path);
-
-    // Export matching records from source
-    auto records = src.export_memories(filter);
-    if (records.empty()) {
-        std::println("No matching records in source DB");
-        return 0;
-    }
-
-    if (dry_run) {
-        std::println("Would move {} records:", records.size());
-        int shown = 0;
-        for (const auto& r : records) {
-            if (shown++ >= 10) {
-                std::println("  ... and {} more", (records.size() - 10));
-                break;
-            }
-            std::string preview = r.text.substr(0, 70);
-            std::println("  id={} {}", r.id, preview);
-        }
-        return 0;
-    }
-
-    // Resolve user_id for provenance when moving to common
-    int user_id = -1;
-    if (direction == "to-common") {
-        std::println("Note: multi-user mode has been removed. Records will be moved without user_id.");
-    }
-
-    // Import into destination
-    int imported = dst.import_memories(records, user_id);
-
-    // Delete from source
-    std::vector<int> ids;
-    ids.reserve(records.size());
-    for (const auto& r : records) ids.push_back(static_cast<int>(r.id));
-    src.delete_batch(ids);
-
-    std::println("Moved {} records", imported);
-    return 0;
 }
 
 // -----------------------------------------------------------------------
@@ -647,7 +569,6 @@ int main(int argc, char** argv) {
         ("lm-proxy-url", Diskerror::po::value<std::string>(), CLI_LM_PROXY_URL)
         ("collection", Diskerror::po::value<std::string>()->default_value(""), "Collection name")
         ("min-chunk-size", Diskerror::po::value<int>(), "Min chunk size for import")
-        ("group-by", Diskerror::po::value<std::string>()->default_value("date"), "Grouping for export (date|category|collection)")
         // admin flags removed — sudo is the admin gate
         ("yes,y", "Skip confirmation prompts (for scripting)")
         ("dump-payloads", Diskerror::po::value<std::string>(), "Write raw request JSON to this directory (one file per prompt)")
@@ -655,11 +576,6 @@ int main(int argc, char** argv) {
     opts.add_hidden_options()
         ("command", Diskerror::po::value<std::string>()->default_value("help"), CLI_COMMAND)
         ("args", Diskerror::po::value<std::vector<std::string>>(), CLI_ARGS)
-        ("ids", Diskerror::po::value<std::string>(), "Comma-separated IDs (move)")
-        ("source", Diskerror::po::value<std::string>(), "Source pattern (move)")
-        ("category", Diskerror::po::value<std::string>(), "Category filter (move)")
-        ("user", Diskerror::po::value<std::string>(), "Target user (move)")
-        ("dry-run", "Show what would happen without doing it")
         // --keep-data removed: always keep user data, sudoer can rm manually
     ;
     opts.add_positional("command", 1);
@@ -687,24 +603,16 @@ int main(int argc, char** argv) {
         std::cout << "  store <text>       Store a new memory\n";
         std::cout << "  count              Show number of stored memories\n";
         std::cout << "  import <file...>   Import files (paragraph-aware chunking)\n";
-        std::cout << "  export <mode> <dir>  Export docs|memories|all to directory\n";
         std::cout << "  chat               Interactive chat with memory context\n";
         std::cout << "  mcp                Start MCP server (JSON-RPC over stdin/stdout)\n";
-        std::cout << "  add-self           Provision yourself (create token)\n";
-        std::cout << "  add-user <name>    Provision a user (requires sudo)\n";
-        std::cout << "  add-all            Provision all users (requires sudo, confirms each)\n";
-        std::cout << "                     -y/--yes to skip prompts\n";
-        std::cout << "  remove-user <name> Remove a user (requires sudo)\n";
-        std::cout << "  passwd [<name>]    Change password (own or another user's with sudo)\n";
+        std::cout << "  useradd <name>     Create a user and issue a bearer token (printed once)\n";
+        std::cout << "  usermod <name>     Rotate an existing user's bearer token (printed once)\n";
+        std::cout << "  userdel <name>     Remove a user and revoke their token\n";
+        std::cout << "  passwd <name>      Set (or clear) a user's web-UI login password\n";
+        std::cout << "  add-self           Bootstrap ~/.ragger/token for the current user\n";
         std::cout << "  housekeeping       Trigger housekeeping on running daemon\n";
         std::cout << "  reload             Reload config on running daemon (SIGHUP)\n";
-        std::cout << "  move <direction>   Move memories between user and common DBs\n";
-        std::cout << "                     direction: to-common | to-user\n";
-        std::cout << "                     filters: --ids, --source, --collection, --category\n";
         std::cout << "                     options: --user <name>, --dry-run\n";
-        // cleanup verb removed — use SQLite CLI or agent-mediated deletion
-        std::cout << "  useradd <username>  Add or update a user account (prompts for password)\n";
-        std::cout << "  userdel <username>  Remove a user account\n";
         std::cout << "  rebuild-bm25       Rebuild the BM25 keyword index\n";
         std::cout << "  rebuild-embeddings Rebuild embeddings for all memories\n";
         std::cout << "  show-embedding-model  Show current embedding model info\n";
@@ -746,7 +654,6 @@ int main(int argc, char** argv) {
     int min_chunk_size     = opts.count("min-chunk-size")
                              ? opts["min-chunk-size"].as<int>()
                              : cfg.minimum_chunk_size;
-    std::string group_by   = opts["group-by"].as<std::string>();
 
     try {
         if (command == "start" || command == "stop" ||
@@ -864,38 +771,12 @@ int main(int argc, char** argv) {
             ragger::setup_logging(false, false);
             auto args = opts.getParams("args");
             if (args.empty()) {
-                std::cerr << "Usage: ragger import <file> [file...] [--collection name]\n";
+                std::cerr << ragger::lang::CLI_USAGE_IMPORT << "\n";
                 return 1;
             }
             ragger::RaggerMemory memory(db_path, model_dir);
             for (auto& filepath : args) {
                 do_import(memory, filepath, collection, min_chunk_size);
-            }
-
-        } else if (command == "export") {
-            ragger::setup_logging(false, false);
-            auto args = opts.getParams("args");
-            if (args.size() < 2) {
-                std::cerr << "Usage: ragger export <docs|memories|all> <dest-dir> [--collection name]\n";
-                return 1;
-            }
-            std::string mode = args[0];
-            std::string dest = args[1];
-
-            ragger::RaggerMemory memory(db_path, model_dir);
-            if (mode == "docs") {
-                if (collection.empty()) {
-                    std::cerr << "Error: --collection required for docs export\n";
-                    return 1;
-                }
-                do_export_docs(memory, collection, dest);
-            } else if (mode == "memories") {
-                do_export_memories(memory, dest, group_by);
-            } else if (mode == "all") {
-                do_export_all(memory, dest, group_by);
-            } else {
-                std::cerr << "Unknown export mode: " << mode << "\n";
-                return 1;
             }
 
         } else if (command == "mcp") {
@@ -907,7 +788,7 @@ int main(int argc, char** argv) {
             ragger::setup_logging(false, false);
             ragger::RaggerMemory memory(db_path, model_dir);
             int count = memory.rebuild_bm25();
-            std::cout << "✓ BM25 index rebuilt: " << count << " documents\n";
+            std::cout << std::format(ragger::lang::MSG_BM25_REBUILT, count) << "\n";
 
         } else if (command == "rebuild-embeddings") {
             ragger::setup_logging(false, false);
@@ -918,38 +799,38 @@ int main(int argc, char** argv) {
             memory_temp.close();
             
             // Warning + confirmation prompt
-            std::println("This will re-embed all {} memories. The server should be stopped first.", total_count);
-            
+            std::println(ragger::lang::MSG_REBUILD_CONFIRM, total_count);
+
             bool proceed = false;
             if (opts.count("yes")) {
                 proceed = true;
             } else {
-                std::print("Continue? [y/N] ");
+                std::print("{}", ragger::lang::PROMPT_CONTINUE);
                 std::string answer;
                 std::getline(std::cin, answer);
                 proceed = (answer == "y" || answer == "Y");
             }
-            
+
             if (!proceed) {
-                std::println("Aborted.");
+                std::println("{}", ragger::lang::MSG_ABORTED);
                 return 0;
             }
-            
+
             // Backup the database file
             std::string actual_db_path = db_path.empty() ? cfg.resolved_db_path() : db_path;
             std::string backup_path = actual_db_path + ".bak";
             try {
-                fs::copy_file(actual_db_path, backup_path, 
+                fs::copy_file(actual_db_path, backup_path,
                              fs::copy_options::overwrite_existing);
-                std::println("Database backed up to: {}", backup_path);
+                std::println(ragger::lang::MSG_DB_BACKED_UP, backup_path);
             } catch (const std::exception& e) {
-                std::cerr << "Warning: Failed to create backup: " << e.what() << "\n";
+                std::cerr << std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()) << "\n";
             }
-            
+
             // Rebuild embeddings
             ragger::RaggerMemory memory(db_path, model_dir);
             int count = memory.rebuild_embeddings();
-            std::cout << "✓ Embeddings rebuilt: " << count << " documents\n";
+            std::cout << std::format(ragger::lang::MSG_EMBEDDINGS_REBUILT, count) << "\n";
 
         } else if (command == "show-embedding-model") {
             ragger::setup_logging(false, false);
@@ -962,25 +843,63 @@ int main(int argc, char** argv) {
                 std::println("Path: (default)");
 
         } else if (command == "useradd") {
+            // Create a new user and issue a bearer token. Token is printed
+            // exactly once — caller must save it. Errors if user exists
+            // (use `usermod <name>` to rotate an existing user's token).
             ragger::setup_logging(false, false);
             auto args = opts.getParams("args");
             if (args.empty()) {
-                std::cerr << "Usage: ragger useradd <username>\n";
+                std::cerr << ragger::lang::CLI_USAGE_USERADD << "\n";
                 return 1;
             }
             std::string username = args[0];
-            
-            // Read password with echo disabled
-            std::string password = read_password("Password: ");
-            if (password.empty()) {
-                std::cerr << "Error: password cannot be empty\n";
-                return 1;
-            }
-            
+
             try {
                 ragger::SqliteBackend storage(cfg.resolved_db_path());
-                ragger::useradd(storage, username, password);
-                std::println("✓ User {} added/updated", username);
+                if (storage.get_user_by_username(username)) {
+                    std::cerr << std::format(ragger::lang::ERR_USERADD_EXISTS, username) << "\n"
+                              << std::format(ragger::lang::ERR_USERADD_EXISTS_HINT, username) << "\n";
+                    return 1;
+                }
+                std::string token = ragger::generate_token();
+                std::string token_hash = ragger::hash_token(token);
+                storage.create_user(username, token_hash);
+                std::println(ragger::lang::MSG_USER_ADDED, username);
+                std::println("");
+                std::println(ragger::lang::MSG_TOKEN_VALUE, token);
+                std::println("");
+                std::println("{}", ragger::lang::MSG_TOKEN_SAVE_WARNING);
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << "\n";
+                return 1;
+            }
+
+        } else if (command == "usermod") {
+            // Rotate an existing user's bearer token. Prints the new token once.
+            // Errors if the user does not exist.
+            ragger::setup_logging(false, false);
+            auto args = opts.getParams("args");
+            if (args.empty()) {
+                std::cerr << ragger::lang::CLI_USAGE_USERMOD << "\n";
+                return 1;
+            }
+            std::string username = args[0];
+
+            try {
+                ragger::SqliteBackend storage(cfg.resolved_db_path());
+                if (!storage.get_user_by_username(username)) {
+                    std::cerr << std::format(ragger::lang::ERR_USERMOD_MISSING, username) << "\n"
+                              << std::format(ragger::lang::ERR_USERMOD_MISSING_HINT, username) << "\n";
+                    return 1;
+                }
+                std::string token = ragger::generate_token();
+                std::string token_hash = ragger::hash_token(token);
+                storage.update_user_token(username, token_hash);
+                std::println(ragger::lang::MSG_TOKEN_ROTATED, username);
+                std::println("");
+                std::println(ragger::lang::MSG_TOKEN_VALUE, token);
+                std::println("");
+                std::println("{}", ragger::lang::MSG_TOKEN_SAVE_WARNING);
             } catch (const std::exception& e) {
                 std::cerr << "Error: " << e.what() << "\n";
                 return 1;
@@ -990,7 +909,7 @@ int main(int argc, char** argv) {
             ragger::setup_logging(false, false);
             auto args = opts.getParams("args");
             if (args.empty()) {
-                std::cerr << "Usage: ragger userdel <username>\n";
+                std::cerr << ragger::lang::CLI_USAGE_USERDEL << "\n";
                 return 1;
             }
             std::string username = args[0];
@@ -998,7 +917,7 @@ int main(int argc, char** argv) {
             try {
                 ragger::SqliteBackend storage(cfg.resolved_db_path());
                 ragger::userdel(storage, username);
-                std::println("✓ User {} removed", username);
+                std::println(ragger::lang::MSG_USER_REMOVED, username);
             } catch (const std::exception& e) {
                 std::cerr << "Error: " << e.what() << "\n";
                 return 1;
@@ -1010,18 +929,18 @@ int main(int argc, char** argv) {
             struct passwd* self_pw = getpwuid(getuid());
             char* login = self_pw ? self_pw->pw_name : nullptr;
             if (!login) {
-                std::cerr << "Error: cannot determine username\n";
+                std::cerr << ragger::lang::ERR_UNKNOWN_USER << "\n";
                 return 1;
             }
             std::string username(login);
             auto [token, created] = provision_user(username);
             if (created)
-                std::println("✓ Created ~/.ragger/token for {}", username);
+                std::println(ragger::lang::MSG_TOKEN_CREATED, username);
             else
-                std::println("Token already exists for {}", username);
-            std::println("\nYour token: {}", token);
-            std::println("Use this in your client config (OpenClaw, Claude Desktop, etc).");
-            std::println("Token file: ~/.ragger/token");
+                std::println(ragger::lang::MSG_TOKEN_EXISTS, username);
+            std::println(ragger::lang::MSG_YOUR_TOKEN, token);
+            std::println("{}", ragger::lang::MSG_TOKEN_USE_HINT);
+            std::println("{}", ragger::lang::MSG_TOKEN_FILE_HINT);
             // Register directly in DB
             // Note: Multi-user mode removed. These user management commands are deprecated.
             try {
@@ -1032,13 +951,13 @@ int main(int argc, char** argv) {
                 if (existing) {
                     if (existing->token_hash != token_hash)
                         backend.update_user_token(username, token_hash);
-                    std::println("✓ User exists in database (id: {})", existing->id);
+                    std::println(ragger::lang::MSG_USER_IN_DB, existing->id);
                 } else {
                     int user_id = backend.create_user(username, token_hash);
-                    std::println("✓ Registered in database (user_id: {})", user_id);
+                    std::println(ragger::lang::MSG_USER_REGISTERED, user_id);
                 }
             } catch (const std::exception& e) {
-                std::println("Warning: DB registration deferred ({})", e.what());
+                std::println(ragger::lang::WARN_DB_DEFERRED, e.what());
             }
 
         // DEPRECATED: Multi-user mode removed. User management commands are no longer needed.
@@ -1238,66 +1157,44 @@ int main(int argc, char** argv) {
             std::println("\n✓ User {} removed", username);
 
         } else if (command == "passwd") {
+            // Set (or clear) a user's web-UI login password. Only needed for
+            // remote users who log in through the browser — local (127.0.0.1
+            // / unix socket) sessions auto-authenticate as the daemon owner.
+            // Empty password clears web-UI access for that user.
             ragger::setup_logging(false, false);
             auto args = opts.getParams("args");
-            
-            // Determine target user
-            std::string target_user;
-            if (!args.empty()) {
-                // Changing another user's password — requires sudo
-                target_user = args[0];
-                if (getuid() != 0) {
-                    std::cerr << "Error: changing another user's password requires sudo\n";
-                    return 1;
-                }
-            } else {
-                // Changing own password
-                struct passwd* self_pw = getpwuid(getuid());
-                if (!self_pw) {
-                    std::cerr << "Error: cannot determine username\n";
-                    return 1;
-                }
-                target_user = self_pw->pw_name;
-            }
-            
-            // Open common database directly (no embedder needed for user management)
-            // User management always uses the common DB (/var/ragger/memories.db)
-            ragger::SqliteBackend umgr(cfg.resolved_db_path());
-
-            // Verify user exists in DB
-            auto user_info = umgr.get_user_by_username(target_user);
-            if (!user_info) {
-                std::cerr << "Error: user '" << target_user << "' not found in database\n";
-                std::cerr << "Provision the user first: sudo ragger add-user " << target_user << "\n";
+            if (args.empty()) {
+                std::cerr << ragger::lang::CLI_USAGE_PASSWD << "\n";
                 return 1;
             }
+            std::string target_user = args[0];
 
-            // If changing own password and not root, verify current password
-            if (args.empty() && user_info->id > 0) {
-                auto existing = umgr.get_user_password(target_user);
-                if (existing) {
-                    std::string current = read_password("Current password: ");
-                    if (!ragger::verify_password(current, *existing)) {
-                        std::cerr << "Error: incorrect password\n";
-                        return 1;
-                    }
-                }
-            }
-            
-            // Read new password
-            std::string new_pass = read_password("New password: ");
-            if (new_pass.empty()) {
-                std::println("Password cleared (web UI access disabled).");
-                umgr.set_user_password(target_user, "");
-            } else {
-                std::string confirm = read_password("Confirm password: ");
-                if (new_pass != confirm) {
-                    std::cerr << "Error: passwords do not match\n";
+            try {
+                ragger::SqliteBackend umgr(cfg.resolved_db_path());
+                auto user_info = umgr.get_user_by_username(target_user);
+                if (!user_info) {
+                    std::cerr << std::format(ragger::lang::ERR_USERMOD_MISSING, target_user) << "\n"
+                              << std::format(ragger::lang::ERR_PASSWD_MISSING_HINT, target_user) << "\n";
                     return 1;
                 }
-                std::string hash = ragger::hash_password(new_pass);
-                umgr.set_user_password(target_user, hash);
-                std::println("✓ Password updated for {}", target_user);
+
+                std::string new_pass = read_password(ragger::lang::PROMPT_NEW_PASSWORD);
+                if (new_pass.empty()) {
+                    umgr.set_user_password(target_user, "");
+                    std::println(ragger::lang::MSG_PASSWORD_CLEARED, target_user);
+                } else {
+                    std::string confirm = read_password(ragger::lang::PROMPT_CONFIRM_PASSWORD);
+                    if (new_pass != confirm) {
+                        std::cerr << ragger::lang::ERR_PASSWORDS_DIFFER << "\n";
+                        return 1;
+                    }
+                    std::string hash = ragger::hash_password(new_pass);
+                    umgr.set_user_password(target_user, hash);
+                    std::println(ragger::lang::MSG_PASSWORD_SET, target_user);
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << "\n";
+                return 1;
             }
 
         } else if (command == "housekeeping") {
@@ -1361,87 +1258,6 @@ int main(int argc, char** argv) {
                 return 1;
             }
             std::println("✓ Config reload triggered (pid {})", daemon_pid);
-
-        } else if (command == "move") {
-            auto args = opts.getParams("args");
-            if (args.empty() || (args[0] != "to-common" && args[0] != "to-user")) {
-                std::cerr << "Usage: ragger move <to-common|to-user> [options]\n"
-                          << "  --ids ID1,ID2,...    Filter by IDs\n"
-                          << "  --source PATTERN     Filter by source (SQL LIKE)\n"
-                          << "  --collection NAME    Filter by collection\n"
-                          << "  --category NAME      Filter by category\n"
-                          << "  --user USERNAME      Target user (default: current)\n"
-                          << "  --dry-run            Show what would be moved\n";
-                return 1;
-            }
-            std::string direction = args[0];
-            std::string filter_ids = opts.count("ids") ? opts["ids"].as<std::string>() : "";
-            std::string filter_source = opts.count("source") ? opts["source"].as<std::string>() : "";
-            std::string filter_collection = opts.count("collection") ? opts["collection"].as<std::string>() : "";
-            std::string filter_category = opts.count("category") ? opts["category"].as<std::string>() : "";
-            std::string target_user = opts.count("user") ? opts["user"].as<std::string>() : "";
-            bool dry_run = opts.count("dry-run") > 0;
-
-            if (filter_ids.empty() && filter_source.empty() &&
-                filter_collection.empty() && filter_category.empty()) {
-                std::cerr << "Error: specify at least one filter (--ids, --source, --collection, --category)\n";
-                return 1;
-            }
-
-            // Resolve user DB path
-            std::string user_db;
-            std::string username;
-            if (!target_user.empty()) {
-                username = target_user;
-                struct passwd* pw = getpwnam(target_user.c_str());
-                if (!pw) {
-                    std::cerr << "Error: cannot resolve home for user '" << target_user << "'\n";
-                    return 1;
-                }
-                user_db = std::string(pw->pw_dir) + "/.ragger/memories.db";
-            } else {
-                struct passwd* pw = getpwuid(getuid());
-                username = pw ? pw->pw_name : "default";
-                user_db = ragger::expand_path("~/.ragger/memories.db");
-            }
-
-            std::string common_db = cfg.resolved_db_path();
-
-            if (!fs::exists(user_db)) {
-                std::cerr << "Error: user DB not found at " << user_db << "\n";
-                return 1;
-            }
-            if (!fs::exists(common_db)) {
-                std::cerr << "Error: common DB not found at " << common_db << "\n";
-                return 1;
-            }
-
-            std::string src_path, dst_path, label_from, label_to;
-            if (direction == "to-common") {
-                src_path = user_db; dst_path = common_db;
-                label_from = "user"; label_to = "common";
-            } else {
-                src_path = common_db; dst_path = user_db;
-                label_from = "common"; label_to = "user";
-            }
-
-            // Build filter from CLI args
-            ragger::MemoryFilter mfilter;
-            if (!filter_ids.empty()) {
-                std::istringstream iss(filter_ids);
-                std::string tok;
-                while (std::getline(iss, tok, ',')) {
-                    tok.erase(0, tok.find_first_not_of(' '));
-                    tok.erase(tok.find_last_not_of(' ') + 1);
-                    if (!tok.empty()) mfilter.ids.push_back(std::stoi(tok));
-                }
-            }
-            if (!filter_source.empty())     mfilter.source_pattern = filter_source;
-            if (!filter_collection.empty()) mfilter.collection = filter_collection;
-            if (!filter_category.empty())   mfilter.category = filter_category;
-
-            return migrate_memories(src_path, dst_path, direction, username,
-                                    mfilter, dry_run);
 
         } else {
             std::cerr << CLI_UNKNOWN_COMMAND << command << "\n";

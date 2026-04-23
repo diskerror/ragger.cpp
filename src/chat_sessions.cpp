@@ -140,33 +140,36 @@ ChatSession& ChatSessionManager::get_or_create(
 }
 
 std::string ChatSessionManager::load_workspace_files() {
-    // Single-user mode: read from user directory only
-    
+    // Load persona/workspace files in priority order.
+    // The combined content serves as the system prompt for Ragger-owned sessions
+    // (CLI and browser chat). Proxy sessions pass through client system prompts unchanged.
     const auto& cfg = config();
     std::string user_dir = expand_path("~/.ragger");
-    std::vector<std::string> files = {"SOUL.md", "USER.md", "AGENTS.md", "TOOLS.md"};
     std::string result;
 
-    for (const auto& fname : files) {
-        std::string fpath;
-        
-        // Single-user mode: only read from user directory
-        std::string user_path = user_dir + "/" + fname;
-        if (fs::exists(user_path)) {
-            fpath = user_path;
-        }
-        
-        if (fs::exists(fpath)) {
-            std::ifstream f(fpath);
-            if (f.is_open()) {
-                std::string content((std::istreambuf_iterator<char>(f)),
-                                     std::istreambuf_iterator<char>());
-                if (!content.empty()) {
-                    if (!result.empty()) result += "\n\n---\n\n";
-                    result += "## " + fname + "\n\n" + content;
-                }
-            }
-        }
+    auto load_file = [&](const std::string& path, const std::string& label) {
+        if (!fs::exists(path)) return;
+        std::ifstream f(path);
+        if (!f.is_open()) return;
+        std::string content((std::istreambuf_iterator<char>(f)),
+                             std::istreambuf_iterator<char>());
+        auto end = content.find_last_not_of(" \t\r\n");
+        if (end != std::string::npos) content = content.substr(0, end + 1);
+        if (content.empty()) return;
+        if (!result.empty()) result += "\n\n---\n\n";
+        result += "## " + label + "\n\n" + content;
+    };
+
+    // system_prompt_file first (configurable; default ~/.ragger/SYSTEM.md)
+    std::string sys_path = expand_path(cfg.system_prompt_file);
+    load_file(sys_path, fs::path(sys_path).filename().string());
+
+    // Persona files from OpenClaw / Ragger workspace
+    for (const auto& fname : {"SOUL.md", "USER.md", "MEMORY.md"}) {
+        std::string fpath = user_dir + "/" + fname;
+        // skip if this is the same file as system_prompt_file (avoid duplicates)
+        if (fs::path(fpath).lexically_normal() == fs::path(sys_path).lexically_normal()) continue;
+        load_file(fpath, fname);
     }
 
     return result;

@@ -1,9 +1,11 @@
 # Deployment
 
-Ragger installs per-user. Everything lives under `~/.ragger/`:
+Ragger installs per-user. The executable lives on `PATH` under
+`~/.local/bin`; data, config, and runtime files live under `~/.ragger/`:
 
 ```
-~/.ragger/bin/ragger        # executable
+~/.local/bin/ragger         # executable (on PATH)
+
 ~/.ragger/settings.ini      # config
 ~/.ragger/memories.db       # SQLite database
 ~/.ragger/ragger.sock       # unix socket (daemon)
@@ -48,15 +50,17 @@ ragger start         # bring the daemon up
 
 `install.sh`:
 
-- Creates `~/.ragger/{bin,logs,models,formats,www}` if missing
+- Creates `~/.local/bin` and `~/.ragger/{logs,models,formats,www}` if missing
 - Copies `example-settings.ini` → `~/.ragger/settings.ini` on first run
-- Copies the built binary to `~/.ragger/bin/ragger` (codesigns on macOS)
-- Adds `~/.ragger/bin` to `PATH` in your shell rc (`.zshrc` / `.bash_profile` / `.bashrc` / `.profile`)
+- Copies the built binary to `~/.local/bin/ragger` (codesigns on macOS)
+- Ensures `~/.local/bin` is on `PATH` — only edits your shell rc if it isn't
+  already there (most modern shells include it by default)
 - Writes a user service unit:
   - **macOS:** `~/Library/LaunchAgents/com.diskerror.ragger.plist`
   - **Linux:** `~/.config/systemd/user/ragger.service` (+ `systemctl --user enable ragger.service`)
 - Installs the default `SOUL.md` to `~/.ragger/` if you don't already have one
 - Copies bundled formats and web assets under `~/.ragger/`
+- Removes a legacy `~/.ragger/bin/` directory if present (old install layout)
 
 It's idempotent — re-run after a rebuild to update the binary. Config,
 database, SOUL.md, and custom formats are preserved.
@@ -65,8 +69,8 @@ database, SOUL.md, and custom formats are preserved.
 
 | Platform | Executable              | Config                    | Database                |
 |----------|-------------------------|---------------------------|-------------------------|
-| macOS    | `~/.ragger/bin/ragger`  | `~/.ragger/settings.ini`  | `~/.ragger/memories.db` |
-| Linux    | `~/.ragger/bin/ragger`  | `~/.ragger/settings.ini`  | `~/.ragger/memories.db` |
+| macOS    | `~/.local/bin/ragger`   | `~/.ragger/settings.ini`  | `~/.ragger/memories.db` |
+| Linux    | `~/.local/bin/ragger`   | `~/.ragger/settings.ini`  | `~/.ragger/memories.db` |
 | Windows  | not yet supported       | —                         | —                       |
 
 ## Daemon Lifecycle
@@ -105,13 +109,19 @@ read.
 
 ## Adding Sub-Users
 
+User management is split across three standard verbs:
+
 ```bash
-ragger useradd <name>     # prints the generated token once
-ragger userdel <name>
+ragger useradd <name>     # create user + mint bearer token (printed once)
+ragger usermod <name>     # rotate an existing user's token (printed once)
+ragger userdel <name>     # remove user and revoke their token
+ragger passwd  <name>     # set (or clear) web-UI login password — only needed
+                          # for remote browser sessions; loopback is auto-auth
 ```
 
-The token is shown exactly once at creation — hand it to the sub-user
-via whatever channel you trust. They set it in their client:
+`useradd` errors if the user already exists — use `usermod` to rotate. The
+token is shown exactly once — hand it to the sub-user via whatever channel
+you trust. They set it in their client:
 
 ```bash
 # Example: curl with the token
@@ -119,9 +129,11 @@ curl -H "Authorization: Bearer <token>" \
      http://daemon-host:8432/health
 ```
 
-For a sub-user on the same machine, the daemon can bypass token auth
-on the unix socket — see `[server] auth_bypass_socket` in
-`example-settings.ini`.
+**Local access needs no token.** Requests on the unix socket and from
+`127.0.0.1` / `::1` are auto-authenticated as the daemon owner. Tokens
+matter for remote clients (other hosts, OpenClaw on a different machine,
+etc.). The daemon owner's own token is minted at install time and
+written to `~/.ragger/token`.
 
 ## Rebuilding and Redeploying
 
@@ -144,15 +156,15 @@ entry needs updating.
 Both versions use the same database format, config file, HTTP API,
 and default port (8432). You can swap between them without data
 migration — re-run the other version's `install.sh` and it overwrites
-`~/.ragger/bin/ragger` with the new binary.
+`~/.local/bin/ragger` with the new binary.
 
 If you want both side by side:
 
 ```bash
-cp ~/.ragger/bin/ragger ~/.ragger/bin/ragger-cpp   # back up the current
+cp ~/.local/bin/ragger ~/.local/bin/ragger-cpp   # back up the current
 # run the other install.sh, then:
-mv ~/.ragger/bin/ragger ~/.ragger/bin/ragger-py
-mv ~/.ragger/bin/ragger-cpp ~/.ragger/bin/ragger
+mv ~/.local/bin/ragger ~/.local/bin/ragger-py
+mv ~/.local/bin/ragger-cpp ~/.local/bin/ragger
 ```
 
 ## Troubleshooting

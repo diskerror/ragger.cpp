@@ -157,4 +157,12 @@ void log_info(const std::string& message) {
     std::cout << get_timestamp() << " [INFO] " << message << "\n";
 }
 
+void log_debug(const std::string& message) {
+    // Opt-in: only when debug_log_enabled is set. Writes to error.log so debug
+    // traces live next to errors (one file to tail during troubleshooting).
+    if (!config().debug_log_enabled) return;
+    write_log_line(g_logger.error_log.get(), g_logger.error_mutex,
+                  "DEBUG", message);
+}
+
 } // namespace ragger

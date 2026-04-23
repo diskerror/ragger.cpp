@@ -46,7 +46,7 @@ public:
     /// Number of stored memories.
     virtual int count() const = 0;
 
-    /// Load all memories (for export). Returns vector of SearchResult (score=0).
+    /// Load all memories. Returns vector of SearchResult (score=0).
     virtual std::vector<SearchResult> load_all(const std::string& collection = "") = 0;
 
     /// Rebuild BM25 index from all stored documents. Returns doc count.
@@ -91,15 +91,6 @@ public:
 
     /// Delete old conversation entries older than specified hours. Returns count deleted.
     virtual int cleanup_old_conversations(int max_age_hours) = 0;
-
-    // --- Bulk export / import (for cross-database migration) ---
-
-    /// Export memories matching the given filter, including raw embedding blobs.
-    virtual std::vector<MemoryRecord> export_memories(const MemoryFilter& filter) = 0;
-
-    /// Import memory records (with raw embeddings). Returns count imported.
-    /// If user_id >= 0, the user_id column is set on each inserted row.
-    virtual int import_memories(const std::vector<MemoryRecord>& records, int user_id = -1) = 0;
 
     // --- User management (single-user mode) ---
     /// Get user info by username. Returns nullopt if not found.

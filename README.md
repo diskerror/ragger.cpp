@@ -20,18 +20,18 @@ Faster startup, lower memory footprint, single static binary. Everything else �
 
 ## Quick Start
 
-**Install** (per-user, no sudo — everything lives under `~/.ragger/`):
+**Install** (per-user, no sudo — binary goes in `~/.local/bin`, data in `~/.ragger/`):
 ```bash
 cd /path/to/ragger.cpp
 ./build.sh                # Check dependencies, build binary
-./install.sh              # Install to ~/.ragger/bin, write user LaunchAgent / systemd-user unit
+./install.sh              # Install to ~/.local/bin/ragger, write user LaunchAgent / systemd-user unit
 ragger start              # Bring the daemon up
 ```
 
 `install.sh` is idempotent — re-run it after a rebuild to update the
-binary and daemon unit without touching your config or database. Open
-a new terminal (or source your rc file) so `~/.ragger/bin` is on
-`PATH`.
+binary and daemon unit without touching your config or database. If
+`~/.local/bin` isn't already on your `PATH`, the installer adds it to
+your shell rc; open a new terminal (or source your rc file) to pick it up.
 
 **Development build** (manual cmake):
 ```bash

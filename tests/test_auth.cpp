@@ -15,6 +15,20 @@
 
 namespace fs = std::filesystem;
 
+// Test helper: create-or-update a user with a password. The one-shot
+// ragger::useradd() API was retired when account creation and password
+// setting became distinct verbs; tests still need the combined action.
+static void seed_user_with_password(
+        ragger::SqliteBackend& db,
+        const std::string& user,
+        const std::string& pw) {
+    std::string pwhash = ragger::hash_password(pw);
+    if (!db.get_user_by_username(user)) {
+        db.create_user(user, "");
+    }
+    db.set_user_password(user, pwhash);
+}
+
 void test_hash_token() {
     std::println("  test_hash_token...");
 
@@ -113,7 +127,7 @@ void test_useradd_and_verify_password() {
     fs::remove(db_path);
     {
         ragger::SqliteBackend db(db_path);
-        ragger::useradd(db, "alice", "correct-horse");
+        seed_user_with_password(db, "alice", "correct-horse");
         assert(ragger::verify_password(db, "alice", "correct-horse"));
         assert(!ragger::verify_password(db, "alice", "wrong-password"));
         assert(!ragger::verify_password(db, "bob", "anything")); // no such user
@@ -129,8 +143,8 @@ void test_useradd_update_existing() {
     fs::remove(db_path);
     {
         ragger::SqliteBackend db(db_path);
-        ragger::useradd(db, "alice", "pw1");
-        ragger::useradd(db, "alice", "pw2"); // same user, new password — should update
+        seed_user_with_password(db, "alice", "pw1");
+        seed_user_with_password(db, "alice", "pw2"); // same user, new password — should update
         assert(ragger::verify_password(db, "alice", "pw2"));
         assert(!ragger::verify_password(db, "alice", "pw1"));
     }
@@ -145,7 +159,7 @@ void test_userdel() {
     fs::remove(db_path);
     {
         ragger::SqliteBackend db(db_path);
-        ragger::useradd(db, "alice", "pw");
+        seed_user_with_password(db, "alice", "pw");
         ragger::userdel(db, "alice");
         assert(!ragger::verify_password(db, "alice", "pw"));
         // userdel should not throw on nonexistent user
@@ -162,7 +176,7 @@ void test_token_roundtrip() {
     fs::remove(db_path);
     {
         ragger::SqliteBackend db(db_path);
-        ragger::useradd(db, "alice", "pw");
+        seed_user_with_password(db, "alice", "pw");
         auto token = ragger::issue_token(db, "alice");
         assert(!token.empty());
         

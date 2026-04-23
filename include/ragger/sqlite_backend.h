@@ -45,7 +45,7 @@ public:
     /// Number of stored memories.
     int count() const override;
 
-    /// Load all memories (for export). Returns vector of SearchResult (score=0).
+    /// Load all memories. Returns vector of SearchResult (score=0).
     std::vector<SearchResult> load_all(const std::string& collection = "") override;
 
     /// Rebuild BM25 index from all stored documents. Returns doc count.
@@ -78,10 +78,6 @@ public:
 
     /// Delete old conversation entries older than specified hours. Returns count deleted.
     int cleanup_old_conversations(int max_age_hours) override;
-
-    // --- Bulk export / import ---
-    std::vector<MemoryRecord> export_memories(const MemoryFilter& filter) override;
-    int import_memories(const std::vector<MemoryRecord>& records, int user_id = -1) override;
 
     // --- User management ---
     /// Get user info by username. Returns nullopt if not found.

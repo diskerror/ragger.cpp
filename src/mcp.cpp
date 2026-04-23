@@ -12,6 +12,7 @@
 
 #include "ragger/mcp.h"
 #include "ragger/config.h"
+#include "ragger/lang.h"
 #include "ragger/logs.h"
 #include "ragger/memory.h"
 #include "ragger/sqlite_backend.h"
@@ -114,7 +115,7 @@ static nlohmann::json tool_call(RaggerMemory& memory,
     if (tool_name == "store") {
         const auto text = arguments.value("text", "");
         if (text.empty())
-            return error_result("Error: text parameter required");
+            return error_result(ragger::lang::ERR_MCP_TEXT_REQUIRED);
         const auto metadata = arguments.value("metadata", nlohmann::json::object());
         const auto id = memory.store(text, metadata);
         return text_result(nlohmann::json({{"id", id}, {"status", "stored"}}).dump());
@@ -122,7 +123,7 @@ static nlohmann::json tool_call(RaggerMemory& memory,
     } else if (tool_name == "search") {
         const auto query = arguments.value("query", "");
         if (query.empty())
-            return error_result("Error: query parameter required");
+            return error_result(ragger::lang::ERR_MCP_QUERY_REQUIRED);
         const int   limit     = arguments.value("limit", 5);
         const float min_score = arguments.value("min_score", 0.0f);
         const auto  colls     = arguments.value("collections",
@@ -240,7 +241,7 @@ void run_mcp(RaggerMemory& memory) {
             try {
                 const auto response = memory.search(line);
                 if (response.results.empty()) {
-                    std::println("No results found.");
+                    std::println("{}", ragger::lang::MSG_MCP_NO_RESULTS);
                 } else {
                     for (size_t i = 0; i < response.results.size(); ++i) {
                         const auto& r      = response.results[i];

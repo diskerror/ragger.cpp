@@ -812,6 +812,10 @@ struct Server::Impl {
 
                 // Build messages
                 std::string system_prompt = ChatSessionManager::load_workspace_files();
+                if (system_prompt.empty()) {
+                    log_error("No system prompt files found (SYSTEM.md, SOUL.md, USER.md, etc.) — "
+                              "chat will proceed without a system prompt");
+                }
                 session.add_user_message(message);
                 auto full_messages = session.build_messages(system_prompt, memory_context);
 
@@ -988,28 +992,381 @@ struct Server::Impl {
 // -----------------------------------------------------------------------
 // LM Proxy: OpenAI-compatible pass-through routes
 // -----------------------------------------------------------------------
+// -------------------------------------------------------------------------
+// SseChatAccumulator — extract assistant content deltas from an OpenAI-style
+// SSE stream in parallel with byte-level forwarding. Pure byte passthrough
+// stays intact; this only *observes* the stream for turn capture.
+//
+// Ignores tool_calls, reasoning, and other non-content deltas.
+// Broken/partial JSON events are skipped silently.
+// -------------------------------------------------------------------------
+namespace {
+
+class SseChatAccumulator {
+public:
+    /// Feed a raw byte chunk from upstream. Returns true iff this chunk
+    /// delivered at least one content delta (used to reset idle timer).
+    bool feed(std::string_view chunk) {
+        buf_.append(chunk.data(), chunk.size());
+        bool got_content = false;
+
+        // Events are separated by a blank line (\n\n or \r\n\r\n).
+        while (true) {
+            auto sep = buf_.find("\n\n");
+            size_t sep_len = 2;
+            if (sep == std::string::npos) {
+                sep = buf_.find("\r\n\r\n");
+                sep_len = 4;
+                if (sep == std::string::npos) break;
+            }
+            std::string event = buf_.substr(0, sep);
+            buf_.erase(0, sep + sep_len);
+            if (process_event(event)) got_content = true;
+        }
+        return got_content;
+    }
+
+    /// Pop accumulated assistant text and clear the buffer.
+    std::string take() {
+        std::string out;
+        out.swap(pending_);
+        return out;
+    }
+
+    bool empty() const { return pending_.empty(); }
+    bool done()  const { return done_; }
+
+private:
+    /// Process a single SSE event (may contain multiple `data:` lines).
+    /// Returns true if this event contributed content.
+    bool process_event(const std::string& event) {
+        bool got = false;
+        size_t pos = 0;
+        while (pos < event.size()) {
+            size_t nl = event.find('\n', pos);
+            std::string line = (nl == std::string::npos)
+                ? event.substr(pos)
+                : event.substr(pos, nl - pos);
+            pos = (nl == std::string::npos) ? event.size() : nl + 1;
+
+            // Strip trailing \r (CRLF)
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            // Field parsing: only care about "data:" lines
+            if (line.rfind("data:", 0) != 0) continue;
+            std::string data = line.substr(5);
+            // optional leading space after colon
+            if (!data.empty() && data.front() == ' ') data.erase(0, 1);
+
+            if (data == "[DONE]") { done_ = true; continue; }
+
+            auto j = nlohmann::json::parse(data, nullptr, false);
+            if (j.is_discarded()) continue;
+            if (!j.contains("choices") || !j["choices"].is_array() ||
+                j["choices"].empty()) continue;
+            const auto& c0 = j["choices"][0];
+            if (!c0.contains("delta")) continue;
+            const auto& delta = c0["delta"];
+            if (delta.contains("content") && delta["content"].is_string()) {
+                const auto s = delta["content"].get<std::string>();
+                if (!s.empty()) { pending_ += s; got = true; }
+            }
+        }
+        return got;
+    }
+
+    std::string buf_;       // inter-chunk line-assembly buffer
+    std::string pending_;   // content since last take()
+    bool done_ = false;
+};
+
+/// Extract the last user message from a chat-completions request body.
+/// Returns empty string if not a chat shape or no user message found.
+inline std::string extract_last_user_message(const nlohmann::json& body_json) {
+    if (body_json.is_discarded()) return {};
+    if (!body_json.contains("messages") || !body_json["messages"].is_array()) return {};
+    for (auto it = body_json["messages"].rbegin();
+         it != body_json["messages"].rend(); ++it) {
+        if (it->contains("role") && (*it)["role"] == "user" &&
+            it->contains("content") && (*it)["content"].is_string()) {
+            return (*it)["content"].get<std::string>();
+        }
+    }
+    return {};
+}
+
+} // anonymous namespace
+
 void Server::Impl::setup_lm_proxy_routes() {
-    // Helper: forward a POST to upstream, propagate status, sanitize errors
+    // Helper: forward a POST to upstream. Two branches:
+    //   stream=false → buffered forward, single-shot turn capture after reply
+    //   stream=true  → byte-passthrough SSE, parallel capture + pause-flush
+    // Capture failures never break the proxy in either branch.
     auto forward_post = [this](const std::string& path,
                                const httplib::Request& req,
                                httplib::Response& res) {
         try {
-            // Reject streaming requests — buffered proxy can't stream SSE
+            // Parse body once: used for stream detection and capture.
             auto body_json = json::parse(req.body, nullptr, false);
-            if (!body_json.is_discarded() &&
-                body_json.contains("stream") && body_json["stream"] == true) {
+            const bool stream_requested =
+                !body_json.is_discarded() &&
+                body_json.contains("stream") && body_json["stream"] == true;
+
+            // ------------------------------------------------------------
+            // Streaming branch (SSE passthrough with parallel capture)
+            // ------------------------------------------------------------
+            if (stream_requested && path == "/v1/chat/completions") {
+                const std::string captured_user_msg =
+                    extract_last_user_message(body_json);
+
+                // Username resolution (default user on localhost / unix socket)
+                auto user = _check_auth(req);
+                std::string username = user ? user->username : "default";
+
+                // Session id: explicit header wins; else fresh per-request sid
+                std::string sid = req.get_header_value("X-Ragger-Session");
+                if (sid.empty()) {
+                    sid = "proxy-" + ChatSessionManager::generate_id();
+                }
+
+                // Shared streaming state (all captured by copy in lambdas)
+                auto mtx        = std::make_shared<std::mutex>();
+                auto cv         = std::make_shared<std::condition_variable>();
+                auto queue      = std::make_shared<std::vector<std::string>>();
+                auto done       = std::make_shared<std::atomic<bool>>(false);
+                auto cancelled  = std::make_shared<std::atomic<bool>>(false);
+                auto status     = std::make_shared<std::atomic<long>>(0);
+                auto accum      = std::make_shared<SseChatAccumulator>();
+                auto chunk_count = std::make_shared<std::atomic<size_t>>(0);
+                auto byte_count  = std::make_shared<std::atomic<size_t>>(0);
+                auto flush_count = std::make_shared<std::atomic<size_t>>(0);
+                auto user_flushed = std::make_shared<std::atomic<bool>>(false);
+                auto flush_mtx   = std::make_shared<std::mutex>();
+                auto last_tok_ms = std::make_shared<std::atomic<int64_t>>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count());
+
+                // Persistence helper — serialized via flush_mtx.
+                // Called on each pause-flush and once at stream end.
+                auto* mgr_ptr     = &session_mgr_;
+                auto* backend_ptr = memory.backend();
+                auto do_flush = [=, this]() {
+                    std::lock_guard<std::mutex> lk(*flush_mtx);
+                    std::string text = accum->take();
+                    if (text.empty()) return;
+                    try {
+                        auto& session = mgr_ptr->get_or_create(
+                            sid, username, backend_ptr);
+                        if (!user_flushed->exchange(true)) {
+                            if (!captured_user_msg.empty()) {
+                                session.add_user_message(captured_user_msg);
+                            }
+                        }
+                        session.add_assistant_message(text);
+                        json arr = json::array();
+                        for (const auto& m : session.messages) {
+                            arr.push_back({{"role", m.role},
+                                           {"content", m.content}});
+                        }
+                        backend_ptr->save_chat_session(
+                            sid, username, arr.dump());
+                        flush_count->fetch_add(1);
+                    } catch (const std::exception& e) {
+                        log_error(std::string("Proxy stream flush failed: ") +
+                                  e.what());
+                    }
+                };
+
+                // Response headers must be set before the first chunk.
+                res.set_header("Content-Type", "text/event-stream");
+                res.set_header("Cache-Control", "no-cache");
+                res.set_header("Connection", "keep-alive");
+                res.set_header("X-Session-Id", sid);
+
+                auto* inf = inference_.get();
+                std::string req_body = req.body;  // copy for thread
+
+                // Producer thread: upstream curl → queue + accumulator
+                std::thread([=]() {
+                    try {
+                        inf->proxy_request_stream(
+                            path, "POST", req_body,
+                            [=](std::string_view chunk) -> bool {
+                                if (cancelled->load()) return false;
+                                {
+                                    std::lock_guard<std::mutex> lk(*mtx);
+                                    queue->emplace_back(chunk);
+                                }
+                                chunk_count->fetch_add(1);
+                                byte_count->fetch_add(chunk.size());
+                                if (accum->feed(chunk)) {
+                                    last_tok_ms->store(
+                                        std::chrono::duration_cast<
+                                            std::chrono::milliseconds>(
+                                            std::chrono::steady_clock::now()
+                                                .time_since_epoch()).count());
+                                }
+                                cv->notify_one();
+                                return true;
+                            },
+                            [=](long code) { status->store(code); });
+                    } catch (const std::exception& e) {
+                        log_error(std::string("Proxy stream upstream error: ")
+                                  + e.what());
+                    }
+                    done->store(true);
+                    cv->notify_one();
+                }).detach();
+
+                // Idle pause-flush thread (disabled when flush_sec <= 0)
+                int flush_sec = config().chat_stream_flush_seconds;
+                if (flush_sec > 0) {
+                    std::thread([=]() {
+                        using namespace std::chrono;
+                        while (!done->load() && !cancelled->load()) {
+                            std::this_thread::sleep_for(milliseconds(500));
+                            auto now = duration_cast<milliseconds>(
+                                steady_clock::now().time_since_epoch()).count();
+                            if (now - last_tok_ms->load() >= flush_sec * 1000 &&
+                                !accum->empty()) {
+                                do_flush();
+                                // Reset timer so we don't hammer-flush on
+                                // long idles with no new tokens.
+                                last_tok_ms->store(now);
+                            }
+                        }
+                    }).detach();
+                }
+
+                // Consumer: drain queue → client
+                auto t0 = std::chrono::steady_clock::now();
+                res.set_chunked_content_provider("text/event-stream",
+                    [=](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+                        while (true) {
+                            std::vector<std::string> batch;
+                            {
+                                std::unique_lock<std::mutex> lk(*mtx);
+                                cv->wait_for(lk,
+                                    std::chrono::milliseconds(100),
+                                    [&] {
+                                        return !queue->empty() || done->load();
+                                    });
+                                batch.swap(*queue);
+                            }
+                            for (const auto& bytes : batch) {
+                                if (!sink.write(bytes.data(), bytes.size())) {
+                                    cancelled->store(true);
+                                    log_debug("proxy stream: client disconnected");
+                                    return false;
+                                }
+                            }
+                            if (done->load()) {
+                                // Drain anything the producer enqueued
+                                // between the batch swap and now.
+                                std::vector<std::string> tail;
+                                {
+                                    std::lock_guard<std::mutex> lk(*mtx);
+                                    tail.swap(*queue);
+                                }
+                                for (const auto& bytes : tail) {
+                                    sink.write(bytes.data(), bytes.size());
+                                }
+                                sink.done();
+
+                                // Final flush if upstream succeeded
+                                long code = status->load();
+                                if (code >= 200 && code < 300) do_flush();
+
+                                auto ms = std::chrono::duration_cast<
+                                    std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - t0).count();
+                                log_http("POST " + path + " stream " +
+                                    std::to_string(code) +
+                                    " (" + std::to_string(chunk_count->load()) +
+                                    " chunks, " +
+                                    std::to_string(byte_count->load()) +
+                                    " bytes, " + std::to_string(ms) + "ms, " +
+                                    "flushed " +
+                                    std::to_string(flush_count->load()) + "×)");
+                                return false;
+                            }
+                        }
+                    });
+                return;
+            }
+
+            // ------------------------------------------------------------
+            // Buffered branch (non-stream) — unchanged semantics
+            // ------------------------------------------------------------
+            // Reject stream=true on paths we don't stream (e.g. /v1/completions)
+            if (stream_requested) {
                 res.status = 400;
                 res.set_content(
-                    R"({"error":"streaming not supported via proxy — connect directly to the inference service"})",
+                    R"({"error":"streaming only supported on /v1/chat/completions"})",
                     "application/json");
                 log_http("POST " + path + " 400 (streaming rejected)");
                 return;
+            }
+
+            // Extract last user message for capture (chat path only)
+            std::string captured_user_msg;
+            if (path == "/v1/chat/completions") {
+                captured_user_msg = extract_last_user_message(body_json);
             }
 
             auto resp = inference_->proxy_request(path, "POST", req.body);
             res.status = static_cast<int>(resp.status_code);
             log_http("POST " + path + " " + std::to_string(resp.status_code));
             res.set_content(resp.body, "application/json");
+
+            // Capture turn on successful chat completions only
+            if (path == "/v1/chat/completions" &&
+                resp.status_code >= 200 && resp.status_code < 300 &&
+                !captured_user_msg.empty()) {
+                try {
+                    auto up = json::parse(resp.body, nullptr, false);
+                    std::string assistant_text;
+                    if (!up.is_discarded() &&
+                        up.contains("choices") && up["choices"].is_array() &&
+                        !up["choices"].empty()) {
+                        const auto& choice0 = up["choices"][0];
+                        if (choice0.contains("message") &&
+                            choice0["message"].contains("content") &&
+                            choice0["message"]["content"].is_string()) {
+                            assistant_text = choice0["message"]["content"].get<std::string>();
+                        }
+                    }
+                    if (!assistant_text.empty()) {
+                        auto user = _check_auth(req);
+                        std::string username = user ? user->username : "default";
+
+                        std::string sid = req.get_header_value("X-Ragger-Session");
+                        if (sid.empty()) sid = "proxy:" + username;
+
+                        auto& session = session_mgr_.get_or_create(
+                            sid, username, memory.backend());
+                        session.add_user_message(captured_user_msg);
+                        session.add_assistant_message(assistant_text);
+
+                        try {
+                            json messages_array = json::array();
+                            for (const auto& m : session.messages) {
+                                messages_array.push_back({
+                                    {"role", m.role},
+                                    {"content", m.content}
+                                });
+                            }
+                            memory.backend()->save_chat_session(
+                                sid, username, messages_array.dump());
+                        } catch (const std::exception& e) {
+                            log_error(std::string("Proxy turn persist failed: ") + e.what());
+                        }
+
+                        res.set_header("X-Session-Id", sid);
+                    }
+                } catch (const std::exception& e) {
+                    log_error(std::string("Proxy turn capture failed: ") + e.what());
+                }
+            }
         } catch (const std::exception& e) {
             log_error("LM proxy " + path + " failed: " + e.what());
             res.status = 502;
@@ -1077,7 +1434,7 @@ void Server::run() {
     const bool use_unix = !cfg.socket_path.empty();
 
     if (!use_unix && !is_port_available(pImpl->host, pImpl->port)) {
-        log_error(std::string(lang::ERR_PORT_IN_USE_1) + std::to_string(pImpl->port) + lang::ERR_PORT_IN_USE_2);
+        log_error(std::format(lang::ERR_PORT_IN_USE, pImpl->port));
         std::exit(1);
     }
 
@@ -1145,9 +1502,23 @@ void Server::run() {
         });
         chmod_thread.detach();
 
-        pImpl->svr.listen(sock_path, 0);  // port ignored for AF_UNIX
+        log_info("Binding AF_UNIX socket: " + sock_path);
+        // NOTE: port must be non-zero even for AF_UNIX. httplib's bind_internal
+        // only calls getsockname() when port==0, and that path only handles
+        // AF_INET/AF_INET6 — for AF_UNIX it returns UnsupportedAddressFamily
+        // AFTER a successful bind, causing listen() to fail silently.
+        bool ok = pImpl->svr.listen(sock_path, 80);  // port value ignored for AF_UNIX
+        if (!ok) {
+            log_error("listen() on unix socket returned false: " + sock_path
+                      + " (errno=" + std::to_string(errno) + ")");
+        }
     } else {
-        pImpl->svr.listen(pImpl->host, pImpl->port);
+        log_info("Binding TCP " + pImpl->host + ":" + std::to_string(pImpl->port));
+        bool ok = pImpl->svr.listen(pImpl->host, pImpl->port);
+        if (!ok) {
+            log_error("listen() on TCP returned false (errno="
+                      + std::to_string(errno) + ")");
+        }
     }
 
     // Cleanup

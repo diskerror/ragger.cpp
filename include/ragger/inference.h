@@ -99,6 +99,20 @@ public:
                                 const std::string& body = "");
     std::vector<std::string> proxy_list_models();
 
+    /// Streaming variant of proxy_request. Forwards each chunk from upstream
+    /// to on_chunk as it arrives. Returning false from on_chunk aborts the
+    /// transfer (libcurl tears down the connection cleanly on next write).
+    /// on_status is invoked once, before the first chunk, with the HTTP status.
+    /// Blocks until the upstream closes or on_chunk returns false.
+    /// Returns final HTTP status (0 if the connection failed before any
+    /// response was received).
+    long proxy_request_stream(
+        const std::string& path,
+        const std::string& method,
+        const std::string& body,
+        std::function<bool(std::string_view)> on_chunk,
+        std::function<void(long)> on_status = nullptr);
+
 private:
     std::string forced_endpoint_;
     std::string lm_proxy_url_;  // LM proxy URL for OpenAI-compatible pass-through

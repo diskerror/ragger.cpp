@@ -14,22 +14,24 @@ First run downloads the embedding model (~90 MB) into
 ```bash
 cd /path/to/ragger.cpp
 ./build.sh           # check dependencies + cmake build
-./install.sh         # copy binary to ~/.ragger/bin, write user service unit, update PATH
+./install.sh         # copy binary to ~/.local/bin, write user service unit, ensure PATH
 ```
 
-No `sudo`. Everything lives under `~/.ragger/`:
+No `sudo`. The binary goes in `~/.local/bin` (the XDG user-binary location,
+already on `PATH` in most modern shells). Everything else lives under `~/.ragger/`:
 
-| What        | Where                     |
-|-------------|---------------------------|
-| Executable  | `~/.ragger/bin/ragger`    |
-| Config      | `~/.ragger/settings.ini`  |
-| Database    | `~/.ragger/memories.db`   |
-| Logs        | `~/.ragger/logs/`         |
-| Models      | `~/.ragger/models/`       |
-| Persona     | `~/.ragger/SOUL.md`       |
+| What        | Where                      |
+|-------------|----------------------------|
+| Executable  | `~/.local/bin/ragger`      |
+| Config      | `~/.ragger/settings.ini`   |
+| Database    | `~/.ragger/memories.db`    |
+| Logs        | `~/.ragger/logs/`          |
+| Models      | `~/.ragger/models/`        |
+| Persona     | `~/.ragger/SOUL.md`        |
 
-Open a new terminal (or `source ~/.zshrc` / `~/.bashrc`) so
-`~/.ragger/bin` is on `PATH`.
+If `~/.local/bin` isn't already on your `PATH`, the installer adds it to
+your shell rc — open a new terminal (or `source ~/.zshrc` / `~/.bashrc`)
+to pick up the change.
 
 See [Deployment](deployment.md) for full details on the install
 script, service unit, and daemon lifecycle.

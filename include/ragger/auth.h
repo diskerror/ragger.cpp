@@ -46,9 +46,12 @@ std::string load_token();
 std::string ensure_token();
 
 // --- High-level DB-backed API ---
-
-/// Insert a new user or update an existing user's password.
-void useradd(StorageBackend& db, const std::string& user, const std::string& pw);
+//
+// Note: user creation / token rotation happens directly in the CLI handlers
+// (src/main.cpp) via StorageBackend::{create_user, update_user_token,
+// set_user_password}. The one-shot `useradd(db, user, pw)` helper was
+// removed — it conflated account creation with password setting, which
+// are now distinct verbs (useradd/usermod vs. passwd).
 
 /// Delete a user. No-op if user doesn't exist.
 void userdel(StorageBackend& db, const std::string& user);
@@ -57,14 +60,14 @@ void userdel(StorageBackend& db, const std::string& user);
 /// Returns false if user doesn't exist or password doesn't match.
 bool verify_password(StorageBackend& db, const std::string& user, const std::string& pw);
 
-/// Issue a time-seeded token for a user. The token is sha256 of
-/// (user + ":" + epoch_minute + ":" + server_secret). The hash is
-/// stored via update_user_token and the rotated_at timestamp is set.
-/// Returns the raw token (the client-facing credential).
+/// Issue a fresh random token for a user. Stores the SHA-256 hash in the
+/// DB and records the issue timestamp. Returns the raw token — caller
+/// must deliver it to the user once; it will not be recoverable afterward.
+/// Valid until explicitly revoked (no automatic expiry).
 std::string issue_token(StorageBackend& db, const std::string& user);
 
-/// Verify a token. Returns ok=true with username if the token's stored
-/// hash is found and the rotated_at timestamp is within the last 24 hours.
+/// Verify a bearer token. Hashes the presented value and looks it up in
+/// the DB. Returns ok=true with username if found; no time window applied.
 AuthResult verify_token(StorageBackend& db, const std::string& token);
 
 } // namespace ragger

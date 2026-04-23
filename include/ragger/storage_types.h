@@ -45,25 +45,5 @@ struct UserInfo {
     std::string preferred_model;  // empty = system default
 };
 
-/// Full memory record including raw embedding blob — used for bulk export/import.
-struct MemoryRecord {
-    int64_t              id = 0;
-    std::string          text;
-    std::vector<uint8_t> embedding;   // raw blob (may be empty)
-    std::string          metadata;    // JSON string
-    std::string          timestamp;
-    std::string          collection;
-    std::string          category;
-    std::string          tags;
-};
-
-/// Filter criteria for bulk memory export.  All fields are optional;
-/// empty/default values mean "no filter on this field".
-struct MemoryFilter {
-    std::vector<int> ids;             // specific IDs (empty = all)
-    std::string      collection;      // exact match
-    std::string      category;        // exact match
-    std::string      source_pattern;  // metadata $.source LIKE pattern
-};
 
 } // namespace ragger

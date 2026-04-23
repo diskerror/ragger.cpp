@@ -23,4 +23,9 @@ void log_error(const std::string& message);
 /// Log an info message to stderr
 void log_info(const std::string& message);
 
+/// Log a verbose debug message. Writes to error.log prefixed [DEBUG] only when
+/// config().debug_log_enabled is true. Intended for opt-in troubleshooting
+/// (per-chunk stream tracing, etc.) — default off to keep logs quiet.
+void log_debug(const std::string& message);
+
 } // namespace ragger
