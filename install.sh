@@ -304,16 +304,22 @@ if slots.get("memory") != "ragger":
         print(f"[!]   plugins.slots.memory already set to \"{slots['memory']}\" — leaving alone")
 
 if "ragger" not in entries:
+    # autoRecall/autoCapture are OFF by default — Ragger proper will own
+    # recall and turn capture directly (see FM roadmap / issues #40, #41).
+    # The OC plugin's auto-inject was found to be too eager and polluted
+    # payloads with recall that the user didn't ask for. Leaving these off
+    # also makes the MCP transport strictly a memory-tools surface, which
+    # matches the intended long-term architecture.
     entries["ragger"] = {
         "enabled": True,
         "config": {
             "transport": "mcp",
-            "autoRecall": True,
-            "autoCapture": True,
+            "autoRecall": False,
+            "autoCapture": False,
         },
     }
     changed = True
-    print("[+]   plugins.entries.ragger added (transport=mcp)")
+    print("[+]   plugins.entries.ragger added (transport=mcp, auto* off)")
 else:
     rag = entries["ragger"]
     if not rag.get("enabled", False):
