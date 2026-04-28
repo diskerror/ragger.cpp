@@ -7,6 +7,8 @@
 #include "ragger/embedder.h"
 #include "ragger/config.h"
 #include "ragger/logs.h"
+#include "ragger/lang.h"
+#include <format>
 
 namespace ragger {
 
@@ -37,6 +39,14 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
             "' but config specifies '" + current_model + "'. " +
             "Reorganise your models directory and run 'ragger rebuild' to re-embed.");
     }
+
+    // Backfill any rows left without embeddings (deferred-embedding writes
+    // that didn't get processed before the previous shutdown). The query is
+    // a no-op when nothing is NULL; embedder is already loaded above.
+    int filled = backend_->backfill_embeddings(*embedder_);
+    if (filled > 0) {
+        log_info(std::format(lang::MSG_BACKFILLED_EMBEDDINGS, filled));
+    }
 }
 
 RaggerMemory::~RaggerMemory() {
@@ -44,9 +54,14 @@ RaggerMemory::~RaggerMemory() {
 }
 
 std::string RaggerMemory::store(const std::string& text, json metadata,
-                                 bool common) {
+                                 bool common, bool defer_embedding) {
     // common flag is now ignored - single-user mode only
-    return backend_->store(text, std::move(metadata));
+    return backend_->store(text, std::move(metadata), defer_embedding);
+}
+
+bool RaggerMemory::update_text(int memory_id, const std::string& text, json metadata,
+                                bool defer_embedding) {
+    return backend_->update_text(memory_id, text, std::move(metadata), defer_embedding);
 }
 
 SearchResponse RaggerMemory::search(const std::string& query,
@@ -70,6 +85,10 @@ int RaggerMemory::rebuild_bm25() {
 
 int RaggerMemory::rebuild_embeddings() {
     return backend_->rebuild_embeddings(*embedder_);
+}
+
+int RaggerMemory::backfill_embeddings() {
+    return backend_->backfill_embeddings(*embedder_);
 }
 
 std::vector<std::string> RaggerMemory::collections() const {

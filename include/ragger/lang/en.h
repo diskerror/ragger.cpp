@@ -31,6 +31,18 @@ constexpr const char* CLI_UNKNOWN_COMMAND     = "Unknown command: ";
 
 // --- Status messages ---
 constexpr const char* MSG_LOADED_MEMORIES     = "Loaded %d memories";
+constexpr const char* MSG_BACKFILLED_EMBEDDINGS  = "Backfilled embeddings for {} row(s).";
+
+// --- Migration / maintenance ---
+constexpr const char* MSG_MIGRATE_EMBEDDING_NULLABLE = "Migrating: dropping NOT NULL on memories.embedding...";
+constexpr const char* MSG_MIGRATE_USER_ID            = "Migrated memories: added user_id column";
+constexpr const char* MSG_MIGRATE_DEDICATED_COLUMNS  = "Migrating: adding collection, category, tags columns...";
+constexpr const char* MSG_MIGRATE_DEDICATED_BACKFILL = "Migrated {} rows: collection/category/tags extracted";
+constexpr const char* MSG_MIGRATE_TOKEN_ROTATED_AT   = "Migrated users: added token_rotated_at column";
+constexpr const char* MSG_MIGRATE_PREFERRED_MODEL    = "Migrated users: added preferred_model column";
+constexpr const char* MSG_MIGRATE_PASSWORD_HASH      = "Migrated users: added password_hash column";
+constexpr const char* MSG_REBUILD_EMBEDDINGS_PROGRESS = "\rRebuilding embeddings: {}/{}";
+constexpr const char* WARN_FORMAT_LOAD_FAILED        = "Failed to load format {}: {}";
 constexpr const char* MSG_STORED_WITH_ID      = "Stored with id: ";
 constexpr const char* MSG_SERVER_STARTING     = "Starting Ragger server on ";
 constexpr const char* ERR_PORT_IN_USE         = "Error: port {} is already in use";
@@ -133,9 +145,68 @@ constexpr const char* WARN_STORE_TURN         = "Warning: failed to store turn: 
 constexpr const char* WARN_ORPHAN_CHECK       = "Warning: orphan check failed: {}";
 constexpr const char* WARN_SUMMARY            = "Warning: summary generation failed: {}";
 constexpr const char* ERR_NO_SYSTEM_PROMPT    = "Error: no system prompt files found. ";
+constexpr const char* MSG_NO_SYSTEM_PROMPT_HINT = "Create ~/.ragger/SYSTEM.md or add SOUL.md / USER.md / MEMORY.md.";
 constexpr const char* WARN_ENDPOINT_DOWN      = "Warning: {} is not reachable";
 constexpr const char* WARN_CHAT_ERROR         = "Warning: {}";
 constexpr const char* WARN_MEMORY_SEARCH      = "Warning: memory search failed: {}";
+
+// --- Chat REPL banner / status ---
+constexpr const char* MSG_CHAT_BANNER         = "Ragger Chat (model: {})";
+constexpr const char* MSG_CHAT_TURN_STORAGE   = "Turn storage: {}";
+constexpr const char* MSG_CHAT_CONTEXT_SIZED  = "Context: {} tokens ({}) → {}% = {} chars persona";
+constexpr const char* MSG_CHAT_CONTEXT_OPEN   = "Context: {} ({}) | Persona: {}";
+constexpr const char* MSG_CHAT_CTX_UNKNOWN    = "unknown";
+constexpr const char* MSG_CHAT_CTX_TOKENS     = "{} tokens";
+constexpr const char* MSG_CHAT_PERSONA_CHARS  = "{} chars";
+constexpr const char* MSG_CHAT_PERSONA_NONE   = "unlimited";
+constexpr const char* MSG_CHAT_QUIT_HINT      = "Type '/quit' or Ctrl+D to exit";
+constexpr const char* MSG_CHAT_GOODBYE        = "Goodbye!";
+
+// --- Chat recovery ---
+constexpr const char* MSG_ORPHAN_FOUND        = "Found {} orphaned turns from previous session...";
+constexpr const char* MSG_ORPHAN_RECOVERED    = "Recovered {} orphaned turns (deleted {} raw entries)";
+constexpr const char* MSG_SUMMARIZING         = "Summarizing in background...";
+
+// --- Chat /models ---
+constexpr const char* MSG_MODELS_QUERYING     = "Querying {} ({})...";
+constexpr const char* MSG_MODELS_NONE         = "  (no models returned or endpoint unreachable)";
+constexpr const char* MSG_MODELS_COUNT        = "{} model(s)";
+constexpr const char* MSG_MODELS_NO_ENDPOINTS = "No endpoints configured.";
+constexpr const char* MSG_MODELS_ALIASES      = "Aliases:";
+constexpr const char* MSG_MODELS_ALIAS_LINE   = "  {} → {}";
+constexpr const char* MSG_MODELS_CURRENT      = "Current: {}";
+constexpr const char* MSG_MODEL_DEFAULT       = "(default)";
+
+// --- Chat /model ---
+constexpr const char* MSG_MODEL_CURRENT       = "Current model: {}";
+constexpr const char* MSG_MODEL_USAGE_SWITCH  = "Use /model <name> to switch";
+constexpr const char* MSG_MODEL_USAGE         = "Usage: /model <name>";
+constexpr const char* MSG_MODEL_SWITCHED      = "Switched to: {}";
+constexpr const char* MSG_MODEL_ALIAS_SUFFIX  = " (alias: {})";
+
+// --- Chat /endpoints ---
+constexpr const char* MSG_ENDPOINTS_HEADER    = "Endpoints:";
+constexpr const char* MSG_ENDPOINT_LINE       = "  {} {} — {} [{}]{}";
+constexpr const char* MSG_ENDPOINT_ACTIVE     = " (active)";
+constexpr const char* MSG_ENDPOINT_ROUTING    = "Routing: {}";
+constexpr const char* MSG_ENDPOINT_USAGE      = "Use /endpoint <name> to force, /endpoint auto to auto-route";
+constexpr const char* MSG_ENDPOINT_CURRENT    = "Current endpoint: {}";
+constexpr const char* MSG_ENDPOINT_USAGE_ARG  = "Usage: /endpoint <name|auto>";
+constexpr const char* MSG_ENDPOINT_AUTO       = "Routing: auto (model-based)";
+constexpr const char* MSG_ENDPOINT_FORCED     = "Forced endpoint: {}";
+constexpr const char* MSG_ENDPOINT_AVAILABLE  = "Available: {}";
+
+// --- Chat /help ---
+constexpr const char* MSG_HELP_HEADER         = "Commands:";
+constexpr const char* MSG_HELP_MODELS         = "  /models          — list models available on active endpoint";
+constexpr const char* MSG_HELP_MODEL          = "  /model [name]    — show or switch model (alias or full name)";
+constexpr const char* MSG_HELP_ENDPOINTS      = "  /endpoints       — list inference endpoints with status";
+constexpr const char* MSG_HELP_ENDPOINT       = "  /endpoint [name] — show, force, or auto-route endpoint";
+constexpr const char* MSG_HELP_HELP           = "  /help            — show this help";
+constexpr const char* MSG_HELP_QUIT           = "  /quit            — exit chat (also /exit, Ctrl+D)";
+
+// --- Chat inference error ---
+constexpr const char* ERR_INFERENCE           = "Error: {}";
 
 // --- MCP ---
 constexpr const char* ERR_MCP_TEXT_REQUIRED   = "Error: text parameter required";

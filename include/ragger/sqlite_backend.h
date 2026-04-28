@@ -34,7 +34,14 @@ public:
     std::string db_path() const override;
 
     /// Store text with metadata. Returns memory ID.
-    std::string store(const std::string& text, json metadata = {}) override;
+    std::string store(const std::string& text, json metadata = {},
+                      bool defer_embedding = false) override;
+
+    /// Replace text + metadata of an existing row.
+    bool update_text(int memory_id,
+                     const std::string& text,
+                     json metadata = {},
+                     bool defer_embedding = false) override;
 
     /// Search with hybrid vector + BM25. collections={} means all.
     SearchResponse search(const std::string& query,
@@ -53,6 +60,7 @@ public:
 
     /// Rebuild embeddings for all stored documents. Returns doc count.
     int rebuild_embeddings(Embedder& embedder) override;
+    int backfill_embeddings(Embedder& embedder) override;
 
     /// Get distinct collection names.
     std::vector<std::string> collections() const override;

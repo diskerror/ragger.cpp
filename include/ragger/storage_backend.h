@@ -35,7 +35,19 @@ public:
     virtual std::string db_path() const = 0;
 
     /// Store text with metadata. Returns memory ID.
-    virtual std::string store(const std::string& text, json metadata = {}) = 0;
+    /// `defer_embedding`: write the row with embedding=NULL, skipping the
+    /// embedder call. Caller is responsible for triggering a backfill.
+    virtual std::string store(const std::string& text, json metadata = {},
+                              bool defer_embedding = false) = 0;
+
+    /// Replace text + metadata of an existing row. Re-embeds (or NULLs the
+    /// embedding when `defer_embedding`) and rebuilds the row's BM25 tokens.
+    /// Preserves id and original timestamp. Returns false if the row
+    /// doesn't exist or is protected (keep tag).
+    virtual bool update_text(int memory_id,
+                             const std::string& text,
+                             json metadata = {},
+                             bool defer_embedding = false) = 0;
 
     /// Search with hybrid vector + BM25. collections={} means all.
     virtual SearchResponse search(const std::string& query,
@@ -54,6 +66,11 @@ public:
 
     /// Rebuild embeddings for all stored documents. Returns doc count.
     virtual int rebuild_embeddings(Embedder& embedder) = 0;
+
+    /// Embed only rows whose embedding column is NULL. Cheap; intended to
+    /// run on startup and after deferred-embedding writes. Returns the
+    /// number of rows updated.
+    virtual int backfill_embeddings(Embedder& embedder) = 0;
 
     /// Get distinct collection names.
     virtual std::vector<std::string> collections() const = 0;

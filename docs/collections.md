@@ -26,8 +26,7 @@ You pull from the right bookshelf based on what you're looking for.
 | `memory`   | Agent-stored memories: facts, decisions, preferences, session summaries (default) |
 
 When you use `ragger store` without `--collection`, memories go into
-the default collection (configurable via `default_collection` in the
-config file, usually `memory`).
+the `memory` collection.
 
 ## Custom Collections
 
@@ -234,4 +233,4 @@ sidecar.
 
 - [Search & RAG](search-and-rag.md) — How hybrid search works
 - [Getting Started](getting-started.md) — Importing your first docs
-- [Configuration](configuration.md) — Setting `default_collection`
+- [Configuration](configuration.md) — Full config reference

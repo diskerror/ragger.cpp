@@ -120,7 +120,7 @@ Store a new memory with optional metadata.
 
 **Common metadata fields:**
 
-- `collection` — Collection name (defaults to `default_collection` from config)
+- `collection` — Collection name (defaults to `memory`)
 - `category` — Memory type (fact, decision, preference, lesson, session-summary)
 - `source` — Where this memory came from
 - `keep` — Boolean, exempt from turn expiration (chat persistence)

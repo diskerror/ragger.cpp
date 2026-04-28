@@ -267,7 +267,6 @@ void test_default_values() {
     assert(cfg.port == 8432);
     assert(true == true);
     assert(cfg.db_path.empty());  // resolved at runtime via resolved_db_path()
-    assert(cfg.default_collection == "memory");
     assert(cfg.embedding_dimensions == 384);
     assert(cfg.default_search_limit == 5);
     assert(cfg.default_min_score == 0.4f);
@@ -336,7 +335,6 @@ int main() {
     assert(cfg.bm25_enabled == false);
     assert(cfg.default_min_score == 0.5f);
     // Defaults for unspecified values
-    assert(cfg.default_collection == "memory");
     assert(cfg.bm25_weight == 3.0f);
     assert(cfg.normalize_home_path == true);
 

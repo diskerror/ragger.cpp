@@ -24,8 +24,16 @@ public:
     ~RaggerMemory();
 
     /// Store a memory. Stores to the configured DB.
+    /// `defer_embedding`: write embedding=NULL; caller (or startup) backfills.
     std::string    store(const std::string& text, json metadata = {},
-                         bool common = false);
+                         bool common = false,
+                         bool defer_embedding = false);
+
+    /// Replace text + metadata of an existing memory (re-embeds unless
+    /// `defer_embedding`, rebuilds BM25 tokens, preserves id and original
+    /// timestamp). Returns false if the row is missing or has the keep tag.
+    bool update_text(int memory_id, const std::string& text, json metadata = {},
+                     bool defer_embedding = false);
 
     /// Search. Returns results from the single configured DB.
     SearchResponse search(const std::string& query,
@@ -43,6 +51,9 @@ public:
 
     /// Rebuild embeddings for all documents. Returns doc count.
     int rebuild_embeddings();
+
+    /// Embed only rows whose embedding column is NULL. Returns count.
+    int backfill_embeddings();
 
     /// Get distinct collection names.
     std::vector<std::string> collections() const;

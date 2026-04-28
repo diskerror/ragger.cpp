@@ -31,7 +31,6 @@ struct Config {
     // --- Storage ---
     std::string db_path;  // empty = resolved at runtime (user home dir)
 
-    std::string default_collection = "memory";
     std::string formats_dir    = "/var/ragger/formats";
 
     // --- Embedding ---
@@ -87,9 +86,6 @@ struct Config {
 
     // --- LM Proxy (OpenAI-compatible pass-through) ---
     std::string lm_proxy_url = "";  // if set, forward /v1/* to this URL
-
-    // --- Llama.cpp (subprocess inference) ---
-    // [llama] removed — use external inference providers (LM Studio, Ollama, etc.)
 
     // --- Model aliases ---
     std::map<std::string, std::string> model_aliases;  // short name → full name or .gguf filename

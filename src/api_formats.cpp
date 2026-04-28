@@ -2,12 +2,14 @@
  * API format loader and request/response transformers
  */
 #include "ragger/api_formats.h"
+#include "ragger/lang.h"
 #include <fstream>
 #include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <algorithm>
 #include <set>
+#include <format>
 
 namespace ragger {
 namespace fs = std::filesystem;
@@ -111,7 +113,8 @@ static std::optional<ApiFormat> _load_format_file(const std::string& name) {
                 // Loaded silently
                 return fmt;
             } catch (const std::exception& e) {
-                std::cerr << "Failed to load format " << path << ": " << e.what() << std::endl;
+                std::cerr << std::format(ragger::lang::WARN_FORMAT_LOAD_FAILED,
+                                         path, e.what()) << std::endl;
             }
         }
     }

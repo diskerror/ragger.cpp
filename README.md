@@ -16,6 +16,7 @@ Faster startup, lower memory footprint, single static binary. Everything else �
 - **Token auth** — Bearer token authentication with SHA-256 hashing
 - **Structured logging** — Four log files (query/http/mcp/error), config-toggleable, thread-safe
 - **File import/export** — Heading-aware paragraph chunking, doc reassembly
+- **Conversation import** — Ingest Claude Code JSONL / claude.ai export with original timestamps preserved
 - **i18n ready** — All user-facing strings in compiled-in language file
 
 ## Quick Start
@@ -52,6 +53,10 @@ ragger search "deployment requirements"
 
 # Import a document
 ragger import notes.md --collection docs
+
+# Import past Claude conversations (preserves original timestamps)
+./scripts/import-claude-conversations.py --format code \
+    --path ~/.claude/projects/<slug> --import
 
 # Daemon lifecycle
 ragger start | stop | restart | status
@@ -99,6 +104,7 @@ All documentation is shared between the Python and C++ versions.
 | [Search & RAG](docs/search-and-rag.md) | How hybrid search works |
 | [HTTP API](docs/http-api.md) | REST endpoints, MCP server, auth |
 | [Chat Persistence](docs/chat-persistence.md) | Turn storage, summaries, cleanup |
+| [Importing Conversations](docs/importing-conversations.md) | Ingest Claude Code / claude.ai history with original timestamps |
 | [Deployment](docs/deployment.md) | Per-user install, LaunchAgent / systemd-user, provisioning sub-users |
 | [Project Structure](docs/project-structure.md) | Code layout, database schema |
 | [OpenClaw Integration](docs/openclaw.md) | Plugin setup for OpenClaw |

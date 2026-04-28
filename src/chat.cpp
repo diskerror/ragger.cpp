@@ -186,52 +186,98 @@ std::string Chat::load_workspace_files(int max_context) {
     return result;
 }
 
-void Chat::store_turn(const std::string& user_text, const std::string& assistant_text) {
-    if (store_turns_ == "false") {
-        return;  // No raw turn storage
-    }
-    
+int Chat::store_partial_turn(const std::string& user_text) {
+    if (store_turns_ == "false") return -1;
+
     try {
-        std::string turn_text = "User: " + user_text + "\n\nAssistant: " + assistant_text;
-        
-        if (store_turns_ == "true") {
-            // Per-turn mode: each exchange is a separate memory
-            json meta = {
-                {"collection", "memory"},
-                {"category", "conversation"},
-                {"source", "ragger-chat"},
-                {"role", "exchange"}
-            };
-            memory_.store(turn_text, meta);
-            
-        } else if (store_turns_ == "session") {
-            // Session mode: one growing memory entry
-            if (session_memory_id_ >= 0) {
-                // Delete old session entry
-                memory_.delete_memory(session_memory_id_);
-            }
-            
-            // Build full session text from unsummarized turns
-            std::string session_text;
-            for (const auto& turn : unsummarized_turns_) {
-                if (!session_text.empty()) session_text += "\n\n---\n\n";
-                session_text += "User: " + turn.first + "\n\nAssistant: " + turn.second;
-            }
-            if (!session_text.empty()) session_text += "\n\n---\n\n";
-            session_text += turn_text;
-            
-            json meta = {
-                {"collection", "memory"},
-                {"category", "conversation"},
-                {"source", "ragger-chat"},
-                {"mode", "session"}
-            };
-            auto id_str = memory_.store(session_text, meta);
-            session_memory_id_ = std::stoi(id_str);
+        json meta = {
+            {"collection", "memory"},
+            {"category", "conversation"},
+            {"source", "ragger-chat"},
+            {"role", "exchange"},
+            {"partial", true}  // assistant reply not yet appended
+        };
+        // Defer embedding: finalize_turn will replace this row's text in
+        // a few seconds anyway. Embedding now would be discarded work.
+        auto id_str = memory_.store(user_text, meta,
+                                    /*common=*/false, /*defer_embedding=*/true);
+        return std::stoi(id_str);
+    } catch (const std::exception& e) {
+        std::cerr << std::format(ragger::lang::WARN_STORE_TURN, e.what()) << "\n";
+        return -1;
+    }
+}
+
+int Chat::finalize_turn(int partial_id,
+                        const std::string& user_text,
+                        const std::string& assistant_text) {
+    if (store_turns_ == "false") return -1;
+
+    // ASCII Unit Separator (U+001F) between user and assistant halves —
+    // structural marker, near-zero semantic weight in tokenizers, can't
+    // collide with content the way "---" or "Assistant:" can.
+    std::string turn_text = user_text + "\n\x1F\n" + assistant_text;
+    json meta = {
+        {"collection", "memory"},
+        {"category", "conversation"},
+        {"source", "ragger-chat"},
+        {"role", "exchange"}
+    };
+
+    int row_id = -1;
+    try {
+        // Update the partial row in place — preserves id and the original
+        // (prompt-arrival) timestamp, which is the correct value for
+        // recency-weighted retrieval. Embedding is deferred; the fork
+        // below picks up this row plus any leftover NULLs.
+        if (partial_id >= 0 && memory_.update_text(partial_id, turn_text, meta,
+                                                   /*defer_embedding=*/true)) {
+            row_id = partial_id;
+        } else {
+            // Partial row missing/protected — fall back to a fresh row.
+            auto id_str = memory_.store(turn_text, meta,
+                                        /*common=*/false, /*defer_embedding=*/true);
+            row_id = std::stoi(id_str);
         }
     } catch (const std::exception& e) {
         std::cerr << std::format(ragger::lang::WARN_STORE_TURN, e.what()) << "\n";
+        return -1;
     }
+
+    // Spawn a backfill child. SQLite isn't fork-safe across an open
+    // connection, so the child opens its own RaggerMemory — whose
+    // constructor already runs backfill_embeddings() and exits. Same
+    // fork pattern as bg_summarize.
+    pid_t pid = fork();
+    if (pid == 0) {
+        try {
+            const auto& cfg = config();
+            RaggerMemory child_memory(cfg.resolved_db_path(), cfg.resolved_model_dir());
+            child_memory.close();
+        } catch (...) {
+            // Silent — next finalize or startup will retry.
+        }
+        _exit(0);
+    }
+    return row_id;
+}
+
+std::vector<std::pair<std::string, std::string>> Chat::turns_as_pairs() const {
+    std::vector<std::pair<std::string, std::string>> out;
+    for (size_t i = 0; i + 1 < unsummarized_turns_.size(); ) {
+        const auto& a = unsummarized_turns_[i];
+        const auto& b = unsummarized_turns_[i + 1];
+        if (a.role == "user" && b.role == "assistant") {
+            std::string utxt, atxt;
+            for (const auto& c : a.content) utxt += c.text;
+            for (const auto& c : b.content) atxt += c.text;
+            out.push_back({utxt, atxt});
+            i += 2;
+        } else {
+            ++i;  // skip stray entry; keep walking
+        }
+    }
+    return out;
 }
 
 void Chat::check_orphaned_turns() {
@@ -277,21 +323,24 @@ void Chat::check_orphaned_turns() {
             return;
         }
         
-        std::cout << "Found " << orphaned_turns.size() << " orphaned turns from previous session...\n";
+        std::cout << std::format(ragger::lang::MSG_ORPHAN_FOUND, orphaned_turns.size()) << "\n";
         
-        // Build conversation text from orphaned turns
+        // Reconstruct user/assistant pairs by splitting on the U+001F
+        // unit separator. Rows without the separator are partial turns
+        // (assistant reply never landed) — feed them as user-only.
         std::vector<std::pair<std::string, std::string>> turn_pairs;
         for (const auto& turn : orphaned_turns) {
-            // Parse turn text (format: "User: ...\n\nAssistant: ...")
-            std::string text = turn.text;
-            size_t user_pos = text.find("User: ");
-            size_t asst_pos = text.find("\n\nAssistant: ");
-            
-            if (user_pos != std::string::npos && asst_pos != std::string::npos) {
-                std::string user_text = text.substr(user_pos + 6, asst_pos - 6);
-                std::string asst_text = text.substr(asst_pos + 14);
-                turn_pairs.push_back({user_text, asst_text});
+            const std::string& text = turn.text;
+            size_t sep = text.find('\x1F');
+            if (sep == std::string::npos) {
+                turn_pairs.push_back({text, ""});
+                continue;
             }
+            // Strip the surrounding \n that brackets the separator.
+            size_t u_end = (sep > 0 && text[sep - 1] == '\n') ? sep - 1 : sep;
+            size_t a_start = (sep + 1 < text.size() && text[sep + 1] == '\n')
+                             ? sep + 2 : sep + 1;
+            turn_pairs.push_back({text.substr(0, u_end), text.substr(a_start)});
         }
         
         if (!turn_pairs.empty()) {
@@ -316,8 +365,8 @@ void Chat::check_orphaned_turns() {
                 }
                 int deleted = memory_.delete_batch(orphaned_ids);
                 
-                std::cout << "Recovered " << turn_pairs.size() << " orphaned turns (deleted " 
-                         << deleted << " raw entries)\n";
+                std::cout << std::format(ragger::lang::MSG_ORPHAN_RECOVERED,
+                                         turn_pairs.size(), deleted) << "\n";
             }
         }
         
@@ -388,7 +437,7 @@ void Chat::check_pause_summary() {
         return;
     }
 
-    bg_summarize(unsummarized_turns_);
+    bg_summarize(turns_as_pairs());
     unsummarized_turns_.clear();
 }
 
@@ -397,8 +446,8 @@ void Chat::quit_summary() {
         return;
     }
 
-    std::cout << "Summarizing in background...\n";
-    bg_summarize(unsummarized_turns_);
+    std::cout << ragger::lang::MSG_SUMMARIZING << "\n";
+    bg_summarize(turns_as_pairs());
 }
 
 std::string Chat::summarize_conversation(const std::vector<std::pair<std::string, std::string>>& turns) {
@@ -459,7 +508,7 @@ void Chat::run() {
 
     if (workspace.empty()) {
         std::cerr << ragger::lang::ERR_NO_SYSTEM_PROMPT
-                  << "Create ~/.ragger/SYSTEM.md or add SOUL.md / USER.md / MEMORY.md.\n";
+                  << ragger::lang::MSG_NO_SYSTEM_PROMPT_HINT << "\n";
     }
 
     // Initialize conversation
@@ -468,9 +517,9 @@ void Chat::run() {
     }
     
     // Print startup banner
-    std::cout << "Ragger Chat (model: " << model_ << ")\n";
-    std::cout << "Turn storage: " << store_turns_ << "\n";
-    
+    std::cout << std::format(ragger::lang::MSG_CHAT_BANNER, model_) << "\n";
+    std::cout << std::format(ragger::lang::MSG_CHAT_TURN_STORAGE, store_turns_) << "\n";
+
     if (max_context > 0 && max_context < PERSONA_SIZING_THRESHOLD) {
         int persona_chars = cfg.chat_max_persona_chars;
         if (persona_chars == 0) {
@@ -478,18 +527,21 @@ void Chat::run() {
                 max_context * cfg.chat_chars_per_token * (cfg.chat_persona_pct / 100.0f)
             );
         }
-        std::cout << "Context: " << max_context << " tokens (" << endpoint.name 
-                  << ") → " << cfg.chat_persona_pct << "% = " << persona_chars << " chars persona\n";
+        std::cout << std::format(ragger::lang::MSG_CHAT_CONTEXT_SIZED,
+                                 max_context, endpoint.name,
+                                 cfg.chat_persona_pct, persona_chars) << "\n";
     } else {
-        std::string ctx_info = max_context > 0 ? std::to_string(max_context) + " tokens" : "unknown";
-        std::string persona_info = cfg.chat_max_persona_chars > 0 
-            ? std::to_string(cfg.chat_max_persona_chars) + " chars" 
-            : "unlimited";
-        std::cout << "Context: " << ctx_info << " (" << endpoint.name 
-                  << ") | Persona: " << persona_info << "\n";
+        std::string ctx_info = max_context > 0
+            ? std::format(ragger::lang::MSG_CHAT_CTX_TOKENS, max_context)
+            : ragger::lang::MSG_CHAT_CTX_UNKNOWN;
+        std::string persona_info = cfg.chat_max_persona_chars > 0
+            ? std::format(ragger::lang::MSG_CHAT_PERSONA_CHARS, cfg.chat_max_persona_chars)
+            : ragger::lang::MSG_CHAT_PERSONA_NONE;
+        std::cout << std::format(ragger::lang::MSG_CHAT_CONTEXT_OPEN,
+                                 ctx_info, endpoint.name, persona_info) << "\n";
     }
-    
-    std::cout << "Type '/quit' or Ctrl+D to exit\n\n";
+
+    std::cout << ragger::lang::MSG_CHAT_QUIT_HINT << "\n\n";
     
     // Check for orphaned turns from previous session (crash recovery)
     check_orphaned_turns();
@@ -503,7 +555,7 @@ void Chat::run() {
         
         std::cout << ragger::lang::CHAT_PROMPT_USER << std::flush;
         if (!std::getline(std::cin, line)) {
-            std::cout << "\nGoodbye!\n";
+            std::cout << "\n" << ragger::lang::MSG_CHAT_GOODBYE << "\n";
             break;
         }
         
@@ -514,7 +566,7 @@ void Chat::run() {
         if (line.empty()) continue;
         
         if (line == "/quit" || line == "/exit") {
-            std::cout << "Goodbye!\n";
+            std::cout << ragger::lang::MSG_CHAT_GOODBYE << "\n";
             break;
         }
 
@@ -538,35 +590,39 @@ void Chat::run() {
             }
 
             if (active_ep) {
-                std::cout << "Querying " << active_ep->name << " (" << active_ep->api_url << ")...\n";
+                std::cout << std::format(ragger::lang::MSG_MODELS_QUERYING,
+                                         active_ep->name, active_ep->api_url) << "\n";
                 auto models = active_ep->list_models();
                 if (models.empty()) {
-                    std::cout << "  (no models returned or endpoint unreachable)\n";
+                    std::cout << ragger::lang::MSG_MODELS_NONE << "\n";
                 } else {
                     for (const auto& m : models) {
                         std::cout << "  " << m << "\n";
                     }
-                    std::cout << models.size() << " model(s)\n";
+                    std::cout << std::format(ragger::lang::MSG_MODELS_COUNT, models.size()) << "\n";
                 }
             } else {
-                std::cout << "No endpoints configured.\n";
+                std::cout << ragger::lang::MSG_MODELS_NO_ENDPOINTS << "\n";
             }
 
             if (!cfg.model_aliases.empty()) {
-                std::cout << "\nAliases:\n";
+                std::cout << "\n" << ragger::lang::MSG_MODELS_ALIASES << "\n";
                 for (const auto& [alias, full] : cfg.model_aliases) {
-                    std::cout << "  " << alias << " → " << full << "\n";
+                    std::cout << std::format(ragger::lang::MSG_MODELS_ALIAS_LINE, alias, full) << "\n";
                 }
             }
 
-            std::cout << "\nCurrent: " << (model_.empty() ? "(default)" : model_) << "\n\n";
+            std::cout << "\n" << std::format(ragger::lang::MSG_MODELS_CURRENT,
+                                              model_.empty() ? ragger::lang::MSG_MODEL_DEFAULT : model_)
+                      << "\n\n";
             continue;
         }
 
         // ---- /model [name] — show or switch model ----
         if (line == "/model") {
-            std::cout << "Current model: " << (model_.empty() ? "(default)" : model_) << "\n";
-            std::cout << "Use /model <name> to switch\n\n";
+            std::cout << std::format(ragger::lang::MSG_MODEL_CURRENT,
+                                     model_.empty() ? ragger::lang::MSG_MODEL_DEFAULT : model_) << "\n";
+            std::cout << ragger::lang::MSG_MODEL_USAGE_SWITCH << "\n\n";
             continue;
         }
 
@@ -575,41 +631,42 @@ void Chat::run() {
             new_model.erase(0, new_model.find_first_not_of(" \t"));
             new_model.erase(new_model.find_last_not_of(" \t") + 1);
             if (new_model.empty()) {
-                std::cout << "Usage: /model <name>\n\n";
+                std::cout << ragger::lang::MSG_MODEL_USAGE << "\n\n";
                 continue;
             }
             // Resolve alias
             std::string resolved = config().resolve_model(new_model);
             model_ = resolved;
-            std::cout << "Switched to: " << resolved;
-            if (resolved != new_model) std::cout << " (alias: " << new_model << ")";
+            std::cout << std::format(ragger::lang::MSG_MODEL_SWITCHED, resolved);
+            if (resolved != new_model) {
+                std::cout << std::format(ragger::lang::MSG_MODEL_ALIAS_SUFFIX, new_model);
+            }
             std::cout << "\n\n";
             continue;
         }
 
         // ---- /endpoints — list endpoints with live status ----
         if (line == "/endpoints" || line == "/services") {
-            std::cout << "Endpoints:\n";
+            std::cout << ragger::lang::MSG_ENDPOINTS_HEADER << "\n";
             for (auto& ep : inference_._endpoints) {
                 bool up = ep.is_reachable();
                 std::string marker = up ? "✓" : "✗";
-                std::string forced = (ep.name == inference_.forced_endpoint()) ? " (active)" : "";
-                std::cout << "  " << marker << " " << ep.name
-                          << " — " << ep.api_url
-                          << " [" << ep.format_name << "]"
-                          << forced << "\n";
+                std::string forced = (ep.name == inference_.forced_endpoint())
+                    ? ragger::lang::MSG_ENDPOINT_ACTIVE : "";
+                std::cout << std::format(ragger::lang::MSG_ENDPOINT_LINE,
+                                         marker, ep.name, ep.api_url, ep.format_name, forced) << "\n";
             }
             std::string current = inference_.forced_endpoint().empty() ? "auto" : inference_.forced_endpoint();
-            std::cout << "\nRouting: " << current << "\n";
-            std::cout << "Use /endpoint <name> to force, /endpoint auto to auto-route\n\n";
+            std::cout << "\n" << std::format(ragger::lang::MSG_ENDPOINT_ROUTING, current) << "\n";
+            std::cout << ragger::lang::MSG_ENDPOINT_USAGE << "\n\n";
             continue;
         }
 
         // ---- /endpoint [name|auto] — force or auto-route endpoint ----
         if (line == "/endpoint" || line == "/service") {
             std::string current = inference_.forced_endpoint().empty() ? "auto" : inference_.forced_endpoint();
-            std::cout << "Current endpoint: " << current << "\n";
-            std::cout << "Use /endpoint <name> to force, /endpoint auto to auto-route\n\n";
+            std::cout << std::format(ragger::lang::MSG_ENDPOINT_CURRENT, current) << "\n";
+            std::cout << ragger::lang::MSG_ENDPOINT_USAGE << "\n\n";
             continue;
         }
 
@@ -619,12 +676,12 @@ void Chat::run() {
             name.erase(0, name.find_first_not_of(" \t"));
             name.erase(name.find_last_not_of(" \t") + 1);
             if (name.empty()) {
-                std::cout << "Usage: /endpoint <name|auto>\n\n";
+                std::cout << ragger::lang::MSG_ENDPOINT_USAGE_ARG << "\n\n";
                 continue;
             }
             if (name == "auto") {
                 inference_.set_forced_endpoint("");
-                std::cout << "Routing: auto (model-based)\n\n";
+                std::cout << ragger::lang::MSG_ENDPOINT_AUTO << "\n\n";
                 continue;
             }
             try {
@@ -638,28 +695,28 @@ void Chat::run() {
                         break;
                     }
                 }
-                std::cout << "Forced endpoint: " << name << "\n\n";
+                std::cout << std::format(ragger::lang::MSG_ENDPOINT_FORCED, name) << "\n\n";
             } catch (const std::exception& e) {
                 std::cout << std::format(ragger::lang::WARN_CHAT_ERROR, e.what()) << "\n";
-                std::cout << "Available: ";
+                std::string available;
                 for (size_t i = 0; i < inference_._endpoints.size(); ++i) {
-                    if (i > 0) std::cout << ", ";
-                    std::cout << inference_._endpoints[i].name;
+                    if (i > 0) available += ", ";
+                    available += inference_._endpoints[i].name;
                 }
-                std::cout << "\n\n";
+                std::cout << std::format(ragger::lang::MSG_ENDPOINT_AVAILABLE, available) << "\n\n";
             }
             continue;
         }
 
         // ---- /help ----
         if (line == "/help") {
-            std::cout << "Commands:\n";
-            std::cout << "  /models          — list models available on active endpoint\n";
-            std::cout << "  /model [name]    — show or switch model (alias or full name)\n";
-            std::cout << "  /endpoints       — list inference endpoints with status\n";
-            std::cout << "  /endpoint [name] — show, force, or auto-route endpoint\n";
-            std::cout << "  /help            — show this help\n";
-            std::cout << "  /quit            — exit chat (also /exit, Ctrl+D)\n\n";
+            std::cout << ragger::lang::MSG_HELP_HEADER    << "\n"
+                      << ragger::lang::MSG_HELP_MODELS    << "\n"
+                      << ragger::lang::MSG_HELP_MODEL     << "\n"
+                      << ragger::lang::MSG_HELP_ENDPOINTS << "\n"
+                      << ragger::lang::MSG_HELP_ENDPOINT  << "\n"
+                      << ragger::lang::MSG_HELP_HELP      << "\n"
+                      << ragger::lang::MSG_HELP_QUIT      << "\n\n";
             continue;
         }
 
@@ -699,11 +756,15 @@ void Chat::run() {
         }
         
         current_messages.push_back({"user", line});
-        
+
+        // Persist the user prompt before the LLM call. If the call crashes
+        // mid-stream the row stays — durable evidence of what was asked.
+        int partial_id = store_partial_turn(line);
+
         // Send to inference API (streaming)
         std::cout << ragger::lang::CHAT_PROMPT_ASSISTANT << std::flush;
         std::string response_text;
-        
+
         try {
             inference_.chat_stream(current_messages, [&](const std::string& token) {
                 std::cout << token << std::flush;
@@ -711,17 +772,22 @@ void Chat::run() {
             }, model_);
             std::cout << "\n";
         } catch (const std::exception& e) {
-            std::cout << "\nError: " << e.what() << "\n";
+            std::cout << "\n" << std::format(ragger::lang::ERR_INFERENCE, e.what()) << "\n";
+            // Leave the partial row in place — that's the whole point.
             continue;
         }
-        
+
         // Update conversation history
         messages_.push_back({"user", line});
         messages_.push_back({"assistant", response_text});
-        
-        // Store turn and track for summary
-        store_turn(line, response_text);
-        unsummarized_turns_.push_back({line, response_text});
+
+        // Replace the partial row with the full exchange and track both
+        // halves as Turn entries (memory_id on the assistant turn points
+        // at the persisted exchange row, since exchanges are stored as a
+        // single combined row today).
+        int exchange_id = finalize_turn(partial_id, line, response_text);
+        unsummarized_turns_.push_back({"user", {{ "text", line }}, -1});
+        unsummarized_turns_.push_back({"assistant", {{ "text", response_text }}, exchange_id});
         update_activity();
         
         std::cout << "\n";  // blank line between exchanges

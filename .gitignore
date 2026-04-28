@@ -12,6 +12,8 @@ Makefile
 cmake_install.cmake
 Testing/
 .cmake/
+.claude/
+.cache/
 
 # IDE
 .idea/

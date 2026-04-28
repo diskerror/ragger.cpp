@@ -69,7 +69,6 @@ that install.sh copies to `~/.ragger/settings.ini` on first run.
 | Key                  | Default                 | Description                         |
 |----------------------|-------------------------|-------------------------------------|
 | `db_path`            | `~/.ragger/memories.db` | SQLite database path                |
-| `default_collection` | `memory`                | Default collection for new memories |
 
 ### `[embedding]`
 
@@ -137,7 +136,6 @@ auth_token = your-secret-token-here
 
 [storage]
 db_path = ~/.ragger/memories.db
-default_collection = memory
 
 [embedding]
 model = all-MiniLM-L6-v2

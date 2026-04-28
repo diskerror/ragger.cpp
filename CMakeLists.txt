@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 project(ragger VERSION 0.9.3 LANGUAGES CXX)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Build metadata: version, commit, build date
 string(TIMESTAMP RAGGER_BUILD_DATE "%Y-%m-%d %H:%M:%S")
 
@@ -151,7 +153,9 @@ target_link_libraries(ragger_core PUBLIC
 # ---------------------------------------------------------------------------
 # ragger executable
 # ---------------------------------------------------------------------------
-add_executable(ragger src/main.cpp)
+add_executable(ragger src/main.cpp
+        src/logger.cpp
+        src/logger.h)
 target_link_libraries(ragger PRIVATE
     ragger_core
     c_lib_po

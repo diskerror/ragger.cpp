@@ -93,7 +93,6 @@ port = 8432
 
 [storage]
 db_path = ~/.ragger/memories.db
-default_collection = memory
 formats_dir = /var/ragger/formats
 
 [embedding]
@@ -256,9 +255,6 @@ void apply_user_overrides(Config& cfg, const Config& user) {
     // ✗ embedding.model, embedding.dimensions, embedding.model_dir
     // ✓ Everything else
     
-    // Storage (non-locked)
-    cfg.default_collection = user.default_collection;
-    
     // Search (all user-overridable)
     cfg.default_search_limit = user.default_search_limit;
     cfg.default_min_score = user.default_min_score;
@@ -366,7 +362,6 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
         }
         else if (section == "storage") {
             if      (key == "db_path") cfg.db_path = val;
-            else if (key == "default_collection") cfg.default_collection = val;
             else if (key == "formats_dir")        cfg.formats_dir = val;
         }
         else if (section == "embedding") {
@@ -390,6 +385,7 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "api_key")    cfg.inference_api_key = val;
             else if (key == "max_tokens") cfg.inference_max_tokens = std::stoi(val);
             else if (key == "default")    cfg.inference_default = val;
+            else if (key == "lm_proxy_url") cfg.lm_proxy_url = val;
         }
         else if (section.substr(0, 10) == "inference.") {
             // Named endpoint section: [inference.local], [inference.anthropic], etc.
@@ -611,6 +607,7 @@ int reload_config() {
     RELOAD(inference_api_url);
     RELOAD(inference_api_key);
     RELOAD(inference_max_tokens);
+    RELOAD(lm_proxy_url);
     // Endpoints: replace entirely if different
     if (cfg.inference_endpoints.size() != fresh.inference_endpoints.size()) {
         cfg.inference_endpoints = fresh.inference_endpoints;

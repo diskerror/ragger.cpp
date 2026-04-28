@@ -154,7 +154,7 @@ void log_error(const std::string& message) {
 
 void log_info(const std::string& message) {
     // Write to stderr only
-    std::cout << get_timestamp() << " [INFO] " << message << "\n";
+    // std::cout << get_timestamp() << " [INFO] " << message << "\n";
 }
 
 void log_debug(const std::string& message) {

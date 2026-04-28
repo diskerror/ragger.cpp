@@ -6,6 +6,7 @@
 #include "ragger/bm25.h"
 #include "ragger/config.h"
 #include "ragger/lang.h"
+#include <format>
 #include "nlohmann_json.hpp"
 
 #include <sqlite3.h>
@@ -123,11 +124,14 @@ struct SqliteBackend::Impl {
             END
         )");
 
+        // embedding is nullable: deferred-embedding writes (chat partial
+        // turns, future bulk imports) insert with NULL; a backfill pass
+        // fills them in afterwards.
         exec(R"(
             CREATE TABLE IF NOT EXISTS memories (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
                 text      TEXT NOT NULL,
-                embedding BLOB NOT NULL,
+                embedding BLOB,
                 metadata  TEXT,
                 timestamp TEXT NOT NULL,
                 user_id   INTEGER REFERENCES users(id)
@@ -166,11 +170,62 @@ struct SqliteBackend::Impl {
         // Migrations
         migrate_add_user_id();
         migrate_dedicated_columns();
+        migrate_embedding_nullable();
         migrate_add_token_rotated_at();
         migrate_add_preferred_model();
         migrate_add_password_hash();
         migrate_add_web_sessions();
         migrate_add_chat_sessions();
+    }
+
+    void migrate_embedding_nullable() {
+        // Detect whether memories.embedding still has the old NOT NULL
+        // constraint. SQLite doesn't support ALTER COLUMN to drop it, so
+        // the standard fix is to rebuild the table.
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db, "PRAGMA table_info(memories)", -1, &stmt, nullptr);
+        bool embedding_notnull = false;
+        bool found_embedding = false;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            std::string col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            if (col == "embedding") {
+                found_embedding = true;
+                embedding_notnull = sqlite3_column_int(stmt, 3) != 0;  // notnull flag
+                break;
+            }
+        }
+        sqlite3_finalize(stmt);
+        if (!found_embedding || !embedding_notnull) return;
+
+        std::cerr << ragger::lang::MSG_MIGRATE_EMBEDDING_NULLABLE << "\n";
+        exec("PRAGMA foreign_keys = OFF");
+        exec("BEGIN");
+        exec(R"(
+            CREATE TABLE memories_new (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                text       TEXT NOT NULL,
+                embedding  BLOB,
+                metadata   TEXT,
+                timestamp  TEXT NOT NULL,
+                user_id    INTEGER REFERENCES users(id),
+                collection TEXT NOT NULL DEFAULT 'memory',
+                category   TEXT NOT NULL DEFAULT '',
+                tags       TEXT NOT NULL DEFAULT ''
+            )
+        )");
+        exec(R"(
+            INSERT INTO memories_new (id, text, embedding, metadata, timestamp,
+                                      user_id, collection, category, tags)
+            SELECT id, text, embedding, metadata, timestamp,
+                   user_id, collection, category, tags
+            FROM memories
+        )");
+        exec("DROP TABLE memories");
+        exec("ALTER TABLE memories_new RENAME TO memories");
+        exec("CREATE INDEX IF NOT EXISTS idx_memories_collection ON memories(collection)");
+        exec("CREATE INDEX IF NOT EXISTS idx_memories_category   ON memories(category)");
+        exec("COMMIT");
+        exec("PRAGMA foreign_keys = ON");
     }
 
     void migrate_add_user_id() {
@@ -186,7 +241,7 @@ struct SqliteBackend::Impl {
 
         if (!has_user_id) {
             exec("ALTER TABLE memories ADD COLUMN user_id INTEGER REFERENCES users(id)");
-            std::cerr << "Migrated memories: added user_id column\n";
+            std::cerr << ragger::lang::MSG_MIGRATE_USER_ID << "\n";
         }
     }
 
@@ -203,7 +258,7 @@ struct SqliteBackend::Impl {
 
         if (has_collection) return;
 
-        std::cerr << "Migrating: adding collection, category, tags columns...\n";
+        std::cerr << ragger::lang::MSG_MIGRATE_DEDICATED_COLUMNS << "\n";
 
         exec("ALTER TABLE memories ADD COLUMN collection TEXT NOT NULL DEFAULT 'memory'");
         exec("ALTER TABLE memories ADD COLUMN category TEXT NOT NULL DEFAULT ''");
@@ -300,7 +355,7 @@ struct SqliteBackend::Impl {
         sqlite3_finalize(stmt);
         sqlite3_finalize(update_stmt);
 
-        std::cerr << "Migrated " << updated << " rows: collection/category/tags extracted\n";
+        std::cerr << std::format(ragger::lang::MSG_MIGRATE_DEDICATED_BACKFILL, updated) << "\n";
     }
 
     void migrate_add_token_rotated_at() {
@@ -316,7 +371,7 @@ struct SqliteBackend::Impl {
 
         if (!has_token_rotated_at) {
             exec("ALTER TABLE users ADD COLUMN token_rotated_at TEXT");
-            std::cerr << "Migrated users: added token_rotated_at column\n";
+            std::cerr << ragger::lang::MSG_MIGRATE_TOKEN_ROTATED_AT << "\n";
         }
     }
 
@@ -333,7 +388,7 @@ struct SqliteBackend::Impl {
 
         if (!has_preferred_model) {
             exec("ALTER TABLE users ADD COLUMN preferred_model TEXT");
-            std::cerr << "Migrated users: added preferred_model column\n";
+            std::cerr << ragger::lang::MSG_MIGRATE_PREFERRED_MODEL << "\n";
         }
     }
 
@@ -349,7 +404,7 @@ struct SqliteBackend::Impl {
 
         if (!has_password_hash) {
             exec("ALTER TABLE users ADD COLUMN password_hash TEXT");
-            std::cerr << "Migrated users: added password_hash column\n";
+            std::cerr << ragger::lang::MSG_MIGRATE_PASSWORD_HASH << "\n";
         }
     }
 
@@ -499,6 +554,7 @@ struct SqliteBackend::Impl {
             -1, &stmt, nullptr);
 
         std::vector<std::vector<float>> emb_rows;
+        const int expected_dims = config().embedding_dimensions;
 
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             cached_ids.push_back(sqlite3_column_int(stmt, 0));
@@ -508,8 +564,13 @@ struct SqliteBackend::Impl {
             const void* blob = sqlite3_column_blob(stmt, 2);
             int blob_bytes   = sqlite3_column_bytes(stmt, 2);
             int n_floats     = blob_bytes / sizeof(float);
-            std::vector<float> emb(n_floats);
-            std::memcpy(emb.data(), blob, blob_bytes);
+            // NULL or wrong-sized embedding (e.g. row written by deferred-
+            // embedding path before backfill ran) → zero vector. Cosine
+            // against any query yields 0; BM25 still scores from text.
+            std::vector<float> emb(expected_dims, 0.0f);
+            if (n_floats == expected_dims && blob != nullptr) {
+                std::memcpy(emb.data(), blob, blob_bytes);
+            }
             emb_rows.push_back(std::move(emb));
 
             // Reconstruct full metadata from columns + JSON blob
@@ -537,13 +598,14 @@ struct SqliteBackend::Impl {
         }
         sqlite3_finalize(stmt);
 
-        // Pack into Eigen matrix (rows × dims)
+        // Pack into Eigen matrix (rows × dims). Dimensions come from config
+        // — every emb_rows entry is already padded/zeroed to expected_dims
+        // so NULL-embedding rows don't poison the matrix shape.
         int n = static_cast<int>(emb_rows.size());
-        int dims = n > 0 ? static_cast<int>(emb_rows[0].size()) : config().embedding_dimensions;
-        cached_embeddings.resize(n, dims);
+        cached_embeddings.resize(n, expected_dims);
         for (int i = 0; i < n; ++i) {
             cached_embeddings.row(i) =
-                Eigen::Map<Eigen::RowVectorXf>(emb_rows[i].data(), dims);
+                Eigen::Map<Eigen::RowVectorXf>(emb_rows[i].data(), expected_dims);
         }
 
         // Build / load BM25 index
@@ -576,15 +638,23 @@ struct SqliteBackend::Impl {
 
     // ---- public API ---------------------------------------------------
 
-    std::string store(const std::string& raw_text, json metadata) {
+    std::string store(const std::string& raw_text, json metadata, bool defer_embedding) {
         // Ensure metadata is an object (default param may be null)
         if (metadata.is_null()) metadata = json::object();
 
         // Extract dedicated columns from metadata
-        std::string collection = metadata.value("collection", config().default_collection);
+        std::string collection = metadata.value("collection", std::string("memory"));
         std::string category = metadata.value("category", "");
+        // Optional historical timestamp override (used by imports of past
+        // conversations — Claude Code JSONL, claude.ai export, etc.).
+        // Must be an ISO-8601 UTC string; otherwise falls back to now.
+        std::string ts_override;
+        if (metadata.contains("timestamp") && metadata["timestamp"].is_string()) {
+            ts_override = metadata["timestamp"].get<std::string>();
+        }
         metadata.erase("collection");
         metadata.erase("category");
+        metadata.erase("timestamp");
 
         // Extract tags
         std::string tags_str;
@@ -615,11 +685,15 @@ struct SqliteBackend::Impl {
         // Normalize paths
         std::string text = normalize_path(raw_text);
 
-        // Compute embedding
-        auto emb = embedder->encode(text);
+        // Compute embedding unless deferred — caller (or startup backfill)
+        // will fill it in later.
+        std::vector<float> emb;
+        if (!defer_embedding) {
+            emb = embedder->encode(text);
+        }
 
-        // Timestamp
-        auto ts = now_iso();
+        // Timestamp — use explicit override from metadata if present
+        auto ts = ts_override.empty() ? now_iso() : ts_override;
 
         // Insert with dedicated columns
         sqlite3_stmt* stmt = nullptr;
@@ -629,9 +703,13 @@ struct SqliteBackend::Impl {
             -1, &stmt, nullptr);
 
         sqlite3_bind_text(stmt, 1, text.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_blob(stmt, 2, emb.data(),
-                          static_cast<int>(emb.size() * sizeof(float)),
-                          SQLITE_TRANSIENT);
+        if (defer_embedding) {
+            sqlite3_bind_null(stmt, 2);
+        } else {
+            sqlite3_bind_blob(stmt, 2, emb.data(),
+                              static_cast<int>(emb.size() * sizeof(float)),
+                              SQLITE_TRANSIENT);
+        }
         std::string meta_str = metadata.empty() ? "" : metadata.dump();
         if (meta_str.empty())
             sqlite3_bind_null(stmt, 3);
@@ -654,6 +732,106 @@ struct SqliteBackend::Impl {
         invalidate_cache();
 
         return std::to_string(memory_id);
+    }
+
+    bool update_text(int memory_id, const std::string& raw_text, json metadata, bool defer_embedding) {
+        if (metadata.is_null()) metadata = json::object();
+
+        // Refuse to mutate protected rows for parity with delete_memory.
+        sqlite3_stmt* check_stmt = nullptr;
+        sqlite3_prepare_v2(db, "SELECT tags FROM memories WHERE id = ?",
+                           -1, &check_stmt, nullptr);
+        sqlite3_bind_int(check_stmt, 1, memory_id);
+        bool exists = false;
+        bool protected_row = false;
+        if (sqlite3_step(check_stmt) == SQLITE_ROW) {
+            exists = true;
+            const char* tags = reinterpret_cast<const char*>(sqlite3_column_text(check_stmt, 0));
+            if (tags && std::string(tags).find("keep") != std::string::npos) {
+                protected_row = true;
+            }
+        }
+        sqlite3_finalize(check_stmt);
+        if (!exists || protected_row) return false;
+
+        // Mirror store()'s metadata extraction so the dedicated columns
+        // stay in sync if the caller changed collection/category/tags.
+        std::string collection = metadata.value("collection", std::string("memory"));
+        std::string category = metadata.value("category", "");
+        metadata.erase("collection");
+        metadata.erase("category");
+        metadata.erase("timestamp");  // never overwrite original timestamp here
+
+        std::string tags_str;
+        if (metadata.contains("tags")) {
+            auto& tv = metadata["tags"];
+            if (tv.is_array()) {
+                for (size_t i = 0; i < tv.size(); ++i) {
+                    if (i > 0) tags_str += ",";
+                    tags_str += tv[i].get<std::string>();
+                }
+            } else if (tv.is_string()) {
+                tags_str = tv.get<std::string>();
+            }
+            metadata.erase("tags");
+        }
+        if (metadata.value("keep", false)) {
+            if (tags_str.find("keep") == std::string::npos)
+                tags_str += (tags_str.empty() ? "" : ",") + std::string("keep");
+        }
+        metadata.erase("keep");
+        if (metadata.value("bad", false)) {
+            if (tags_str.find("bad") == std::string::npos)
+                tags_str += (tags_str.empty() ? "" : ",") + std::string("bad");
+        }
+        metadata.erase("bad");
+
+        std::string text = normalize_path(raw_text);
+        std::vector<float> emb;
+        if (!defer_embedding) {
+            emb = embedder->encode(text);
+        }
+
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db,
+            "UPDATE memories "
+            "SET text = ?, embedding = ?, metadata = ?, "
+            "    collection = ?, category = ?, tags = ? "
+            "WHERE id = ?",
+            -1, &stmt, nullptr);
+
+        sqlite3_bind_text(stmt, 1, text.c_str(), -1, SQLITE_TRANSIENT);
+        if (defer_embedding) {
+            sqlite3_bind_null(stmt, 2);
+        } else {
+            sqlite3_bind_blob(stmt, 2, emb.data(),
+                              static_cast<int>(emb.size() * sizeof(float)),
+                              SQLITE_TRANSIENT);
+        }
+        std::string meta_str = metadata.empty() ? "" : metadata.dump();
+        if (meta_str.empty())
+            sqlite3_bind_null(stmt, 3);
+        else
+            sqlite3_bind_text(stmt, 3, meta_str.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, collection.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, category.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 6, tags_str.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int (stmt, 7, memory_id);
+
+        int rc = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        if (rc != SQLITE_DONE) return false;
+
+        // Rebuild this row's BM25 tokens against the new text.
+        sqlite3_stmt* del = nullptr;
+        sqlite3_prepare_v2(db, "DELETE FROM bm25_index WHERE memory_id = ?",
+                           -1, &del, nullptr);
+        sqlite3_bind_int(del, 1, memory_id);
+        sqlite3_step(del);
+        sqlite3_finalize(del);
+        index_bm25_tokens(memory_id, text);
+        invalidate_cache();
+        return true;
     }
 
     SearchResponse search(const std::string& query, int limit,
@@ -913,7 +1091,8 @@ struct SqliteBackend::Impl {
             ++doc_count;
 
             // Print progress counter
-            std::cout << "\rRebuilding embeddings: " << doc_count << "/" << total_count;
+            std::cout << std::format(ragger::lang::MSG_REBUILD_EMBEDDINGS_PROGRESS,
+                                     doc_count, total_count);
             std::cout.flush();
         }
 
@@ -925,6 +1104,39 @@ struct SqliteBackend::Impl {
         
         invalidate_cache();
         return doc_count;
+    }
+
+    int backfill_embeddings(Embedder& emb_ref) {
+        sqlite3_stmt* select_stmt = nullptr;
+        sqlite3_prepare_v2(db,
+            "SELECT id, text FROM memories WHERE embedding IS NULL",
+            -1, &select_stmt, nullptr);
+
+        sqlite3_stmt* update_stmt = nullptr;
+        sqlite3_prepare_v2(db,
+            "UPDATE memories SET embedding = ? WHERE id = ?",
+            -1, &update_stmt, nullptr);
+
+        int updated = 0;
+        while (sqlite3_step(select_stmt) == SQLITE_ROW) {
+            int id = sqlite3_column_int(select_stmt, 0);
+            const char* text = reinterpret_cast<const char*>(sqlite3_column_text(select_stmt, 1));
+            if (!text) continue;
+
+            auto emb = emb_ref.encode(text);
+            sqlite3_bind_blob(update_stmt, 1, emb.data(),
+                              static_cast<int>(emb.size() * sizeof(float)),
+                              SQLITE_TRANSIENT);
+            sqlite3_bind_int(update_stmt, 2, id);
+            sqlite3_step(update_stmt);
+            sqlite3_reset(update_stmt);
+            ++updated;
+        }
+        sqlite3_finalize(select_stmt);
+        sqlite3_finalize(update_stmt);
+
+        if (updated > 0) invalidate_cache();
+        return updated;
     }
 
     std::vector<std::string> collections() const {
@@ -1123,8 +1335,12 @@ SqliteBackend::~SqliteBackend() = default;
 
 std::string SqliteBackend::db_path() const { return pImpl->db_path; }
 
-std::string SqliteBackend::store(const std::string& text, json metadata) {
-    return pImpl->store(text, std::move(metadata));
+std::string SqliteBackend::store(const std::string& text, json metadata, bool defer_embedding) {
+    return pImpl->store(text, std::move(metadata), defer_embedding);
+}
+
+bool SqliteBackend::update_text(int memory_id, const std::string& text, json metadata, bool defer_embedding) {
+    return pImpl->update_text(memory_id, text, std::move(metadata), defer_embedding);
 }
 
 SearchResponse SqliteBackend::search(const std::string& query, int limit,
@@ -1143,6 +1359,10 @@ int SqliteBackend::rebuild_bm25() { return pImpl->rebuild_bm25(); }
 
 int SqliteBackend::rebuild_embeddings(Embedder& embedder) {
     return pImpl->rebuild_embeddings(embedder);
+}
+
+int SqliteBackend::backfill_embeddings(Embedder& embedder) {
+    return pImpl->backfill_embeddings(embedder);
 }
 
 std::vector<std::string> SqliteBackend::collections() const {

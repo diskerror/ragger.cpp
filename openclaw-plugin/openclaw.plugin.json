@@ -51,7 +51,7 @@
     "serverCommand": {
       "label": "Server Command",
       "help": "Path to ragger binary. If set, the plugin will auto-start the HTTP server when it's not running.",
-      "placeholder": "/usr/local/bin/ragger"
+      "placeholder": "~/.local/bin/ragger"
     },
     "serverArgs": {
       "label": "Server Arguments",
