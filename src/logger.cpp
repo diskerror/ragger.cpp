@@ -11,9 +11,9 @@
 #include <sstream>
 #include <string>
 
-#include "ragger/logger.h"
+#include "diskerror/logger.h"
 
-namespace ragger {
+namespace Diskerror {
 
 std::mutex logger::logMutex;
 std::ofstream logger::logFile;
@@ -126,4 +126,4 @@ std::string logger::get_timestamp() {
     return oss.str();
 }
 
-} // ragger
+} // namespace Diskerror

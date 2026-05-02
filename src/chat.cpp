@@ -4,7 +4,7 @@
 #include "ragger/chat.h"
 #include "ragger/config.h"
 #include "ragger/lang.h"
-#include "ragger/logger.h"
+#include "diskerror/logger.h"
 #include "ragger/memory.h"
 #include "ragger/inference.h"
 #include <unistd.h>  // fork, _exit
@@ -209,7 +209,7 @@ int Chat::store_partial_turn(const std::string &user_text) {
         return std::stoi(id_str);
     }
     catch (const std::exception &e) {
-        logger::warn(std::format(ragger::lang::WARN_STORE_TURN, e.what()));
+        Diskerror::logger::warn(std::format(ragger::lang::WARN_STORE_TURN, e.what()));
         return -1;
     }
 }
@@ -333,7 +333,7 @@ void Chat::check_orphaned_turns() {
             return;
         }
 
-        logger::info(std::format(ragger::lang::MSG_ORPHAN_FOUND, orphaned_turns.size()));
+        Diskerror::logger::info(std::format(ragger::lang::MSG_ORPHAN_FOUND, orphaned_turns.size()));
 
         // Reconstruct user/assistant pairs by splitting on the U+001F
         // unit separator. Rows without the separator are partial turns
@@ -461,7 +461,7 @@ void Chat::quit_summary() {
         return;
     }
 
-    logger::info(ragger::lang::MSG_SUMMARIZING);
+    Diskerror::logger::info(ragger::lang::MSG_SUMMARIZING);
     bg_summarize(turns_as_pairs());
 }
 

@@ -2,8 +2,8 @@
 // Created by Reid Woodbury Jr on 4/28/26.
 //
 
-#ifndef RAGGER_LOGGER_H
-#define RAGGER_LOGGER_H
+#ifndef DISKERROR_LOGGER_H
+#define DISKERROR_LOGGER_H
 
 #include <fstream>
 #include <functional>
@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-namespace ragger {
+namespace Diskerror {
 
 class logger {
     static unsigned int instanceCount;
@@ -33,6 +33,6 @@ public:
     static std::function<void(std::string const&)> critical;
 };
 
-} // ragger
+} // namespace Diskerror
 
-#endif //RAGGER_LOGGER_H
+#endif //DISKERROR_LOGGER_H

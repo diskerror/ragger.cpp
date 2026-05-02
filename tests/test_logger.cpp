@@ -5,7 +5,7 @@
  * file output, timestamps, and destructor cleanup.
  * Uses a temp file that is removed after each test group.
  */
-#include "ragger/logger.h"
+#include "diskerror/logger.h"
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -35,8 +35,8 @@ int main() {
     std::println("  test_file_created...");
     cleanup();
     {
-        ragger::logger log(LOG_FILE, "info");
-        ragger::logger::info("startup message");
+        Diskerror::logger log(LOG_FILE, "info");
+        Diskerror::logger::info("startup message");
     }
     assert(fs::exists(LOG_FILE));
     auto content = read_file(LOG_FILE);
@@ -47,12 +47,12 @@ int main() {
     std::println("  test_destructor_closes_file...");
     cleanup();
     {
-        ragger::logger log(LOG_FILE, "info");
-        ragger::logger::info("first run");
+        Diskerror::logger log(LOG_FILE, "info");
+        Diskerror::logger::info("first run");
     }
     {
-        ragger::logger log(LOG_FILE, "info");
-        ragger::logger::info("second run");
+        Diskerror::logger log(LOG_FILE, "info");
+        Diskerror::logger::info("second run");
     }
     content = read_file(LOG_FILE);
     assert(content.find("first run") != std::string::npos);
@@ -63,11 +63,11 @@ int main() {
     std::println("  test_level_filtering_warn...");
     cleanup();
     {
-        ragger::logger log(LOG_FILE, "warn");
-        ragger::logger::debug("should not appear");
-        ragger::logger::info("should not appear either");
-        ragger::logger::warn("visible warning");
-        ragger::logger::error("visible error");
+        Diskerror::logger log(LOG_FILE, "warn");
+        Diskerror::logger::debug("should not appear");
+        Diskerror::logger::info("should not appear either");
+        Diskerror::logger::warn("visible warning");
+        Diskerror::logger::error("visible error");
     }
     content = read_file(LOG_FILE);
     assert(content.find("should not appear") == std::string::npos);
@@ -80,13 +80,13 @@ int main() {
     std::println("  test_level_filtering_trace...");
     cleanup();
     {
-        ragger::logger log(LOG_FILE, "trace");
-        ragger::logger::trace("t msg");
-        ragger::logger::debug("d msg");
-        ragger::logger::info("i msg");
-        ragger::logger::warn("w msg");
-        ragger::logger::error("e msg");
-        ragger::logger::critical("c msg");
+        Diskerror::logger log(LOG_FILE, "trace");
+        Diskerror::logger::trace("t msg");
+        Diskerror::logger::debug("d msg");
+        Diskerror::logger::info("i msg");
+        Diskerror::logger::warn("w msg");
+        Diskerror::logger::error("e msg");
+        Diskerror::logger::critical("c msg");
     }
     content = read_file(LOG_FILE);
     assert(content.find("[TRACE]") != std::string::npos);
@@ -101,13 +101,13 @@ int main() {
     std::println("  test_level_filtering_critical...");
     cleanup();
     {
-        ragger::logger log(LOG_FILE, "critical");
-        ragger::logger::trace("no");
-        ragger::logger::debug("no");
-        ragger::logger::info("no");
-        ragger::logger::warn("no");
-        ragger::logger::error("no");
-        ragger::logger::critical("yes critical");
+        Diskerror::logger log(LOG_FILE, "critical");
+        Diskerror::logger::trace("no");
+        Diskerror::logger::debug("no");
+        Diskerror::logger::info("no");
+        Diskerror::logger::warn("no");
+        Diskerror::logger::error("no");
+        Diskerror::logger::critical("yes critical");
     }
     content = read_file(LOG_FILE);
     assert(content.find("yes critical") != std::string::npos);
@@ -121,8 +121,8 @@ int main() {
     std::println("  test_timestamp_format...");
     cleanup();
     {
-        ragger::logger log(LOG_FILE, "info");
-        ragger::logger::info("timestamp check");
+        Diskerror::logger log(LOG_FILE, "info");
+        Diskerror::logger::info("timestamp check");
     }
     content = read_file(LOG_FILE);
     assert(content.find("202") != std::string::npos);
@@ -136,8 +136,8 @@ int main() {
     std::println("  test_log_tags...");
     cleanup();
     {
-        ragger::logger log(LOG_FILE, "info");
-        ragger::logger::info("tag test");
+        Diskerror::logger log(LOG_FILE, "info");
+        Diskerror::logger::info("tag test");
     }
     content = read_file(LOG_FILE);
     assert(content.find("[INFO ]") != std::string::npos);
@@ -147,9 +147,9 @@ int main() {
     std::println("  test_invalid_level_defaults_to_warn...");
     cleanup();
     {
-        ragger::logger log(LOG_FILE, "nonsense");
-        ragger::logger::info("should be hidden");
-        ragger::logger::warn("should be visible");
+        Diskerror::logger log(LOG_FILE, "nonsense");
+        Diskerror::logger::info("should be hidden");
+        Diskerror::logger::warn("should be visible");
     }
     content = read_file(LOG_FILE);
     assert(content.find("should be hidden") == std::string::npos);
@@ -160,10 +160,10 @@ int main() {
     std::println("  test_accumulation...");
     cleanup();
     {
-        ragger::logger log(LOG_FILE, "info");
-        ragger::logger::info("line one");
-        ragger::logger::info("line two");
-        ragger::logger::info("line three");
+        Diskerror::logger log(LOG_FILE, "info");
+        Diskerror::logger::info("line one");
+        Diskerror::logger::info("line two");
+        Diskerror::logger::info("line three");
     }
     content = read_file(LOG_FILE);
     assert(content.find("line one") != std::string::npos);
@@ -176,7 +176,7 @@ int main() {
     {
         bool threw = false;
         try {
-            ragger::logger log("/no/such/directory/bad.log", "info");
+            Diskerror::logger log("/no/such/directory/bad.log", "info");
         } catch (const std::runtime_error& e) {
             threw = true;
             assert(std::string(e.what()).find("failed to open") != std::string::npos);

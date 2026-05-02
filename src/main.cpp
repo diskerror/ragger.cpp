@@ -33,7 +33,7 @@
 #include "ragger/import.h"
 #include "ragger/inference.h"
 #include "ragger/lang.h"
-#include "ragger/logger.h"
+#include "diskerror/logger.h"
 #include "ragger/mcp.h"
 #include "ragger/memory.h"
 #include "ragger/sqlite_backend.h"
@@ -94,7 +94,7 @@ static void do_chat(const std::string &db_path, const std::string &model_dir,
         bool existed = std::filesystem::exists(dump_payloads_dir);
         std::filesystem::create_directories(dump_payloads_dir, ec);
         if (ec) {
-            ragger::logger::error(std::format(ragger::lang::ERR_PAYLOAD_DUMP_DIR, dump_payloads_dir, ec.message()));
+            Diskerror::logger::error(std::format(ragger::lang::ERR_PAYLOAD_DUMP_DIR, dump_payloads_dir, ec.message()));
             return;
         }
         if (!existed) {
@@ -143,11 +143,11 @@ static void do_chat(const std::string &db_path, const std::string &model_dir,
             curl_easy_cleanup(curl);
 
             if (res != CURLE_OK) {
-                ragger::logger::error(std::format(ragger::lang::ERR_ENDPOINT_UNREACHABLE, ep.name, ep.api_url, curl_easy_strerror(res)));
+                Diskerror::logger::error(std::format(ragger::lang::ERR_ENDPOINT_UNREACHABLE, ep.name, ep.api_url, curl_easy_strerror(res)));
                 return;
             }
             if (http_code >= 400) {
-                ragger::logger::error(std::format(ragger::lang::ERR_ENDPOINT_HTTP, ep.name, http_code));
+                Diskerror::logger::error(std::format(ragger::lang::ERR_ENDPOINT_HTTP, ep.name, http_code));
                 return;
             }
         }
@@ -230,7 +230,7 @@ static int daemon_control(const std::string &action) {
     struct passwd *pw = getpwuid(getuid());
     std::string home = pw ? pw->pw_dir : (std::getenv("HOME") ? std::getenv("HOME") : "");
     if (home.empty()) {
-        ragger::logger::error(ragger::lang::ERR_HOME_NOT_FOUND);
+        Diskerror::logger::error(ragger::lang::ERR_HOME_NOT_FOUND);
         return 1;
     }
 
@@ -257,7 +257,7 @@ static int daemon_control(const std::string &action) {
 
     auto ensure_plist = [&]() -> bool {
         if (fs::exists(plist)) return true;
-        ragger::logger::error(std::format(ragger::lang::ERR_PLIST_NOT_FOUND, plist));
+        Diskerror::logger::error(std::format(ragger::lang::ERR_PLIST_NOT_FOUND, plist));
         return false;
     };
 
@@ -269,13 +269,13 @@ static int daemon_control(const std::string &action) {
         }
         if (is_loaded()) {
             if (!run_quiet("launchctl kickstart " + target)) {
-                ragger::logger::error(ragger::lang::ERR_LAUNCHCTL_KICKSTART);
+                Diskerror::logger::error(ragger::lang::ERR_LAUNCHCTL_KICKSTART);
                 return 1;
             }
         }
         else {
             if (!run_quiet("launchctl bootstrap " + domain + " " + plist)) {
-                ragger::logger::error(ragger::lang::ERR_LAUNCHCTL_BOOTSTRAP);
+                Diskerror::logger::error(ragger::lang::ERR_LAUNCHCTL_BOOTSTRAP);
                 return 1;
             }
         }
@@ -291,7 +291,7 @@ static int daemon_control(const std::string &action) {
         bool daemon_was_running = is_loaded() && is_running();
         if (daemon_was_running) {
             if (!run_quiet("launchctl bootout " + target)) {
-                ragger::logger::error(ragger::lang::ERR_LAUNCHCTL_BOOTOUT);
+                Diskerror::logger::error(ragger::lang::ERR_LAUNCHCTL_BOOTOUT);
                 return 1;
             }
         }
@@ -336,7 +336,7 @@ static int daemon_control(const std::string &action) {
         kill_other_ragger_instances();
 
         if (!run_quiet("launchctl bootstrap " + domain + " " + plist)) {
-            ragger::logger::critical(ragger::lang::ERR_LAUNCHCTL_BOOTSTRAP);
+            Diskerror::logger::critical(ragger::lang::ERR_LAUNCHCTL_BOOTSTRAP);
             return 1;
         }
         auto pid = get_pid();
@@ -368,7 +368,7 @@ static int daemon_control(const std::string &action) {
         return 0;
     }
 
-    ragger::logger::critical(std::format(ragger::lang::ERR_UNKNOWN_ACTION, action));
+    Diskerror::logger::critical(std::format(ragger::lang::ERR_UNKNOWN_ACTION, action));
     return 1;
 
 #elif defined(__linux__)
@@ -397,7 +397,7 @@ static int daemon_control(const std::string &action) {
             return 0;
         }
         if (!run_quiet("systemctl --user start " + unit)) {
-            ragger::logger::critical(ragger::lang::ERR_SYSTEMCTL_START);
+            Diskerror::logger::critical(ragger::lang::ERR_SYSTEMCTL_START);
             return 1;
         }
         auto pid = main_pid();
@@ -412,7 +412,7 @@ static int daemon_control(const std::string &action) {
         bool daemon_was_running = is_active();
         if (daemon_was_running) {
             if (!run_quiet("systemctl --user stop " + unit)) {
-                ragger::logger::critical(ragger::lang::ERR_SYSTEMCTL_STOP);
+                Diskerror::logger::critical(ragger::lang::ERR_SYSTEMCTL_STOP);
                 return 1;
             }
         }
@@ -445,7 +445,7 @@ static int daemon_control(const std::string &action) {
         if (was_active) run_quiet("systemctl --user stop " + unit);
         kill_other_ragger_instances();
         if (!run_quiet("systemctl --user start " + unit)) {
-            ragger::logger::critical(ragger::lang::ERR_SYSTEMCTL_START);
+            Diskerror::logger::critical(ragger::lang::ERR_SYSTEMCTL_START);
             return 1;
         }
         auto pid = main_pid();
@@ -477,10 +477,10 @@ static int daemon_control(const std::string &action) {
         return 0;
     }
 
-    ragger::logger::critical(std::format(ragger::lang::ERR_UNKNOWN_ACTION, action));
+    Diskerror::logger::critical(std::format(ragger::lang::ERR_UNKNOWN_ACTION, action));
     return 1;
 #else
-    ragger::logger::error(ragger::lang::ERR_DAEMON_UNSUPPORTED);
+    Diskerror::logger::error(ragger::lang::ERR_DAEMON_UNSUPPORTED);
     return 1;
 #endif
 }
@@ -665,7 +665,7 @@ int main(int argc, char **argv) {
     const auto &cfg = ragger::config();
 
     //  Initialize static logging system.
-    ragger::logger log(cfg.log_file, cfg.log_level);
+    Diskerror::logger log(cfg.log_file, cfg.log_level);
 
     // CLI overrides
     if (opts.count("lm-proxy-url"))
@@ -694,7 +694,7 @@ int main(int argc, char **argv) {
             auto &memory = *mem_ptr;
             char buf[128];
             std::snprintf(buf, sizeof(buf), MSG_LOADED_MEMORIES, memory.count());
-            ragger::logger::info(buf);
+            Diskerror::logger::info(buf);
 
             ragger::Server server(memory, host, port);
             server.run();
@@ -710,7 +710,7 @@ int main(int argc, char **argv) {
         else if (command == "search") {
             auto args = opts.getParams("args");
             if (args.empty()) {
-                ragger::logger::error(CLI_USAGE_SEARCH);
+                Diskerror::logger::error(CLI_USAGE_SEARCH);
                 return 1;
             }
             std::string query;
@@ -751,7 +751,7 @@ int main(int argc, char **argv) {
         else if (command == "store") {
             auto args = opts.getParams("args");
             if (args.empty()) {
-                ragger::logger::error(CLI_USAGE_STORE);
+                Diskerror::logger::error(CLI_USAGE_STORE);
                 return 1;
             }
             std::string text;
@@ -800,7 +800,7 @@ int main(int argc, char **argv) {
         else if (command == "import") {
             auto args = opts.getParams("args");
             if (args.empty()) {
-                ragger::logger::error(ragger::lang::CLI_USAGE_IMPORT);
+                Diskerror::logger::error(ragger::lang::CLI_USAGE_IMPORT);
                 return 1;
             }
             ragger::RaggerMemory memory(db_path, model_dir);
@@ -855,7 +855,7 @@ int main(int argc, char **argv) {
                 std::println(ragger::lang::MSG_DB_BACKED_UP, backup_path);
             }
             catch (const std::exception &e) {
-                ragger::logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
+                Diskerror::logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
             }
 
             // Rebuild embeddings
@@ -880,7 +880,7 @@ int main(int argc, char **argv) {
             // (use `usermod <name>` to rotate an existing user's token).
             auto args = opts.getParams("args");
             if (args.empty()) {
-                ragger::logger::critical(ragger::lang::CLI_USAGE_USERADD);
+                Diskerror::logger::critical(ragger::lang::CLI_USAGE_USERADD);
                 return 1;
             }
             std::string username = args[0];
@@ -888,7 +888,7 @@ int main(int argc, char **argv) {
             try {
                 ragger::SqliteBackend storage(cfg.resolved_db_path());
                 if (storage.get_user_by_username(username)) {
-                    ragger::logger::error(std::format(ragger::lang::ERR_USERADD_EXISTS, username) + "\n"
+                    Diskerror::logger::error(std::format(ragger::lang::ERR_USERADD_EXISTS, username) + "\n"
                                           + std::format(ragger::lang::ERR_USERADD_EXISTS_HINT, username));
                     return 1;
                 }
@@ -902,7 +902,7 @@ int main(int argc, char **argv) {
                 std::println("{}", ragger::lang::MSG_TOKEN_SAVE_WARNING);
             }
             catch (const std::exception &e) {
-                ragger::logger::critical("Error: " + std::string(e.what()));
+                Diskerror::logger::critical("Error: " + std::string(e.what()));
                 return 1;
             }
 
@@ -912,7 +912,7 @@ int main(int argc, char **argv) {
             // Errors if the user does not exist.
             auto args = opts.getParams("args");
             if (args.empty()) {
-                ragger::logger::error(ragger::lang::CLI_USAGE_USERMOD);
+                Diskerror::logger::error(ragger::lang::CLI_USAGE_USERMOD);
                 return 1;
             }
             std::string username = args[0];
@@ -920,7 +920,7 @@ int main(int argc, char **argv) {
             try {
                 ragger::SqliteBackend storage(cfg.resolved_db_path());
                 if (!storage.get_user_by_username(username)) {
-                    ragger::logger::error(std::format(ragger::lang::ERR_USERMOD_MISSING, username) + "\n"
+                    Diskerror::logger::error(std::format(ragger::lang::ERR_USERMOD_MISSING, username) + "\n"
                                           + std::format(ragger::lang::ERR_USERMOD_MISSING_HINT, username));
                     return 1;
                 }
@@ -934,7 +934,7 @@ int main(int argc, char **argv) {
                 std::println("{}", ragger::lang::MSG_TOKEN_SAVE_WARNING);
             }
             catch (const std::exception &e) {
-                ragger::logger::critical("Error: " + std::string(e.what()));
+                Diskerror::logger::critical("Error: " + std::string(e.what()));
                 return 1;
             }
 
@@ -942,7 +942,7 @@ int main(int argc, char **argv) {
         else if (command == "userdel") {
             auto args = opts.getParams("args");
             if (args.empty()) {
-                ragger::logger::critical(ragger::lang::CLI_USAGE_USERDEL);
+                Diskerror::logger::critical(ragger::lang::CLI_USAGE_USERDEL);
                 return 1;
             }
             std::string username = args[0];
@@ -953,7 +953,7 @@ int main(int argc, char **argv) {
                 std::println(ragger::lang::MSG_USER_REMOVED, username);
             }
             catch (const std::exception &e) {
-                ragger::logger::critical("Error: " + std::string(e.what()));
+                Diskerror::logger::critical("Error: " + std::string(e.what()));
                 return 1;
             }
 
@@ -963,7 +963,7 @@ int main(int argc, char **argv) {
             struct passwd *self_pw = getpwuid(getuid());
             char *login = self_pw ? self_pw->pw_name : nullptr;
             if (!login) {
-                ragger::logger::error(ragger::lang::ERR_UNKNOWN_USER);
+                Diskerror::logger::error(ragger::lang::ERR_UNKNOWN_USER);
                 return 1;
             }
             std::string username(login);
@@ -1002,7 +1002,7 @@ int main(int argc, char **argv) {
         } else if (command == "add-user") {
                     auto args = opts.getParams("args");
                 if (args.empty()) {
-                    ragger::logger::error("Usage: ragger add-user <username>");
+                    Diskerror::logger::error("Usage: ragger add-user <username>");
                     return 1;
                 }
                 std::string username = args[0];
@@ -1023,7 +1023,7 @@ int main(int argc, char **argv) {
             if (std::system(cmd.c_str()) == 0)
                 std::println("✓ Added {} to ragger group", username);
             else
-                ragger::logger::error("Warning: could not add " + username + " to ragger group");
+                Diskerror::logger::error("Warning: could not add " + username + " to ragger group");
                 }
             // Register in DB
             std::string reg_db = cfg.resolved_db_path();
@@ -1040,7 +1040,7 @@ int main(int argc, char **argv) {
                 std::println("✓ Registered in database (user_id: {})", user_id);
             }
             } catch (const std::exception &e) {
-                ragger::logger::critical("Error: " + std::string(e.what()));
+                Diskerror::logger::critical("Error: " + std::string(e.what()));
                 return 1;
             }
             std::println("\nToken file: ~{}/.ragger/token", username);
@@ -1050,7 +1050,7 @@ int main(int argc, char **argv) {
         }
         else if (command == "add-all") {
             if (getuid() != 0) {
-                ragger::logger::error("Error: add-all requires sudo");
+                Diskerror::logger::error("Error: add-all requires sudo");
                 return 1;
             }
             // Non-login shells — service accounts use these
@@ -1142,11 +1142,11 @@ int main(int argc, char **argv) {
         else if (command == "remove-user") {
             auto args = opts.getParams("args");
             if (args.empty()) {
-                ragger::logger::critical("Usage: ragger remove-user <username>");
+                Diskerror::logger::critical("Usage: ragger remove-user <username>");
                 return 1;
             }
             if (getuid() != 0) {
-                ragger::logger::error("Error: remove-user requires sudo");
+                Diskerror::logger::error("Error: remove-user requires sudo");
                 return 1;
             }
             std::string username = args[0];
@@ -1179,7 +1179,7 @@ int main(int argc, char **argv) {
                 }
             }
             catch (const std::exception &e) {
-                ragger::logger::critical("Warning: database removal: " + std::string(e.what()));
+                Diskerror::logger::critical("Warning: database removal: " + std::string(e.what()));
             }
 
             // 3. Remove token (keep ~/.ragger/ data — sudoer can remove manually)
@@ -1208,7 +1208,7 @@ int main(int argc, char **argv) {
             // Empty password clears web-UI access for that user.
             auto args = opts.getParams("args");
             if (args.empty()) {
-                ragger::logger::error(ragger::lang::CLI_USAGE_PASSWD);
+                Diskerror::logger::error(ragger::lang::CLI_USAGE_PASSWD);
                 return 1;
             }
             std::string target_user = args[0];
@@ -1217,7 +1217,7 @@ int main(int argc, char **argv) {
                 ragger::SqliteBackend umgr(cfg.resolved_db_path());
                 auto user_info = umgr.get_user_by_username(target_user);
                 if (!user_info) {
-                    ragger::logger::error(std::format(ragger::lang::ERR_USERMOD_MISSING, target_user) + "\n"
+                    Diskerror::logger::error(std::format(ragger::lang::ERR_USERMOD_MISSING, target_user) + "\n"
                                           + std::format(ragger::lang::ERR_PASSWD_MISSING_HINT, target_user));
                     return 1;
                 }
@@ -1230,7 +1230,7 @@ int main(int argc, char **argv) {
                 else {
                     std::string confirm = read_password(ragger::lang::PROMPT_CONFIRM_PASSWORD);
                     if (new_pass != confirm) {
-                        ragger::logger::critical(ragger::lang::ERR_PASSWORDS_DIFFER);
+                        Diskerror::logger::critical(ragger::lang::ERR_PASSWORDS_DIFFER);
                         return 1;
                     }
                     std::string hash = ragger::hash_password(new_pass);
@@ -1239,7 +1239,7 @@ int main(int argc, char **argv) {
                 }
             }
             catch (const std::exception &e) {
-                ragger::logger::critical("Error: " + std::string(e.what()));
+                Diskerror::logger::critical("Error: " + std::string(e.what()));
                 return 1;
             }
 
@@ -1262,23 +1262,23 @@ int main(int argc, char **argv) {
             catch (...) {
             }
             if (daemon_pid <= 0) {
-                ragger::logger::error("Error: no running ragger daemon found");
+                Diskerror::logger::error("Error: no running ragger daemon found");
                 return 1;
             }
             if (kill(daemon_pid, 0) != 0) {
-                ragger::logger::error(std::format("Error: daemon (pid {}) is not running", daemon_pid));
+                Diskerror::logger::error(std::format("Error: daemon (pid {}) is not running", daemon_pid));
                 return 1;
             }
             if (kill(daemon_pid, SIGUSR1) != 0) {
                 if (errno == EPERM) {
-                    ragger::logger::error("Permission denied. Use sudo to signal the daemon.");
+                    Diskerror::logger::error("Permission denied. Use sudo to signal the daemon.");
                 }
                 else {
-                    ragger::logger::error(std::format("Failed to signal process: {}", strerror(errno)));
+                    Diskerror::logger::error(std::format("Failed to signal process: {}", strerror(errno)));
                 }
                 return 1;
             }
-            ragger::logger::info(std::format("✓ Housekeeping triggered (pid {})", daemon_pid));
+            Diskerror::logger::info(std::format("✓ Housekeeping triggered (pid {})", daemon_pid));
 
         }
         else if (command == "reload") {
@@ -1302,14 +1302,14 @@ int main(int argc, char **argv) {
             }
 
             if (daemon_pid <= 0) {
-                ragger::logger::error(ragger::lang::ERR_DAEMON_NOT_FOUND);
+                Diskerror::logger::error(ragger::lang::ERR_DAEMON_NOT_FOUND);
                 return 1;
             }
             if (kill(daemon_pid, SIGHUP) != 0) {
                 std::cerr << std::format(ragger::lang::ERR_SIGNAL_FAILED, strerror(errno)) << "\n";
                 return 1;
             }
-            ragger::logger::error(std::format(ragger::lang::MSG_CONFIG_RELOAD_OK, daemon_pid));
+            Diskerror::logger::error(std::format(ragger::lang::MSG_CONFIG_RELOAD_OK, daemon_pid));
 
         }
         else {
@@ -1318,7 +1318,7 @@ int main(int argc, char **argv) {
         }
     }
     catch (const std::exception &e) {
-        ragger::logger::critical(std::format("Error: {}", e.what()));
+        Diskerror::logger::critical(std::format("Error: {}", e.what()));
         return 1;
     }
 
