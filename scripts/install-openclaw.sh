@@ -28,7 +28,7 @@ if [ "$(id -u)" -eq 0 ]; then
     fail "Do NOT run install-openclaw.sh as root."
 fi
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 SRC="$(pwd)"
 
 OPENCLAW_HOME="$HOME/.openclaw"

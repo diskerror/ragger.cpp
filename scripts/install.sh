@@ -32,7 +32,7 @@ if [ "$(id -u)" -eq 0 ]; then
     fail "Do NOT run install.sh as root. It installs into your own ~/.ragger/."
 fi
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 SRC="$(pwd)"
 OS="$(uname -s)"
 

@@ -105,10 +105,10 @@ target_compile_definitions(vendor_headers INTERFACE CPPHTTPLIB_OPENSSL_SUPPORT)
 # c_lib — ProgramOptions (hard-linked from c_lib)
 # ---------------------------------------------------------------------------
 add_library(c_lib_po STATIC
-    ProgramOptions.cpp
+    src/program_options.cpp
 )
 target_include_directories(c_lib_po PUBLIC
-    "${CMAKE_SOURCE_DIR}"
+    "${CMAKE_SOURCE_DIR}/include"
 )
 target_link_libraries(c_lib_po PUBLIC Boost::program_options)
 

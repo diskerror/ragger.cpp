@@ -25,7 +25,7 @@
 #include <curl/curl.h>
 #include <print>
 
-#include "ProgramOptions.h"
+#include "diskerror/program_options.h"
 #include "ragger/auth.h"
 #include "ragger/chat.h"
 #include "ragger/client.h"

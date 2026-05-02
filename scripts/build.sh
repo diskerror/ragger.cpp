@@ -23,7 +23,7 @@ if [ ${#missing[@]} -gt 0 ]; then
     exit 1
 fi
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 BUILD_DIR="build"
 
 if [ "${1:-}" = "clean" ]; then
@@ -86,4 +86,4 @@ make -j"$JOBS"
 
 echo ""
 echo "✓ Built: $(pwd)/ragger"
-echo "  Install with: ./install.sh"
+echo "  Install with: ./scripts/install.sh"
