@@ -29,7 +29,7 @@ models/model.onnx
 
 # OS
 .DS_Store
-deploy.sh
+scripts/deploy.sh
 
 # Private design/planning notes — kept locally, not published
 DESIGN_FADING_MEMORY.md
