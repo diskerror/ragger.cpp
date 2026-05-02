@@ -607,50 +607,48 @@ int main(int argc, char **argv) {
         opts.run(argc, argv);
     }
     catch (const std::exception &e) {
-        std::cerr << "Error: " << e.what() << "\n";
+        std::cerr << std::format(ragger::lang::ERR_GENERIC, e.what()) << "\n";
         return 1;
     }
 
     auto command = opts["command"].as<std::string>();
 
     if (opts.count("help") || command == "help") {
-        std::cout << "ragger " << RAGGER_VERSION << "\n\n";
-        std::cout << "Usage: ragger <command> [options] [args]\n\n";
-        std::cout << "Commands:\n";
-        std::cout << "  start              Start the background daemon (user LaunchAgent / systemd --user)\n";
-        std::cout << "  stop               Stop the background daemon\n";
-        std::cout << "  restart            Restart the background daemon\n";
-        std::cout << "  status             Show daemon status\n";
-        std::cout << "  serve              Run the server in the foreground (what the daemon invokes)\n";
-        std::cout << "  search <query>     Search memories by meaning\n";
-        std::cout << "  store <text>       Store a new memory\n";
-        std::cout << "  count              Show number of stored memories\n";
-        std::cout << "  import <file...>   Import files (paragraph-aware chunking)\n";
-        std::cout << "  chat               Interactive chat with memory context\n";
-        std::cout << "  mcp                Start MCP server (JSON-RPC over stdin/stdout)\n";
-        std::cout << "  useradd <name>     Create a user and issue a bearer token (printed once)\n";
-        std::cout << "  usermod <name>     Rotate an existing user's bearer token (printed once)\n";
-        std::cout << "  userdel <name>     Remove a user and revoke their token\n";
-        std::cout << "  passwd <name>      Set (or clear) a user's web-UI login password\n";
-        std::cout << "  add-self           Bootstrap ~/.ragger/token for the current user\n";
-        std::cout << "  housekeeping       Trigger housekeeping on running daemon\n";
-        std::cout << "  reload             Reload config on running daemon (SIGHUP)\n";
-        std::cout << "                     options: --user <name>, --dry-run\n";
-        std::cout << "  rebuild-bm25       Rebuild the BM25 keyword index\n";
-        std::cout << "  rebuild-embeddings Rebuild embeddings for all memories\n";
-        std::cout << "  show-embedding-model  Show current embedding model info\n";
+        std::cout << std::format(ragger::lang::HELP_VERSION_HEADER, RAGGER_VERSION) << "\n\n";
+        std::cout << ragger::lang::HELP_USAGE_HEADER << "\n\n";
+        std::cout << ragger::lang::HELP_COMMANDS_HEADER << "\n";
+        std::cout << ragger::lang::HELP_CMD_START << "\n";
+        std::cout << ragger::lang::HELP_CMD_STOP << "\n";
+        std::cout << ragger::lang::HELP_CMD_RESTART << "\n";
+        std::cout << ragger::lang::HELP_CMD_STATUS << "\n";
+        std::cout << ragger::lang::HELP_CMD_SERVE << "\n";
+        std::cout << ragger::lang::HELP_CMD_SEARCH << "\n";
+        std::cout << ragger::lang::HELP_CMD_STORE << "\n";
+        std::cout << ragger::lang::HELP_CMD_COUNT << "\n";
+        std::cout << ragger::lang::HELP_CMD_IMPORT << "\n";
+        std::cout << ragger::lang::HELP_CMD_CHAT << "\n";
+        std::cout << ragger::lang::HELP_CMD_MCP << "\n";
+        std::cout << ragger::lang::HELP_CMD_USERADD << "\n";
+        std::cout << ragger::lang::HELP_CMD_USERMOD << "\n";
+        std::cout << ragger::lang::HELP_CMD_USERDEL << "\n";
+        std::cout << ragger::lang::HELP_CMD_PASSWD << "\n";
+        std::cout << ragger::lang::HELP_CMD_ADD_SELF << "\n";
+        std::cout << ragger::lang::HELP_CMD_HOUSEKEEPING << "\n";
+        std::cout << ragger::lang::HELP_CMD_RELOAD << "\n";
+        std::cout << ragger::lang::HELP_CMD_RELOAD_OPTS << "\n";
+        std::cout << ragger::lang::HELP_CMD_REBUILD_BM25 << "\n";
+        std::cout << ragger::lang::HELP_CMD_REBUILD_EMBED << "\n";
+        std::cout << ragger::lang::HELP_CMD_SHOW_MODEL << "\n";
         // (llama and model verbs removed — use external providers)
-        std::cout << "  help               Show this help\n";
-        std::cout << "  version            Show version\n";
-        std::cout << "\nOptions:\n";
+        std::cout << ragger::lang::HELP_CMD_HELP << "\n";
+        std::cout << ragger::lang::HELP_CMD_VERSION << "\n";
+        std::cout << "\n" << ragger::lang::HELP_OPTIONS_HEADER << "\n";
         std::cout << opts.to_string() << "\n";
         return 0;
     }
 
     if (opts.count("version") || command == "version") {
-        std::cout << "ragger " << RAGGER_VERSION << "\n"
-                << "commit " << RAGGER_COMMIT << "\n"
-                << "built  " << RAGGER_BUILD_DATE << "\n";
+        std::cout << std::format(ragger::lang::VERSION_FORMAT, RAGGER_VERSION, RAGGER_COMMIT, RAGGER_BUILD_DATE) << "\n";
         return 0;
     }
 
@@ -778,7 +776,7 @@ int main(int argc, char **argv) {
                 ragger::RaggerMemory memory(db_path, model_dir);
                 id = memory.store(text, meta);
             }
-            std::cout << MSG_STORED_WITH_ID << id << "\n";
+            std::cout << ragger::lang::MSG_STORED_WITH_ID << id << "\n";
 
         }
         else if (command == "count") {
@@ -1304,18 +1302,18 @@ int main(int argc, char **argv) {
             }
 
             if (daemon_pid <= 0) {
-                ragger::logger::error("Error: no running ragger daemon found");
+                ragger::logger::error(ragger::lang::ERR_DAEMON_NOT_FOUND);
                 return 1;
             }
             if (kill(daemon_pid, SIGHUP) != 0) {
-                std::cerr << "Error: failed to signal process: " << strerror(errno) << "\n";
+                std::cerr << std::format(ragger::lang::ERR_SIGNAL_FAILED, strerror(errno)) << "\n";
                 return 1;
             }
-            ragger::logger::error(std::format("✓ Config reload triggered (pid {})", daemon_pid));
+            ragger::logger::error(std::format(ragger::lang::MSG_CONFIG_RELOAD_OK, daemon_pid));
 
         }
         else {
-            std::cerr << CLI_UNKNOWN_COMMAND << command << "\n";
+            std::cerr << std::format(ragger::lang::CLI_UNKNOWN_COMMAND, command) << "\n";
             return 1;
         }
     }

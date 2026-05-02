@@ -27,7 +27,7 @@ constexpr const char* CLI_USAGE_USERMOD       = "Usage: ragger usermod <username
 constexpr const char* CLI_USAGE_USERDEL       = "Usage: ragger userdel <username>";
 constexpr const char* CLI_USAGE_PASSWD        = "Usage: ragger passwd <username>";
 constexpr const char* CLI_USAGE_IMPORT        = "Usage: ragger import <file> [file...] [--collection name]";
-constexpr const char* CLI_UNKNOWN_COMMAND     = "Unknown command: ";
+constexpr const char* CLI_UNKNOWN_COMMAND     = "Unknown command: {}";
 
 // --- Status messages ---
 constexpr const char* MSG_LOADED_MEMORIES     = "Loaded %d memories";
@@ -233,5 +233,45 @@ constexpr const char* ERR_TOKENIZER_OPEN      = "Failed to open tokenizer.json: 
 constexpr const char* ERR_TOKENIZER_EMPTY     = "Empty tokenizer.json file: ";
 constexpr const char* ERR_TOKENIZER_CREATE    = "Failed to create tokenizer from JSON";
 constexpr const char* ERR_TOKENIZER_NOT_INIT  = "Tokenizer not initialized";
+
+// --- Help: main usage ---
+constexpr const char* HELP_VERSION_HEADER     = "ragger {}";
+constexpr const char* HELP_USAGE_HEADER       = "Usage: ragger <command> [options] [args]";
+constexpr const char* HELP_COMMANDS_HEADER    = "Commands:";
+constexpr const char* HELP_CMD_START          = "  start              Start the background daemon (user LaunchAgent / systemd --user)";
+constexpr const char* HELP_CMD_STOP           = "  stop               Stop the background daemon";
+constexpr const char* HELP_CMD_RESTART        = "  restart            Restart the background daemon";
+constexpr const char* HELP_CMD_STATUS         = "  status             Show daemon status";
+constexpr const char* HELP_CMD_SERVE          = "  serve              Run the server in the foreground (what the daemon invokes)";
+constexpr const char* HELP_CMD_SEARCH         = "  search <query>     Search memories by meaning";
+constexpr const char* HELP_CMD_STORE          = "  store <text>       Store a new memory";
+constexpr const char* HELP_CMD_COUNT          = "  count              Show number of stored memories";
+constexpr const char* HELP_CMD_IMPORT         = "  import <file...>   Import files (paragraph-aware chunking)";
+constexpr const char* HELP_CMD_CHAT           = "  chat               Interactive chat with memory context";
+constexpr const char* HELP_CMD_MCP            = "  mcp                Start MCP server (JSON-RPC over stdin/stdout)";
+constexpr const char* HELP_CMD_USERADD        = "  useradd <name>     Create a user and issue a bearer token (printed once)";
+constexpr const char* HELP_CMD_USERMOD        = "  usermod <name>     Rotate an existing user's bearer token (printed once)";
+constexpr const char* HELP_CMD_USERDEL        = "  userdel <name>     Remove a user and revoke their token";
+constexpr const char* HELP_CMD_PASSWD         = "  passwd <name>      Set (or clear) a user's web-UI login password";
+constexpr const char* HELP_CMD_ADD_SELF       = "  add-self           Bootstrap ~/.ragger/token for the current user";
+constexpr const char* HELP_CMD_HOUSEKEEPING   = "  housekeeping       Trigger housekeeping on running daemon";
+constexpr const char* HELP_CMD_RELOAD         = "  reload             Reload config on running daemon (SIGHUP)";
+constexpr const char* HELP_CMD_RELOAD_OPTS    = "                     options: --user <name>, --dry-run";
+constexpr const char* HELP_CMD_REBUILD_BM25   = "  rebuild-bm25       Rebuild the BM25 keyword index";
+constexpr const char* HELP_CMD_REBUILD_EMBED  = "  rebuild-embeddings Rebuild embeddings for all memories";
+constexpr const char* HELP_CMD_SHOW_MODEL     = "  show-embedding-model  Show current embedding model info";
+constexpr const char* HELP_CMD_HELP           = "  help               Show this help";
+constexpr const char* HELP_CMD_VERSION        = "  version            Show version";
+constexpr const char* HELP_OPTIONS_HEADER     = "Options:";
+constexpr const char* VERSION_FORMAT          = "ragger {}\ncommit {}\nbuilt  {}";
+constexpr const char* ERR_GENERIC             = "Error: {}";
+
+// --- Command execution ---
+constexpr const char* ERR_DAEMON_NOT_FOUND    = "Error: no running ragger daemon found";
+constexpr const char* ERR_SIGNAL_FAILED       = "Error: failed to signal process: {}";
+constexpr const char* MSG_CONFIG_RELOAD_OK    = "✓ Config reload triggered (pid {})";
+
+// --- Config reload warnings ---
+constexpr const char* WARN_CONFIG_RESTART     = " [WARN] Config reload: '{}' changed but requires restart";
 
 } // namespace ragger::lang

@@ -555,8 +555,7 @@ int reload_config() {
     // Keys that require restart (log but don't apply)
     auto warn_restart = [&](const std::string& name, bool changed) {
         if (changed) {
-            std::cerr << " [WARN] Config reload: '" << name
-                      << "' changed but requires restart\n";
+            std::cerr << std::format(ragger::lang::WARN_CONFIG_RESTART, name) << "\n";
         }
     };
     warn_restart("port", fresh.port != cfg.port);
