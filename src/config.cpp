@@ -4,7 +4,6 @@
 #include "ragger/config.h"
 #include "ragger/lang.h"
 
-#include <chrono>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -17,20 +16,6 @@
 #include <unistd.h>
 #include <format>
 
-// Standalone timestamp — usable before logging is initialized
-static std::string ts() {
-    auto now = std::chrono::system_clock::now();
-    auto tt = std::chrono::system_clock::to_time_t(now);
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now.time_since_epoch()) % 1000;
-    std::tm tm{};
-    localtime_r(&tt, &tm);
-    char buf[24];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
-    char result[32];
-    std::snprintf(result, sizeof(result), "%s.%03d", buf, (int)ms.count());
-    return result;
-}
 
 namespace ragger {
 namespace fs = std::filesystem;
@@ -63,6 +48,7 @@ std::string Config::resolved_log_dir() const {
     }
     return expand_path(log_dir);
 }
+
 std::string Config::resolved_model_dir() const {
     std::string base = model_dir.empty()
         ? expand_path("~/.ragger/models")
@@ -93,7 +79,7 @@ port = 8432
 
 [storage]
 db_path = ~/.ragger/memories.db
-formats_dir = /var/ragger/formats
+formats_dir = ~/.ragger/formats
 
 [embedding]
 model = all-MiniLM-L6-v2
@@ -135,15 +121,9 @@ max_tokens = 4096
 # models = claude-*
 
 [logging]
-# log_dir: where query.log / http.log / mcp.log / error.log are written.
-# Default when unset: ~/.ragger/logs (matches launchd/systemd stdout.log + stderr.log).
-# log_dir = ~/.ragger/logs
-query_log = true
-http_log = true
-mcp_log = true
-# debug_log: opt-in verbose tracing (per-chunk stream events, etc.)
-# Off by default — enable when troubleshooting.
-debug_log = false
+log_file = ~/.ragger/activity.log
+# Log Levels: trace, debug, info, warn, error, and critical
+log_level = warn
 
 [paths]
 normalize_home = true
@@ -174,7 +154,7 @@ static std::string bootstrap_user_config() {
     out << DEFAULT_CONFIG;
     out.close();
 
-    std::cout << ts() << " [INFO] " << lang::MSG_CONFIG_CREATED << conf_path << std::endl;
+//  std::cout << " [INFO] " << lang::MSG_CONFIG_CREATED << conf_path << std::endl;
     return conf_path;
 }
 
@@ -402,6 +382,8 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
         }
         else if (section == "logging") {
             if      (key == "log_dir")   cfg.log_dir = val;
+            else if (key == "log_file")  cfg.log_file = expand_path(val);
+            else if (key == "log_level") cfg.log_level = val;
             else if (key == "query_log") cfg.query_log_enabled = parse_bool(val);
             else if (key == "http_log")  cfg.http_log_enabled = parse_bool(val);
             else if (key == "mcp_log")   cfg.mcp_log_enabled = parse_bool(val);
@@ -492,7 +474,7 @@ Config& mutable_config() {
     return *g_config;
 }
 
-void init_config(const std::string& cli_config_path, bool quiet) {
+void init_config(const std::string& cli_config_path) {
     // Load system config first
     auto system_result = find_system_config(cli_config_path);
     if (!system_result.has_value()) {
@@ -512,8 +494,7 @@ void init_config(const std::string& cli_config_path, bool quiet) {
         }
     }
     static Config cfg = *sys_cfg_result;
-    if (!quiet)
-        std::cout << ts() << " [INFO] " << lang::MSG_CONFIG_LOADED << system_path << std::endl;
+//  std::cout << " [INFO] " << lang::MSG_CONFIG_LOADED << system_path << std::endl;
     
     // Then overlay user-specific overrides
     auto user_result = find_user_config();
@@ -524,13 +505,14 @@ void init_config(const std::string& cli_config_path, bool quiet) {
             if (user_cfg_result.has_value()) {
                 Config user_cfg = *user_cfg_result;
                 apply_user_overrides(cfg, user_cfg);
-                if (!quiet)
-                    std::cout << ts() << " [INFO] Applied user overrides from " << user_path << std::endl;
             } else {
                 // Log but don't fail on user config errors
             }
         }
     }
+
+    if (cfg.log_file.empty())
+        cfg.log_file = expand_path("~/.ragger/activity.log");
 
     g_config = &cfg;
 }
@@ -573,7 +555,7 @@ int reload_config() {
     // Keys that require restart (log but don't apply)
     auto warn_restart = [&](const std::string& name, bool changed) {
         if (changed) {
-            std::cerr << ts() << " [WARN] Config reload: '" << name
+            std::cerr << " [WARN] Config reload: '" << name
                       << "' changed but requires restart\n";
         }
     };

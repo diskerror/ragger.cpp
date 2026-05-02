@@ -6,7 +6,7 @@
 #include "ragger/memory.h"
 #include "ragger/sqlite_backend.h"
 #include "ragger/lang.h"
-#include "ragger/logs.h"
+#include "ragger/logger.h"
 #include "ragger/auth.h"
 #include "ragger/config.h"
 #include "ragger/inference.h"
@@ -84,10 +84,10 @@ struct Server::Impl {
         // Pre-load embedding cache so first request isn't slow
         try {
             auto result = memory.search("warmup", 1, 0.0f);
-            log_info("Warmup: embedding cache loaded (" 
+            logger::info("Warmup: embedding cache loaded ("
                      + std::to_string(memory.count()) + " memories)");
         } catch (const std::exception& e) {
-            log_info("Warmup: " + std::string(e.what()));
+            logger::info("Warmup: " + std::string(e.what()));
         }
         // Preload default model on local inference engines
         if (inference_) {
@@ -108,9 +108,9 @@ struct Server::Impl {
         std::thread([this, model_name]() {
             auto err = inference_->ensure_model_loaded(model_name);
             if (err.empty()) {
-                log_info("Preloaded model: " + model_name);
+                logger::info("Preloaded model: " + model_name);
             } else {
-                log_info("Model preload skipped: " + err);
+                logger::info("Model preload skipped: " + err);
             }
         }).detach();
     }
@@ -171,11 +171,11 @@ struct Server::Impl {
                             {"source", "chat-session-" + sid_short}
                         };
                         mem_ptr->store(summary, meta);
-                        log_info("Summarized session " + sid_short +
+                        logger::info("Summarized session " + sid_short +
                                  " (" + std::to_string(turns.size()) + " turns)");
                     }
                 } catch (const std::exception& e) {
-                    log_error("Session summarization failed: " + std::string(e.what()));
+                    logger::critical("Session summarization failed: " + std::string(e.what()));
                 }
             }).detach();
         }
@@ -196,16 +196,16 @@ struct Server::Impl {
                 int deleted = temp_backend.cleanup_old_conversations(max_age_hours);
                 conversations_cleaned += deleted;
                 if (deleted > 0) {
-                    log_info("Cleaned " + std::to_string(deleted)
+                    logger::info("Cleaned " + std::to_string(deleted)
                            + " expired conversations from main DB");
                 }
             } catch (const std::exception& e) {
-                log_error(std::string("Cleanup failed for main DB: ") + e.what());
+                logger::critical(std::string("Cleanup failed for main DB: ") + e.what());
             }
         }
 
         if (sessions_expired > 0 || conversations_cleaned > 0) {
-            log_info("Housekeeping: " + std::to_string(sessions_expired) + " sessions expired, "
+            logger::info("Housekeeping: " + std::to_string(sessions_expired) + " sessions expired, "
                    + std::to_string(conversations_cleaned) + " conversations cleaned");
         }
     }
@@ -236,7 +236,7 @@ struct Server::Impl {
         auto pid_str = std::to_string(getpid());
         (void)write(fd, pid_str.c_str(), pid_str.size());
         housekeeping_locks_[username] = fd;
-        log_info("Housekeeping owner for user '" + username + "'");
+        logger::info("Housekeeping owner for user '" + username + "'");
         return true;
     }
 
@@ -245,7 +245,7 @@ struct Server::Impl {
     void start_housekeeping_timer() {
         int interval = config().housekeeping_interval;
         if (interval == 0) {
-            log_info("Housekeeping: disabled (interval = 0)");
+            logger::info("Housekeeping: disabled (interval = 0)");
             return;
         }
         timer_running_ = true;
@@ -255,24 +255,24 @@ struct Server::Impl {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                     // Check for signal-triggered housekeeping
                     if (g_housekeeping_requested.exchange(false)) {
-                        log_info("Housekeeping triggered by signal");
+                        logger::info("Housekeeping triggered by signal");
                         run_housekeeping();
                     }
                     // Check for config reload (SIGHUP)
                     if (g_config_reload_requested.exchange(false)) {
                         int n = reload_config();
                         if (n > 0) {
-                            log_info(std::format("Config reloaded: {} value(s) changed", n));
+                            logger::info(std::format("Config reloaded: {} value(s) changed", n));
                             // Re-initialize inference client if endpoints changed
                             try {
                                 inference_ = std::make_unique<InferenceClient>(
                                     InferenceClient::from_config(config()));
-                                log_info("Inference client reloaded");
+                                logger::info("Inference client reloaded");
                             } catch (const std::exception& e) {
-                                log_error("Inference client reload failed: " + std::string(e.what()));
+                                logger::critical("Inference client reload failed: " + std::string(e.what()));
                             }
                         } else {
-                            log_info("Config reloaded: no changes");
+                            logger::info("Config reloaded: no changes");
                         }
                     }
                 }
@@ -302,16 +302,16 @@ struct Server::Impl {
         auto client = InferenceClient::from_config(cfg);
         if (!client._endpoints.empty()) {
             inference_ = std::make_unique<InferenceClient>(std::move(client));
-            log_info("Inference: enabled (" + std::to_string(inference_->_endpoints.size()) + " endpoint(s))");
+            logger::info("Inference: enabled (" + std::to_string(inference_->_endpoints.size()) + " endpoint(s))");
         }
         
         // LM Proxy pass-through (if configured)
         if (!cfg.lm_proxy_url.empty()) {
             if (inference_) {
                 inference_->set_lm_proxy_url(cfg.lm_proxy_url);
-                log_info("LM proxy: enabled (" + cfg.lm_proxy_url + ")");
+                logger::info("LM proxy: enabled (" + cfg.lm_proxy_url + ")");
             } else {
-                log_error("LM proxy configured but no inference endpoint available");
+                logger::error("LM proxy configured but no inference endpoint available");
             }
         }
     }
@@ -332,11 +332,11 @@ struct Server::Impl {
                 
                 int user_id = memory.backend()->create_user(username, token_hash);
                 user = UserInfo{user_id, username, token_hash, ""};
-                log_info("Created user: " + username + " (id=" + std::to_string(user_id) + ")");
+                logger::info("Created user: " + username + " (id=" + std::to_string(user_id) + ")");
             }
             default_user_ = user;
         }
-        log_info("Single-user mode initialized");
+        logger::info("Single-user mode initialized");
     }
 
     // --- Web sessions (password login, DB-backed) ---
@@ -463,7 +463,7 @@ struct Server::Impl {
                 {"built", RAGGER_BUILD_DATE},
                 {"memories", memory.count()}
             };
-            log_http("GET /health 200");
+            logger::debug("GET /health 200");
             res.set_content(response.dump(), "application/json");
         });
 
@@ -471,7 +471,7 @@ struct Server::Impl {
         svr.Get("/count", [this](const httplib::Request& req, httplib::Response& res) {
             auto user = _check_auth(req);
             if (!user) {
-                log_http("GET /count 401");
+                logger::debug("GET /count 401");
                 res.status = 401;
                 res.set_content("Unauthorized", "text/plain");
                 return;
@@ -480,7 +480,7 @@ struct Server::Impl {
             json response = {
                 {"count", mem.count()}
             };
-            log_http("GET /count 200");
+            logger::debug("GET /count 200");
             res.set_content(response.dump(), "application/json");
         });
 
@@ -489,7 +489,7 @@ struct Server::Impl {
             // Auth check
             auto user = _check_auth(req);
             if (!user) {
-                log_http("POST /store 401");
+                logger::debug("POST /store 401");
                 res.status = 401;
                 res.set_content("Unauthorized", "text/plain");
                 return;
@@ -502,7 +502,7 @@ struct Server::Impl {
                 json metadata = body.value("metadata", json::object());
 
                 if (text.empty()) {
-                    log_http("POST /store 400");
+                    logger::debug("POST /store 400");
                     res.status = 400;
                     res.set_content("Missing 'text' field", "text/plain");
                     return;
@@ -524,16 +524,16 @@ struct Server::Impl {
                     {"id", id},
                     {"status", "stored"}
                 };
-                log_http("POST /store 200");
+                logger::debug("POST /store 200");
                 res.set_content(response.dump(), "application/json");
 
             } catch (const json::exception& e) {
-                log_http("POST /store 400");
+                logger::debug("POST /store 400");
                 res.status = 400;
                 res.set_content(std::string("JSON error: ") + e.what(), "text/plain");
             } catch (const std::exception& e) {
-                log_http("POST /store 500");
-                log_error(std::string("POST /store failed: ") + e.what());
+                logger::debug("POST /store 500");
+                logger::critical(std::string("POST /store failed: ") + e.what());
                 res.status = 500;
                 res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
@@ -543,7 +543,7 @@ struct Server::Impl {
         svr.Post("/search", [this](const httplib::Request& req, httplib::Response& res) {
             auto user = _check_auth(req);
             if (!user) {
-                log_http("POST /search 401");
+                logger::debug("POST /search 401");
                 res.status = 401; res.set_content("Unauthorized", "text/plain"); return;
             }
             try {
@@ -554,7 +554,7 @@ struct Server::Impl {
                 std::vector<std::string> collections =
                     body.value("collections", std::vector<std::string>{});
                 if (query.empty()) {
-                    log_http("POST /search 400");
+                    logger::debug("POST /search 400");
                     res.status = 400; res.set_content("Missing 'query' field", "text/plain"); return;
                 }
                 auto start_time = std::chrono::high_resolution_clock::now();
@@ -573,15 +573,15 @@ struct Server::Impl {
                 std::ostringstream ql;
                 ql << "query=\"" << query << "\" results=" << search_response.results.size()
                    << " time=" << duration.count() << "ms";
-                log_query(ql.str());
-                log_http("POST /search 200");
+                logger::trace(ql.str());
+                logger::debug("POST /search 200");
                 res.set_content(response.dump(), "application/json");
             } catch (const json::exception& e) {
-                log_http("POST /search 400");
+                logger::debug("POST /search 400");
                 res.status = 400; res.set_content(std::string("JSON error: ") + e.what(), "text/plain");
             } catch (const std::exception& e) {
-                log_http("POST /search 500");
-                log_error(std::string("POST /search failed: ") + e.what());
+                logger::debug("POST /search 500");
+                logger::critical(std::string("POST /search failed: ") + e.what());
                 res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
         });
@@ -590,7 +590,7 @@ struct Server::Impl {
         svr.Delete(R"(/memory/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
             auto user = _check_auth(req);
             if (!user) {
-                log_http("DELETE /memory 401");
+                logger::debug("DELETE /memory 401");
                 res.status = 401; res.set_content("Unauthorized", "text/plain"); return;
             }
             try {
@@ -599,15 +599,15 @@ struct Server::Impl {
                 bool deleted = mem.delete_memory(id);
                 if (deleted) {
                     json response = {{"id", id}, {"status", "deleted"}};
-                    log_http("DELETE /memory 200");
+                    logger::debug("DELETE /memory 200");
                     res.set_content(response.dump(), "application/json");
                 } else {
-                    log_http("DELETE /memory 404");
+                    logger::debug("DELETE /memory 404");
                     res.status = 404; res.set_content("Memory not found", "text/plain");
                 }
             } catch (const std::exception& e) {
-                log_http("DELETE /memory 500");
-                log_error(std::string("DELETE /memory failed: ") + e.what());
+                logger::debug("DELETE /memory 500");
+                logger::critical(std::string("DELETE /memory failed: ") + e.what());
                 res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
         });
@@ -616,27 +616,27 @@ struct Server::Impl {
         svr.Post("/delete_batch", [this](const httplib::Request& req, httplib::Response& res) {
             auto user = _check_auth(req);
             if (!user) {
-                log_http("POST /delete_batch 401");
+                logger::debug("POST /delete_batch 401");
                 res.status = 401; res.set_content("Unauthorized", "text/plain"); return;
             }
             try {
                 auto body = json::parse(req.body);
                 if (!body.contains("ids") || !body["ids"].is_array()) {
-                    log_http("POST /delete_batch 400");
+                    logger::debug("POST /delete_batch 400");
                     res.status = 400; res.set_content("Missing or invalid 'ids' field", "text/plain"); return;
                 }
                 std::vector<int> ids = body["ids"].get<std::vector<int>>();
                 auto& mem = _get_memory(user->username);
                 int deleted = mem.delete_batch(ids);
                 json response = {{"deleted", deleted}};
-                log_http("POST /delete_batch 200");
+                logger::debug("POST /delete_batch 200");
                 res.set_content(response.dump(), "application/json");
             } catch (const json::exception& e) {
-                log_http("POST /delete_batch 400");
+                logger::debug("POST /delete_batch 400");
                 res.status = 400; res.set_content(std::string("JSON error: ") + e.what(), "text/plain");
             } catch (const std::exception& e) {
-                log_http("POST /delete_batch 500");
-                log_error(std::string("POST /delete_batch failed: ") + e.what());
+                logger::debug("POST /delete_batch 500");
+                logger::critical(std::string("POST /delete_batch failed: ") + e.what());
                 res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
         });
@@ -645,13 +645,13 @@ struct Server::Impl {
         svr.Post("/search_by_metadata", [this](const httplib::Request& req, httplib::Response& res) {
             auto user = _check_auth(req);
             if (!user) {
-                log_http("POST /search_by_metadata 401");
+                logger::debug("POST /search_by_metadata 401");
                 res.status = 401; res.set_content("Unauthorized", "text/plain"); return;
             }
             try {
                 auto body = json::parse(req.body);
                 if (!body.contains("metadata") || !body["metadata"].is_object()) {
-                    log_http("POST /search_by_metadata 400");
+                    logger::debug("POST /search_by_metadata 400");
                     res.status = 400; res.set_content("Missing or invalid 'metadata' field", "text/plain"); return;
                 }
                 json metadata_filter = body["metadata"];
@@ -666,14 +666,14 @@ struct Server::Impl {
                                             {"metadata", r.metadata}, {"timestamp", r.timestamp}});
                 }
                 json response = {{"results", results_json}, {"count", results.size()}};
-                log_http("POST /search_by_metadata 200");
+                logger::debug("POST /search_by_metadata 200");
                 res.set_content(response.dump(), "application/json");
             } catch (const json::exception& e) {
-                log_http("POST /search_by_metadata 400");
+                logger::debug("POST /search_by_metadata 400");
                 res.status = 400; res.set_content(std::string("JSON error: ") + e.what(), "text/plain");
             } catch (const std::exception& e) {
-                log_http("POST /search_by_metadata 500");
-                log_error(std::string("POST /search_by_metadata failed: ") + e.what());
+                logger::debug("POST /search_by_metadata 500");
+                logger::critical(std::string("POST /search_by_metadata failed: ") + e.what());
                 res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
         });
@@ -691,12 +691,12 @@ struct Server::Impl {
                 memory.backend()->update_user_preferred_model(user->username, resolved);
                 preload_local_model(resolved);
                 json response = {{"status", "updated"}, {"model", resolved}};
-                log_http("PUT /user/model 200");
+                logger::debug("PUT /user/model 200");
                 res.set_content(response.dump(), "application/json");
             } catch (const json::exception& e) {
                 res.status = 400; res.set_content(std::string("JSON error: ") + e.what(), "text/plain");
             } catch (const std::exception& e) {
-                log_error(std::string("PUT /user/model failed: ") + e.what());
+                logger::critical(std::string("PUT /user/model failed: ") + e.what());
                 res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
         });
@@ -708,10 +708,10 @@ struct Server::Impl {
             try {
                 auto model_opt = memory.backend()->get_user_preferred_model(user->username);
                 json response = model_opt ? json{{"model", *model_opt}} : json{{"model", nullptr}};
-                log_http("GET /user/model 200");
+                logger::debug("GET /user/model 200");
                 res.set_content(response.dump(), "application/json");
             } catch (const std::exception& e) {
-                log_error(std::string("GET /user/model failed: ") + e.what());
+                logger::critical(std::string("GET /user/model failed: ") + e.what());
                 res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
         });
@@ -722,10 +722,10 @@ struct Server::Impl {
             if (!user) { res.status = 401; res.set_content("Unauthorized", "text/plain"); return; }
             try {
                 memory.backend()->update_user_preferred_model(user->username, "");
-                log_http("DELETE /user/model 200");
+                logger::debug("DELETE /user/model 200");
                 res.set_content(R"({"status":"cleared"})", "application/json");
             } catch (const std::exception& e) {
-                log_error(std::string("DELETE /user/model failed: ") + e.what());
+                logger::critical(std::string("DELETE /user/model failed: ") + e.what());
                 res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
         });
@@ -746,7 +746,7 @@ struct Server::Impl {
                 size_t e = token.find_last_not_of(" \t\r\n");
                 if (s != std::string::npos) token = token.substr(s, e - s + 1);
                 json response = {{"token", token}, {"username", user->username}};
-                log_http("GET /user/token 200");
+                logger::debug("GET /user/token 200");
                 res.set_content(response.dump(), "application/json");
             } catch (const std::exception& ex) {
                 res.status = 500; res.set_content(std::string("Error: ") + ex.what(), "text/plain");
@@ -758,11 +758,11 @@ struct Server::Impl {
         svr.Post("/chat", [this](const httplib::Request& req, httplib::Response& res) {
             auto user = _check_auth(req);
             if (!user) {
-                log_http("POST /chat 401");
+                logger::debug("POST /chat 401");
                 res.status = 401; res.set_content("Unauthorized", "text/plain"); return;
             }
             if (!inference_) {
-                log_http("POST /chat 503");
+                logger::debug("POST /chat 503");
                 res.status = 503; res.set_content(R"({"error":"inference not configured"})", "application/json"); return;
             }
 
@@ -788,7 +788,7 @@ struct Server::Impl {
                         memory_context += r.text;
                     }
                 } catch (const std::exception& e) {
-                    log_error(std::string("Memory search failed for /chat: ") + e.what());
+                    logger::critical(std::string("Memory search failed for /chat: ") + e.what());
                 }
 
                 // Resolve model
@@ -806,14 +806,14 @@ struct Server::Impl {
                     std::string sse = "data: " + json{{"error", load_err}}.dump() + "\n\n"
                                     + "data: " + json{{"done", true}}.dump() + "\n\n";
                     res.set_content(sse, "text/event-stream");
-                    log_http("POST /chat 200 (model load error)");
+                    logger::debug("POST /chat 200 (model load error)");
                     return;
                 }
 
                 // Build messages
                 std::string system_prompt = ChatSessionManager::load_workspace_files();
                 if (system_prompt.empty()) {
-                    log_error("No system prompt files found (SYSTEM.md, SOUL.md, USER.md, etc.) — "
+                    logger::critical("No system prompt files found (SYSTEM.md, SOUL.md, USER.md, etc.) — "
                               "chat will proceed without a system prompt");
                 }
                 session.add_user_message(message);
@@ -916,7 +916,7 @@ struct Server::Impl {
                                         }
                                         backend_ptr->save_chat_session(sid, username, messages_array.dump());
                                     } catch (const std::exception& e) {
-                                        log_error(std::string("Session save failed: ") + e.what());
+                                        logger::critical(std::string("Session save failed: ") + e.what());
                                     }
                                     
                                     const auto& cfg = config();
@@ -931,11 +931,11 @@ struct Server::Impl {
                                             mem.store("User: " + msg_text + "\n\nAssistant: " + *response_text,
                                                       turn_meta);
                                         } catch (const std::exception& e) {
-                                            log_error(std::string("Turn storage failed: ") + e.what());
+                                            logger::critical(std::string("Turn storage failed: ") + e.what());
                                         }
                                     }
                                 }
-                                log_http("POST /chat 200");
+                                logger::debug("POST /chat 200");
                                 return false; // done streaming
                             }
                         }
@@ -943,11 +943,11 @@ struct Server::Impl {
                 );
 
             } catch (const json::exception& e) {
-                log_http("POST /chat 400");
+                logger::debug("POST /chat 400");
                 res.status = 400; res.set_content(std::string("JSON error: ") + e.what(), "text/plain");
             } catch (const std::exception& e) {
-                log_http("POST /chat 500");
-                log_error(std::string("POST /chat failed: ") + e.what());
+                logger::debug("POST /chat 500");
+                logger::critical(std::string("POST /chat failed: ") + e.what());
                 res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
         });
@@ -970,10 +970,10 @@ struct Server::Impl {
                 memory.backend()->create_web_session(
                     session_token, username, user->id, WEB_SESSION_TTL);
                 json result = {{"token", session_token}, {"username", username}, {"expires_in", WEB_SESSION_TTL}};
-                log_http("POST /auth/login 200 (" + username + ")");
+                logger::debug("POST /auth/login 200 (" + username + ")");
                 res.set_content(result.dump(), "application/json");
             } catch (const std::exception& e) {
-                log_error(std::string("Login error: ") + e.what());
+                logger::critical(std::string("Login error: ") + e.what());
                 res.status = 500; res.set_content(R"({"error":"login failed"})", "application/json");
             }
         });
@@ -1171,7 +1171,7 @@ void Server::Impl::setup_lm_proxy_routes() {
                             sid, username, arr.dump());
                         flush_count->fetch_add(1);
                     } catch (const std::exception& e) {
-                        log_error(std::string("Proxy stream flush failed: ") +
+                        logger::critical(std::string("Proxy stream flush failed: ") +
                                   e.what());
                     }
                 };
@@ -1210,7 +1210,7 @@ void Server::Impl::setup_lm_proxy_routes() {
                             },
                             [=](long code) { status->store(code); });
                     } catch (const std::exception& e) {
-                        log_error(std::string("Proxy stream upstream error: ")
+                        logger::critical(std::string("Proxy stream upstream error: ")
                                   + e.what());
                     }
                     done->store(true);
@@ -1255,7 +1255,7 @@ void Server::Impl::setup_lm_proxy_routes() {
                             for (const auto& bytes : batch) {
                                 if (!sink.write(bytes.data(), bytes.size())) {
                                     cancelled->store(true);
-                                    log_debug("proxy stream: client disconnected");
+                                    logger::debug("proxy stream: client disconnected");
                                     return false;
                                 }
                             }
@@ -1279,7 +1279,7 @@ void Server::Impl::setup_lm_proxy_routes() {
                                 auto ms = std::chrono::duration_cast<
                                     std::chrono::milliseconds>(
                                     std::chrono::steady_clock::now() - t0).count();
-                                log_http("POST " + path + " stream " +
+                                logger::debug("POST " + path + " stream " +
                                     std::to_string(code) +
                                     " (" + std::to_string(chunk_count->load()) +
                                     " chunks, " +
@@ -1303,7 +1303,7 @@ void Server::Impl::setup_lm_proxy_routes() {
                 res.set_content(
                     R"({"error":"streaming only supported on /v1/chat/completions"})",
                     "application/json");
-                log_http("POST " + path + " 400 (streaming rejected)");
+                logger::debug("POST " + path + " 400 (streaming rejected)");
                 return;
             }
 
@@ -1315,7 +1315,7 @@ void Server::Impl::setup_lm_proxy_routes() {
 
             auto resp = inference_->proxy_request(path, "POST", req.body);
             res.status = static_cast<int>(resp.status_code);
-            log_http("POST " + path + " " + std::to_string(resp.status_code));
+            logger::debug("POST " + path + " " + std::to_string(resp.status_code));
             res.set_content(resp.body, "application/json");
 
             // Capture turn on successful chat completions only
@@ -1358,17 +1358,17 @@ void Server::Impl::setup_lm_proxy_routes() {
                             memory.backend()->save_chat_session(
                                 sid, username, messages_array.dump());
                         } catch (const std::exception& e) {
-                            log_error(std::string("Proxy turn persist failed: ") + e.what());
+                            logger::error(std::string("Proxy turn persist failed: ") + e.what());
                         }
 
                         res.set_header("X-Session-Id", sid);
                     }
                 } catch (const std::exception& e) {
-                    log_error(std::string("Proxy turn capture failed: ") + e.what());
+                    logger::error(std::string("Proxy turn capture failed: ") + e.what());
                 }
             }
         } catch (const std::exception& e) {
-            log_error("LM proxy " + path + " failed: " + e.what());
+            logger::error("LM proxy " + path + " failed: " + e.what());
             res.status = 502;
             res.set_content(R"({"error":"upstream unavailable"})", "application/json");
         }
@@ -1382,10 +1382,10 @@ void Server::Impl::setup_lm_proxy_routes() {
             for (const auto& model : models) {
                 response["data"].push_back({{"id", model}, {"object", "model"}, {"owned_by", "lm-proxy"}});
             }
-            log_http("GET /v1/models 200");
+            logger::debug("GET /v1/models 200");
             res.set_content(response.dump(), "application/json");
         } catch (const std::exception& e) {
-            log_error(std::string("LM proxy /v1/models failed: ") + e.what());
+            logger::error(std::string("LM proxy /v1/models failed: ") + e.what());
             res.status = 502;
             res.set_content(R"({"error":"upstream unavailable"})", "application/json");
         }
@@ -1434,18 +1434,18 @@ void Server::run() {
     const bool use_unix = !cfg.socket_path.empty();
 
     if (!use_unix && !is_port_available(pImpl->host, pImpl->port)) {
-        log_error(std::format(lang::ERR_PORT_IN_USE, pImpl->port));
+        logger::critical(std::format(lang::ERR_PORT_IN_USE, pImpl->port));
         std::exit(1);
     }
 
     std::string addr = use_unix
         ? expand_path(cfg.socket_path)
         : (pImpl->host + ":" + std::to_string(pImpl->port));
-    log_info(std::string(lang::MSG_SERVER_STARTING) + addr);
+    logger::info(std::string(lang::MSG_SERVER_STARTING) + addr);
     if (!use_unix) {
-        log_info("  Health check: curl http://" + addr + "/health");
+        logger::info("  Health check: curl http://" + addr + "/health");
     } else {
-        log_info("  Health check: curl --unix-socket " + addr + " http://localhost/health");
+        logger::info("  Health check: curl --unix-socket " + addr + " http://localhost/health");
     }
 
     // TLS support — if certs configured, create SSLServer instead
@@ -1453,7 +1453,7 @@ void Server::run() {
     // httplib::SSLServer. For now, TLS is handled via reverse proxy (Caddy/nginx).
     // TODO: To support native TLS, conditionally create SSLServer in Impl constructor.
     if (!cfg.tls_cert.empty() && !cfg.tls_key.empty()) {
-        log_info("TLS config present — native TLS not yet supported with httplib. Use reverse proxy.");
+        logger::info("TLS config present — native TLS not yet supported with httplib. Use reverse proxy.");
     }
 
     // Write PID file (per-port)
@@ -1464,7 +1464,7 @@ void Server::run() {
         std::ofstream pf(pImpl->pid_file_);
         if (pf) {
             pf << getpid();
-            log_info("PID file: " + pImpl->pid_file_);
+            logger::info("PID file: " + pImpl->pid_file_);
         }
     }
 
@@ -1498,26 +1498,24 @@ void Server::run() {
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
             }
-            log_info("Unix socket chmod 0600 timed out; check " + sock_path);
+            logger::info("Unix socket chmod 0600 timed out; check " + sock_path);
         });
         chmod_thread.detach();
 
-        log_info("Binding AF_UNIX socket: " + sock_path);
+        logger::info("Binding AF_UNIX socket: " + sock_path);
         // NOTE: port must be non-zero even for AF_UNIX. httplib's bind_internal
         // only calls getsockname() when port==0, and that path only handles
         // AF_INET/AF_INET6 — for AF_UNIX it returns UnsupportedAddressFamily
         // AFTER a successful bind, causing listen() to fail silently.
         bool ok = pImpl->svr.listen(sock_path, 80);  // port value ignored for AF_UNIX
         if (!ok) {
-            log_error("listen() on unix socket returned false: " + sock_path
-                      + " (errno=" + std::to_string(errno) + ")");
+            logger::error(std::format("listen() on unix socket returned false: {} (errno={})", sock_path, std::to_string(errno)));
         }
     } else {
-        log_info("Binding TCP " + pImpl->host + ":" + std::to_string(pImpl->port));
+        logger::info(std::format("Binding TCP {}:{}", pImpl->host, std::to_string(pImpl->port)));
         bool ok = pImpl->svr.listen(pImpl->host, pImpl->port);
         if (!ok) {
-            log_error("listen() on TCP returned false (errno="
-                      + std::to_string(errno) + ")");
+            logger::error(std::format("listen() on TCP returned false (errno={})", std::to_string(errno)));
         }
     }
 

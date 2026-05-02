@@ -8,7 +8,7 @@
 #     ~/.local/bin/ragger         executable (on PATH)
 #
 #     ~/.ragger/settings.ini      config
-#     ~/.ragger/logs/             logs
+#     ~/.ragger/activity.log      logs
 #     ~/.ragger/models/           embedding models
 #     ~/.ragger/formats/          inference format definitions
 #     ~/.ragger/www/              web UI assets
@@ -42,7 +42,7 @@ BINARY="build/ragger"
 # --- Paths (single source of truth) ---
 RAGGER_HOME="$HOME/.ragger"
 BIN_DIR="$HOME/.local/bin"          # XDG user executables
-LOG_DIR="$RAGGER_HOME/logs"
+LOG_DIR="$RAGGER_HOME"
 MODEL_DIR="$RAGGER_HOME/models"
 FORMATS_DIR="$RAGGER_HOME/formats"
 WEB_DIR="$RAGGER_HOME/www"
@@ -193,8 +193,8 @@ if [ "$OS" = "Darwin" ]; then
     </array>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
-    <key>StandardOutPath</key><string>$LOG_DIR/stdout.log</string>
-    <key>StandardErrorPath</key><string>$LOG_DIR/stderr.log</string>
+    <key>StandardOutPath</key><string>$LOG_DIR/activity.log</string>
+    <key>StandardErrorPath</key><string>$LOG_DIR/activity.log</string>
 </dict>
 </plist>
 EOF
@@ -217,8 +217,8 @@ After=default.target
 Type=simple
 ExecStart=$DEST serve
 Restart=on-failure
-StandardOutput=append:$LOG_DIR/stdout.log
-StandardError=append:$LOG_DIR/stderr.log
+StandardOutput=append:$LOG_DIR/activity.log
+StandardError=append:$LOG_DIR/activity.log
 
 [Install]
 WantedBy=default.target

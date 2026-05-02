@@ -65,11 +65,13 @@ struct Config {
     std::vector<InferenceEndpointConfig> inference_endpoints;
 
     // --- Logging ---
-    std::string log_dir;       // empty = resolved at runtime (single_user: ~/.ragger, daemon: /var/log/ragger)
-    bool query_log_enabled     = true;
-    bool http_log_enabled      = true;
-    bool mcp_log_enabled       = true;
-    bool debug_log_enabled     = false;  // opt-in verbose tracing (per-chunk, etc.)
+    std::string log_file;   //  ~/.ragger/activity.log
+    std::string log_level   = "warn";   //  trace, debug, info, warn, error, and critical
+    std::string log_dir;    // empty = resolved at runtime (single_user: ~/.ragger, daemon: /var/log/ragger)
+    bool query_log_enabled  = true;
+    bool http_log_enabled   = true;
+    bool mcp_log_enabled    = true;
+    bool debug_log_enabled  = false;  // opt-in verbose tracing (per-chunk, etc.)
 
     // --- Paths ---
     bool normalize_home_path   = true;
@@ -140,7 +142,7 @@ const Config& config();
 Config& mutable_config();
 
 /// Initialize global config. Call once at startup.
-void init_config(const std::string& cli_config_path = "", bool quiet = false);
+void init_config(const std::string& cli_config_path = "");
 
 /// Reload config from INI file(s). Updates hot-reloadable values in-place.
 /// Returns number of values changed. Logs restart-required changes without applying.

@@ -13,7 +13,7 @@
 #include "ragger/mcp.h"
 #include "ragger/config.h"
 #include "ragger/lang.h"
-#include "ragger/logs.h"
+#include "ragger/logger.h"
 #include "ragger/memory.h"
 #include "ragger/sqlite_backend.h"
 #include "nlohmann_json.hpp"
@@ -165,8 +165,8 @@ static void housekeeping_thread(RaggerMemory& memory,
             SqliteBackend tmp(memory.backend()->db_path());
             const int deleted = tmp.cleanup_old_conversations(max_age_hours);
             if (deleted > 0) {
-                log_info("MCP housekeeping: cleaned "
-                         + std::to_string(deleted) + " expired conversations");
+                logger::info("MCP housekeeping: cleaned "
+                             + std::to_string(deleted) + " expired conversations");
             }
         } catch (...) {}
     }

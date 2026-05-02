@@ -131,7 +131,7 @@ void test_normalize_embedded_in_longer_text(ragger::Embedder& emb) {
 int main() {
     std::println("Running path normalization tests:");
 
-    ragger::init_config("", true);  // quiet
+    ragger::init_config("");
     auto cfg = ragger::config();
     assert(cfg.normalize_home_path == true);
 

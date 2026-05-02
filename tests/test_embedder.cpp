@@ -108,7 +108,7 @@ void test_semantic_similarity(ragger::Embedder& emb) {
 int main() {
     std::println("Running embedder tests:");
 
-    ragger::init_config("", true);
+    ragger::init_config("");
     auto cfg = ragger::config();
     ragger::Embedder emb(cfg.resolved_model_dir());
 

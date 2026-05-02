@@ -6,7 +6,7 @@
 #include "ragger/sqlite_backend.h"
 #include "ragger/embedder.h"
 #include "ragger/config.h"
-#include "ragger/logs.h"
+#include "ragger/logger.h"
 #include "ragger/lang.h"
 #include <format>
 
@@ -45,7 +45,7 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     // a no-op when nothing is NULL; embedder is already loaded above.
     int filled = backend_->backfill_embeddings(*embedder_);
     if (filled > 0) {
-        log_info(std::format(lang::MSG_BACKFILLED_EMBEDDINGS, filled));
+        logger::info(std::format(lang::MSG_BACKFILLED_EMBEDDINGS, filled));
     }
 }
 

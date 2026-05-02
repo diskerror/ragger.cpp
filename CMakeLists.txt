@@ -1,4 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
+if(APPLE)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
+endif()
 project(ragger VERSION 0.9.3 LANGUAGES CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -49,7 +52,7 @@ option(RAGGER_BUILD_TESTS "Build test suite" ON)
 # ---------------------------------------------------------------------------
 # MacPorts boost188 lives here; adjust if using a different version
 set(BOOST_ROOT "/opt/local/libexec/boost/1.88" CACHE PATH "Boost root")
-find_package(Boost 1.76 REQUIRED COMPONENTS program_options)
+find_package(Boost 1.88 REQUIRED COMPONENTS program_options)
 
 # ---------------------------------------------------------------------------
 # SQLite3
@@ -69,6 +72,16 @@ set_target_properties(onnxruntime PROPERTIES
 # ---------------------------------------------------------------------------
 # tokenizers-cpp (HuggingFace tokenizer via Rust FFI)
 # ---------------------------------------------------------------------------
+if(APPLE)
+    # Use nightly Rust for unstable features needed by tokenizers
+    find_program(RUSTUP rustup)
+    if(RUSTUP)
+        execute_process(
+            COMMAND ${RUSTUP} default nightly-aarch64-apple-darwin
+            OUTPUT_QUIET
+        )
+    endif()
+endif()
 add_subdirectory(vendor/tokenizers-cpp)
 
 # ---------------------------------------------------------------------------
@@ -125,7 +138,7 @@ add_library(ragger_core STATIC
     src/server.cpp
     src/inference.cpp
     src/api_formats.cpp
-    src/logs.cpp
+    src/logger.cpp
     src/auth.cpp
     src/chat_sessions.cpp
     src/mcp.cpp
@@ -153,13 +166,10 @@ target_link_libraries(ragger_core PUBLIC
 # ---------------------------------------------------------------------------
 # ragger executable
 # ---------------------------------------------------------------------------
-add_executable(ragger src/main.cpp
-        src/logger.cpp
-        src/logger.h)
+add_executable(ragger src/main.cpp)
 target_link_libraries(ragger PRIVATE
     ragger_core
-    c_lib_po
-)
+    c_lib_po)
 
 # ---------------------------------------------------------------------------
 # Tests

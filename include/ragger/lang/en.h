@@ -70,7 +70,7 @@ constexpr const char* MSG_INFERENCE_HINT      = "Add to settings.ini:\n"
                                                 "  api_url = http://localhost:1234/v1\n"
                                                 "  api_key = lmstudio-local\n"
                                                 "  models = qwen/*, llama/*";
-constexpr const char* ERR_ENDPOINT_UNREACHABLE= "Error: cannot reach inference endpoint '{}' at {}";
+constexpr const char* ERR_ENDPOINT_UNREACHABLE= "Error: cannot reach inference endpoint '{}' at {}\n    {}";
 constexpr const char* ERR_ENDPOINT_HTTP       = "Error: inference endpoint '{}' returned HTTP {}";
 
 // --- Daemon control ---

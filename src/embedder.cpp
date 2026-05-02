@@ -4,7 +4,7 @@
 #include "ragger/embedder.h"
 #include "ragger/config.h"
 #include "ragger/lang.h"
-#include "tokenizer_wrapper.h"
+#include "ragger/tokenizer_wrapper.h"
 #include <onnxruntime_cxx_api.h>
 #include <stdexcept>
 #include <cmath>
