@@ -143,7 +143,7 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         return text_result(arr.dump());
 
     } else {
-        return error_result("Unknown tool: " + tool_name);
+        return error_result(std::format(lang::ERR_MCP_UNKNOWN_TOOL, tool_name));
     }
 }
 
@@ -165,8 +165,12 @@ static void housekeeping_thread(RaggerMemory& memory,
             SqliteBackend tmp(memory.backend()->db_path());
             const int deleted = tmp.cleanup_old_conversations(max_age_hours);
             if (deleted > 0) {
-                Diskerror::logger::info("MCP housekeeping: cleaned "
-                             + std::to_string(deleted) + " expired conversations");
+                std::string msg(ragger::lang::MSG_MCP_HOUSEKEEPING);
+                size_t pos = msg.find("{}");
+                if (pos != std::string::npos) {
+                    msg.replace(pos, 2, std::to_string(deleted));
+                }
+                Diskerror::logger::info(msg);
             }
         } catch (...) {}
     }
@@ -224,7 +228,7 @@ void run_mcp(RaggerMemory& memory) {
                 } else {
                     send({{"jsonrpc", "2.0"}, {"id", req_id},
                           {"error", {{"code",    -32601},
-                                     {"message", "Method not found: " + method}}}});
+                                     {"message", std::string(ragger::lang::ERR_MCP_METHOD_NOT_FOUND) + method}}}});
                     continue;
                 }
 
@@ -257,7 +261,7 @@ void run_mcp(RaggerMemory& memory) {
                     }
                 }
             } catch (const std::exception& e) {
-                std::println("Error: {}", e.what());
+                std::cerr << "ERROR: " << e.what() << "\n";
             }
         }
     }

@@ -4,6 +4,7 @@
 #include "ragger/inference.h"
 #include "ragger/config.h"
 #include "ragger/api_formats.h"
+#include "ragger/lang.h"
 #include "nlohmann_json.hpp"
 
 #include <curl/curl.h>
@@ -153,7 +154,7 @@ std::string InferenceClient::ensure_model_loaded(const std::string& model_overri
     if (res != CURLE_OK) {
         curl_easy_cleanup(curl);
         if (res == CURLE_COULDNT_CONNECT || res == CURLE_OPERATION_TIMEDOUT) {
-            return "Inference engine not reachable at " + mgmt_base;
+            return std::format(lang::ERR_ENGINE_UNREACHABLE, mgmt_base);
         }
         return "";  // fail open
     }
@@ -197,10 +198,10 @@ std::string InferenceClient::ensure_model_loaded(const std::string& model_overri
     curl_easy_cleanup(curl);
 
     if (res == CURLE_OPERATION_TIMEDOUT) {
-        return "Model " + use_model + " load timed out";
+        return std::format(lang::ERR_MODEL_LOAD_TIMEOUT, use_model);
     }
     if (res != CURLE_OK) {
-        return "Failed to load model " + use_model;
+        return std::format(lang::ERR_MODEL_LOAD_FAILED, use_model);
     }
 
     return "";  // loaded successfully
@@ -217,7 +218,7 @@ void InferenceClient::set_forced_endpoint(const std::string& name) {
             return;
         }
     }
-    throw std::runtime_error("Unknown endpoint: " + name);
+    throw std::runtime_error(std::format(lang::ERR_UNKNOWN_ENDPOINT, name));
 }
 
 Endpoint& InferenceClient::resolve_endpoint(const std::string& model_name) {
@@ -236,7 +237,7 @@ Endpoint& InferenceClient::resolve_endpoint(const std::string& model_name) {
     if (!_endpoints.empty()) {
         return _endpoints.back();
     }
-    throw std::runtime_error("No inference endpoints configured");
+    throw std::runtime_error(lang::ERR_NO_ENDPOINTS);
 }
 
 // -----------------------------------------------------------------------
@@ -433,7 +434,7 @@ std::string InferenceClient::chat(const std::vector<Message>& messages,
     // Setup libcurl
     CURL* curl = curl_easy_init();
     if (!curl) {
-        throw std::runtime_error("Failed to initialize libcurl");
+        throw std::runtime_error(lang::ERR_CURL_INIT);
     }
 
     std::string response_buffer;
@@ -461,13 +462,11 @@ std::string InferenceClient::chat(const std::vector<Message>& messages,
     curl_easy_cleanup(curl);
 
     if (res != CURLE_OK) {
-        throw std::runtime_error(std::string("HTTP request failed: ") +
-                                 curl_easy_strerror(res));
+        throw std::runtime_error(std::format(lang::ERR_HTTP_REQUEST, curl_easy_strerror(res)));
     }
 
     if (http_code != 200) {
-        throw std::runtime_error("Inference API error " + std::to_string(http_code) +
-                                 ": " + response_buffer);
+        throw std::runtime_error(std::format(lang::ERR_INFERENCE_API, http_code, response_buffer));
     }
 
     // Parse response using format
@@ -475,7 +474,7 @@ std::string InferenceClient::chat(const std::vector<Message>& messages,
         auto response = nlohmann::json::parse(response_buffer);
         return extract_content(fmt, response);
     } catch (const std::exception& e) {
-        throw std::runtime_error(std::string("Failed to parse response: ") + e.what());
+        throw std::runtime_error(std::format(lang::ERR_PARSE_RESPONSE, e.what()));
     }
 }
 
@@ -518,7 +517,7 @@ void InferenceClient::chat_stream(const std::vector<Message>& messages,
     // Setup libcurl
     CURL* curl = curl_easy_init();
     if (!curl) {
-        throw std::runtime_error("Failed to initialize libcurl");
+        throw std::runtime_error(lang::ERR_CURL_INIT);
     }
 
     StreamCallbackData stream_data{&on_token, "", &fmt};
@@ -571,12 +570,11 @@ void InferenceClient::chat_stream(const std::vector<Message>& messages,
 
     // CURLE_PARTIAL_FILE is normal for SSE streams — server closes after [DONE]
     if (res != CURLE_OK && res != CURLE_PARTIAL_FILE) {
-        throw std::runtime_error(std::string("HTTP request failed: ") +
-                                 curl_easy_strerror(res));
+        throw std::runtime_error(std::format(lang::ERR_HTTP_REQUEST, curl_easy_strerror(res)));
     }
 
     if (http_code != 200) {
-        throw std::runtime_error("Inference API error " + std::to_string(http_code));
+        throw std::runtime_error(std::format(lang::ERR_INFERENCE_API_STATUS, http_code));
     }
 }
 
@@ -590,7 +588,7 @@ namespace {
             const std::string& method,
             const std::string& body) {
         if (lm_proxy_url.empty()) {
-            throw std::runtime_error("LM proxy not configured");
+            throw std::runtime_error(lang::ERR_LM_PROXY_NOT_CONFIGURED);
         }
 
         // Strip trailing slash from base URL
@@ -603,7 +601,7 @@ namespace {
 
         CURL* curl = curl_easy_init();
         if (!curl) {
-            throw std::runtime_error("Failed to initialize libcurl for proxy");
+            throw std::runtime_error(lang::ERR_CURL_INIT_PROXY);
         }
 
         std::string response_buffer;
@@ -631,7 +629,7 @@ namespace {
         curl_easy_cleanup(curl);
 
         if (res != CURLE_OK) {
-            throw std::runtime_error("Proxy connection failed");
+            throw std::runtime_error(lang::ERR_PROXY_CONNECT);
         }
 
         return {http_code, std::move(response_buffer)};
@@ -643,7 +641,7 @@ InferenceClient::ProxyResponse InferenceClient::proxy_request(
         const std::string& method,
         const std::string& body) {
     if (lm_proxy_url_.empty()) {
-        throw std::runtime_error("LM proxy not configured");
+        throw std::runtime_error(lang::ERR_LM_PROXY_NOT_CONFIGURED);
     }
     return forward_request(lm_proxy_url_, path, method, body);
 }
@@ -656,7 +654,7 @@ long InferenceClient::proxy_request_stream(
         std::function<bool(std::string_view)> on_chunk,
         std::function<void(long)> on_status) {
     if (lm_proxy_url_.empty()) {
-        throw std::runtime_error("LM proxy not configured");
+        throw std::runtime_error(lang::ERR_LM_PROXY_NOT_CONFIGURED);
     }
 
     std::string base = lm_proxy_url_;
@@ -665,7 +663,7 @@ long InferenceClient::proxy_request_stream(
 
     CURL* curl = curl_easy_init();
     if (!curl) {
-        throw std::runtime_error("Failed to initialize libcurl for proxy stream");
+        throw std::runtime_error(lang::ERR_CURL_INIT_PROXY_STREAM);
     }
 
     // State shared with libcurl callbacks
@@ -747,8 +745,7 @@ long InferenceClient::proxy_request_stream(
     if (res != CURLE_OK &&
         res != CURLE_PARTIAL_FILE &&
         !(res == CURLE_WRITE_ERROR && ctx.cancelled)) {
-        throw std::runtime_error(std::string("Proxy stream failed: ") +
-                                 curl_easy_strerror(res));
+        throw std::runtime_error(std::format(lang::ERR_PROXY_STREAM, curl_easy_strerror(res)));
     }
     return http_code;
 }
@@ -756,7 +753,7 @@ long InferenceClient::proxy_request_stream(
 std::vector<std::string> InferenceClient::proxy_list_models() {
     auto resp = proxy_request("/v1/models", "GET", "");
     if (resp.status_code != 200) {
-        throw std::runtime_error("Upstream returned status " + std::to_string(resp.status_code));
+        throw std::runtime_error(std::format(lang::ERR_UPSTREAM_STATUS, resp.status_code));
     }
     try {
         auto json_response = nlohmann::json::parse(resp.body);
@@ -770,7 +767,7 @@ std::vector<std::string> InferenceClient::proxy_list_models() {
         }
         return models;
     } catch (const std::exception& e) {
-        throw std::runtime_error("Failed to parse upstream model list");
+        throw std::runtime_error(lang::ERR_UPSTREAM_PARSE);
     }
 }
 

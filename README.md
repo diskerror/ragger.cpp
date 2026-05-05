@@ -2,9 +2,8 @@
 
 **C++ port of [Ragger Memory](https://github.com/diskerror/ragger) — local-first semantic memory for AI agents and humans.**
 
-Same HTTP API, same database format, same config files. The C++ and Python versions are interchangeable — swap the binary, restart.
-
-Faster startup, lower memory footprint, single static binary. Everything else — features, endpoints, config, behavior — is identical.
+This project has diverged from the original [Ragger Memory](https://github.com/diskerror/ragger) 
+at version 0.9.4. All focus with now be on this C++ version.
 
 ## Features
 
@@ -24,8 +23,8 @@ Faster startup, lower memory footprint, single static binary. Everything else �
 **Install** (per-user, no sudo — binary goes in `~/.local/bin`, data in `~/.ragger/`):
 ```bash
 cd /path/to/ragger.cpp
-./build.sh                # Check dependencies, build binary
-./install.sh              # Install to ~/.local/bin/ragger, write user LaunchAgent / systemd-user unit
+./scripts/build.sh        # Check dependencies, build binary
+./scripts/install.sh      # Install to ~/.local/bin/ragger, write user LaunchAgent / systemd-user unit
 ragger start              # Bring the daemon up
 ```
 

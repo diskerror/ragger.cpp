@@ -54,7 +54,7 @@ static void do_import(ragger::RaggerMemory &memory,
                       const std::string &collection,
                       int min_chunk_size) {
     if (!fs::exists(filepath)) {
-        throw std::runtime_error("File not found: " + filepath);
+        throw std::runtime_error(std::format(ragger::lang::ERR_FILE_NOT_FOUND, filepath));
     }
 
     std::ifstream file(filepath);
@@ -110,8 +110,7 @@ static void do_chat(const std::string &db_path, const std::string &model_dir,
     }
 
     if (inference._endpoints.empty()) {
-        std::println("{}", ragger::lang::ERR_NO_ENDPOINTS);
-        std::println(ragger::lang::MSG_INFERENCE_HINT);
+        std::println(ragger::lang::ERR_NO_ENDPOINTS_HINT);
         return;
     }
 
@@ -524,7 +523,7 @@ static std::pair<std::string, bool> provision_user(
     std::string home_dir = home_override;
     if (home_dir.empty()) {
         struct passwd *pw = getpwnam(username.c_str());
-        if (!pw) throw std::runtime_error("User not found: " + username);
+        if (!pw) throw std::runtime_error(std::format(ragger::lang::ERR_USER_NOT_FOUND, username));
         home_dir = pw->pw_dir;
     }
 
@@ -589,12 +588,11 @@ int main(int argc, char **argv) {
             ("db", Diskerror::po::value<std::string>(), CLI_DB)
             ("model-dir", Diskerror::po::value<std::string>(), CLI_MODEL_DIR)
             ("lm-proxy-url", Diskerror::po::value<std::string>(), CLI_LM_PROXY_URL)
-            ("collection", Diskerror::po::value<std::string>()->default_value(""), "Collection name")
-            ("min-chunk-size", Diskerror::po::value<int>(), "Min chunk size for import")
+            ("collection", Diskerror::po::value<std::string>()->default_value(""), CLI_COLLECTION)
+            ("min-chunk-size", Diskerror::po::value<int>(), CLI_MIN_CHUNK_SIZE)
             // admin flags removed — sudo is the admin gate
-            ("yes,y", "Skip confirmation prompts (for scripting)")
-            ("dump-payloads", Diskerror::po::value<std::string>(),
-             "Write raw request JSON to this directory (one file per prompt)");
+            ("yes,y", CLI_YES)
+            ("dump-payloads", Diskerror::po::value<std::string>(), CLI_DUMP_PAYLOADS);
     opts.add_hidden_options()
             ("command", Diskerror::po::value<std::string>()->default_value("help"), CLI_COMMAND)
             ("args", Diskerror::po::value<std::vector<std::string> >(), CLI_ARGS)
@@ -607,42 +605,15 @@ int main(int argc, char **argv) {
         opts.run(argc, argv);
     }
     catch (const std::exception &e) {
-        std::cerr << std::format(ragger::lang::ERR_GENERIC, e.what()) << "\n";
+        std::cerr << std::format(ragger::lang::ERR_INFERENCE, e.what()) << "\n";
         return 1;
     }
 
     auto command = opts["command"].as<std::string>();
 
     if (opts.count("help") || command == "help") {
-        std::cout << std::format(ragger::lang::HELP_VERSION_HEADER, RAGGER_VERSION) << "\n\n";
-        std::cout << ragger::lang::HELP_USAGE_HEADER << "\n\n";
-        std::cout << ragger::lang::HELP_COMMANDS_HEADER << "\n";
-        std::cout << ragger::lang::HELP_CMD_START << "\n";
-        std::cout << ragger::lang::HELP_CMD_STOP << "\n";
-        std::cout << ragger::lang::HELP_CMD_RESTART << "\n";
-        std::cout << ragger::lang::HELP_CMD_STATUS << "\n";
-        std::cout << ragger::lang::HELP_CMD_SERVE << "\n";
-        std::cout << ragger::lang::HELP_CMD_SEARCH << "\n";
-        std::cout << ragger::lang::HELP_CMD_STORE << "\n";
-        std::cout << ragger::lang::HELP_CMD_COUNT << "\n";
-        std::cout << ragger::lang::HELP_CMD_IMPORT << "\n";
-        std::cout << ragger::lang::HELP_CMD_CHAT << "\n";
-        std::cout << ragger::lang::HELP_CMD_MCP << "\n";
-        std::cout << ragger::lang::HELP_CMD_USERADD << "\n";
-        std::cout << ragger::lang::HELP_CMD_USERMOD << "\n";
-        std::cout << ragger::lang::HELP_CMD_USERDEL << "\n";
-        std::cout << ragger::lang::HELP_CMD_PASSWD << "\n";
-        std::cout << ragger::lang::HELP_CMD_ADD_SELF << "\n";
-        std::cout << ragger::lang::HELP_CMD_HOUSEKEEPING << "\n";
-        std::cout << ragger::lang::HELP_CMD_RELOAD << "\n";
-        std::cout << ragger::lang::HELP_CMD_RELOAD_OPTS << "\n";
-        std::cout << ragger::lang::HELP_CMD_REBUILD_BM25 << "\n";
-        std::cout << ragger::lang::HELP_CMD_REBUILD_EMBED << "\n";
-        std::cout << ragger::lang::HELP_CMD_SHOW_MODEL << "\n";
-        // (llama and model verbs removed — use external providers)
-        std::cout << ragger::lang::HELP_CMD_HELP << "\n";
-        std::cout << ragger::lang::HELP_CMD_VERSION << "\n";
-        std::cout << "\n" << ragger::lang::HELP_OPTIONS_HEADER << "\n";
+        std::println(ragger::lang::HELP_VERSION_HEADER, RAGGER_VERSION);
+        std::cout << ragger::lang::HELP_SCREEN;
         std::cout << opts.to_string() << "\n";
         return 0;
     }
@@ -658,7 +629,7 @@ int main(int argc, char **argv) {
         ragger::init_config(opts["config"].as<std::string>());
     }
     catch (const std::exception &e) {
-        std::cerr << "Error: " << e.what() << "\n";
+        std::cerr << std::format(ragger::lang::ERR_INFERENCE, e.what()) << "\n";
         return 1;
     }
 
@@ -692,9 +663,7 @@ int main(int argc, char **argv) {
             // Single-user mode only
             mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path, model_dir);
             auto &memory = *mem_ptr;
-            char buf[128];
-            std::snprintf(buf, sizeof(buf), MSG_LOADED_MEMORIES, memory.count());
-            Diskerror::logger::info(buf);
+            Diskerror::logger::info(std::format(MSG_LOADED_MEMORIES, memory.count()));
 
             ragger::Server server(memory, host, port);
             server.run();
@@ -776,7 +745,7 @@ int main(int argc, char **argv) {
                 ragger::RaggerMemory memory(db_path, model_dir);
                 id = memory.store(text, meta);
             }
-            std::cout << ragger::lang::MSG_STORED_WITH_ID << id << "\n";
+            std::cout << std::format(ragger::lang::MSG_STORED_WITH_ID, id) << "\n";
 
         }
         else if (command == "count") {
@@ -865,13 +834,13 @@ int main(int argc, char **argv) {
 
         }
         else if (command == "show-embedding-model") {
-            std::println("Model: {}", cfg.embedding_model);
-            std::println("Dimensions: {}", cfg.embedding_dimensions);
+            std::println(ragger::lang::MSG_EMBEDDING_MODEL_NAME, cfg.embedding_model);
+            std::println(ragger::lang::MSG_EMBEDDING_DIMENSIONS, cfg.embedding_dimensions);
             std::string model_path = model_dir.empty() ? cfg.model_dir : model_dir;
             if (!model_path.empty() && fs::is_directory(model_path))
-                std::println("Path: {}", model_path);
+                std::println(ragger::lang::MSG_EMBEDDING_PATH, model_path);
             else
-                std::println("Path: (default)");
+                std::println(ragger::lang::MSG_EMBEDDING_PATH_DEFAULT);
 
         }
         else if (command == "useradd") {
@@ -902,7 +871,7 @@ int main(int argc, char **argv) {
                 std::println("{}", ragger::lang::MSG_TOKEN_SAVE_WARNING);
             }
             catch (const std::exception &e) {
-                Diskerror::logger::critical("Error: " + std::string(e.what()));
+                Diskerror::logger::critical(e.what());
                 return 1;
             }
 
@@ -934,7 +903,7 @@ int main(int argc, char **argv) {
                 std::println("{}", ragger::lang::MSG_TOKEN_SAVE_WARNING);
             }
             catch (const std::exception &e) {
-                Diskerror::logger::critical("Error: " + std::string(e.what()));
+                Diskerror::logger::critical(e.what());
                 return 1;
             }
 
@@ -953,7 +922,7 @@ int main(int argc, char **argv) {
                 std::println(ragger::lang::MSG_USER_REMOVED, username);
             }
             catch (const std::exception &e) {
-                Diskerror::logger::critical("Error: " + std::string(e.what()));
+                Diskerror::logger::critical(e.what());
                 return 1;
             }
 
@@ -998,20 +967,19 @@ int main(int argc, char **argv) {
 
             // DEPRECATED: Multi-user mode removed. User management commands are no longer needed.
             // Keeping code for reference but commented out.
-#if 0
         } else if (command == "add-user") {
                     auto args = opts.getParams("args");
                 if (args.empty()) {
-                    Diskerror::logger::error("Usage: ragger add-user <username>");
+                    Diskerror::logger::error(std::format(ragger::lang::MSG_ADD_USER_USAGE));
                     return 1;
                 }
                 std::string username = args[0];
                 try {
                     auto [token, created] = provision_user(username);
                     if (created)
-                        std::println("✓ Created token for {}", username);
+                        std::println(ragger::lang::MSG_TOKEN_CREATED_FOR, username);
                     else
-                        std::println("Token already exists for {}", username);
+                        std::println(ragger::lang::MSG_TOKEN_EXISTS_FOR, username);
                     // Add user to ragger group (requires root)
                     if (getuid() == 0) {
 
@@ -1021,9 +989,9 @@ int main(int argc, char **argv) {
             std::string cmd = "usermod -aG ragger " + username;
 #endif
             if (std::system(cmd.c_str()) == 0)
-                std::println("✓ Added {} to ragger group", username);
+                std::println(ragger::lang::MSG_ADDED_TO_GROUP, username);
             else
-                Diskerror::logger::error("Warning: could not add " + username + " to ragger group");
+                Diskerror::logger::error(std::format(ragger::lang::MSG_WARNING, "could not add " + username + " to ragger group"));
                 }
             // Register in DB
             std::string reg_db = cfg.resolved_db_path();
@@ -1033,24 +1001,23 @@ int main(int argc, char **argv) {
             if (existing) {
                 if (existing->token_hash != token_hash)
                     umgr.update_user_token(username, token_hash);
-                std::println("✓ User exists in database (id: {})", existing->id);
+                std::println(ragger::lang::MSG_USER_IN_DB, existing->id);
             }
             else {
                 int user_id = umgr.create_user(username, token_hash);
-                std::println("✓ Registered in database (user_id: {})", user_id);
+                std::println(ragger::lang::MSG_USER_REGISTERED, user_id);
             }
             } catch (const std::exception &e) {
-                Diskerror::logger::critical("Error: " + std::string(e.what()));
+                Diskerror::logger::critical(e.what());
                 return 1;
             }
-            std::println("\nToken file: ~{}/.ragger/token", username);
-            std::println("The user will need to update their client config if the token is rotated.");
-#endif
+            std::println(ragger::lang::MSG_TOKEN_FILE_USER, username);
+            std::println(ragger::lang::MSG_TOKEN_UPDATE_HINT);
 
         }
         else if (command == "add-all") {
             if (getuid() != 0) {
-                Diskerror::logger::error("Error: add-all requires sudo");
+                Diskerror::logger::error(std::format(ragger::lang::MSG_WARNING_SUDO, "add-all"));
                 return 1;
             }
             // Non-login shells — service accounts use these
@@ -1085,14 +1052,14 @@ int main(int argc, char **argv) {
 
                 std::string uname(pw->pw_name);
                 if (!auto_yes) {
-                    std::print("  Add {}? [Y/n] ", uname);
+                    std::print(ragger::lang::MSG_ADD_USER_PROMPT, uname);
                     std::string answer;
                     std::getline(std::cin, answer);
                     // Trim
                     while (!answer.empty() && std::isspace(answer.back())) answer.pop_back();
                     while (!answer.empty() && std::isspace(answer.front())) answer.erase(answer.begin());
                     if (!answer.empty() && std::tolower(answer[0]) != 'y') {
-                        std::println("  {}: skipped", uname);
+                        std::println(ragger::lang::MSG_USER_SKIPPED, uname);
                         continue;
                     }
                 }
@@ -1128,25 +1095,25 @@ int main(int argc, char **argv) {
                     catch (const std::exception &e) {
                         status += ", db error: " + std::string(e.what());
                     }
-                    std::println("  {}: {}", uname, status);
+                    std::println(ragger::lang::MSG_USER_STATUS, uname, status);
                     ++count;
                 }
                 catch (const std::exception &e) {
-                    std::println("  {}: error ({})", uname, e.what());
+                    std::println(ragger::lang::MSG_USER_ERROR, uname, e.what());
                 }
             }
             endpwent();
-            std::println("✓ Processed {} users", count);
+            std::println(ragger::lang::MSG_PROCESSED_USERS, count);
 
         }
         else if (command == "remove-user") {
             auto args = opts.getParams("args");
             if (args.empty()) {
-                Diskerror::logger::critical("Usage: ragger remove-user <username>");
+                std::println(ragger::lang::MSG_ADD_USER_USAGE);
                 return 1;
             }
             if (getuid() != 0) {
-                Diskerror::logger::error("Error: remove-user requires sudo");
+                std::println(ragger::lang::MSG_WARNING_SUDO, "remove-user");
                 return 1;
             }
             std::string username = args[0];
@@ -1160,9 +1127,9 @@ int main(int argc, char **argv) {
 #endif
                 int rc = std::system(cmd.c_str());
                 if (rc == 0)
-                    std::println("✓ Removed {} from ragger group", username);
+                    std::println(ragger::lang::MSG_REMOVED_FROM_GROUP, username);
                 else
-                    std::println("  {} was not in ragger group (skipped)", username);
+                    std::println(ragger::lang::MSG_GROUP_SKIPPED, username);
             }
 
             // 2. Remove from common database
@@ -1172,14 +1139,14 @@ int main(int argc, char **argv) {
                 auto existing = umgr.get_user_by_username(username);
                 if (existing) {
                     umgr.delete_user(username);
-                    std::println("✓ Removed {} from database", username);
+                    std::println(ragger::lang::MSG_REMOVED_FROM_DB, username);
                 }
                 else {
-                    std::println("  {} not found in database (skipped)", username);
+                    std::println(ragger::lang::MSG_NOT_IN_DB, username);
                 }
             }
             catch (const std::exception &e) {
-                Diskerror::logger::critical("Warning: database removal: " + std::string(e.what()));
+                Diskerror::logger::warn(std::format(ragger::lang::MSG_WARNING, "database removal: " + std::string(e.what())));
             }
 
             // 3. Remove token (keep ~/.ragger/ data — sudoer can remove manually)
@@ -1188,17 +1155,17 @@ int main(int argc, char **argv) {
                 std::string token_path = std::string(pw->pw_dir) + "/.ragger/token";
                 if (fs::exists(token_path)) {
                     fs::remove(token_path);
-                    std::println("✓ Removed token ({})", token_path);
+                    std::println(ragger::lang::MSG_REMOVED_TOKEN_FILE, token_path);
                 }
                 else {
-                    std::println("  No token file found (skipped)");
+                    std::println(ragger::lang::MSG_TOKEN_SKIPPED, username);
                 }
             }
             else {
-                std::println("  User {} not found in system passwd (skipped token)", username);
+                std::println(ragger::lang::MSG_USER_NOT_IN_PASSWD, username);
             }
 
-            std::println("\n✓ User {} removed", username);
+            std::println(ragger::lang::MSG_USER_REMOVED_FINAL, username);
 
         }
         else if (command == "passwd") {
@@ -1239,7 +1206,7 @@ int main(int argc, char **argv) {
                 }
             }
             catch (const std::exception &e) {
-                Diskerror::logger::critical("Error: " + std::string(e.what()));
+                Diskerror::logger::critical(e.what());
                 return 1;
             }
 
@@ -1262,23 +1229,23 @@ int main(int argc, char **argv) {
             catch (...) {
             }
             if (daemon_pid <= 0) {
-                Diskerror::logger::error("Error: no running ragger daemon found");
+                Diskerror::logger::error(ragger::lang::ERR_DAEMON_NOT_FOUND);
                 return 1;
             }
             if (kill(daemon_pid, 0) != 0) {
-                Diskerror::logger::error(std::format("Error: daemon (pid {}) is not running", daemon_pid));
+                Diskerror::logger::error(std::format(ragger::lang::ERR_DAEMON_PID_NOT_RUNNING, daemon_pid));
                 return 1;
             }
             if (kill(daemon_pid, SIGUSR1) != 0) {
                 if (errno == EPERM) {
-                    Diskerror::logger::error("Permission denied. Use sudo to signal the daemon.");
+                    Diskerror::logger::error(ragger::lang::ERR_PERMISSION_DENIED_SIGNAL);
                 }
                 else {
-                    Diskerror::logger::error(std::format("Failed to signal process: {}", strerror(errno)));
+                    Diskerror::logger::error(std::format(ragger::lang::ERR_SIGNAL_FAILED, strerror(errno)));
                 }
                 return 1;
             }
-            Diskerror::logger::info(std::format("✓ Housekeeping triggered (pid {})", daemon_pid));
+            Diskerror::logger::info(std::format(ragger::lang::MSG_HOUSEKEEPING_TRIGGERED, daemon_pid));
 
         }
         else if (command == "reload") {
@@ -1318,7 +1285,7 @@ int main(int argc, char **argv) {
         }
     }
     catch (const std::exception &e) {
-        Diskerror::logger::critical(std::format("Error: {}", e.what()));
+        Diskerror::logger::critical(e.what());
         return 1;
     }
 

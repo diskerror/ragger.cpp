@@ -148,8 +148,7 @@ static std::string bootstrap_user_config() {
 
     std::ofstream out(conf_path);
     if (!out.is_open()) {
-        throw std::runtime_error(
-            std::string(lang::ERR_CONFIG_OPEN) + conf_path);
+        throw std::runtime_error(std::format(lang::ERR_CONFIG_OPEN, conf_path));
     }
     out << DEFAULT_CONFIG;
     out.close();
@@ -438,7 +437,7 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
     // Validate: at least one of socket_path or bind_address must be set
     std::string expanded_socket = expand_path(cfg.socket_path);
     if (expanded_socket.empty() && cfg.bind_address.empty()) {
-        throw std::runtime_error("Config error: either [server] socket or bind must be configured");
+        throw std::runtime_error(lang::ERR_CONFIG_SOCKET_OR_BIND);
     }
 
     // Expand socket_path and bind_address if they start with ~
@@ -478,7 +477,7 @@ void init_config(const std::string& cli_config_path) {
     // Load system config first
     auto system_result = find_system_config(cli_config_path);
     if (!system_result.has_value()) {
-        throw std::runtime_error("Failed to find system config");
+        throw std::runtime_error(lang::ERR_CONFIG_SYSTEM_NOT_FOUND);
     }
     std::string system_path = *system_result;
     
@@ -486,11 +485,11 @@ void init_config(const std::string& cli_config_path) {
     if (!sys_cfg_result.has_value()) {
         switch (sys_cfg_result.error()) {
             case ConfigError::IOError:
-                throw std::runtime_error("Failed to load system config: " + system_path);
+                throw std::runtime_error(std::format(lang::ERR_CONFIG_SYSTEM_LOAD, system_path));
             case ConfigError::ParseError:
-                throw std::runtime_error("Failed to parse system config: " + system_path);
+                throw std::runtime_error(std::format(lang::ERR_CONFIG_SYSTEM_PARSE, system_path));
             default:
-                throw std::runtime_error("Unknown error loading system config: " + system_path);
+                throw std::runtime_error(std::format(lang::ERR_CONFIG_SYSTEM_UNKNOWN, system_path));
         }
     }
     static Config cfg = *sys_cfg_result;

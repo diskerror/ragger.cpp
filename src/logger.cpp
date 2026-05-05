@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <format>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -12,6 +13,7 @@
 #include <string>
 
 #include "diskerror/logger.h"
+#include "ragger/lang.h"
 
 namespace Diskerror {
 
@@ -33,7 +35,7 @@ logger::logger(const std::string &logFileName, const std::string &level) {
     logFile.open(logFileName, std::ios::app);
 
     if (logFile.fail()) {
-        throw std::runtime_error("failed to open log file: \"" + logFileName + "\"");
+        throw std::runtime_error(std::format(ragger::lang::ERR_LOG_OPEN, logFileName));
     }
 
     trace = [](std::string const &) {};

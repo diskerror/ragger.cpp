@@ -140,10 +140,7 @@ ApiFormat get_format(const std::string& name) {
             return OPENAI_FORMAT;
         }
         
-        std::stringstream ss;
-        ss << "Unknown API format '" << use_name << "'. No " << use_name 
-           << ".json found in search dirs.";
-        throw std::runtime_error(ss.str());
+        throw std::runtime_error(std::format(lang::ERR_UNKNOWN_FORMAT, use_name, use_name));
     }
     
     _cache[use_name] = *fmt;

@@ -35,9 +35,7 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
         backend_->set_setting("embedding_model", current_model);
     } else if (*stored_model != current_model) {
         throw std::runtime_error(
-            "Embedding model mismatch: database was built with '" + *stored_model +
-            "' but config specifies '" + current_model + "'. " +
-            "Reorganise your models directory and run 'ragger rebuild' to re-embed.");
+            std::format(lang::ERR_EMBEDDING_MISMATCH, *stored_model, current_model));
     }
 
     // Backfill any rows left without embeddings (deferred-embedding writes

@@ -4,6 +4,7 @@
 #include "ragger/lang.h"
 #include "ragger/tokenizer_wrapper.h"
 #include <tokenizers_cpp.h>
+#include <format>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -18,7 +19,7 @@ struct TokenizerWrapper::Impl {
         // Read tokenizer.json into string
         std::ifstream file(tokenizer_json_path);
         if (!file.is_open()) {
-            throw std::runtime_error(std::string(ragger::lang::ERR_TOKENIZER_OPEN) + tokenizer_json_path);
+            throw std::runtime_error(std::format(ragger::lang::ERR_TOKENIZER_OPEN, tokenizer_json_path));
         }
         
         std::stringstream buffer;
@@ -26,7 +27,7 @@ struct TokenizerWrapper::Impl {
         std::string json_content = buffer.str();
         
         if (json_content.empty()) {
-            throw std::runtime_error(std::string(ragger::lang::ERR_TOKENIZER_EMPTY) + tokenizer_json_path);
+            throw std::runtime_error(std::format(ragger::lang::ERR_TOKENIZER_EMPTY, tokenizer_json_path));
         }
         
         // Create tokenizer from JSON blob

@@ -3,6 +3,8 @@
  */
 #include "ragger/client.h"
 
+#include "ragger/lang.h"
+
 #include <cstring>
 #include <format>
 #include <stdexcept>
@@ -42,7 +44,7 @@ std::string RaggerClient::store(const std::string& text, json metadata) {
     
     auto resp = http_post("/store", payload.dump());
     if (resp.status < 200 || resp.status >= 300) {
-        throw std::runtime_error("Store failed: HTTP " + std::to_string(resp.status));
+        throw std::runtime_error(std::format(lang::ERR_CLIENT_STORE, resp.status));
     }
     
     auto j = json::parse(resp.body);
@@ -62,7 +64,7 @@ SearchResponse RaggerClient::search(const std::string& query, int limit,
     
     auto resp = http_post("/search", payload.dump());
     if (resp.status < 200 || resp.status >= 300) {
-        throw std::runtime_error("Search failed: HTTP " + std::to_string(resp.status));
+        throw std::runtime_error(std::format(lang::ERR_CLIENT_SEARCH, resp.status));
     }
     
     auto j = json::parse(resp.body);
@@ -99,7 +101,7 @@ SearchResponse RaggerClient::search(const std::string& query, int limit,
 int RaggerClient::count() {
     auto resp = http_get("/count");
     if (resp.status < 200 || resp.status >= 300) {
-        throw std::runtime_error("Count failed: HTTP " + std::to_string(resp.status));
+        throw std::runtime_error(std::format(lang::ERR_CLIENT_COUNT, resp.status));
     }
     
     auto j = json::parse(resp.body);
@@ -122,7 +124,7 @@ int RaggerClient::delete_batch(const std::vector<int>& memory_ids) {
     
     auto resp = http_post("/delete_batch", payload.dump());
     if (resp.status < 200 || resp.status >= 300) {
-        throw std::runtime_error("Delete batch failed: HTTP " + std::to_string(resp.status));
+        throw std::runtime_error(std::format(lang::ERR_CLIENT_DELETE_BATCH, resp.status));
     }
     
     auto j = json::parse(resp.body);
@@ -138,7 +140,7 @@ std::vector<SearchResult> RaggerClient::search_by_metadata(const json& metadata_
     
     auto resp = http_post("/search_by_metadata", payload.dump());
     if (resp.status < 200 || resp.status >= 300) {
-        throw std::runtime_error("Search by metadata failed: HTTP " + std::to_string(resp.status));
+        throw std::runtime_error(std::format(lang::ERR_CLIENT_SEARCH_META, resp.status));
     }
     
     auto j = json::parse(resp.body);
@@ -175,7 +177,7 @@ json RaggerClient::register_user(const std::string& username) {
 
     auto resp = http_post("/register", payload.dump());
     if (resp.status < 200 || resp.status >= 300) {
-        throw std::runtime_error("Register failed: HTTP " + std::to_string(resp.status));
+        throw std::runtime_error(std::format(lang::ERR_CLIENT_REGISTER, resp.status));
     }
     return json::parse(resp.body);
 }
@@ -201,7 +203,7 @@ RaggerClient::HttpResponse RaggerClient::http_request(const std::string& method,
     // Create socket
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
-        throw std::runtime_error("Failed to create socket: " + std::string(strerror(errno)));
+        throw std::runtime_error(std::format(lang::ERR_CLIENT_SOCKET, strerror(errno)));
     }
     
     // Set timeout (5 seconds)
@@ -219,12 +221,12 @@ RaggerClient::HttpResponse RaggerClient::http_request(const std::string& method,
     
     if (inet_pton(AF_INET, host_.c_str(), &server_addr.sin_addr) <= 0) {
         close(sock);
-        throw std::runtime_error("Invalid address: " + host_);
+        throw std::runtime_error(std::format(lang::ERR_CLIENT_ADDRESS, host_));
     }
     
     if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
         close(sock);
-        throw std::runtime_error("Connection failed: " + std::string(strerror(errno)));
+        throw std::runtime_error(std::format(lang::ERR_CLIENT_CONNECT, strerror(errno)));
     }
     
     // Build HTTP request
@@ -250,7 +252,7 @@ RaggerClient::HttpResponse RaggerClient::http_request(const std::string& method,
     ssize_t sent = send(sock, req_str.c_str(), req_str.length(), 0);
     if (sent < 0) {
         close(sock);
-        throw std::runtime_error("Failed to send request: " + std::string(strerror(errno)));
+        throw std::runtime_error(std::format(lang::ERR_CLIENT_SEND, strerror(errno)));
     }
     
     // Read response
@@ -265,7 +267,7 @@ RaggerClient::HttpResponse RaggerClient::http_request(const std::string& method,
     close(sock);
     
     if (bytes_read < 0) {
-        throw std::runtime_error("Failed to read response: " + std::string(strerror(errno)));
+        throw std::runtime_error(std::format(lang::ERR_CLIENT_READ, strerror(errno)));
     }
     
     // Parse response
@@ -274,7 +276,7 @@ RaggerClient::HttpResponse RaggerClient::http_request(const std::string& method,
     // Find status line
     size_t status_end = response_data.find("\r\n");
     if (status_end == std::string::npos) {
-        throw std::runtime_error("Invalid HTTP response: no status line");
+        throw std::runtime_error(lang::ERR_CLIENT_NO_STATUS);
     }
     
     std::string status_line = response_data.substr(0, status_end);
@@ -284,7 +286,7 @@ RaggerClient::HttpResponse RaggerClient::http_request(const std::string& method,
     size_t second_space = status_line.find(' ', first_space + 1);
     
     if (first_space == std::string::npos || second_space == std::string::npos) {
-        throw std::runtime_error("Invalid HTTP response: malformed status line");
+        throw std::runtime_error(lang::ERR_CLIENT_BAD_STATUS);
     }
     
     std::string status_code_str = status_line.substr(first_space + 1, second_space - first_space - 1);

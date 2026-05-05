@@ -62,7 +62,7 @@ struct SqliteBackend::Impl {
             std::string err = sqlite3_errmsg(db);
             sqlite3_close(db);
             db = nullptr;
-            throw std::runtime_error(std::string(lang::ERR_SQLITE_OPEN) + err);
+            throw std::runtime_error(std::format(lang::ERR_SQLITE_OPEN, err));
         }
 
         exec("PRAGMA journal_mode=WAL");
@@ -82,7 +82,7 @@ struct SqliteBackend::Impl {
             std::string err = sqlite3_errmsg(db);
             sqlite3_close(db);
             db = nullptr;
-            throw std::runtime_error(std::string(lang::ERR_SQLITE_OPEN) + err);
+            throw std::runtime_error(std::format(lang::ERR_SQLITE_OPEN, err));
         }
 
         exec("PRAGMA journal_mode=WAL");
@@ -100,7 +100,7 @@ struct SqliteBackend::Impl {
         if (rc != SQLITE_OK) {
             std::string err = errmsg ? errmsg : "unknown error";
             sqlite3_free(errmsg);
-            throw std::runtime_error(std::string(lang::ERR_SQL) + err);
+            throw std::runtime_error(std::format(lang::ERR_SQL, err));
         }
     }
 
@@ -723,8 +723,7 @@ struct SqliteBackend::Impl {
         int rc = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
         if (rc != SQLITE_DONE) {
-            throw std::runtime_error(std::string(lang::ERR_STORE_FAILED) +
-                                     sqlite3_errmsg(db));
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         }
 
         int memory_id = static_cast<int>(sqlite3_last_insert_rowid(db));

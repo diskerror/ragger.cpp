@@ -3,6 +3,7 @@
  */
 #include "ragger/auth.h"
 #include "ragger/config.h"
+#include "ragger/lang.h"
 #include "ragger/storage_backend.h"
 #include "ragger/storage_types.h"
 
@@ -94,13 +95,13 @@ std::string generate_token() {
     // Read from /dev/urandom
     FILE* f = fopen("/dev/urandom", "rb");
     if (!f) {
-        throw std::runtime_error("Failed to open /dev/urandom");
+        throw std::runtime_error(lang::ERR_URANDOM_OPEN);
     }
     size_t read_count = fread(random_bytes, 1, 32, f);
     fclose(f);
     
     if (read_count != 32) {
-        throw std::runtime_error("Failed to read enough random bytes");
+        throw std::runtime_error(lang::ERR_URANDOM_READ);
     }
     
     return base64url_encode(random_bytes, 32);
@@ -124,7 +125,7 @@ std::string ensure_token() {
     // Write to file
     std::ofstream f(path);
     if (!f.is_open()) {
-        throw std::runtime_error("Failed to write token file: " + path);
+        throw std::runtime_error(std::format(lang::ERR_TOKEN_WRITE, path));
     }
     f << token << std::endl;
     f.close();
@@ -182,7 +183,7 @@ static std::vector<unsigned char> hex_to_bytes(const std::string& hex) {
 std::string generate_random_token(int bytes) {
     std::vector<unsigned char> buf(bytes);
     if (RAND_bytes(buf.data(), bytes) != 1) {
-        throw std::runtime_error("Failed to generate random bytes");
+        throw std::runtime_error(lang::ERR_RANDOM_BYTES);
     }
     // URL-safe base64-like: hex encoding (simple, always works)
     return bytes_to_hex(buf.data(), bytes);
@@ -191,7 +192,7 @@ std::string generate_random_token(int bytes) {
 std::string hash_password(const std::string& password) {
     unsigned char salt[PBKDF2_SALT_LEN];
     if (RAND_bytes(salt, PBKDF2_SALT_LEN) != 1) {
-        throw std::runtime_error("Failed to generate random salt");
+        throw std::runtime_error(lang::ERR_RANDOM_SALT);
     }
     
     unsigned char key[PBKDF2_KEY_LEN];
@@ -201,7 +202,7 @@ std::string hash_password(const std::string& password) {
             PBKDF2_ITERATIONS,
             EVP_sha256(),
             PBKDF2_KEY_LEN, key) != 1) {
-        throw std::runtime_error("PBKDF2 failed");
+        throw std::runtime_error(lang::ERR_PBKDF2);
     }
     
     // Format: pbkdf2:iterations:salt_hex:key_hex

@@ -84,10 +84,9 @@ struct Server::Impl {
         // Pre-load embedding cache so first request isn't slow
         try {
             auto result = memory.search("warmup", 1, 0.0f);
-            Diskerror::logger::info("Warmup: embedding cache loaded ("
-                     + std::to_string(memory.count()) + " memories)");
+            Diskerror::logger::info(std::format(lang::MSG_WARMUP_EMBEDDING_CACHE, memory.count()));
         } catch (const std::exception& e) {
-            Diskerror::logger::info("Warmup: " + std::string(e.what()));
+            Diskerror::logger::info(std::format(lang::MSG_WARMUP_ERROR, e.what()));
         }
         // Preload default model on local inference engines
         if (inference_) {
@@ -108,9 +107,9 @@ struct Server::Impl {
         std::thread([this, model_name]() {
             auto err = inference_->ensure_model_loaded(model_name);
             if (err.empty()) {
-                Diskerror::logger::info("Preloaded model: " + model_name);
+                Diskerror::logger::info(std::format(lang::MSG_PRELOADED_MODEL, model_name));
             } else {
-                Diskerror::logger::info("Model preload skipped: " + err);
+                Diskerror::logger::info(std::format(lang::MSG_MODEL_PRELOAD_SKIPPED, err));
             }
         }).detach();
     }
@@ -171,11 +170,10 @@ struct Server::Impl {
                             {"source", "chat-session-" + sid_short}
                         };
                         mem_ptr->store(summary, meta);
-                        Diskerror::logger::info("Summarized session " + sid_short +
-                                 " (" + std::to_string(turns.size()) + " turns)");
+                        Diskerror::logger::info(std::format(lang::MSG_SUMMARIZED_SESSION, sid_short, turns.size()));
                     }
                 } catch (const std::exception& e) {
-                    Diskerror::logger::critical("Session summarization failed: " + std::string(e.what()));
+                    Diskerror::logger::critical(std::format(lang::ERR_SESSION_SUMMARY_FAIL, e.what()));
                 }
             }).detach();
         }
@@ -196,17 +194,15 @@ struct Server::Impl {
                 int deleted = temp_backend.cleanup_old_conversations(max_age_hours);
                 conversations_cleaned += deleted;
                 if (deleted > 0) {
-                    Diskerror::logger::info("Cleaned " + std::to_string(deleted)
-                           + " expired conversations from main DB");
+                    Diskerror::logger::info(std::format(lang::MSG_CLEANED, deleted));
                 }
             } catch (const std::exception& e) {
-                Diskerror::logger::critical(std::string("Cleanup failed for main DB: ") + e.what());
+                Diskerror::logger::critical(std::format(lang::ERR_CLEANUP_DB, e.what()));
             }
         }
 
         if (sessions_expired > 0 || conversations_cleaned > 0) {
-            Diskerror::logger::info("Housekeeping: " + std::to_string(sessions_expired) + " sessions expired, "
-                   + std::to_string(conversations_cleaned) + " conversations cleaned");
+            Diskerror::logger::info(std::format(lang::MSG_HOUSEKEEPING_EXPIRED, sessions_expired, conversations_cleaned));
         }
     }
 
@@ -236,7 +232,7 @@ struct Server::Impl {
         auto pid_str = std::to_string(getpid());
         (void)write(fd, pid_str.c_str(), pid_str.size());
         housekeeping_locks_[username] = fd;
-        Diskerror::logger::info("Housekeeping owner for user '" + username + "'");
+        Diskerror::logger::info(std::format(lang::MSG_HOUSEKEEPING_OWNER, username));
         return true;
     }
 
@@ -245,7 +241,7 @@ struct Server::Impl {
     void start_housekeeping_timer() {
         int interval = config().housekeeping_interval;
         if (interval == 0) {
-            Diskerror::logger::info("Housekeeping: disabled (interval = 0)");
+            Diskerror::logger::info(lang::MSG_HOUSEKEEPING_DISABLED);
             return;
         }
         timer_running_ = true;
@@ -255,24 +251,24 @@ struct Server::Impl {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                     // Check for signal-triggered housekeeping
                     if (g_housekeeping_requested.exchange(false)) {
-                        Diskerror::logger::info("Housekeeping triggered by signal");
+                        Diskerror::logger::info(lang::MSG_HOUSEKEEPING_SIGNAL);
                         run_housekeeping();
                     }
                     // Check for config reload (SIGHUP)
                     if (g_config_reload_requested.exchange(false)) {
                         int n = reload_config();
                         if (n > 0) {
-                            Diskerror::logger::info(std::format("Config reloaded: {} value(s) changed", n));
+                            Diskerror::logger::info(std::format(ragger::lang::MSG_CONFIG_RELOADED_N, n));
                             // Re-initialize inference client if endpoints changed
                             try {
                                 inference_ = std::make_unique<InferenceClient>(
                                     InferenceClient::from_config(config()));
-                                Diskerror::logger::info("Inference client reloaded");
+                                Diskerror::logger::info(lang::MSG_INFERENCE_CLIENT_OK);
                             } catch (const std::exception& e) {
-                                Diskerror::logger::critical("Inference client reload failed: " + std::string(e.what()));
+                                Diskerror::logger::critical(std::format(lang::ERR_INFERENCE_CLIENT_FAIL, e.what()));
                             }
                         } else {
-                            Diskerror::logger::info("Config reloaded: no changes");
+                            Diskerror::logger::info(lang::MSG_CONFIG_RELOADED_NONE);
                         }
                     }
                 }
@@ -302,16 +298,16 @@ struct Server::Impl {
         auto client = InferenceClient::from_config(cfg);
         if (!client._endpoints.empty()) {
             inference_ = std::make_unique<InferenceClient>(std::move(client));
-            Diskerror::logger::info("Inference: enabled (" + std::to_string(inference_->_endpoints.size()) + " endpoint(s))");
+            Diskerror::logger::info(std::format(lang::MSG_INFERENCE_ENABLED, inference_->_endpoints.size()));
         }
         
         // LM Proxy pass-through (if configured)
         if (!cfg.lm_proxy_url.empty()) {
             if (inference_) {
                 inference_->set_lm_proxy_url(cfg.lm_proxy_url);
-                Diskerror::logger::info("LM proxy: enabled (" + cfg.lm_proxy_url + ")");
+                Diskerror::logger::info(std::format(lang::MSG_LM_PROXY_ENABLED, cfg.lm_proxy_url));
             } else {
-                Diskerror::logger::error("LM proxy configured but no inference endpoint available");
+                Diskerror::logger::error(lang::ERR_LM_PROXY_NO_ENDPOINT);
             }
         }
     }
@@ -332,11 +328,11 @@ struct Server::Impl {
                 
                 int user_id = memory.backend()->create_user(username, token_hash);
                 user = UserInfo{user_id, username, token_hash, ""};
-                Diskerror::logger::info("Created user: " + username + " (id=" + std::to_string(user_id) + ")");
+                Diskerror::logger::info(std::format(lang::MSG_CREATED_USER, username, user_id));
             }
             default_user_ = user;
         }
-        Diskerror::logger::info("Single-user mode initialized");
+        Diskerror::logger::info(lang::MSG_SINGLE_USER_MODE);
     }
 
     // --- Web sessions (password login, DB-backed) ---
@@ -504,7 +500,7 @@ struct Server::Impl {
                 if (text.empty()) {
                     Diskerror::logger::debug("POST /store 400");
                     res.status = 400;
-                    res.set_content("Missing 'text' field", "text/plain");
+                    res.set_content(lang::HTTP_MISSING_TEXT, "text/plain");
                     return;
                 }
 
@@ -535,7 +531,7 @@ struct Server::Impl {
                 Diskerror::logger::debug("POST /store 500");
                 Diskerror::logger::critical(std::string("POST /store failed: ") + e.what());
                 res.status = 500;
-                res.set_content(std::string("Error: ") + e.what(), "text/plain");
+                res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
             }
         });
 
@@ -555,7 +551,7 @@ struct Server::Impl {
                     body.value("collections", std::vector<std::string>{});
                 if (query.empty()) {
                     Diskerror::logger::debug("POST /search 400");
-                    res.status = 400; res.set_content("Missing 'query' field", "text/plain"); return;
+                    res.status = 400; res.set_content(lang::HTTP_MISSING_QUERY, "text/plain"); return;
                 }
                 auto start_time = std::chrono::high_resolution_clock::now();
                 auto& mem = _get_memory(user->username);
@@ -570,11 +566,8 @@ struct Server::Impl {
                 json timing = search_response.timing;
                 timing["total_ms"] = duration.count();
                 json response = {{"results", results}, {"timing", timing}};
-                std::ostringstream ql;
-                ql << "query=\"" << query << "\" results=" << search_response.results.size()
-                   << " time=" << duration.count() << "ms";
-                Diskerror::logger::trace(ql.str());
-                Diskerror::logger::debug("POST /search 200");
+                Diskerror::logger::trace(std::format(lang::DBG_QUERY_LOG, query, search_response.results.size(), duration.count()));
+                Diskerror::logger::debug(std::format(lang::DBG_HTTP, "POST", "/search", "200"));
                 res.set_content(response.dump(), "application/json");
             } catch (const json::exception& e) {
                 Diskerror::logger::debug("POST /search 400");
@@ -603,12 +596,12 @@ struct Server::Impl {
                     res.set_content(response.dump(), "application/json");
                 } else {
                     Diskerror::logger::debug("DELETE /memory 404");
-                    res.status = 404; res.set_content("Memory not found", "text/plain");
+                    res.status = 404; res.set_content(lang::HTTP_MEMORY_NOT_FOUND, "text/plain");
                 }
             } catch (const std::exception& e) {
                 Diskerror::logger::debug("DELETE /memory 500");
                 Diskerror::logger::critical(std::string("DELETE /memory failed: ") + e.what());
-                res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
+                res.status = 500; res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
             }
         });
 
@@ -623,7 +616,7 @@ struct Server::Impl {
                 auto body = json::parse(req.body);
                 if (!body.contains("ids") || !body["ids"].is_array()) {
                     Diskerror::logger::debug("POST /delete_batch 400");
-                    res.status = 400; res.set_content("Missing or invalid 'ids' field", "text/plain"); return;
+                    res.status = 400; res.set_content(lang::HTTP_MISSING_IDS, "text/plain"); return;
                 }
                 std::vector<int> ids = body["ids"].get<std::vector<int>>();
                 auto& mem = _get_memory(user->username);
@@ -635,7 +628,6 @@ struct Server::Impl {
                 Diskerror::logger::debug("POST /delete_batch 400");
                 res.status = 400; res.set_content(std::string("JSON error: ") + e.what(), "text/plain");
             } catch (const std::exception& e) {
-                Diskerror::logger::debug("POST /delete_batch 500");
                 Diskerror::logger::critical(std::string("POST /delete_batch failed: ") + e.what());
                 res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
             }
@@ -652,7 +644,7 @@ struct Server::Impl {
                 auto body = json::parse(req.body);
                 if (!body.contains("metadata") || !body["metadata"].is_object()) {
                     Diskerror::logger::debug("POST /search_by_metadata 400");
-                    res.status = 400; res.set_content("Missing or invalid 'metadata' field", "text/plain"); return;
+                    res.status = 400; res.set_content(lang::HTTP_MISSING_METADATA, "text/plain"); return;
                 }
                 json metadata_filter = body["metadata"];
                 int limit = body.value("limit", 0);
@@ -686,7 +678,7 @@ struct Server::Impl {
             try {
                 auto body = json::parse(req.body);
                 std::string model = body.value("model", "");
-                if (model.empty()) { res.status = 400; res.set_content("Missing 'model' field", "text/plain"); return; }
+                if (model.empty()) { res.status = 400; res.set_content(lang::HTTP_MISSING_MODEL, "text/plain"); return; }
                 std::string resolved = config().resolve_model(model);
                 memory.backend()->update_user_preferred_model(user->username, resolved);
                 preload_local_model(resolved);
@@ -697,7 +689,7 @@ struct Server::Impl {
                 res.status = 400; res.set_content(std::string("JSON error: ") + e.what(), "text/plain");
             } catch (const std::exception& e) {
                 Diskerror::logger::critical(std::string("PUT /user/model failed: ") + e.what());
-                res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
+                res.status = 500; res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
             }
         });
 
@@ -712,7 +704,7 @@ struct Server::Impl {
                 res.set_content(response.dump(), "application/json");
             } catch (const std::exception& e) {
                 Diskerror::logger::critical(std::string("GET /user/model failed: ") + e.what());
-                res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
+                res.status = 500; res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
             }
         });
 
@@ -726,7 +718,7 @@ struct Server::Impl {
                 res.set_content(R"({"status":"cleared"})", "application/json");
             } catch (const std::exception& e) {
                 Diskerror::logger::critical(std::string("DELETE /user/model failed: ") + e.what());
-                res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
+                res.status = 500; res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
             }
         });
 
@@ -749,7 +741,7 @@ struct Server::Impl {
                 Diskerror::logger::debug("GET /user/token 200");
                 res.set_content(response.dump(), "application/json");
             } catch (const std::exception& ex) {
-                res.status = 500; res.set_content(std::string("Error: ") + ex.what(), "text/plain");
+                res.status = 500; res.set_content(std::string("ERROR: ") + ex.what(), "text/plain");
             }
         });
 
@@ -762,15 +754,15 @@ struct Server::Impl {
                 res.status = 401; res.set_content("Unauthorized", "text/plain"); return;
             }
             if (!inference_) {
-                Diskerror::logger::debug("POST /chat 503");
-                res.status = 503; res.set_content(R"({"error":"inference not configured"})", "application/json"); return;
+                Diskerror::logger::debug(std::format(lang::DBG_HTTP, "POST", "/chat", "503"));
+                res.status = 503; res.set_content(json{{"error", lang::HTTP_INFERENCE_NOT_CONFIGURED}}.dump(), "application/json"); return;
             }
 
             try {
                 auto body = json::parse(req.body);
                 std::string message = body.value("message", "");
                 if (message.empty()) {
-                    res.status = 400; res.set_content(R"({"error":"message required"})", "application/json"); return;
+                    res.status = 400; res.set_content(json{{"error", lang::HTTP_MESSAGE_REQUIRED}}.dump(), "application/json"); return;
                 }
 
                 std::string session_id = body.value("session_id", "");
@@ -788,7 +780,7 @@ struct Server::Impl {
                         memory_context += r.text;
                     }
                 } catch (const std::exception& e) {
-                    Diskerror::logger::critical(std::string("Memory search failed for /chat: ") + e.what());
+                    Diskerror::logger::critical(std::format(lang::ERR_MEMORY_SEARCH_FAIL, e.what()));
                 }
 
                 // Resolve model
@@ -813,8 +805,7 @@ struct Server::Impl {
                 // Build messages
                 std::string system_prompt = ChatSessionManager::load_workspace_files();
                 if (system_prompt.empty()) {
-                    Diskerror::logger::critical("No system prompt files found (SYSTEM.md, SOUL.md, USER.md, etc.) — "
-                              "chat will proceed without a system prompt");
+                    Diskerror::logger::critical(std::string(lang::ERR_NO_SYSTEM_PROMPT_FILES) + "chat will proceed without a system prompt");
                 }
                 session.add_user_message(message);
                 auto full_messages = session.build_messages(system_prompt, memory_context);
@@ -916,7 +907,7 @@ struct Server::Impl {
                                         }
                                         backend_ptr->save_chat_session(sid, username, messages_array.dump());
                                     } catch (const std::exception& e) {
-                                        Diskerror::logger::critical(std::string("Session save failed: ") + e.what());
+                                        Diskerror::logger::critical(std::format(lang::ERR_SESSION_SAVE_FAIL, e.what()));
                                     }
                                     
                                     const auto& cfg = config();
@@ -931,7 +922,7 @@ struct Server::Impl {
                                             mem.store("User: " + msg_text + "\n\nAssistant: " + *response_text,
                                                       turn_meta);
                                         } catch (const std::exception& e) {
-                                            Diskerror::logger::critical(std::string("Turn storage failed: ") + e.what());
+                                            Diskerror::logger::critical(std::format(lang::ERR_TURN_STORAGE_FAIL, e.what()));
                                         }
                                     }
                                 }
@@ -948,7 +939,7 @@ struct Server::Impl {
             } catch (const std::exception& e) {
                 Diskerror::logger::debug("POST /chat 500");
                 Diskerror::logger::critical(std::string("POST /chat failed: ") + e.what());
-                res.status = 500; res.set_content(std::string("Error: ") + e.what(), "text/plain");
+                res.status = 500; res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
             }
         });
 
@@ -959,22 +950,22 @@ struct Server::Impl {
                 std::string username = body.value("username", "");
                 std::string password = body.value("password", "");
                 if (username.empty() || password.empty()) {
-                    res.status = 400; res.set_content(R"({"error":"username and password required"})", "application/json"); return;
+                    res.status = 400; res.set_content(json{{"error", lang::HTTP_LOGIN_CREDENTIALS_REQ}}.dump(), "application/json"); return;
                 }
                 auto user = memory.backend()->get_user_by_username(username);
-                if (!user) { res.status = 401; res.set_content(R"({"error":"invalid credentials"})", "application/json"); return; }
+                if (!user) { res.status = 401; res.set_content(json{{"error", lang::HTTP_LOGIN_INVALID}}.dump(), "application/json"); return; }
                 auto stored_hash = memory.backend()->get_user_password(username);
-                if (!stored_hash) { res.status = 401; res.set_content(R"({"error":"no password set — use 'ragger passwd' first"})", "application/json"); return; }
-                if (!verify_password(password, *stored_hash)) { res.status = 401; res.set_content(R"({"error":"invalid credentials"})", "application/json"); return; }
+                if (!stored_hash) { res.status = 401; res.set_content(json{{"error", lang::HTTP_LOGIN_NO_PASSWORD}}.dump(), "application/json"); return; }
+                if (!verify_password(password, *stored_hash)) { res.status = 401; res.set_content(json{{"error", lang::HTTP_LOGIN_INVALID}}.dump(), "application/json"); return; }
                 std::string session_token = generate_random_token(32);
                 memory.backend()->create_web_session(
                     session_token, username, user->id, WEB_SESSION_TTL);
                 json result = {{"token", session_token}, {"username", username}, {"expires_in", WEB_SESSION_TTL}};
-                Diskerror::logger::debug("POST /auth/login 200 (" + username + ")");
+                Diskerror::logger::debug(std::format(lang::DBG_HTTP_DETAIL, "POST", "/auth/login", "200", username));
                 res.set_content(result.dump(), "application/json");
             } catch (const std::exception& e) {
-                Diskerror::logger::critical(std::string("Login error: ") + e.what());
-                res.status = 500; res.set_content(R"({"error":"login failed"})", "application/json");
+                Diskerror::logger::critical(std::format(lang::ERR_LOGIN, e.what()));
+                res.status = 500; res.set_content(json{{"error", lang::HTTP_LOGIN_FAILED}}.dump(), "application/json");
             }
         });
 
@@ -1171,8 +1162,7 @@ void Server::Impl::setup_lm_proxy_routes() {
                             sid, username, arr.dump());
                         flush_count->fetch_add(1);
                     } catch (const std::exception& e) {
-                        Diskerror::logger::critical(std::string("Proxy stream flush failed: ") +
-                                  e.what());
+                        Diskerror::logger::critical(std::format(lang::ERR_PROXY_FLUSH, e.what()));
                     }
                 };
 
@@ -1210,8 +1200,7 @@ void Server::Impl::setup_lm_proxy_routes() {
                             },
                             [=](long code) { status->store(code); });
                     } catch (const std::exception& e) {
-                        Diskerror::logger::critical(std::string("Proxy stream upstream error: ")
-                                  + e.what());
+                        Diskerror::logger::critical(std::format(lang::ERR_PROXY_UPSTREAM, e.what()));
                     }
                     done->store(true);
                     cv->notify_one();
@@ -1255,7 +1244,7 @@ void Server::Impl::setup_lm_proxy_routes() {
                             for (const auto& bytes : batch) {
                                 if (!sink.write(bytes.data(), bytes.size())) {
                                     cancelled->store(true);
-                                    Diskerror::logger::debug("proxy stream: client disconnected");
+                                    Diskerror::logger::debug(lang::MSG_PROXY_CLIENT_DISC);
                                     return false;
                                 }
                             }
@@ -1279,14 +1268,7 @@ void Server::Impl::setup_lm_proxy_routes() {
                                 auto ms = std::chrono::duration_cast<
                                     std::chrono::milliseconds>(
                                     std::chrono::steady_clock::now() - t0).count();
-                                Diskerror::logger::debug("POST " + path + " stream " +
-                                    std::to_string(code) +
-                                    " (" + std::to_string(chunk_count->load()) +
-                                    " chunks, " +
-                                    std::to_string(byte_count->load()) +
-                                    " bytes, " + std::to_string(ms) + "ms, " +
-                                    "flushed " +
-                                    std::to_string(flush_count->load()) + "×)");
+                                Diskerror::logger::debug(std::format(lang::DBG_PROXY_STREAM_STATS, path, code, chunk_count->load(), byte_count->load(), ms, flush_count->load()));
                                 return false;
                             }
                         }
@@ -1300,10 +1282,9 @@ void Server::Impl::setup_lm_proxy_routes() {
             // Reject stream=true on paths we don't stream (e.g. /v1/completions)
             if (stream_requested) {
                 res.status = 400;
-                res.set_content(
-                    R"({"error":"streaming only supported on /v1/chat/completions"})",
+                res.set_content(json{{"error", lang::HTTP_STREAMING_REJECTED}}.dump(),
                     "application/json");
-                Diskerror::logger::debug("POST " + path + " 400 (streaming rejected)");
+                Diskerror::logger::debug(std::format(lang::DBG_HTTP_DETAIL, "POST", path, "400", "streaming rejected"));
                 return;
             }
 
@@ -1315,7 +1296,7 @@ void Server::Impl::setup_lm_proxy_routes() {
 
             auto resp = inference_->proxy_request(path, "POST", req.body);
             res.status = static_cast<int>(resp.status_code);
-            Diskerror::logger::debug("POST " + path + " " + std::to_string(resp.status_code));
+            Diskerror::logger::debug(std::format(lang::DBG_HTTP, "POST", path, resp.status_code));
             res.set_content(resp.body, "application/json");
 
             // Capture turn on successful chat completions only
@@ -1358,19 +1339,19 @@ void Server::Impl::setup_lm_proxy_routes() {
                             memory.backend()->save_chat_session(
                                 sid, username, messages_array.dump());
                         } catch (const std::exception& e) {
-                            Diskerror::logger::error(std::string("Proxy turn persist failed: ") + e.what());
+                            Diskerror::logger::error(std::format(lang::ERR_PROXY_TURN_PERSIST, e.what()));
                         }
 
                         res.set_header("X-Session-Id", sid);
                     }
                 } catch (const std::exception& e) {
-                    Diskerror::logger::error(std::string("Proxy turn capture failed: ") + e.what());
+                    Diskerror::logger::error(std::format(lang::ERR_PROXY_TURN_CAPTURE, e.what()));
                 }
             }
         } catch (const std::exception& e) {
-            Diskerror::logger::error("LM proxy " + path + " failed: " + e.what());
+            Diskerror::logger::error(std::format(lang::ERR_LM_PROXY_PATH, path, e.what()));
             res.status = 502;
-            res.set_content(R"({"error":"upstream unavailable"})", "application/json");
+            res.set_content(json{{"error", lang::HTTP_UPSTREAM_UNAVAILABLE}}.dump(), "application/json");
         }
     };
 
@@ -1382,12 +1363,12 @@ void Server::Impl::setup_lm_proxy_routes() {
             for (const auto& model : models) {
                 response["data"].push_back({{"id", model}, {"object", "model"}, {"owned_by", "lm-proxy"}});
             }
-            Diskerror::logger::debug("GET /v1/models 200");
+            Diskerror::logger::debug(std::format(lang::DBG_HTTP, "GET", "/v1/models", "200"));
             res.set_content(response.dump(), "application/json");
         } catch (const std::exception& e) {
-            Diskerror::logger::error(std::string("LM proxy /v1/models failed: ") + e.what());
+            Diskerror::logger::error(std::format(lang::ERR_LM_PROXY_MODELS, e.what()));
             res.status = 502;
-            res.set_content(R"({"error":"upstream unavailable"})", "application/json");
+            res.set_content(json{{"error", lang::HTTP_UPSTREAM_UNAVAILABLE}}.dump(), "application/json");
         }
     });
 
@@ -1441,11 +1422,11 @@ void Server::run() {
     std::string addr = use_unix
         ? expand_path(cfg.socket_path)
         : (pImpl->host + ":" + std::to_string(pImpl->port));
-    Diskerror::logger::info(std::string(lang::MSG_SERVER_STARTING) + addr);
+    Diskerror::logger::info(std::format(lang::MSG_SERVER_STARTING, addr));
     if (!use_unix) {
-        Diskerror::logger::info("  Health check: curl http://" + addr + "/health");
+        Diskerror::logger::info(std::format(lang::MSG_HEALTH_CHECK_TCP, addr));
     } else {
-        Diskerror::logger::info("  Health check: curl --unix-socket " + addr + " http://localhost/health");
+        Diskerror::logger::info(std::format(lang::MSG_HEALTH_CHECK_UNIX, addr));
     }
 
     // TLS support — if certs configured, create SSLServer instead
@@ -1453,7 +1434,7 @@ void Server::run() {
     // httplib::SSLServer. For now, TLS is handled via reverse proxy (Caddy/nginx).
     // TODO: To support native TLS, conditionally create SSLServer in Impl constructor.
     if (!cfg.tls_cert.empty() && !cfg.tls_key.empty()) {
-        Diskerror::logger::info("TLS config present — native TLS not yet supported with httplib. Use reverse proxy.");
+        Diskerror::logger::info(lang::MSG_TLS_NOT_SUPPORTED);
     }
 
     // Write PID file (per-port)
@@ -1464,7 +1445,7 @@ void Server::run() {
         std::ofstream pf(pImpl->pid_file_);
         if (pf) {
             pf << getpid();
-            Diskerror::logger::info("PID file: " + pImpl->pid_file_);
+            Diskerror::logger::info(std::format(lang::MSG_PID_FILE, pImpl->pid_file_));
         }
     }
 
@@ -1498,24 +1479,24 @@ void Server::run() {
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
             }
-            Diskerror::logger::info("Unix socket chmod 0600 timed out; check " + sock_path);
+            Diskerror::logger::info(std::format(lang::MSG_UNIX_CHMOD_TIMEOUT, sock_path));
         });
         chmod_thread.detach();
 
-        Diskerror::logger::info("Binding AF_UNIX socket: " + sock_path);
+        Diskerror::logger::info(std::format(lang::MSG_BIND_UNIX_SOCKET, sock_path));
         // NOTE: port must be non-zero even for AF_UNIX. httplib's bind_internal
         // only calls getsockname() when port==0, and that path only handles
         // AF_INET/AF_INET6 — for AF_UNIX it returns UnsupportedAddressFamily
         // AFTER a successful bind, causing listen() to fail silently.
         bool ok = pImpl->svr.listen(sock_path, 80);  // port value ignored for AF_UNIX
         if (!ok) {
-            Diskerror::logger::error(std::format("listen() on unix socket returned false: {} (errno={})", sock_path, std::to_string(errno)));
+            Diskerror::logger::error(std::format(ragger::lang::ERR_LISTEN_UNIX, sock_path, std::to_string(errno)));
         }
     } else {
-        Diskerror::logger::info(std::format("Binding TCP {}:{}", pImpl->host, std::to_string(pImpl->port)));
+        Diskerror::logger::info(std::format(ragger::lang::MSG_BIND_TCP, pImpl->host, std::to_string(pImpl->port)));
         bool ok = pImpl->svr.listen(pImpl->host, pImpl->port);
         if (!ok) {
-            Diskerror::logger::error(std::format("listen() on TCP returned false (errno={})", std::to_string(errno)));
+            Diskerror::logger::error(std::format(ragger::lang::ERR_LISTEN_TCP, std::to_string(errno)));
         }
     }
 

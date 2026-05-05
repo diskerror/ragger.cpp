@@ -6,9 +6,10 @@
 #include "ragger/lang.h"
 #include "ragger/tokenizer_wrapper.h"
 #include <onnxruntime_cxx_api.h>
-#include <stdexcept>
 #include <cmath>
 #include <filesystem>
+#include <format>
+#include <stdexcept>
 
 namespace ragger {
 
@@ -28,10 +29,10 @@ struct Embedder::Impl {
         
         // Check files exist
         if (!std::filesystem::exists(model_path)) {
-            throw std::runtime_error(std::string(lang::ERR_MODEL_NOT_FOUND) + model_path.string());
+            throw std::runtime_error(std::format(lang::ERR_MODEL_NOT_FOUND, model_path.string()));
         }
         if (!std::filesystem::exists(tokenizer_path)) {
-            throw std::runtime_error(std::string(lang::ERR_TOKENIZER_NOT_FOUND) + tokenizer_path.string());
+            throw std::runtime_error(std::format(lang::ERR_TOKENIZER_NOT_FOUND, tokenizer_path.string()));
         }
         
         // Load tokenizer
