@@ -109,7 +109,11 @@ struct Server::Impl {
             if (err.empty()) {
                 Diskerror::logger::info(std::format(lang::MSG_PRELOADED_MODEL, model_name));
             } else {
-                Diskerror::logger::info(std::format(lang::MSG_MODEL_PRELOAD_SKIPPED, err));
+                // WARN, not info — preload is best-effort but a misconfigured or
+                // unreachable management endpoint is the kind of thing the user
+                // wants to see (issue #47). The err string already carries the
+                // tried URL via ERR_ENGINE_UNREACHABLE / ERR_MODEL_LOAD_*.
+                Diskerror::logger::warn(std::format(lang::MSG_MODEL_PRELOAD_SKIPPED, err));
             }
         }).detach();
     }

@@ -198,10 +198,10 @@ std::string InferenceClient::ensure_model_loaded(const std::string& model_overri
     curl_easy_cleanup(curl);
 
     if (res == CURLE_OPERATION_TIMEDOUT) {
-        return std::format(lang::ERR_MODEL_LOAD_TIMEOUT, use_model);
+        return std::format(lang::ERR_MODEL_LOAD_TIMEOUT, use_model, load_url);
     }
     if (res != CURLE_OK) {
-        return std::format(lang::ERR_MODEL_LOAD_FAILED, use_model);
+        return std::format(lang::ERR_MODEL_LOAD_FAILED, use_model, load_url, curl_easy_strerror(res));
     }
 
     return "";  // loaded successfully
