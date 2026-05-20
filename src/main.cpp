@@ -67,17 +67,33 @@ static void do_import(ragger::RaggerMemory &memory,
     auto filename = fs::path(filepath).filename().string();
     std::println(ragger::lang::MSG_IMPORTING_CHUNKS, chunks.size(), filename);
 
-    for (size_t i = 0; i < chunks.size(); ++i) {
-        nlohmann::json meta = {
-            {"source", filepath},
-            {"chunk", (int) (i + 1)},
-            {"total_chunks", (int) chunks.size()}
-        };
-        if (!collection.empty()) meta["collection"] = collection;
-        if (!chunks[i].section.empty()) meta["section"] = chunks[i].section;
+    // Single timestamp shared across every chunk of this import (issue #48).
+    std::string import_ts;
+    {
+        auto now = std::chrono::system_clock::now();
+        auto tt  = std::chrono::system_clock::to_time_t(now);
+        std::tm gm{};
+        gmtime_r(&tt, &gm);
+        char buf[32];
+        std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &gm);
+        import_ts = std::string(buf) + "Z";
+    }
 
-        auto id = memory.store(chunks[i].text, meta);
-        std::println(ragger::lang::MSG_IMPORT_CHUNK, (i + 1), chunks.size(), id);
+    const int total = static_cast<int>(chunks.size());
+    const std::string coll = collection.empty() ? std::string("default") : collection;
+
+    for (int i = 0; i < total; ++i) {
+        ragger::DocumentChunk doc;
+        doc.text        = chunks[i].text;
+        doc.source      = filepath;
+        doc.section     = chunks[i].section;
+        doc.chunk_index = i + 1;
+        doc.chunk_total = total;
+        doc.imported_at = import_ts;
+        doc.collection  = coll;
+
+        int id = memory.store_document(doc);
+        std::println(ragger::lang::MSG_IMPORT_CHUNK, (i + 1), total, std::to_string(id));
     }
     std::println(ragger::lang::MSG_IMPORT_DONE, chunks.size());
 }

@@ -852,6 +852,86 @@ struct SqliteBackend::Impl {
         return std::to_string(memory_id);
     }
 
+    // ---- index BM25 tokens for documents table ------------------------
+    void index_bm25_document_tokens(int document_id, const std::string& text) {
+        auto tokens = BM25Index::tokenize(text);
+        if (tokens.empty()) return;
+
+        std::unordered_map<std::string, int> tf;
+        for (auto& t : tokens) ++tf[t];
+
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db,
+            "INSERT INTO bm25_documents (document_id, token, term_freq) VALUES (?,?,?)",
+            -1, &stmt, nullptr);
+
+        for (auto& [token, freq] : tf) {
+            sqlite3_bind_int(stmt, 1, document_id);
+            sqlite3_bind_text(stmt, 2, token.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(stmt, 3, freq);
+            sqlite3_step(stmt);
+            sqlite3_reset(stmt);
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    // ---- store_document: write Level 5 RAG chunk ----------------------
+    int store_document(const DocumentChunk& chunk, bool defer_embedding) {
+        // Path-normalise the body text for consistency with store().
+        std::string text = normalize_path(chunk.text);
+
+        std::vector<float> emb;
+        if (!defer_embedding) {
+            emb = embedder->encode(text);
+        }
+
+        std::string imported_at = chunk.imported_at.empty() ? now_iso() : chunk.imported_at;
+
+        // chunk_index / chunk_total of 0 mean "unchunked" — store as NULL so
+        // the column reflects the absence of a chunking scheme.
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db,
+            "INSERT INTO documents "
+            "(text, embedding, source, section, chunk_index, chunk_total, "
+            " metadata, imported_at, collection, tags) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            -1, &stmt, nullptr);
+
+        sqlite3_bind_text(stmt, 1, text.c_str(), -1, SQLITE_TRANSIENT);
+        if (defer_embedding) {
+            sqlite3_bind_null(stmt, 2);
+        } else {
+            sqlite3_bind_blob(stmt, 2, emb.data(),
+                              static_cast<int>(emb.size() * sizeof(float)),
+                              SQLITE_TRANSIENT);
+        }
+        if (chunk.source.empty()) sqlite3_bind_null(stmt, 3);
+        else sqlite3_bind_text(stmt, 3, chunk.source.c_str(), -1, SQLITE_TRANSIENT);
+        if (chunk.section.empty()) sqlite3_bind_null(stmt, 4);
+        else sqlite3_bind_text(stmt, 4, chunk.section.c_str(), -1, SQLITE_TRANSIENT);
+        if (chunk.chunk_index <= 0) sqlite3_bind_null(stmt, 5);
+        else sqlite3_bind_int(stmt, 5, chunk.chunk_index);
+        if (chunk.chunk_total <= 0) sqlite3_bind_null(stmt, 6);
+        else sqlite3_bind_int(stmt, 6, chunk.chunk_total);
+        std::string meta_str = chunk.metadata.is_null() || chunk.metadata.empty()
+                                   ? "" : chunk.metadata.dump();
+        if (meta_str.empty()) sqlite3_bind_null(stmt, 7);
+        else sqlite3_bind_text(stmt, 7, meta_str.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 8, imported_at.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 9, chunk.collection.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 10, chunk.tags.c_str(), -1, SQLITE_TRANSIENT);
+
+        int rc = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+        if (rc != SQLITE_DONE) {
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+        }
+
+        int document_id = static_cast<int>(sqlite3_last_insert_rowid(db));
+        index_bm25_document_tokens(document_id, text);
+        return document_id;
+    }
+
     bool update_text(int memory_id, const std::string& raw_text, json metadata, bool defer_embedding) {
         if (metadata.is_null()) metadata = json::object();
 
@@ -1455,6 +1535,10 @@ std::string SqliteBackend::db_path() const { return pImpl->db_path; }
 
 std::string SqliteBackend::store(const std::string& text, json metadata, bool defer_embedding) {
     return pImpl->store(text, std::move(metadata), defer_embedding);
+}
+
+int SqliteBackend::store_document(const DocumentChunk& chunk, bool defer_embedding) {
+    return pImpl->store_document(chunk, defer_embedding);
 }
 
 bool SqliteBackend::update_text(int memory_id, const std::string& text, json metadata, bool defer_embedding) {

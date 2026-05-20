@@ -29,6 +29,11 @@ public:
                          bool common = false,
                          bool defer_embedding = false);
 
+    /// Store a Level 5 RAG document chunk. Pass the same `chunk.imported_at`
+    /// for every chunk of one import so they share a single timestamp
+    /// (issue #48). Returns the new document id.
+    int store_document(const DocumentChunk& chunk, bool defer_embedding = false);
+
     /// Replace text + metadata of an existing memory (re-embeds unless
     /// `defer_embedding`, rebuilds BM25 tokens, preserves id and original
     /// timestamp). Returns false if the row is missing or has the keep tag.

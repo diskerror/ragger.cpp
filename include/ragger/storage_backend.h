@@ -40,6 +40,13 @@ public:
     virtual std::string store(const std::string& text, json metadata = {},
                               bool defer_embedding = false) = 0;
 
+    /// Store a Level 5 RAG document chunk into the `documents` table.
+    /// Indexes tokens into `bm25_documents`. Returns the new row id.
+    /// `chunk.imported_at` is honoured when non-empty so every chunk of one
+    /// import shares a single timestamp (issue #48).
+    virtual int store_document(const DocumentChunk& chunk,
+                               bool defer_embedding = false) = 0;
+
     /// Replace text + metadata of an existing row. Re-embeds (or NULLs the
     /// embedding when `defer_embedding`) and rebuilds the row's BM25 tokens.
     /// Preserves id and original timestamp. Returns false if the row
