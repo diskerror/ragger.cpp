@@ -23,6 +23,18 @@ namespace fs = std::filesystem;
 // -----------------------------------------------------------------------
 // Path helpers
 // -----------------------------------------------------------------------
+std::string normalize_lm_proxy_url(std::string url) {
+    // Drop trailing slashes
+    while (!url.empty() && url.back() == '/') url.pop_back();
+    // Drop one trailing "/v1" segment if present
+    static constexpr std::string_view v1_suffix = "/v1";
+    if (url.size() >= v1_suffix.size() &&
+        url.compare(url.size() - v1_suffix.size(), v1_suffix.size(), v1_suffix) == 0) {
+        url.erase(url.size() - v1_suffix.size());
+    }
+    return url;
+}
+
 std::string expand_path(const std::string& path) {
     if (path.empty() || path[0] != '~') return path;
     const char* home = std::getenv("HOME");
@@ -364,7 +376,7 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "api_key")    cfg.inference_api_key = val;
             else if (key == "max_tokens") cfg.inference_max_tokens = std::stoi(val);
             else if (key == "default")    cfg.inference_default = val;
-            else if (key == "lm_proxy_url") cfg.lm_proxy_url = val;
+            else if (key == "lm_proxy_url") cfg.lm_proxy_url = normalize_lm_proxy_url(val);
         }
         else if (section.substr(0, 10) == "inference.") {
             // Named endpoint section: [inference.local], [inference.anthropic], etc.

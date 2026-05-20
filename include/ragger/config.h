@@ -125,6 +125,12 @@ struct Config {
 /// Expand ~ to $HOME in a path string.
 std::string expand_path(const std::string& path);
 
+/// Normalise lm_proxy_url so users can supply either origin-only or a
+/// trailing /v1 (with or without slash). Strips trailing slash(es) and one
+/// trailing "/v1" segment so the proxy code can safely prepend /v1/* paths
+/// without producing /v1/v1/... See issue #45.
+std::string normalize_lm_proxy_url(std::string url);
+
 /// Find system config file using search order. Returns path or throws.
 /// @param cli_path  Path from --config (empty if not given)
 std::expected<std::string, ConfigError> find_system_config(const std::string& cli_path = "");
