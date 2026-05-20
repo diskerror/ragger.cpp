@@ -176,6 +176,125 @@ struct SqliteBackend::Impl {
         migrate_add_password_hash();
         migrate_add_web_sessions();
         migrate_add_chat_sessions();
+        migrate_separate_tables();
+    }
+
+    // Issue #33 — split storage into three tables:
+    //   turns      = Level 1 raw exchanges (user_text + assistant_text)
+    //   documents  = Level 5 RAG (user-curated; agent cannot write)
+    //   memories   = Levels 2/3/4/6 (summaries + decisions) — extended in place
+    //
+    // Existing memories rows keep their data and receive level='legacy'
+    // until a follow-up classifier reassigns them. BM25 stays per-table
+    // until #49 swaps everything to FTS5.
+    void migrate_separate_tables() {
+        // Detect whether this migration has already run by checking for the
+        // `level` column on `memories`. Idempotent on re-open.
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db, "PRAGMA table_info(memories)", -1, &stmt, nullptr);
+        bool has_level = false;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            std::string col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            if (col == "level") { has_level = true; break; }
+        }
+        sqlite3_finalize(stmt);
+
+        if (has_level) {
+            // Tables/columns may still need the IF NOT EXISTS no-ops below
+            // on a fresh sibling DB. Skip the log line; the work is idempotent.
+        } else {
+            std::cerr << ragger::lang::MSG_MIGRATE_SEPARATE_TABLES << "\n";
+        }
+
+        // --- documents: user-curated RAG (Level 5) ---
+        // imported_at is a single timestamp shared by every chunk of one
+        // import (issue #48). chunk_index/chunk_total are NULL for
+        // unchunked documents.
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS documents (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                text        TEXT    NOT NULL,
+                embedding   BLOB,
+                source      TEXT,
+                section     TEXT,
+                chunk_index INTEGER,
+                chunk_total INTEGER,
+                metadata    TEXT,
+                imported_at TEXT    NOT NULL,
+                user_id     INTEGER REFERENCES users(id),
+                collection  TEXT    NOT NULL DEFAULT 'default',
+                tags        TEXT    NOT NULL DEFAULT ''
+            )
+        )");
+        exec("CREATE INDEX IF NOT EXISTS idx_documents_source      ON documents(source)");
+        exec("CREATE INDEX IF NOT EXISTS idx_documents_collection  ON documents(collection)");
+        exec("CREATE INDEX IF NOT EXISTS idx_documents_imported_at ON documents(imported_at)");
+
+        // --- turns: raw verbatim exchanges (Level 1) ---
+        // Paired schema: one row per user/assistant exchange. assistant_text
+        // is nullable to support the existing deferred-embedding flow where
+        // a partial row is written on user input and finalized on response.
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS turns (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id     TEXT,
+                user_text      TEXT NOT NULL,
+                assistant_text TEXT,
+                embedding      BLOB,
+                model          TEXT,
+                metadata       TEXT,
+                timestamp      TEXT NOT NULL,
+                user_id        INTEGER REFERENCES users(id)
+            )
+        )");
+        exec("CREATE INDEX IF NOT EXISTS idx_turns_session   ON turns(session_id)");
+        exec("CREATE INDEX IF NOT EXISTS idx_turns_timestamp ON turns(timestamp)");
+
+        // --- memories: extend in place for Levels 2/3/4/6 ---
+        // level:  'turn-summary' | 'session-summary' | 'project-summary' | 'decision' | 'legacy'
+        // status: 'current' | 'complete' (summaries) | 'superseded' | 'revisit' | 'deprecated' (decisions)
+        // parent_id: hierarchy (L2 -> L3, L3 -> L4, superseded decision -> replacement)
+        // source_turn_id: L2 turn-summary references the turn it summarises
+        if (!has_level) {
+            exec("ALTER TABLE memories ADD COLUMN level          TEXT NOT NULL DEFAULT 'legacy'");
+            exec("ALTER TABLE memories ADD COLUMN status         TEXT NOT NULL DEFAULT 'current'");
+            exec("ALTER TABLE memories ADD COLUMN parent_id      INTEGER");
+            exec("ALTER TABLE memories ADD COLUMN source_turn_id INTEGER");
+            std::cerr << ragger::lang::MSG_MIGRATE_MEMORIES_LEVEL << "\n";
+        }
+        exec("CREATE INDEX IF NOT EXISTS idx_memories_level     ON memories(level)");
+        exec("CREATE INDEX IF NOT EXISTS idx_memories_status    ON memories(status)");
+        exec("CREATE INDEX IF NOT EXISTS idx_memories_parent    ON memories(parent_id)");
+        exec("CREATE INDEX IF NOT EXISTS idx_memories_src_turn  ON memories(source_turn_id)");
+
+        // --- BM25 sidecars for turns and documents ---
+        // The existing bm25_index stays keyed to memories(id). When #49
+        // lands FTS5, all three are superseded by virtual tables.
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS bm25_documents (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id INTEGER NOT NULL
+                    REFERENCES documents(id)
+                    ON DELETE CASCADE ON UPDATE CASCADE,
+                token       TEXT    NOT NULL,
+                term_freq   INTEGER NOT NULL
+            )
+        )");
+        exec("CREATE INDEX IF NOT EXISTS idx_bm25_documents_doc   ON bm25_documents(document_id)");
+        exec("CREATE INDEX IF NOT EXISTS idx_bm25_documents_token ON bm25_documents(token)");
+
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS bm25_turns (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                turn_id   INTEGER NOT NULL
+                    REFERENCES turns(id)
+                    ON DELETE CASCADE ON UPDATE CASCADE,
+                token     TEXT    NOT NULL,
+                term_freq INTEGER NOT NULL
+            )
+        )");
+        exec("CREATE INDEX IF NOT EXISTS idx_bm25_turns_turn  ON bm25_turns(turn_id)");
+        exec("CREATE INDEX IF NOT EXISTS idx_bm25_turns_token ON bm25_turns(token)");
     }
 
     void migrate_embedding_nullable() {
