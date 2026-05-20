@@ -110,7 +110,9 @@ void test_chat_section_parsing() {
           << "max_persona_chars = 500\n"
           << "max_memory_results = 10\n"
           << "persona_pct = 30\n"
-          << "chars_per_token = 3.5\n";
+          << "chars_per_token = 3.5\n"
+          << "persona_dir = /opt/ragger/persona\n"
+          << "proxy_system_prompt = prepend\n";
     }
 
     ragger::Config cfg = ragger::load_config(path).value();
@@ -122,6 +124,8 @@ void test_chat_section_parsing() {
     assert(cfg.chat_max_memory_results == 10);
     assert(cfg.chat_persona_pct == 30);
     assert(cfg.chat_chars_per_token == 3.5f);
+    assert(cfg.persona_dir == "/opt/ragger/persona");
+    assert(cfg.proxy_system_prompt == "prepend");
 
     fs::remove(path);
     std::println(" OK");
@@ -281,6 +285,8 @@ void test_default_values() {
     assert(cfg.max_search_limit == 0);
     assert(cfg.inference_max_tokens == 4096);
     assert(cfg.minimum_chunk_size == 300);
+    assert(cfg.persona_dir == "~/.ragger");
+    assert(cfg.proxy_system_prompt == "ignore");
 
     fs::remove(path);
     std::println(" OK");

@@ -105,6 +105,8 @@ struct Config {
     float chat_chars_per_token   = 4.0f;
     int  chat_stream_flush_seconds = 8;  // proxy stream: flush to DB after N idle sec (0 = flush only at end)
     std::string system_prompt_file = "~/.ragger/SYSTEM.md";  // base system prompt file
+    std::string persona_dir        = "~/.ragger";            // directory for SOUL.md, USER.md, MEMORY.md, etc.
+    std::string proxy_system_prompt = "ignore";              // "ignore", "prepend", "replace"
 
     // --- System ceilings (0 = no limit) ---
     int  max_search_limit             = 0;

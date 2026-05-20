@@ -3,8 +3,12 @@
  */
 #include "ragger/chat_sessions.h"
 #include "ragger/config.h"
+#include "ragger/lang.h"
 #include "ragger/sqlite_backend.h"
+#include "diskerror/logger.h"
 #include "nlohmann_json.hpp"
+
+#include <format>
 
 #include <filesystem>
 #include <fstream>
@@ -142,9 +146,9 @@ ChatSession& ChatSessionManager::get_or_create(
 std::string ChatSessionManager::load_workspace_files() {
     // Load persona/workspace files in priority order.
     // The combined content serves as the system prompt for Ragger-owned sessions
-    // (CLI and browser chat). Proxy sessions pass through client system prompts unchanged.
+    // (CLI and browser chat). Proxy behavior is controlled by proxy_system_prompt config.
     const auto& cfg = config();
-    std::string user_dir = expand_path("~/.ragger");
+    std::string persona_dir = expand_path(cfg.persona_dir);
     std::string result;
 
     auto load_file = [&](const std::string& path, const std::string& label) {
@@ -164,12 +168,15 @@ std::string ChatSessionManager::load_workspace_files() {
     std::string sys_path = expand_path(cfg.system_prompt_file);
     load_file(sys_path, fs::path(sys_path).filename().string());
 
-    // Persona files from OpenClaw / Ragger workspace
+    // Persona files from persona_dir (SOUL.md, USER.md, MEMORY.md)
     for (const auto& fname : {"SOUL.md", "USER.md", "MEMORY.md"}) {
-        std::string fpath = user_dir + "/" + fname;
-        // skip if this is the same file as system_prompt_file (avoid duplicates)
+        std::string fpath = persona_dir + "/" + fname;
         if (fs::path(fpath).lexically_normal() == fs::path(sys_path).lexically_normal()) continue;
         load_file(fpath, fname);
+    }
+
+    if (result.empty()) {
+        Diskerror::logger::info(std::format(lang::MSG_NO_PERSONA_FILES, persona_dir));
     }
 
     return result;

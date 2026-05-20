@@ -419,6 +419,8 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "max_persona_chars_limit") cfg.chat_max_persona_chars_limit = std::stoi(val);
             else if (key == "max_memory_results_limit") cfg.chat_max_memory_results_limit = std::stoi(val);
             else if (key == "system_prompt_file") cfg.system_prompt_file = val;
+            else if (key == "persona_dir") cfg.persona_dir = val;
+            else if (key == "proxy_system_prompt") cfg.proxy_system_prompt = val;
         }
         else if (section == "models") {
             cfg.model_aliases[key] = val;
@@ -639,6 +641,8 @@ int reload_config() {
     RELOAD(chat_chars_per_token);
     RELOAD(chat_stream_flush_seconds);
     RELOAD(system_prompt_file);
+    RELOAD(persona_dir);
+    RELOAD(proxy_system_prompt);
 
     // System ceilings
     RELOAD(max_search_limit);

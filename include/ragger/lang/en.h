@@ -153,6 +153,7 @@ constexpr const char* WARN_ORPHAN_CHECK       = "Warning: orphan check failed: {
 constexpr const char* WARN_SUMMARY            = "Warning: summary generation failed: {}";
 constexpr const char* ERR_NO_SYSTEM_PROMPT    = "Error: no system prompt files found. ";
 constexpr const char* MSG_NO_SYSTEM_PROMPT_HINT = "Create ~/.ragger/SYSTEM.md or add SOUL.md / USER.md / MEMORY.md.";
+constexpr const char* MSG_NO_PERSONA_FILES    = "No persona files found in {}. Chat will use an empty system prompt.";
 constexpr const char* WARN_ENDPOINT_DOWN      = "Warning: {} is not reachable";
 constexpr const char* WARN_CHAT_ERROR         = "Warning: {}";
 constexpr const char* WARN_MEMORY_SEARCH      = "Warning: memory search failed: {}";

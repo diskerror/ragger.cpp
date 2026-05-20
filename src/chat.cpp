@@ -62,7 +62,7 @@ std::string Chat::load_workspace_files(int max_context) {
      */
     const auto &cfg = config();
 
-    std::string ragger_dir = expand_path("~/.ragger");
+    std::string ragger_dir = expand_path(cfg.persona_dir);
 
     // Calculate persona budget
     int max_persona_chars = 0;

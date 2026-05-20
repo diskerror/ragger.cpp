@@ -804,9 +804,6 @@ struct Server::Impl {
 
                 // Build messages
                 std::string system_prompt = ChatSessionManager::load_workspace_files();
-                if (system_prompt.empty()) {
-                    Diskerror::logger::critical(std::string(lang::ERR_NO_SYSTEM_PROMPT_FILES) + "chat will proceed without a system prompt");
-                }
                 session.add_user_message(message);
                 auto full_messages = session.build_messages(system_prompt, memory_context);
 
@@ -1102,6 +1099,32 @@ void Server::Impl::setup_lm_proxy_routes() {
                 !body_json.is_discarded() &&
                 body_json.contains("stream") && body_json["stream"] == true;
 
+            // Apply proxy_system_prompt policy to chat completions.
+            std::string forwarded_body = req.body;
+            const auto& proxy_mode = config().proxy_system_prompt;
+            if (path == "/v1/chat/completions" && proxy_mode != "ignore"
+                && !body_json.is_discarded() && body_json.contains("messages")) {
+                std::string persona = ChatSessionManager::load_workspace_files();
+                if (!persona.empty()) {
+                    auto& msgs = body_json["messages"];
+                    if (proxy_mode == "prepend") {
+                        // Insert persona as first system message, before existing messages
+                        json sys_msg = {{"role", "system"}, {"content", persona}};
+                        msgs.insert(msgs.begin(), sys_msg);
+                    } else if (proxy_mode == "replace") {
+                        // Replace existing system messages with persona
+                        json new_msgs = json::array();
+                        new_msgs.push_back({{"role", "system"}, {"content", persona}});
+                        for (auto& m : msgs) {
+                            if (m.value("role", "") != "system")
+                                new_msgs.push_back(m);
+                        }
+                        msgs = new_msgs;
+                    }
+                    forwarded_body = body_json.dump();
+                }
+            }
+
             // ------------------------------------------------------------
             // Streaming branch (SSE passthrough with parallel capture)
             // ------------------------------------------------------------
@@ -1173,7 +1196,7 @@ void Server::Impl::setup_lm_proxy_routes() {
                 res.set_header("X-Session-Id", sid);
 
                 auto* inf = inference_.get();
-                std::string req_body = req.body;  // copy for thread
+                std::string req_body = forwarded_body;  // copy for thread
 
                 // Producer thread: upstream curl → queue + accumulator
                 std::thread([=]() {
@@ -1294,7 +1317,7 @@ void Server::Impl::setup_lm_proxy_routes() {
                 captured_user_msg = extract_last_user_message(body_json);
             }
 
-            auto resp = inference_->proxy_request(path, "POST", req.body);
+            auto resp = inference_->proxy_request(path, "POST", forwarded_body);
             res.status = static_cast<int>(resp.status_code);
             Diskerror::logger::debug(std::format(lang::DBG_HTTP, "POST", path, resp.status_code));
             res.set_content(resp.body, "application/json");
