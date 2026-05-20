@@ -17,6 +17,10 @@ add_executable(test_import test_import.cpp)
 target_link_libraries(test_import PRIVATE ragger_core)
 add_test(NAME test_import COMMAND test_import)
 
+add_executable(test_export test_export.cpp)
+target_link_libraries(test_export PRIVATE ragger_core)
+add_test(NAME test_export COMMAND test_export)
+
 add_executable(test_auth test_auth.cpp)
 target_link_libraries(test_auth PRIVATE ragger_core)
 add_test(NAME test_auth COMMAND test_auth)

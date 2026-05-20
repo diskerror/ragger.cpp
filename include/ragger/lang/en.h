@@ -27,6 +27,7 @@ constexpr const char* CLI_USAGE_USERMOD       = "Usage: ragger usermod <username
 constexpr const char* CLI_USAGE_USERDEL       = "Usage: ragger userdel <username>";
 constexpr const char* CLI_USAGE_PASSWD        = "Usage: ragger passwd <username>";
 constexpr const char* CLI_USAGE_IMPORT        = "Usage: ragger import <file> [file...] [--collection name]";
+constexpr const char* CLI_USAGE_EXPORT        = "Usage: ragger export <all|table> [-e|--embeddings] [--output file]";
 constexpr const char* CLI_UNKNOWN_COMMAND     = "Unknown command: {}";
 
 // --- Status messages ---
@@ -53,6 +54,12 @@ constexpr const char* MSG_CONFIG_CREATED      = "Created default config: {}";
 constexpr const char* MSG_IMPORTING_CHUNKS    = "Importing {} chunks from {}...";
 constexpr const char* MSG_IMPORT_CHUNK        = "  Chunk {}/{}: {}";
 constexpr const char* MSG_IMPORT_DONE         = "✓ Imported {} chunks";
+
+// --- Export ---
+constexpr const char* MSG_EXPORT_DONE         = "✓ Exported {} rows";
+constexpr const char* MSG_EXPORT_TABLE_NOT_FOUND = "Error: table '{}' not found. Available: {}";
+constexpr const char* MSG_EXPORT_WROTE_FILE   = "Wrote {}";
+constexpr const char* CLI_EMBEDDINGS          = "Include embedding column in export";
 constexpr const char* ERR_PAYLOAD_DUMP_DIR    = "Error: cannot create payload dump directory '{}': {}";
 constexpr const char* MSG_PAYLOAD_DUMP_CREATED= "Created payload dump directory: {}";
 
@@ -250,6 +257,9 @@ Commands:
   store <text>       Store a new memory
   count              Show number of stored memories
   import <file...>   Import files (paragraph-aware chunking)
+  export <all|table> Dump database as SQL (like mysqldump)
+                       -e, --embeddings  include embedding blobs
+                       --output <file>   write to file instead of stdout
   chat               Interactive chat with memory context
   mcp                Start MCP server (JSON-RPC over stdin/stdout)
   useradd <name>     Create a user and issue a bearer token (printed once)

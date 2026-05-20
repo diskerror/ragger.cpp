@@ -30,6 +30,7 @@
 #include "ragger/chat.h"
 #include "ragger/client.h"
 #include "ragger/config.h"
+#include "ragger/export.h"
 #include "ragger/import.h"
 #include "ragger/inference.h"
 #include "ragger/lang.h"
@@ -592,7 +593,9 @@ int main(int argc, char **argv) {
             ("min-chunk-size", Diskerror::po::value<int>(), CLI_MIN_CHUNK_SIZE)
             // admin flags removed — sudo is the admin gate
             ("yes,y", CLI_YES)
-            ("dump-payloads", Diskerror::po::value<std::string>(), CLI_DUMP_PAYLOADS);
+            ("dump-payloads", Diskerror::po::value<std::string>(), CLI_DUMP_PAYLOADS)
+            ("embeddings,e", CLI_EMBEDDINGS)
+            ("output,o", Diskerror::po::value<std::string>(), "Output file");
     opts.add_hidden_options()
             ("command", Diskerror::po::value<std::string>()->default_value("help"), CLI_COMMAND)
             ("args", Diskerror::po::value<std::vector<std::string> >(), CLI_ARGS)
@@ -775,6 +778,53 @@ int main(int argc, char **argv) {
             ragger::RaggerMemory memory(db_path, model_dir);
             for (auto &filepath: args) {
                 do_import(memory, filepath, collection, min_chunk_size);
+            }
+
+        }
+        else if (command == "export") {
+            auto args = opts.getParams("args");
+            if (args.empty()) {
+                Diskerror::logger::error(ragger::lang::CLI_USAGE_EXPORT);
+                return 1;
+            }
+            std::string target = args[0];
+
+            // Resolve DB path (same logic as other commands that don't need embedder)
+            std::string resolved_db = db_path.empty()
+                ? ragger::config().resolved_db_path() : ragger::expand_path(db_path);
+
+            ragger::ExportOptions export_opts;
+            export_opts.include_embeddings = opts.count("embeddings") > 0;
+
+            if (target != "all") {
+                auto tables = ragger::export_list_tables(resolved_db);
+                bool found = false;
+                for (auto& t : tables) { if (t == target) { found = true; break; } }
+                if (!found) {
+                    std::string avail;
+                    for (auto& t : tables) {
+                        if (!avail.empty()) avail += ", ";
+                        avail += t;
+                    }
+                    Diskerror::logger::error(std::format(
+                        ragger::lang::MSG_EXPORT_TABLE_NOT_FOUND, target, avail));
+                    return 1;
+                }
+                export_opts.table = target;
+            }
+
+            if (opts.count("output")) {
+                std::string outpath = opts["output"].as<std::string>();
+                std::ofstream outfile(outpath);
+                if (!outfile) {
+                    Diskerror::logger::error(std::format("Cannot open: {}", outpath));
+                    return 1;
+                }
+                int rows = ragger::export_sql(outfile, resolved_db, export_opts);
+                std::println(ragger::lang::MSG_EXPORT_WROTE_FILE, outpath);
+                std::println(ragger::lang::MSG_EXPORT_DONE, rows);
+            } else {
+                ragger::export_sql(std::cout, resolved_db, export_opts);
             }
 
         }

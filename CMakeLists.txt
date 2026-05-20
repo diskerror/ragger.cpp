@@ -134,6 +134,7 @@ add_library(ragger_core STATIC
     src/sqlite_backend.cpp
     src/bm25.cpp
     src/import.cpp
+    src/export.cpp
     src/memory.cpp
     src/server.cpp
     src/inference.cpp
