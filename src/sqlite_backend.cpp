@@ -124,28 +124,78 @@ struct SqliteBackend::Impl {
             END
         )");
 
-        // embedding is nullable: deferred-embedding writes (chat partial
-        // turns, future bulk imports) insert with NULL; a backfill pass
-        // fills them in afterwards.
+        // ---- v2 fading-memory schema (issue #33): turns / summaries /
+        //      decisions / documents / models, with FTS5 (issue #49).
+        //      See scripts/schema_v2_fading_memory.sql for the reference DDL.
+        //      Pre-v2 data is exported out-of-band, not migrated in place.
+
+        // models — lookup table; turns + summaries reference it.
         exec(R"(
-            CREATE TABLE IF NOT EXISTS memories (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                text      TEXT NOT NULL,
-                embedding BLOB,
-                metadata  TEXT,
-                timestamp TEXT NOT NULL,
-                user_id   INTEGER REFERENCES users(id)
+            CREATE TABLE IF NOT EXISTS models (
+                model_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name     TEXT NOT NULL UNIQUE
             )
         )");
+
+        // turns (L1) — raw verbatim exchanges. embedding nullable for the
+        // deferred-embedding path (partial row written, backfilled later).
         exec(R"(
-            CREATE TABLE IF NOT EXISTS memory_usage (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                memory_id INTEGER NOT NULL
-                    REFERENCES memories(id)
-                    ON DELETE CASCADE ON UPDATE CASCADE,
-                timestamp TEXT NOT NULL
+            CREATE TABLE IF NOT EXISTS turns (
+                turn_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                model_id       INTEGER REFERENCES models(model_id),
+                user_text      TEXT NOT NULL,
+                assistant_text TEXT,
+                embedding      BLOB,
+                timestamp      TEXT NOT NULL
             )
         )");
+        exec("CREATE INDEX IF NOT EXISTS idx_turns_timestamp ON turns(timestamp)");
+
+        // summaries (L2/L3/L4) — level discriminates turn/session/project.
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS summaries (
+                summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model_id   INTEGER REFERENCES models(model_id),
+                text       TEXT NOT NULL,
+                embedding  BLOB,
+                level      TEXT NOT NULL,
+                status     TEXT NOT NULL,
+                tags       TEXT NOT NULL DEFAULT '',
+                timestamp  TEXT NOT NULL
+            )
+        )");
+        exec("CREATE INDEX IF NOT EXISTS idx_summaries_level     ON summaries(level)");
+        exec("CREATE INDEX IF NOT EXISTS idx_summaries_status    ON summaries(status)");
+        exec("CREATE INDEX IF NOT EXISTS idx_summaries_timestamp ON summaries(timestamp)");
+
+        // decisions (L6).
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS decisions (
+                decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                text        TEXT NOT NULL,
+                embedding   BLOB,
+                status      TEXT NOT NULL,
+                tags        TEXT NOT NULL DEFAULT '',
+                timestamp   TEXT NOT NULL
+            )
+        )");
+        exec("CREATE INDEX IF NOT EXISTS idx_decisions_status ON decisions(status)");
+
+        // documents (L5) — user-curated RAG; the only sharable table.
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS documents (
+                document_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                text        TEXT NOT NULL,
+                embedding   BLOB,
+                path        TEXT,
+                title       TEXT,
+                tags        TEXT NOT NULL DEFAULT '',
+                year        INTEGER,
+                chunk_index INTEGER,
+                imported_at TEXT NOT NULL
+            )
+        )");
+        exec("CREATE INDEX IF NOT EXISTS idx_documents_imported_at ON documents(imported_at)");
         
         exec(R"(
             CREATE TABLE IF NOT EXISTS settings (
@@ -153,30 +203,94 @@ struct SqliteBackend::Impl {
                 value TEXT NOT NULL
             )
         )");
-        exec("CREATE INDEX IF NOT EXISTS idx_memory_usage_memory_id ON memory_usage(memory_id)");
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS bm25_index (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                memory_id INTEGER NOT NULL
-                    REFERENCES memories(id)
-                    ON DELETE CASCADE ON UPDATE CASCADE,
-                token     TEXT NOT NULL,
-                term_freq INTEGER NOT NULL
-            )
-        )");
-        exec("CREATE INDEX IF NOT EXISTS idx_bm25_memory_id ON bm25_index(memory_id)");
-        exec("CREATE INDEX IF NOT EXISTS idx_bm25_token ON bm25_index(token)");
+        // FTS5 — external-content virtual tables + sync triggers replace
+        // the old hand-rolled bm25_* sidecars (issue #49).
+        create_fts_schema();
 
-        // Migrations
-        migrate_add_user_id();
-        migrate_dedicated_columns();
-        migrate_embedding_nullable();
+        // Schema upgrades for the users/sessions tables (idempotent).
+        // The v2 memory tables are created fresh — no in-place migration.
         migrate_add_token_rotated_at();
         migrate_add_preferred_model();
         migrate_add_password_hash();
         migrate_add_web_sessions();
         migrate_add_chat_sessions();
-        migrate_separate_tables();
+    }
+
+    /// FTS5 external-content virtual tables + sync triggers for the four
+    /// searchable content tables (turns, summaries, decisions, documents).
+    /// Idempotent — safe to call on every open.
+    void create_fts_schema() {
+        exec(R"(CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(
+            user_text, assistant_text,
+            content='turns', content_rowid='turn_id'))");
+        exec(R"(CREATE TRIGGER IF NOT EXISTS turns_ai AFTER INSERT ON turns BEGIN
+            INSERT INTO turns_fts(rowid, user_text, assistant_text)
+            VALUES (new.turn_id, new.user_text, new.assistant_text);
+        END)");
+        exec(R"(CREATE TRIGGER IF NOT EXISTS turns_ad AFTER DELETE ON turns BEGIN
+            INSERT INTO turns_fts(turns_fts, rowid, user_text, assistant_text)
+            VALUES ('delete', old.turn_id, old.user_text, old.assistant_text);
+        END)");
+        exec(R"(CREATE TRIGGER IF NOT EXISTS turns_au AFTER UPDATE ON turns BEGIN
+            INSERT INTO turns_fts(turns_fts, rowid, user_text, assistant_text)
+            VALUES ('delete', old.turn_id, old.user_text, old.assistant_text);
+            INSERT INTO turns_fts(rowid, user_text, assistant_text)
+            VALUES (new.turn_id, new.user_text, new.assistant_text);
+        END)");
+
+        exec(R"(CREATE VIRTUAL TABLE IF NOT EXISTS summaries_fts USING fts5(
+            text, tags,
+            content='summaries', content_rowid='summary_id'))");
+        exec(R"(CREATE TRIGGER IF NOT EXISTS summaries_ai AFTER INSERT ON summaries BEGIN
+            INSERT INTO summaries_fts(rowid, text, tags)
+            VALUES (new.summary_id, new.text, new.tags);
+        END)");
+        exec(R"(CREATE TRIGGER IF NOT EXISTS summaries_ad AFTER DELETE ON summaries BEGIN
+            INSERT INTO summaries_fts(summaries_fts, rowid, text, tags)
+            VALUES ('delete', old.summary_id, old.text, old.tags);
+        END)");
+        exec(R"(CREATE TRIGGER IF NOT EXISTS summaries_au AFTER UPDATE ON summaries BEGIN
+            INSERT INTO summaries_fts(summaries_fts, rowid, text, tags)
+            VALUES ('delete', old.summary_id, old.text, old.tags);
+            INSERT INTO summaries_fts(rowid, text, tags)
+            VALUES (new.summary_id, new.text, new.tags);
+        END)");
+
+        exec(R"(CREATE VIRTUAL TABLE IF NOT EXISTS decisions_fts USING fts5(
+            text, tags,
+            content='decisions', content_rowid='decision_id'))");
+        exec(R"(CREATE TRIGGER IF NOT EXISTS decisions_ai AFTER INSERT ON decisions BEGIN
+            INSERT INTO decisions_fts(rowid, text, tags)
+            VALUES (new.decision_id, new.text, new.tags);
+        END)");
+        exec(R"(CREATE TRIGGER IF NOT EXISTS decisions_ad AFTER DELETE ON decisions BEGIN
+            INSERT INTO decisions_fts(decisions_fts, rowid, text, tags)
+            VALUES ('delete', old.decision_id, old.text, old.tags);
+        END)");
+        exec(R"(CREATE TRIGGER IF NOT EXISTS decisions_au AFTER UPDATE ON decisions BEGIN
+            INSERT INTO decisions_fts(decisions_fts, rowid, text, tags)
+            VALUES ('delete', old.decision_id, old.text, old.tags);
+            INSERT INTO decisions_fts(rowid, text, tags)
+            VALUES (new.decision_id, new.text, new.tags);
+        END)");
+
+        exec(R"(CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+            title, text, tags,
+            content='documents', content_rowid='document_id'))");
+        exec(R"(CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
+            INSERT INTO documents_fts(rowid, title, text, tags)
+            VALUES (new.document_id, new.title, new.text, new.tags);
+        END)");
+        exec(R"(CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
+            INSERT INTO documents_fts(documents_fts, rowid, title, text, tags)
+            VALUES ('delete', old.document_id, old.title, old.text, old.tags);
+        END)");
+        exec(R"(CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
+            INSERT INTO documents_fts(documents_fts, rowid, title, text, tags)
+            VALUES ('delete', old.document_id, old.title, old.text, old.tags);
+            INSERT INTO documents_fts(rowid, title, text, tags)
+            VALUES (new.document_id, new.title, new.text, new.tags);
+        END)");
     }
 
     // Issue #33 — split storage into three tables:
