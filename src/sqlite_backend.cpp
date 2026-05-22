@@ -871,25 +871,26 @@ struct SqliteBackend::Impl {
 
     // ---- public API ---------------------------------------------------
 
+    // v2: the generic store API writes a summary (L2/L3/L4). A memory-only
+    // install records agent memories here. `level`/`status` come from
+    // metadata when supplied; defaults suit a settled session-level note.
+    // collection/category and the free-form metadata blob are gone in v2 —
+    // metadata fields are either promoted to columns or dropped. FTS5 sync
+    // triggers index the row, so there is no explicit BM25 step.
     std::string store(const std::string& raw_text, json metadata, bool defer_embedding) {
-        // Ensure metadata is an object (default param may be null)
         if (metadata.is_null()) metadata = json::object();
 
-        // Extract dedicated columns from metadata
-        std::string collection = metadata.value("collection", std::string("memory"));
-        std::string category = metadata.value("category", "");
-        // Optional historical timestamp override (used by imports of past
-        // conversations — Claude Code JSONL, claude.ai export, etc.).
-        // Must be an ISO-8601 UTC string; otherwise falls back to now.
+        std::string level  = metadata.value("level",  std::string("session"));
+        std::string status = metadata.value("status", std::string("complete"));
+
+        // Optional historical timestamp override (imports of past
+        // conversations). Must be an ISO-8601 UTC string; else falls to now.
         std::string ts_override;
         if (metadata.contains("timestamp") && metadata["timestamp"].is_string()) {
             ts_override = metadata["timestamp"].get<std::string>();
         }
-        metadata.erase("collection");
-        metadata.erase("category");
-        metadata.erase("timestamp");
 
-        // Extract tags
+        // tags: accept a JSON array or a plain string.
         std::string tags_str;
         if (metadata.contains("tags")) {
             auto& tv = metadata["tags"];
@@ -901,38 +902,21 @@ struct SqliteBackend::Impl {
             } else if (tv.is_string()) {
                 tags_str = tv.get<std::string>();
             }
-            metadata.erase("tags");
         }
-        // Boolean flags → tags
-        if (metadata.value("keep", false)) {
-            if (tags_str.find("keep") == std::string::npos)
-                tags_str += (tags_str.empty() ? "" : ",") + std::string("keep");
-        }
-        metadata.erase("keep");
-        if (metadata.value("bad", false)) {
-            if (tags_str.find("bad") == std::string::npos)
-                tags_str += (tags_str.empty() ? "" : ",") + std::string("bad");
-        }
-        metadata.erase("bad");
 
-        // Normalize paths
         std::string text = normalize_path(raw_text);
 
-        // Compute embedding unless deferred — caller (or startup backfill)
-        // will fill it in later.
         std::vector<float> emb;
         if (!defer_embedding) {
             emb = embedder->encode(text);
         }
 
-        // Timestamp — use explicit override from metadata if present
         auto ts = ts_override.empty() ? now_iso() : ts_override;
 
-        // Insert with dedicated columns
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(db,
-            "INSERT INTO memories (text, embedding, metadata, timestamp, collection, category, tags) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO summaries (text, embedding, level, status, tags, timestamp) "
+            "VALUES (?,?,?,?,?,?)",
             -1, &stmt, nullptr);
 
         sqlite3_bind_text(stmt, 1, text.c_str(), -1, SQLITE_TRANSIENT);
@@ -943,15 +927,10 @@ struct SqliteBackend::Impl {
                               static_cast<int>(emb.size() * sizeof(float)),
                               SQLITE_TRANSIENT);
         }
-        std::string meta_str = metadata.empty() ? "" : metadata.dump();
-        if (meta_str.empty())
-            sqlite3_bind_null(stmt, 3);
-        else
-            sqlite3_bind_text(stmt, 3, meta_str.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 4, ts.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 5, collection.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 6, category.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 7, tags_str.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, level.c_str(),    -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 4, status.c_str(),   -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, tags_str.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 6, ts.c_str(),       -1, SQLITE_TRANSIENT);
 
         int rc = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
@@ -959,11 +938,10 @@ struct SqliteBackend::Impl {
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         }
 
-        int memory_id = static_cast<int>(sqlite3_last_insert_rowid(db));
-        index_bm25_tokens(memory_id, text);
+        int summary_id = static_cast<int>(sqlite3_last_insert_rowid(db));
         invalidate_cache();
 
-        return std::to_string(memory_id);
+        return std::to_string(summary_id);
     }
 
     // ---- index BM25 tokens for documents table ------------------------
