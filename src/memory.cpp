@@ -57,6 +57,10 @@ std::string RaggerMemory::store(const std::string& text, json metadata,
     return backend_->store(text, std::move(metadata), defer_embedding);
 }
 
+int RaggerMemory::store_document(const DocumentChunk& chunk, bool defer_embedding) {
+    return backend_->store_document(chunk, defer_embedding);
+}
+
 bool RaggerMemory::update_text(int memory_id, const std::string& text, json metadata,
                                 bool defer_embedding) {
     return backend_->update_text(memory_id, text, std::move(metadata), defer_embedding);

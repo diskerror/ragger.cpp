@@ -37,6 +37,10 @@ public:
     std::string store(const std::string& text, json metadata = {},
                       bool defer_embedding = false) override;
 
+    /// Store a Level 5 RAG document chunk. Indexes tokens into bm25_documents.
+    int store_document(const DocumentChunk& chunk,
+                       bool defer_embedding = false) override;
+
     /// Replace text + metadata of an existing row.
     bool update_text(int memory_id,
                      const std::string& text,
