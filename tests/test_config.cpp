@@ -306,6 +306,19 @@ int main() {
 
     test_default_values();
 
+    // normalize_lm_proxy_url (issue #45)
+    using ragger::normalize_lm_proxy_url;
+    assert(normalize_lm_proxy_url("http://host:1234")        == "http://host:1234");
+    assert(normalize_lm_proxy_url("http://host:1234/")       == "http://host:1234");
+    assert(normalize_lm_proxy_url("http://host:1234/v1")     == "http://host:1234");
+    assert(normalize_lm_proxy_url("http://host:1234/v1/")    == "http://host:1234");
+    assert(normalize_lm_proxy_url("http://host:1234/v1////") == "http://host:1234");
+    // Only one /v1 segment is stripped — paranoia case
+    assert(normalize_lm_proxy_url("http://host:1234/v1/v1")  == "http://host:1234/v1");
+    // Non-/v1 path is preserved
+    assert(normalize_lm_proxy_url("http://host:1234/api")    == "http://host:1234/api");
+    assert(normalize_lm_proxy_url("")                        == "");
+
     // expand_path with ~
     std::string expanded = ragger::expand_path("~/.ragger/memories.db");
     const char* home = std::getenv("HOME");

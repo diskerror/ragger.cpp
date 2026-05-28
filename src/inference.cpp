@@ -629,7 +629,7 @@ namespace {
         curl_easy_cleanup(curl);
 
         if (res != CURLE_OK) {
-            throw std::runtime_error(lang::ERR_PROXY_CONNECT);
+            throw std::runtime_error(std::format(lang::ERR_PROXY_CONNECT, curl_easy_strerror(res)));
         }
 
         return {http_code, std::move(response_buffer)};
