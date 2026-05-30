@@ -408,27 +408,94 @@ void Chat::bg_summarize(
     _exit(0);
 }
 
+void Chat::summarize_turn(const std::string &user_text,
+                          const std::string &assistant_text) {
+    if (store_turns_ == "false") return;
+    if (user_text.empty() || assistant_text.empty()) return;
+
+    pid_t pid = fork();
+    if (pid != 0) return;  // parent returns immediately (non-blocking)
+
+    // Child: fresh connections (SQLite not fork-safe). Summarization runs on
+    // the memory model (cheap/local), falling back to the main model.
+    try {
+        const auto &cfg = config();
+        RaggerMemory child_memory(cfg.resolved_db_path(), cfg.resolved_model_dir());
+        InferenceClient child_inf = InferenceClient::from_config(cfg);
+
+        // L2: one-sentence summary of this single exchange.
+        std::vector<Message> l2_req = {
+            {"system",
+             "Summarize this single user/assistant exchange in ONE concise "
+             "sentence capturing the key fact, decision, or question. Third "
+             "person, past tense. No preamble — output only the sentence."},
+            {"user", "User: " + user_text + "\n\nAssistant: " + assistant_text}
+        };
+        std::string l2 = child_inf.chat_memory(l2_req);
+        // Trim whitespace/newlines.
+        auto trim = [](std::string s) {
+            size_t a = s.find_first_not_of(" \t\r\n");
+            size_t b = s.find_last_not_of(" \t\r\n");
+            return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
+        };
+        l2 = trim(l2);
+        if (l2.empty()) { child_memory.close(); _exit(0); }
+        child_memory.store_summary(l2, "turn", "complete", child_inf.memory_model);
+
+        // L3: fold the L2 into the running session summary, or start a new one.
+        auto cur = child_memory.current_session_summary();
+        if (!cur) {
+            child_memory.store_summary(l2, "session", "current", child_inf.memory_model);
+        } else {
+            std::vector<Message> merge_req = {
+                {"system",
+                 "You maintain a running summary of the CURRENT conversation "
+                 "topic. Given the CURRENT SUMMARY and a NEW DEVELOPMENT, reply "
+                 "with an updated summary that folds in the new development "
+                 "(a short paragraph, third person, past tense). If the new "
+                 "development is about a clearly DIFFERENT topic that does not "
+                 "belong in this summary, reply with exactly NO_MERGE and "
+                 "nothing else."},
+                {"user", "CURRENT SUMMARY:\n" + cur->second +
+                         "\n\nNEW DEVELOPMENT:\n" + l2}
+            };
+            std::string merged = trim(child_inf.chat_memory(merge_req));
+            if (merged.empty() || merged == "NO_MERGE") {
+                // Topic shift: complete the old running summary, start a new one.
+                child_memory.set_summary_status(cur->first, "complete");
+                child_memory.store_summary(l2, "session", "current",
+                                           child_inf.memory_model);
+            } else {
+                child_memory.update_summary_text(cur->first, merged,
+                                                 child_inf.memory_model);
+            }
+        }
+        child_memory.close();
+    }
+    catch (...) {
+        // Silent failure in background child — a missed summary is recoverable.
+    }
+    _exit(0);
+}
+
 void Chat::check_pause_summary() {
-    if (!summarize_on_pause_ || unsummarized_turns_.empty()) {
-        return;
-    }
-
-    int idle = idle_seconds();
-    if (idle < pause_minutes_ * 60) {
-        return;
-    }
-
-    bg_summarize(turns_as_pairs());
-    unsummarized_turns_.clear();
+    // Superseded by per-turn summarize_turn() (issue #22): the running L3 is
+    // kept current on every turn, so there is no batch of turns to flush on
+    // idle. Left as a no-op hook for a future pause-driven session boundary.
 }
 
 void Chat::quit_summary() {
-    if (!summarize_on_quit_ || unsummarized_turns_.empty()) {
-        return;
+    if (store_turns_ == "false") return;
+    // The per-turn pipeline already keeps the running L3 current. On quit,
+    // close out the running session summary so the next conversation begins a
+    // fresh one. Best-effort — a still-running summarize_turn child has
+    // usually finished by now.
+    try {
+        auto cur = memory_.current_session_summary();
+        if (cur) memory_.set_summary_status(cur->first, "complete");
     }
-
-    Diskerror::logger::info(ragger::lang::MSG_SUMMARIZING);
-    bg_summarize(turns_as_pairs());
+    catch (...) {
+    }
 }
 
 std::string Chat::summarize_conversation(const std::vector<std::pair<std::string, std::string> > &turns) {
@@ -786,6 +853,11 @@ void Chat::run() {
         int exchange_id = finalize_turn(partial_id, line, response_text);
         unsummarized_turns_.push_back({"user", {{"text", line}}, -1});
         unsummarized_turns_.push_back({"assistant", {{"text", response_text}}, exchange_id});
+
+        // Fading-memory summarization (issue #22): per-turn L2 + running L3,
+        // in a forked child so it never blocks the prompt.
+        summarize_turn(line, response_text);
+
         update_activity();
 
         std::cout << std::endl; // blank line between exchanges

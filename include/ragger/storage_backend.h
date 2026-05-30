@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ragger/storage_types.h"
@@ -66,6 +67,21 @@ public:
     /// then write the vectors back). Returns true if a row was updated.
     virtual bool update_document_embedding(int document_id,
                                            const std::vector<float>& emb) = 0;
+
+    // --- summaries (L2/L3) pipeline (issue #22) ---
+    /// Insert a summary (level 'turn'|'session'|'project', status
+    /// 'current'|'complete'); embeds text, records model. Returns summary_id.
+    virtual int store_summary(const std::string& text, const std::string& level,
+                              const std::string& status,
+                              const std::string& model_name = "") = 0;
+    /// The current running L3 session summary, if any: (summary_id, text).
+    virtual std::optional<std::pair<int, std::string>>
+        current_session_summary() = 0;
+    /// Replace a summary's text + embedding (and model). False if absent.
+    virtual bool update_summary_text(int summary_id, const std::string& text,
+                                     const std::string& model_name = "") = 0;
+    /// Set a summary's status (e.g. mark a session summary 'complete').
+    virtual bool set_summary_status(int summary_id, const std::string& status) = 0;
 
     /// Replace text + metadata of an existing row. Re-embeds (or NULLs the
     /// embedding when `defer_embedding`) and rebuilds the row's BM25 tokens.

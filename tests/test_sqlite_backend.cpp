@@ -629,6 +629,66 @@ void test_store_turn(ragger::Embedder& emb) {
     cleanup();
 }
 
+// L2/L3 summary primitives (issue #22): store_summary, current_session_summary,
+// update_summary_text, set_summary_status — the deterministic backbone the
+// forked summarization pipeline drives.
+void test_summary_primitives(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    assert(!db.current_session_summary().has_value());
+
+    int l2 = db.store_summary("User asked about France; capital is Paris.",
+                              "turn", "complete", "memo-model");
+    assert(l2 > 0);
+
+    int l3 = db.store_summary("Discussed European capitals.",
+                              "session", "current", "memo-model");
+    assert(l3 > 0);
+    auto cur = db.current_session_summary();
+    assert(cur.has_value());
+    assert(cur->first == l3);
+    assert(cur->second == "Discussed European capitals.");
+
+    assert(db.update_summary_text(l3, "Discussed European capitals, focus France.",
+                                  "memo-model"));
+    cur = db.current_session_summary();
+    assert(cur->second == "Discussed European capitals, focus France.");
+
+    // Topic shift: complete the old, start a new current.
+    assert(db.set_summary_status(l3, "complete"));
+    assert(!db.current_session_summary().has_value());
+    int l3b = db.store_summary("Switched to cooking techniques.",
+                               "session", "current", "memo-model");
+    auto cur2 = db.current_session_summary();
+    assert(cur2->first == l3b);
+
+    sqlite3* raw = nullptr;
+    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM summaries WHERE level='turn'",
+                       -1, &st, nullptr);
+    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1);
+    sqlite3_finalize(st);
+    sqlite3_prepare_v2(raw,
+        "SELECT COUNT(*) FROM summaries WHERE level='session' AND status='complete'",
+        -1, &st, nullptr);
+    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1);
+    sqlite3_finalize(st);
+    sqlite3_prepare_v2(raw,
+        "SELECT COUNT(*) FROM summaries s JOIN models m ON m.model_id=s.model_id "
+        "WHERE m.name='memo-model'", -1, &st, nullptr);
+    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 3);
+    sqlite3_finalize(st);
+    sqlite3_close(raw);
+
+    assert(!db.update_summary_text(99999, "x", "memo-model"));
+    assert(!db.set_summary_status(99999, "complete"));
+
+    db.close();
+    cleanup();
+}
+
 void test_path_normalization(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
@@ -739,6 +799,7 @@ int main() {
     test_v2_summaries_backing(emb);
     test_store_document(emb);
     test_store_turn(emb);
+    test_summary_primitives(emb);
     test_path_normalization(emb);
     test_token_rotated_at(emb);
     test_preferred_model(emb);

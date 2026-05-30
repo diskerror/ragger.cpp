@@ -772,6 +772,90 @@ struct SqliteBackend::Impl {
         return rc == SQLITE_DONE;
     }
 
+    // ---- summaries (L2/L3) pipeline primitives (issue #22) ------------
+    // Insert a summary row. level: 'turn' (L2) | 'session' (L3) | 'project'.
+    // status: 'current' (running L3) | 'complete'. Embeds text, records model.
+    int store_summary(const std::string& text, const std::string& level,
+                      const std::string& status, const std::string& model_name) {
+        std::string t = normalize_path(text);
+        int model_id  = get_or_create_model(model_name);
+        auto emb = embedder->encode(t);
+
+        sqlite3_stmt* s = nullptr;
+        sqlite3_prepare_v2(db,
+            "INSERT INTO summaries (model_id, text, embedding, level, status, tags, timestamp) "
+            "VALUES (?,?,?,?,?,'',?)",
+            -1, &s, nullptr);
+        if (model_id) sqlite3_bind_int(s, 1, model_id); else sqlite3_bind_null(s, 1);
+        sqlite3_bind_text(s, 2, t.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(s, 3, emb.data(),
+                          static_cast<int>(emb.size() * sizeof(float)), SQLITE_TRANSIENT);
+        sqlite3_bind_text(s, 4, level.c_str(),  -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(s, 5, status.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(s, 6, now_iso().c_str(), -1, SQLITE_TRANSIENT);
+        int rc = sqlite3_step(s);
+        sqlite3_finalize(s);
+        if (rc != SQLITE_DONE)
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+        invalidate_cache();
+        return static_cast<int>(sqlite3_last_insert_rowid(db));
+    }
+
+    // The current running L3 session summary, if any: (summary_id, text).
+    std::optional<std::pair<int, std::string>> current_session_summary() {
+        sqlite3_stmt* s = nullptr;
+        sqlite3_prepare_v2(db,
+            "SELECT summary_id, text FROM summaries "
+            "WHERE level='session' AND status='current' "
+            "ORDER BY summary_id DESC LIMIT 1",
+            -1, &s, nullptr);
+        std::optional<std::pair<int, std::string>> out;
+        if (sqlite3_step(s) == SQLITE_ROW) {
+            int id = sqlite3_column_int(s, 0);
+            const char* p = reinterpret_cast<const char*>(sqlite3_column_text(s, 1));
+            out = std::make_pair(id, std::string(p ? p : ""));
+        }
+        sqlite3_finalize(s);
+        return out;
+    }
+
+    // Replace a summary's text + embedding, update its model. False if absent.
+    bool update_summary_text(int summary_id, const std::string& text,
+                             const std::string& model_name) {
+        std::string t = normalize_path(text);
+        int model_id  = get_or_create_model(model_name);
+        auto emb = embedder->encode(t);
+
+        sqlite3_stmt* s = nullptr;
+        sqlite3_prepare_v2(db,
+            "UPDATE summaries SET text = ?, embedding = ?, "
+            "model_id = COALESCE(?, model_id) WHERE summary_id = ?",
+            -1, &s, nullptr);
+        sqlite3_bind_text(s, 1, t.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(s, 2, emb.data(),
+                          static_cast<int>(emb.size() * sizeof(float)), SQLITE_TRANSIENT);
+        if (model_id) sqlite3_bind_int(s, 3, model_id); else sqlite3_bind_null(s, 3);
+        sqlite3_bind_int(s, 4, summary_id);
+        int rc = sqlite3_step(s);
+        sqlite3_finalize(s);
+        bool ok = (rc == SQLITE_DONE && sqlite3_changes(db) > 0);
+        if (ok) invalidate_cache();
+        return ok;
+    }
+
+    // Set a summary's status (e.g. mark a session summary 'complete').
+    bool set_summary_status(int summary_id, const std::string& status) {
+        sqlite3_stmt* s = nullptr;
+        sqlite3_prepare_v2(db,
+            "UPDATE summaries SET status = ? WHERE summary_id = ?",
+            -1, &s, nullptr);
+        sqlite3_bind_text(s, 1, status.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(s, 2, summary_id);
+        int rc = sqlite3_step(s);
+        sqlite3_finalize(s);
+        return rc == SQLITE_DONE && sqlite3_changes(db) > 0;
+    }
+
     bool update_text(int memory_id, const std::string& raw_text, json metadata, bool defer_embedding) {
         if (metadata.is_null()) metadata = json::object();
 
@@ -1287,6 +1371,25 @@ int SqliteBackend::store_turn(const std::string& user_text,
 bool SqliteBackend::finalize_turn(int turn_id, const std::string& assistant_text,
                                   const std::string& model_name) {
     return pImpl->finalize_turn(turn_id, assistant_text, model_name);
+}
+
+int SqliteBackend::store_summary(const std::string& text, const std::string& level,
+                                 const std::string& status, const std::string& model_name) {
+    return pImpl->store_summary(text, level, status, model_name);
+}
+
+std::optional<std::pair<int, std::string>>
+SqliteBackend::current_session_summary() {
+    return pImpl->current_session_summary();
+}
+
+bool SqliteBackend::update_summary_text(int summary_id, const std::string& text,
+                                        const std::string& model_name) {
+    return pImpl->update_summary_text(summary_id, text, model_name);
+}
+
+bool SqliteBackend::set_summary_status(int summary_id, const std::string& status) {
+    return pImpl->set_summary_status(summary_id, status);
 }
 
 bool SqliteBackend::update_text(int memory_id, const std::string& text, json metadata, bool defer_embedding) {

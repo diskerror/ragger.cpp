@@ -132,6 +132,14 @@ max_tokens = 4096
 # api_key = sk-ant-...
 # models = claude-*
 
+# Memory model: a cheaper/local model for summarization. Falls back to the
+# main chat model when unset. api_url is optional — omit it if the model is
+# already served by one of the endpoints above.
+# [inference.memory]
+# model   = qwen2.5:7b
+# api_url = http://localhost:11434/v1
+# api_key =
+
 [logging]
 log_file = ~/.ragger/activity.log
 # Log Levels: trace, debug, info, warn, error, and critical
@@ -383,6 +391,14 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "default")    cfg.inference_default = val;
             else if (key == "lm_proxy_url") cfg.lm_proxy_url = normalize_lm_proxy_url(val);
         }
+        else if (section == "inference.memory") {
+            // The memory model (summarization/routing). Captured into dedicated
+            // fields rather than a generic endpoint; from_config() builds the
+            // endpoint from these when api_url is set.
+            if      (key == "model")   cfg.inference_memory_model   = val;
+            else if (key == "api_url") cfg.inference_memory_api_url = val;
+            else if (key == "api_key") cfg.inference_memory_api_key = val;
+        }
         else if (section.substr(0, 10) == "inference.") {
             // Named endpoint section: [inference.local], [inference.anthropic], etc.
             std::string ep_name = section.substr(10);
@@ -611,6 +627,9 @@ int reload_config() {
     RELOAD(inference_api_url);
     RELOAD(inference_api_key);
     RELOAD(inference_max_tokens);
+    RELOAD(inference_memory_model);
+    RELOAD(inference_memory_api_url);
+    RELOAD(inference_memory_api_key);
     RELOAD(lm_proxy_url);
     // Endpoints: replace entirely if different
     if (cfg.inference_endpoints.size() != fresh.inference_endpoints.size()) {

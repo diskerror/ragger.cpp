@@ -52,6 +52,7 @@ struct Endpoint {
 class InferenceClient {
 public:
     std::string model;
+    std::string memory_model;   // [inference.memory] model, or = model
     int max_tokens;
     std::vector<Endpoint> _endpoints;
 
@@ -65,6 +66,9 @@ public:
     /// Blocking chat (returns full response text)
     std::string chat(const std::vector<Message>& messages,
                      const std::string& model = "");
+
+    /// Blocking chat using the memory model (summarization / routing).
+    std::string chat_memory(const std::vector<Message>& messages);
 
     /// Streaming chat (calls callback for each token)
     void chat_stream(const std::vector<Message>& messages,
