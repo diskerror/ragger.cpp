@@ -62,6 +62,11 @@ public:
                                const std::string& assistant_text,
                                const std::string& model_name = "") = 0;
 
+    /// Set a document's embedding (import path: embed chunks out-of-process,
+    /// then write the vectors back). Returns true if a row was updated.
+    virtual bool update_document_embedding(int document_id,
+                                           const std::vector<float>& emb) = 0;
+
     /// Replace text + metadata of an existing row. Re-embeds (or NULLs the
     /// embedding when `defer_embedding`) and rebuilds the row's BM25 tokens.
     /// Preserves id and original timestamp. Returns false if the row

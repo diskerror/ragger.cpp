@@ -72,6 +72,11 @@ bool RaggerMemory::finalize_turn(int turn_id, const std::string& assistant_text,
     return backend_->finalize_turn(turn_id, assistant_text, model_name);
 }
 
+bool RaggerMemory::update_document_embedding(int document_id,
+                                             const std::vector<float>& emb) {
+    return backend_->update_document_embedding(document_id, emb);
+}
+
 bool RaggerMemory::update_text(int memory_id, const std::string& text, json metadata,
                                 bool defer_embedding) {
     return backend_->update_text(memory_id, text, std::move(metadata), defer_embedding);

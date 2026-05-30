@@ -48,8 +48,9 @@ struct Config {
     float bm25_b               = 0.75f;
 
     // --- Embed (subprocess) ---
-    int embed_timeout_ms = 5000;
-    int embed_retries    = 1;
+    int embed_timeout_ms  = 5000;
+    int embed_retries     = 1;
+    int embed_max_workers = 4;   // cap concurrent `ragger embed` subprocesses
 
     // --- Inference ---
     struct InferenceEndpointConfig {
@@ -159,5 +160,11 @@ void init_config(const std::string& cli_config_path = "");
 /// Reload config from INI file(s). Updates hot-reloadable values in-place.
 /// Returns number of values changed. Logs restart-required changes without applying.
 int reload_config();
+
+/// Absolute path to this `ragger` executable, used to spawn `ragger embed`
+/// subprocesses. Set once at startup from argv[0]; falls back to "ragger"
+/// (resolved via PATH) if never set or unresolvable.
+void set_executable_path(const std::string& argv0);
+const std::string& executable_path();
 
 } // namespace ragger

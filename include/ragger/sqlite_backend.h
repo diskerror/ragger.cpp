@@ -50,6 +50,10 @@ public:
                        const std::string& assistant_text,
                        const std::string& model_name = "") override;
 
+    /// Write back a document's embedding (import path).
+    bool update_document_embedding(int document_id,
+                                   const std::vector<float>& emb) override;
+
     /// Replace text + metadata of an existing row.
     bool update_text(int memory_id,
                      const std::string& text,

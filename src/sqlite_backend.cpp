@@ -1077,6 +1077,25 @@ struct SqliteBackend::Impl {
         return updated;
     }
 
+    // Set a document's embedding (used by the import path after embedding
+    // chunks via the subprocess executor). Returns true on a row update.
+    bool update_document_embedding(int document_id, const std::vector<float>& emb) {
+        sqlite3_stmt* s = nullptr;
+        sqlite3_prepare_v2(db,
+            "UPDATE documents SET embedding = ? WHERE document_id = ?",
+            -1, &s, nullptr);
+        sqlite3_bind_blob(s, 1, emb.data(),
+                          static_cast<int>(emb.size() * sizeof(float)), SQLITE_TRANSIENT);
+        sqlite3_bind_int(s, 2, document_id);
+        int rc = sqlite3_step(s);
+        sqlite3_finalize(s);
+        if (rc == SQLITE_DONE && sqlite3_changes(db) > 0) {
+            invalidate_cache();
+            return true;
+        }
+        return false;
+    }
+
     std::vector<std::string> collections() const {
         std::vector<std::string> result;
         // Lean v2 summaries have no collection column — collections are not a
@@ -1294,6 +1313,11 @@ int SqliteBackend::rebuild_embeddings(Embedder& embedder) {
 
 int SqliteBackend::backfill_embeddings(Embedder& embedder) {
     return pImpl->backfill_embeddings(embedder);
+}
+
+bool SqliteBackend::update_document_embedding(int document_id,
+                                              const std::vector<float>& emb) {
+    return pImpl->update_document_embedding(document_id, emb);
 }
 
 std::vector<std::string> SqliteBackend::collections() const {

@@ -37,6 +37,7 @@
 #include "diskerror/logger.h"
 #include "ragger/mcp.h"
 #include "ragger/memory.h"
+#include "ragger/embed_executor.h"
 #include "ragger/sqlite_backend.h"
 #include "ragger/server.h"
 #include "ragger/embedder.h"
@@ -88,6 +89,14 @@ static void do_import(ragger::RaggerMemory &memory,
     // `collection` argument is not stored here.)
     const std::string doc_title = fs::path(filepath).stem().string();
 
+    // Store every chunk first WITHOUT embedding (fast), then embed the bodies
+    // out-of-process with bounded concurrency + per-call timeout (issue #41).
+    // This keeps a large import from saturating the box: at most
+    // embed_max_workers `ragger embed` subprocesses run at once.
+    std::vector<int>         ids;
+    std::vector<std::string> texts;
+    ids.reserve(total);
+    texts.reserve(total);
     for (int i = 0; i < total; ++i) {
         ragger::DocumentChunk doc;
         doc.text        = chunks[i].text;
@@ -96,10 +105,23 @@ static void do_import(ragger::RaggerMemory &memory,
         doc.chunk_index = i + 1;
         doc.imported_at = import_ts;
 
-        int id = memory.store_document(doc);
+        int id = memory.store_document(doc, /*defer_embedding=*/true);
+        ids.push_back(id);
+        texts.push_back(chunks[i].text);
         std::println(ragger::lang::MSG_IMPORT_CHUNK, (i + 1), total, std::to_string(id));
     }
+
+    ragger::EmbedExecutor embed_exec;  // timeout / retries / workers from config
+    auto vecs = embed_exec.batch(texts);
+    int skipped = 0;
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (vecs[i]) memory.update_document_embedding(ids[i], *vecs[i]);
+        else ++skipped;   // left NULL — `ragger rebuild-embeddings` can retry
+    }
     std::println(ragger::lang::MSG_IMPORT_DONE, chunks.size());
+    if (skipped > 0)
+        Diskerror::logger::warn(std::format(ragger::lang::WARN_IMPORT_EMBED_SKIPPED,
+                                            skipped, total));
 }
 
 // -----------------------------------------------------------------------
@@ -599,6 +621,9 @@ static std::pair<std::string, bool> provision_user(
 // Main
 // -----------------------------------------------------------------------
 int main(int argc, char **argv) {
+    // Record our own path so embedding can be spawned as `ragger embed`.
+    if (argc > 0) ragger::set_executable_path(argv[0]);
+
     Diskerror::ProgramOptions opts(CLI_DESCRIPTION);
     opts.add_options()
             ("help,h", CLI_HELP)

@@ -45,6 +45,9 @@ public:
                        const std::string& assistant_text,
                        const std::string& model_name = "");
 
+    /// Write back a document's embedding (import path).
+    bool update_document_embedding(int document_id, const std::vector<float>& emb);
+
     /// Replace text + metadata of an existing memory (re-embeds unless
     /// `defer_embedding`, rebuilds BM25 tokens, preserves id and original
     /// timestamp). Returns false if the row is missing or has the keep tag.
