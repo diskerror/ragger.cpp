@@ -1,0 +1,3 @@
+name: ragger
+version: 1.0.0
+description: "Ragger — local semantic memory with hybrid vector + BM25 search."
