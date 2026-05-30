@@ -43,19 +43,19 @@ void test_store_and_search() {
     std::println(" OK");
 }
 
-void test_store_with_collection() {
-    std::println("  test_store_with_collection...");
+void test_store_with_tags() {
+    std::println("  test_store_with_tags...");
     cleanup_all();
 
     ragger::RaggerMemory mem(TEMP_DB1);
-    mem.store("Reference: HTTP status 200 means OK.", {{"collection", "reference"}});
-    mem.store("Memory: I had coffee this morning.", {{"collection", "memory"}});
+    mem.store("Reference: HTTP status 200 means OK.", {{"tags", {"reference"}}});
+    mem.store("Memory: I had coffee this morning.", {{"tags", {"diary"}}});
 
-    auto resp = mem.search("HTTP status", 5, 0.0f, {"reference"});
+    // Lean v2 has no collection filter; verify tags round-trip + search works.
+    auto resp = mem.search("HTTP status", 5, 0.0f);
     assert(!resp.results.empty());
-    for (auto& r : resp.results) {
-        assert(r.metadata["collection"] == "reference");
-    }
+    assert(resp.results[0].text.find("HTTP") != std::string::npos);
+    assert(resp.results[0].metadata["tags"] == "reference");
 
     mem.close();
     cleanup_all();
@@ -136,22 +136,6 @@ void test_delete() {
     std::println(" OK");
 }
 
-void test_collections() {
-    std::println("  test_collections...");
-    cleanup_all();
-
-    ragger::RaggerMemory mem(TEMP_DB1);
-    mem.store("Doc A.", {{"collection", "alpha"}});
-    mem.store("Doc B.", {{"collection", "beta"}});
-    mem.store("Doc C.", {{"collection", "gamma"}});
-
-    auto colls = mem.collections();
-    assert(colls.size() == 3);
-
-    mem.close();
-    cleanup_all();
-    std::println(" OK");
-}
 
 int main() {
     ragger::init_config("");
@@ -166,11 +150,10 @@ int main() {
     std::println("Running memory facade tests:");
 
     test_store_and_search();
-    test_store_with_collection();
+    test_store_with_tags();
     test_search_merging_dual_db();
     test_count();
     test_delete();
-    test_collections();
 
     std::println("test_memory: all passed");
     return 0;

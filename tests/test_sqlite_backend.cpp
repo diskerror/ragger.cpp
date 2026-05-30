@@ -8,6 +8,7 @@
 #include "ragger/embedder.h"
 #include "ragger/sqlite_backend.h"
 #include "ragger/auth.h"
+#include <sqlite3.h>
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -49,20 +50,20 @@ void test_store_with_metadata(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
 
+    // Lean v2 summaries: tags (comma-joined) + level/status round-trip.
     ragger::json meta = {
-        {"category", "fact"},
-        {"collection", "memory"},
+        {"level", "session"},
+        {"status", "complete"},
         {"tags", {"test", "unit"}}
     };
     std::string id = db.store("Metadata round-trip test.", meta);
     assert(!id.empty());
 
-    // Retrieve via load_all and check metadata survived
     auto all = db.load_all();
     assert(all.size() == 1);
-    assert(all[0].metadata["category"] == "fact");
-    assert(all[0].metadata["collection"] == "memory");
-    // Tags stored as comma-separated string in dedicated column
+    assert(all[0].metadata["level"] == "session");
+    assert(all[0].metadata["status"] == "complete");
+    // Tags stored as comma-separated string in the tags column.
     assert(all[0].metadata["tags"] == "test,unit");
 
     db.close();
@@ -86,29 +87,32 @@ void test_search_basic(ragger::Embedder& emb) {
     cleanup();
 }
 
-void test_search_collection_filter(ragger::Embedder& emb) {
+// FTS5 MATCH is built from arbitrary user text; punctuation/quotes/operators
+// must not produce a syntax error. The keyword pass should degrade to "no
+// keyword contribution" rather than throw, and vector search still returns.
+void test_search_fts_special_chars(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
 
-    db.store("Apple is a fruit.", {{"collection", "food"}});
-    db.store("Apple makes computers.", {{"collection", "tech"}});
-    db.store("Bananas are yellow.", {{"collection", "food"}});
+    db.store("SQLite is a lightweight embedded database engine.");
+    db.store("The Eiffel Tower stands in Paris.");
 
-    // Search only "food" collection
-    auto resp = db.search("apple", 5, 0.0f, {"food"});
-    for (auto& r : resp.results) {
-        assert(r.metadata["collection"] == "food");
+    // Queries laden with FTS5-significant characters — must not throw.
+    const char* nasty[] = {
+        "database \"engine\" AND (lightweight)",
+        "what is SQLite?  -- punctuation: *,^,:",
+        "NEAR(\"paris",          // unbalanced quote / bare operator
+        "***",                   // no usable tokens → keyword pass skipped
+    };
+    for (const char* q : nasty) {
+        auto resp = db.search(q, 5, 0.0f);   // must not throw
+        (void)resp;
     }
 
-    // Search only "tech" collection
-    resp = db.search("apple", 5, 0.0f, {"tech"});
-    for (auto& r : resp.results) {
-        assert(r.metadata["collection"] == "tech");
-    }
-
-    // Search all collections (empty filter)
-    resp = db.search("apple", 5, 0.0f);
-    assert(resp.results.size() >= 2);
+    // A normal keyword still resolves through the hybrid path.
+    auto resp = db.search("lightweight database", 5, 0.0f);
+    assert(!resp.results.empty());
+    assert(resp.results[0].text.find("SQLite") != std::string::npos);
 
     db.close();
     cleanup();
@@ -144,42 +148,16 @@ void test_search_limit(ragger::Embedder& emb) {
     cleanup();
 }
 
-void test_collections_list(ragger::Embedder& emb) {
-    cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
-
-    db.store("Doc one.", {{"collection", "alpha"}});
-    db.store("Doc two.", {{"collection", "beta"}});
-    db.store("Doc three.", {{"collection", "alpha"}});
-
-    auto colls = db.collections();
-    assert(colls.size() == 2);
-    bool has_alpha = false, has_beta = false;
-    for (auto& c : colls) {
-        if (c == "alpha") has_alpha = true;
-        if (c == "beta") has_beta = true;
-    }
-    assert(has_alpha && has_beta);
-
-    db.close();
-    cleanup();
-}
-
 void test_load_all(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
 
-    db.store("First memory.", {{"collection", "test"}});
-    db.store("Second memory.", {{"collection", "test"}});
-    db.store("Third memory.", {{"collection", "other"}});
+    db.store("First memory.");
+    db.store("Second memory.");
+    db.store("Third memory.");
 
-    // Load all
     auto all = db.load_all();
     assert(all.size() == 3);
-
-    // Load by collection
-    auto test_only = db.load_all("test");
-    assert(test_only.size() == 2);
 
     db.close();
     cleanup();
@@ -332,35 +310,37 @@ void test_search_by_metadata(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
 
-    // Store memories with different metadata
-    db.store("Apple document.", {{"category", "fruit"}, {"color", "red"}});
-    db.store("Banana document.", {{"category", "fruit"}, {"color", "yellow"}});
-    db.store("Car document.", {{"category", "vehicle"}, {"color", "red"}});
-    db.store("Sky document.", {{"category", "nature"}, {"color", "blue"}});
+    // Lean v2: filterable columns are level / status / tags (+ time window).
+    db.store("Apple note.",  {{"level", "turn"},    {"status", "complete"}, {"tags", {"fruit"}}});
+    db.store("Banana note.", {{"level", "turn"},    {"status", "current"},  {"tags", {"fruit"}}});
+    db.store("Car note.",    {{"level", "session"}, {"status", "complete"}, {"tags", {"vehicle"}}});
 
-    // Search by single field → correct results
-    auto results = db.search_by_metadata({{"category", "fruit"}});
+    // Filter by level
+    auto results = db.search_by_metadata({{"level", "turn"}});
     assert(results.size() == 2);
-    for (auto& r : results) {
-        assert(r.metadata["category"] == "fruit");
-    }
+    for (auto& r : results) assert(r.metadata["level"] == "turn");
 
-    // Search by multiple fields (AND) → correct results
-    results = db.search_by_metadata({{"category", "fruit"}, {"color", "yellow"}});
+    // Filter by tag (LIKE on the tags column)
+    results = db.search_by_metadata({{"tags", "vehicle"}});
     assert(results.size() == 1);
-    assert(results[0].text == "Banana document.");
+    assert(results[0].text == "Car note.");
 
-    // Search with limit → respects limit
-    results = db.search_by_metadata({{"color", "red"}}, 1);
+    // AND across columns
+    results = db.search_by_metadata({{"level", "turn"}, {"status", "current"}});
+    assert(results.size() == 1);
+    assert(results[0].text == "Banana note.");
+
+    // Limit respected
+    results = db.search_by_metadata({{"status", "complete"}}, 1);
     assert(results.size() == 1);
 
-    // Search with no matches → empty
-    results = db.search_by_metadata({{"category", "nonexistent"}});
+    // No matches → empty
+    results = db.search_by_metadata({{"level", "project"}});
     assert(results.empty());
 
-    // Search with no limit (0) → returns all matches
-    results = db.search_by_metadata({{"color", "red"}}, 0);
-    assert(results.size() == 2);
+    // Unsupported key under lean schema → empty
+    results = db.search_by_metadata({{"color", "red"}});
+    assert(results.empty());
 
     db.close();
     cleanup();
@@ -489,27 +469,98 @@ void test_timestamp_format(ragger::Embedder& emb) {
     cleanup();
 }
 
-void test_dedicated_columns_stored(ragger::Embedder& emb) {
+// Guards the v2 read-path wiring: the generic store/read API operates on the
+// lean `summaries` table (issue #33 split), not the dropped pre-v2 `memories`
+// table. level/status/tags round-trip; there is no metadata blob.
+void test_v2_summaries_backing(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    {
+        ragger::SqliteBackend db(emb, TEMP_DB);
+        db.store("v2 summaries backing check.",
+                 {{"level", "session"}, {"status", "complete"}, {"tags", {"note"}}});
 
-    ragger::json meta = {
-        {"collection", "reference"},
-        {"category", "fact"},
-        {"tags", {"alpha", "beta"}}
+        auto all = db.load_all();
+        assert(all.size() == 1);
+        assert(all[0].metadata["level"] == "session");
+        assert(all[0].metadata["status"] == "complete");
+        assert(all[0].metadata["tags"] == "note");
+        db.close();
+    }
+
+    // Inspect the raw DB: the row must be in `summaries`, and the legacy
+    // `memories` table must not exist in a fresh v2 database.
+    sqlite3* raw = nullptr;
+    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM summaries", -1, &st, nullptr);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int(st, 0) == 1);
+    sqlite3_finalize(st);
+
+    sqlite3_prepare_v2(raw,
+        "SELECT COUNT(*) FROM sqlite_master "
+        "WHERE type='table' AND name='memories'",
+        -1, &st, nullptr);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int(st, 0) == 0);   // no legacy table in fresh DB
+    sqlite3_finalize(st);
+
+    sqlite3_close(raw);
+    cleanup();
+}
+
+// store_document() must write Level 5 RAG chunks to the lean `documents`
+// table with title / tags (subject) / year / path in dedicated columns for
+// grouping — none of which are folded into the embedded `text`.
+void test_store_document(ragger::Embedder& emb) {
+    cleanup();
+    int doc_id = -1;
+    {
+        ragger::SqliteBackend db(emb, TEMP_DB);
+
+        ragger::DocumentChunk doc;
+        doc.text        = "The mitochondria is the powerhouse of the cell.";
+        doc.title       = "Cell Biology Primer";
+        doc.tags        = "biology,cells";
+        doc.year        = 2021;
+        doc.path        = "/tmp/primer.md";
+        doc.chunk_index = 1;
+
+        doc_id = db.store_document(doc);
+        assert(doc_id > 0);
+        db.close();
+    }
+
+    // Verify the dedicated columns round-trip via the raw documents table.
+    sqlite3* raw = nullptr;
+    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(raw,
+        "SELECT text, title, tags, year, path, chunk_index "
+        "FROM documents WHERE document_id = ?",
+        -1, &st, nullptr);
+    sqlite3_bind_int(st, 1, doc_id);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+
+    auto col = [&](int i) {
+        const char* s = reinterpret_cast<const char*>(sqlite3_column_text(st, i));
+        return std::string(s ? s : "");
     };
-    db.store("Dedicated columns test.", meta);
+    std::string text = col(0);
+    assert(col(1) == "Cell Biology Primer");
+    assert(col(2) == "biology,cells");
+    assert(sqlite3_column_int(st, 3) == 2021);
+    assert(col(4) == "/tmp/primer.md");
+    assert(sqlite3_column_int(st, 5) == 1);
 
-    auto all = db.load_all();
-    assert(all.size() == 1);
-    assert(all[0].metadata["collection"] == "reference");
-    assert(all[0].metadata["category"] == "fact");
-    // Tags stored as comma-separated in dedicated column
-    std::string tags = all[0].metadata["tags"];
-    assert(tags.find("alpha") != std::string::npos);
-    assert(tags.find("beta") != std::string::npos);
+    // Grouping metadata must NOT be embedded into the body text.
+    assert(text == "The mitochondria is the powerhouse of the cell.");
+    assert(text.find("Cell Biology Primer") == std::string::npos);
 
-    db.close();
+    sqlite3_finalize(st);
+    sqlite3_close(raw);
     cleanup();
 }
 
@@ -605,10 +656,9 @@ int main() {
     test_store_and_count(emb);
     test_store_with_metadata(emb);
     test_search_basic(emb);
-    test_search_collection_filter(emb);
+    test_search_fts_special_chars(emb);
     test_search_min_score(emb);
     test_search_limit(emb);
-    test_collections_list(emb);
     test_load_all(emb);
     test_rebuild_bm25(emb);
     test_rebuild_embeddings(emb);
@@ -621,7 +671,8 @@ int main() {
     test_delete_respects_keep(emb);
     test_delete_batch_respects_keep(emb);
     test_timestamp_format(emb);
-    test_dedicated_columns_stored(emb);
+    test_v2_summaries_backing(emb);
+    test_store_document(emb);
     test_path_normalization(emb);
     test_token_rotated_at(emb);
     test_preferred_model(emb);

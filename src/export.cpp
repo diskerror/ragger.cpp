@@ -42,17 +42,20 @@ static std::string blob_hex(const void* data, int len) {
 }
 
 // Columns to skip in a given table unless embeddings are requested.
-static bool skip_column(const std::string& table,
+// The v2 content tables (turns/summaries/decisions/documents) each carry an
+// `embedding` BLOB; skip it by default to keep dumps small and diffable.
+static bool skip_column(const std::string& /*table*/,
                         const std::string& column,
                         bool include_embeddings) {
-    if (!include_embeddings && table == "memories" && column == "embedding")
-        return true;
-    return false;
+    return !include_embeddings && column == "embedding";
 }
 
-// Tables that are purely internal / rebuilt on startup.
+// Tables that are purely internal / rebuilt on startup. FTS5 maintains its
+// own shadow tables (<name>_data/_idx/_docsize/_config) under each *_fts
+// virtual table; those are derived content and are rebuilt from the base
+// tables, so they're excluded from dumps.
 static bool is_internal_table(const std::string& name) {
-    return name == "bm25_index";
+    return name.find("_fts") != std::string::npos;
 }
 
 // -- public API -------------------------------------------------------------

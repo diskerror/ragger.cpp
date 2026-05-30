@@ -80,17 +80,21 @@ static void do_import(ragger::RaggerMemory &memory,
     }
 
     const int total = static_cast<int>(chunks.size());
-    const std::string coll = collection.empty() ? std::string("default") : collection;
+
+    // Default document title to the filename stem so chunks share a title for
+    // grouping; path records the origin. year/tags are left for callers that
+    // have that metadata (frontmatter or API import); markdown import sets
+    // neither. (The lean v2 documents schema has no collection column, so the
+    // `collection` argument is not stored here.)
+    const std::string doc_title = fs::path(filepath).stem().string();
 
     for (int i = 0; i < total; ++i) {
         ragger::DocumentChunk doc;
         doc.text        = chunks[i].text;
-        doc.source      = filepath;
-        doc.section     = chunks[i].section;
+        doc.title       = doc_title;
+        doc.path        = filepath;
         doc.chunk_index = i + 1;
-        doc.chunk_total = total;
         doc.imported_at = import_ts;
-        doc.collection  = coll;
 
         int id = memory.store_document(doc);
         std::println(ragger::lang::MSG_IMPORT_CHUNK, (i + 1), total, std::to_string(id));

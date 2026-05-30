@@ -23,21 +23,22 @@ struct SearchResult {
     std::string timestamp;
 };
 
-/// Input for storing a Level 5 RAG document chunk.
-/// `chunk_index` / `chunk_total` of 0 mean "unchunked" (single-row document).
-/// `imported_at` should be the same ISO-8601 string for every chunk of one
-/// import so they share a single timestamp (issue #48); empty = backend stamps
-/// now_iso() at insert.
+/// Input for storing a Level 5 RAG document chunk (lean v2 documents schema).
+/// `chunk_index` of 0 means "unchunked" (single-row document). `imported_at`
+/// should be the same string for every chunk of one import so they share a
+/// single timestamp (issue #48); empty = backend stamps now_iso() at insert.
+///
+/// `title` identifies the publication, `tags` is a comma-separated subject
+/// list, `year` is the publish year, `path` is the origin. Only `text` is
+/// embedded — title/tags/year are grouping/priority metadata, not embedded.
 struct DocumentChunk {
     std::string text;
-    std::string source;
-    std::string section;
-    int         chunk_index = 0;
-    int         chunk_total = 0;
-    json        metadata     = {};
-    std::string imported_at;
-    std::string collection   = "default";
+    std::string path;
+    std::string title;
     std::string tags;
+    int         year        = 0;
+    int         chunk_index = 0;
+    std::string imported_at;
 };
 
 struct SearchResponse {

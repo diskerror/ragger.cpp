@@ -3,7 +3,6 @@
  */
 #include "ragger/sqlite_backend.h"
 #include "ragger/embedder.h"
-#include "ragger/bm25.h"
 #include "ragger/config.h"
 #include "ragger/lang.h"
 #include <format>
@@ -13,10 +12,12 @@
 #include <Eigen/Dense>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <unordered_map>
 #include <iomanip>
 #include <filesystem>
 #include <numeric>
@@ -36,20 +37,20 @@ namespace fs = std::filesystem;
 struct SqliteBackend::Impl {
     sqlite3*    db       = nullptr;
     Embedder*   embedder = nullptr;    // nullable — null for DB-only (user mgmt) mode
-    BM25Index   bm25;  // initialized after config loaded
     std::string db_path;
 
-    // Embedding cache — invalidated on writes
+    // Embedding cache for the summaries table — invalidated on writes.
+    // Vector scores come from here; keyword scores come from FTS5
+    // (summaries_fts) at query time. The two are blended in search().
     bool                           cache_valid = false;
     std::vector<int>               cached_ids;
     std::vector<std::string>       cached_texts;
     Eigen::MatrixXf                cached_embeddings;   // rows × 384
     std::vector<json>              cached_metadata;
-    std::vector<std::string>       cached_collections;
     std::vector<std::string>       cached_timestamps;
 
     Impl(Embedder& emb, const std::string& path)
-        : embedder(&emb), bm25(config().bm25_k1, config().bm25_b)
+        : embedder(&emb)
     {
         const auto& cfg = config();
         db_path = path.empty() ? cfg.resolved_db_path() : expand_path(path);
@@ -72,7 +73,7 @@ struct SqliteBackend::Impl {
 
     /// DB-only constructor — no embedder, only user management ops work.
     explicit Impl(const std::string& path)
-        : embedder(nullptr), bm25(0, 0)
+        : embedder(nullptr)
     {
         db_path = expand_path(path);
         fs::create_directories(fs::path(db_path).parent_path());
@@ -152,6 +153,9 @@ struct SqliteBackend::Impl {
         exec("CREATE INDEX IF NOT EXISTS idx_turns_timestamp ON turns(timestamp)");
 
         // summaries (L2/L3/L4) — level discriminates turn/session/project.
+        // Lean per scripts/schema_v2_fading_memory.sql (the reference DDL).
+        // The generic Role-1 store() also lands here (level='session',
+        // status='complete'); keyword search is FTS5, not a metadata blob.
         exec(R"(
             CREATE TABLE IF NOT EXISTS summaries (
                 summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -182,6 +186,9 @@ struct SqliteBackend::Impl {
         exec("CREATE INDEX IF NOT EXISTS idx_decisions_status ON decisions(status)");
 
         // documents (L5) — user-curated RAG; the only sharable table.
+        // Lean per the reference DDL: title identifies the publication, tags
+        // group/describe (subject), year is the publish year, path is the
+        // origin. Only `text` is embedded. Keyword search via documents_fts.
         exec(R"(
             CREATE TABLE IF NOT EXISTS documents (
                 document_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -196,7 +203,7 @@ struct SqliteBackend::Impl {
             )
         )");
         exec("CREATE INDEX IF NOT EXISTS idx_documents_imported_at ON documents(imported_at)");
-        
+
         exec(R"(
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -291,304 +298,6 @@ struct SqliteBackend::Impl {
             INSERT INTO documents_fts(rowid, title, text, tags)
             VALUES (new.document_id, new.title, new.text, new.tags);
         END)");
-    }
-
-    // Issue #33 — split storage into three tables:
-    //   turns      = Level 1 raw exchanges (user_text + assistant_text)
-    //   documents  = Level 5 RAG (user-curated; agent cannot write)
-    //   memories   = Levels 2/3/4/6 (summaries + decisions) — extended in place
-    //
-    // Existing memories rows keep their data and receive level='legacy'
-    // until a follow-up classifier reassigns them. BM25 stays per-table
-    // until #49 swaps everything to FTS5.
-    void migrate_separate_tables() {
-        // Detect whether this migration has already run by checking for the
-        // `level` column on `memories`. Idempotent on re-open.
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db, "PRAGMA table_info(memories)", -1, &stmt, nullptr);
-        bool has_level = false;
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            std::string col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-            if (col == "level") { has_level = true; break; }
-        }
-        sqlite3_finalize(stmt);
-
-        if (has_level) {
-            // Tables/columns may still need the IF NOT EXISTS no-ops below
-            // on a fresh sibling DB. Skip the log line; the work is idempotent.
-        } else {
-            std::cerr << ragger::lang::MSG_MIGRATE_SEPARATE_TABLES << "\n";
-        }
-
-        // --- documents: user-curated RAG (Level 5) ---
-        // imported_at is a single timestamp shared by every chunk of one
-        // import (issue #48). chunk_index/chunk_total are NULL for
-        // unchunked documents.
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS documents (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                text        TEXT    NOT NULL,
-                embedding   BLOB,
-                source      TEXT,
-                section     TEXT,
-                chunk_index INTEGER,
-                chunk_total INTEGER,
-                metadata    TEXT,
-                imported_at TEXT    NOT NULL,
-                user_id     INTEGER REFERENCES users(id),
-                collection  TEXT    NOT NULL DEFAULT 'default',
-                tags        TEXT    NOT NULL DEFAULT ''
-            )
-        )");
-        exec("CREATE INDEX IF NOT EXISTS idx_documents_source      ON documents(source)");
-        exec("CREATE INDEX IF NOT EXISTS idx_documents_collection  ON documents(collection)");
-        exec("CREATE INDEX IF NOT EXISTS idx_documents_imported_at ON documents(imported_at)");
-
-        // --- turns: raw verbatim exchanges (Level 1) ---
-        // Paired schema: one row per user/assistant exchange. assistant_text
-        // is nullable to support the existing deferred-embedding flow where
-        // a partial row is written on user input and finalized on response.
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS turns (
-                id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id     TEXT,
-                user_text      TEXT NOT NULL,
-                assistant_text TEXT,
-                embedding      BLOB,
-                model          TEXT,
-                metadata       TEXT,
-                timestamp      TEXT NOT NULL,
-                user_id        INTEGER REFERENCES users(id)
-            )
-        )");
-        exec("CREATE INDEX IF NOT EXISTS idx_turns_session   ON turns(session_id)");
-        exec("CREATE INDEX IF NOT EXISTS idx_turns_timestamp ON turns(timestamp)");
-
-        // --- memories: extend in place for Levels 2/3/4/6 ---
-        // level:  'turn-summary' | 'session-summary' | 'project-summary' | 'decision' | 'legacy'
-        // status: 'current' | 'complete' (summaries) | 'superseded' | 'revisit' | 'deprecated' (decisions)
-        // parent_id: hierarchy (L2 -> L3, L3 -> L4, superseded decision -> replacement)
-        // source_turn_id: L2 turn-summary references the turn it summarises
-        if (!has_level) {
-            exec("ALTER TABLE memories ADD COLUMN level          TEXT NOT NULL DEFAULT 'legacy'");
-            exec("ALTER TABLE memories ADD COLUMN status         TEXT NOT NULL DEFAULT 'current'");
-            exec("ALTER TABLE memories ADD COLUMN parent_id      INTEGER");
-            exec("ALTER TABLE memories ADD COLUMN source_turn_id INTEGER");
-            std::cerr << ragger::lang::MSG_MIGRATE_MEMORIES_LEVEL << "\n";
-        }
-        exec("CREATE INDEX IF NOT EXISTS idx_memories_level     ON memories(level)");
-        exec("CREATE INDEX IF NOT EXISTS idx_memories_status    ON memories(status)");
-        exec("CREATE INDEX IF NOT EXISTS idx_memories_parent    ON memories(parent_id)");
-        exec("CREATE INDEX IF NOT EXISTS idx_memories_src_turn  ON memories(source_turn_id)");
-
-        // --- BM25 sidecars for turns and documents ---
-        // The existing bm25_index stays keyed to memories(id). When #49
-        // lands FTS5, all three are superseded by virtual tables.
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS bm25_documents (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                document_id INTEGER NOT NULL
-                    REFERENCES documents(id)
-                    ON DELETE CASCADE ON UPDATE CASCADE,
-                token       TEXT    NOT NULL,
-                term_freq   INTEGER NOT NULL
-            )
-        )");
-        exec("CREATE INDEX IF NOT EXISTS idx_bm25_documents_doc   ON bm25_documents(document_id)");
-        exec("CREATE INDEX IF NOT EXISTS idx_bm25_documents_token ON bm25_documents(token)");
-
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS bm25_turns (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                turn_id   INTEGER NOT NULL
-                    REFERENCES turns(id)
-                    ON DELETE CASCADE ON UPDATE CASCADE,
-                token     TEXT    NOT NULL,
-                term_freq INTEGER NOT NULL
-            )
-        )");
-        exec("CREATE INDEX IF NOT EXISTS idx_bm25_turns_turn  ON bm25_turns(turn_id)");
-        exec("CREATE INDEX IF NOT EXISTS idx_bm25_turns_token ON bm25_turns(token)");
-    }
-
-    void migrate_embedding_nullable() {
-        // Detect whether memories.embedding still has the old NOT NULL
-        // constraint. SQLite doesn't support ALTER COLUMN to drop it, so
-        // the standard fix is to rebuild the table.
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db, "PRAGMA table_info(memories)", -1, &stmt, nullptr);
-        bool embedding_notnull = false;
-        bool found_embedding = false;
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            std::string col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-            if (col == "embedding") {
-                found_embedding = true;
-                embedding_notnull = sqlite3_column_int(stmt, 3) != 0;  // notnull flag
-                break;
-            }
-        }
-        sqlite3_finalize(stmt);
-        if (!found_embedding || !embedding_notnull) return;
-
-        std::cerr << ragger::lang::MSG_MIGRATE_EMBEDDING_NULLABLE << "\n";
-        exec("PRAGMA foreign_keys = OFF");
-        exec("BEGIN");
-        exec(R"(
-            CREATE TABLE memories_new (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                text       TEXT NOT NULL,
-                embedding  BLOB,
-                metadata   TEXT,
-                timestamp  TEXT NOT NULL,
-                user_id    INTEGER REFERENCES users(id),
-                collection TEXT NOT NULL DEFAULT 'memory',
-                category   TEXT NOT NULL DEFAULT '',
-                tags       TEXT NOT NULL DEFAULT ''
-            )
-        )");
-        exec(R"(
-            INSERT INTO memories_new (id, text, embedding, metadata, timestamp,
-                                      user_id, collection, category, tags)
-            SELECT id, text, embedding, metadata, timestamp,
-                   user_id, collection, category, tags
-            FROM memories
-        )");
-        exec("DROP TABLE memories");
-        exec("ALTER TABLE memories_new RENAME TO memories");
-        exec("CREATE INDEX IF NOT EXISTS idx_memories_collection ON memories(collection)");
-        exec("CREATE INDEX IF NOT EXISTS idx_memories_category   ON memories(category)");
-        exec("COMMIT");
-        exec("PRAGMA foreign_keys = ON");
-    }
-
-    void migrate_add_user_id() {
-        // Check if column exists
-        sqlite3_stmt* stmt;
-        sqlite3_prepare_v2(db, "PRAGMA table_info(memories)", -1, &stmt, nullptr);
-        bool has_user_id = false;
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            std::string col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-            if (col == "user_id") has_user_id = true;
-        }
-        sqlite3_finalize(stmt);
-
-        if (!has_user_id) {
-            exec("ALTER TABLE memories ADD COLUMN user_id INTEGER REFERENCES users(id)");
-            std::cerr << ragger::lang::MSG_MIGRATE_USER_ID << "\n";
-        }
-    }
-
-    void migrate_dedicated_columns() {
-        // Check if collection column already exists
-        sqlite3_stmt* stmt;
-        sqlite3_prepare_v2(db, "PRAGMA table_info(memories)", -1, &stmt, nullptr);
-        bool has_collection = false;
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            std::string col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-            if (col == "collection") has_collection = true;
-        }
-        sqlite3_finalize(stmt);
-
-        if (has_collection) return;
-
-        std::cerr << ragger::lang::MSG_MIGRATE_DEDICATED_COLUMNS << "\n";
-
-        exec("ALTER TABLE memories ADD COLUMN collection TEXT NOT NULL DEFAULT 'memory'");
-        exec("ALTER TABLE memories ADD COLUMN category TEXT NOT NULL DEFAULT ''");
-        exec("ALTER TABLE memories ADD COLUMN tags TEXT NOT NULL DEFAULT ''");
-        exec("CREATE INDEX IF NOT EXISTS idx_memories_collection ON memories(collection)");
-        exec("CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category)");
-
-        // Backfill from JSON metadata
-        stmt = nullptr;
-        sqlite3_prepare_v2(db,
-            "SELECT id, metadata FROM memories WHERE metadata IS NOT NULL",
-            -1, &stmt, nullptr);
-
-        sqlite3_stmt* update_stmt = nullptr;
-        sqlite3_prepare_v2(db,
-            "UPDATE memories SET collection = ?, category = ?, tags = ?, metadata = ? WHERE id = ?",
-            -1, &update_stmt, nullptr);
-
-        int updated = 0;
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            int id = sqlite3_column_int(stmt, 0);
-            const char* meta_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-            if (!meta_str) continue;
-
-            json meta;
-            try { meta = json::parse(meta_str); }
-            catch (...) { continue; }
-
-            // Extract dedicated fields
-            std::string collection = meta.value("collection", "memory");
-            std::string category = meta.value("category", "");
-            meta.erase("collection");
-            meta.erase("category");
-
-            // Tags: array → comma-separated, string kept as-is
-            std::vector<std::string> tag_list;
-            if (meta.contains("tags")) {
-                auto& tags_val = meta["tags"];
-                if (tags_val.is_array()) {
-                    for (auto& t : tags_val) tag_list.push_back(t.get<std::string>());
-                } else if (tags_val.is_string() && !tags_val.get<std::string>().empty()) {
-                    // Split comma-separated
-                    std::string s = tags_val.get<std::string>();
-                    size_t pos = 0;
-                    while (pos < s.size()) {
-                        size_t comma = s.find(',', pos);
-                        if (comma == std::string::npos) comma = s.size();
-                        std::string t = s.substr(pos, comma - pos);
-                        // trim
-                        size_t start = t.find_first_not_of(" \t");
-                        size_t end = t.find_last_not_of(" \t");
-                        if (start != std::string::npos)
-                            tag_list.push_back(t.substr(start, end - start + 1));
-                        pos = comma + 1;
-                    }
-                }
-                meta.erase("tags");
-            }
-
-            // Boolean flags → tags
-            if (meta.value("keep", false)) {
-                if (std::find(tag_list.begin(), tag_list.end(), "keep") == tag_list.end())
-                    tag_list.push_back("keep");
-            }
-            meta.erase("keep");
-            if (meta.value("bad", false)) {
-                if (std::find(tag_list.begin(), tag_list.end(), "bad") == tag_list.end())
-                    tag_list.push_back("bad");
-            }
-            meta.erase("bad");
-
-            // Join tags
-            std::string tags_str;
-            for (size_t i = 0; i < tag_list.size(); ++i) {
-                if (i > 0) tags_str += ",";
-                tags_str += tag_list[i];
-            }
-
-            // Clean metadata JSON
-            std::string cleaned = meta.empty() ? "" : meta.dump();
-
-            sqlite3_bind_text(update_stmt, 1, collection.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(update_stmt, 2, category.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(update_stmt, 3, tags_str.c_str(), -1, SQLITE_TRANSIENT);
-            if (cleaned.empty())
-                sqlite3_bind_null(update_stmt, 4);
-            else
-                sqlite3_bind_text(update_stmt, 4, cleaned.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int(update_stmt, 5, id);
-            sqlite3_step(update_stmt);
-            sqlite3_reset(update_stmt);
-            ++updated;
-        }
-        sqlite3_finalize(stmt);
-        sqlite3_finalize(update_stmt);
-
-        std::cerr << std::format(ragger::lang::MSG_MIGRATE_DEDICATED_BACKFILL, updated) << "\n";
     }
 
     void migrate_add_token_rotated_at() {
@@ -719,59 +428,11 @@ struct SqliteBackend::Impl {
         return std::string(buf) + "Z";
     }
 
-    // ---- BM25 token indexing ------------------------------------------
-    void index_bm25_tokens(int memory_id, const std::string& text) {
-        auto tokens = BM25Index::tokenize(text);
-        if (tokens.empty()) return;
-
-        // Count term frequencies
-        std::unordered_map<std::string, int> tf;
-        for (auto& t : tokens) ++tf[t];
-
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db,
-            "INSERT INTO bm25_index (memory_id, token, term_freq) VALUES (?,?,?)",
-            -1, &stmt, nullptr);
-
-        for (auto& [token, freq] : tf) {
-            sqlite3_bind_int(stmt, 1, memory_id);
-            sqlite3_bind_text(stmt, 2, token.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int(stmt, 3, freq);
-            sqlite3_step(stmt);
-            sqlite3_reset(stmt);
-        }
-        sqlite3_finalize(stmt);
-    }
-
-    // ---- load BM25 from storage ---------------------------------------
-    void load_bm25_from_storage() {
-        if (!config().bm25_enabled) return;
-
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db,
-            "SELECT memory_id, token, term_freq FROM bm25_index",
-            -1, &stmt, nullptr);
-
-        std::vector<int> doc_ids;
-        std::vector<std::string> tokens;
-        std::vector<int> freqs;
-
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            doc_ids.push_back(sqlite3_column_int(stmt, 0));
-            tokens.emplace_back(
-                reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
-            freqs.push_back(sqlite3_column_int(stmt, 2));
-        }
-        sqlite3_finalize(stmt);
-
-        if (!doc_ids.empty()) {
-            bm25.load(doc_ids, tokens, freqs);
-        }
-    }
-
     // ---- cache --------------------------------------------------------
     void invalidate_cache() { cache_valid = false; }
 
+    // Loads the summaries table into the vector cache. Keyword scores come
+    // from FTS5 (summaries_fts) at query time — see keyword_scores().
     void ensure_cache() {
         if (cache_valid) return;
 
@@ -779,61 +440,50 @@ struct SqliteBackend::Impl {
         cached_texts.clear();
         cached_metadata.clear();
         cached_timestamps.clear();
-        cached_collections.clear();
 
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(db,
-            "SELECT id, text, embedding, metadata, timestamp, collection, category, tags FROM memories",
+            "SELECT summary_id, text, embedding, level, status, tags, timestamp "
+            "FROM summaries",
             -1, &stmt, nullptr);
 
         std::vector<std::vector<float>> emb_rows;
         const int expected_dims = config().embedding_dimensions;
 
         while (sqlite3_step(stmt) == SQLITE_ROW) {
+            auto col_text = [&](int i) -> std::string {
+                const char* s = reinterpret_cast<const char*>(sqlite3_column_text(stmt, i));
+                return s ? s : "";
+            };
             cached_ids.push_back(sqlite3_column_int(stmt, 0));
-            cached_texts.emplace_back(
-                reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1)));
+            cached_texts.push_back(col_text(1));
 
             const void* blob = sqlite3_column_blob(stmt, 2);
             int blob_bytes   = sqlite3_column_bytes(stmt, 2);
             int n_floats     = blob_bytes / sizeof(float);
-            // NULL or wrong-sized embedding (e.g. row written by deferred-
-            // embedding path before backfill ran) → zero vector. Cosine
-            // against any query yields 0; BM25 still scores from text.
+            // NULL or wrong-sized embedding (deferred-embedding row before
+            // backfill) → zero vector. Cosine yields 0; FTS5 still matches text.
             std::vector<float> emb(expected_dims, 0.0f);
             if (n_floats == expected_dims && blob != nullptr) {
                 std::memcpy(emb.data(), blob, blob_bytes);
             }
             emb_rows.push_back(std::move(emb));
 
-            // Reconstruct full metadata from columns + JSON blob
-            const char* meta_str =
-                reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-            json meta = meta_str ? json::parse(meta_str) : json::object();
-
-            const char* col_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
-            const char* cat_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
-            const char* tag_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 7));
-
-            std::string collection = col_str ? col_str : "memory";
-            std::string category = cat_str ? cat_str : "";
-            std::string tags = tag_str ? tag_str : "";
-
-            meta["collection"] = collection;
-            if (!category.empty()) meta["category"] = category;
+            // Lean v2 summaries: surface level/status/tags as metadata so the
+            // generic API and keep-protection (via tags) have what they need.
+            json meta = json::object();
+            meta["level"]  = col_text(3);
+            meta["status"] = col_text(4);
+            std::string tags = col_text(5);
             if (!tags.empty()) meta["tags"] = tags;
-
             cached_metadata.push_back(std::move(meta));
-            cached_collections.push_back(collection);
 
-            cached_timestamps.emplace_back(
-                reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4)));
+            cached_timestamps.push_back(col_text(6));
         }
         sqlite3_finalize(stmt);
 
-        // Pack into Eigen matrix (rows × dims). Dimensions come from config
-        // — every emb_rows entry is already padded/zeroed to expected_dims
-        // so NULL-embedding rows don't poison the matrix shape.
+        // Pack into Eigen matrix (rows × dims). Every row is padded/zeroed to
+        // expected_dims so NULL-embedding rows don't poison the matrix shape.
         int n = static_cast<int>(emb_rows.size());
         cached_embeddings.resize(n, expected_dims);
         for (int i = 0; i < n; ++i) {
@@ -841,32 +491,49 @@ struct SqliteBackend::Impl {
                 Eigen::Map<Eigen::RowVectorXf>(emb_rows[i].data(), expected_dims);
         }
 
-        // Build / load BM25 index
-        if (config().bm25_enabled) {
-            load_bm25_from_storage();
-            if (!bm25.is_built() && !cached_texts.empty()) {
-                bm25.build(cached_texts);
-            }
-        }
-
         cache_valid = true;
     }
 
-    // ---- usage tracking -----------------------------------------------
-    void track_usage(const std::vector<int>& ids) {
-        if (ids.empty()) return;  // usage tracking always on
-        auto ts = now_iso();
+    // ---- FTS5 keyword scoring -----------------------------------------
+    // Build a safe MATCH expression from arbitrary user text: extract
+    // alphanumeric tokens and OR together quoted terms. Returns "" when the
+    // query has no usable tokens (caller then skips the keyword pass).
+    static std::string fts_match_expr(const std::string& query) {
+        std::string expr, tok;
+        auto flush = [&]() {
+            if (tok.empty()) return;
+            if (!expr.empty()) expr += " OR ";
+            expr += "\"" + tok + "\"";
+            tok.clear();
+        };
+        for (char c : query) {
+            if (std::isalnum(static_cast<unsigned char>(c))) tok += c;
+            else flush();
+        }
+        flush();
+        return expr;
+    }
+
+    // bm25(summaries_fts) over a MATCH expression → summary_id → score, where
+    // higher = more relevant (FTS5 bm25() is lower-is-better, so the sign is
+    // flipped). Non-matching rows are absent (treated as 0 by the caller).
+    std::unordered_map<int, float> keyword_scores(const std::string& match_expr) {
+        std::unordered_map<int, float> out;
+        if (match_expr.empty()) return out;
         sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db,
-            "INSERT INTO memory_usage (memory_id, timestamp) VALUES (?,?)",
-            -1, &stmt, nullptr);
-        for (int id : ids) {
-            sqlite3_bind_int(stmt, 1, id);
-            sqlite3_bind_text(stmt, 2, ts.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_step(stmt);
-            sqlite3_reset(stmt);
+        if (sqlite3_prepare_v2(db,
+                "SELECT rowid, bm25(summaries_fts) FROM summaries_fts "
+                "WHERE summaries_fts MATCH ?",
+                -1, &stmt, nullptr) != SQLITE_OK)
+            return out;   // malformed expr etc. → no keyword contribution
+        sqlite3_bind_text(stmt, 1, match_expr.c_str(), -1, SQLITE_TRANSIENT);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int id   = sqlite3_column_int(stmt, 0);
+            double s = sqlite3_column_double(stmt, 1);
+            out[id]  = static_cast<float>(-s);
         }
         sqlite3_finalize(stmt);
+        return out;
     }
 
     // ---- public API ---------------------------------------------------
@@ -890,7 +557,9 @@ struct SqliteBackend::Impl {
             ts_override = metadata["timestamp"].get<std::string>();
         }
 
-        // tags: accept a JSON array or a plain string.
+        // tags: accept a JSON array or a plain string. `keep`/`bad` are
+        // flag-tags folded into the tags column — a row tagged "keep" is
+        // protected from delete/update (see delete_memory / update_text).
         std::string tags_str;
         if (metadata.contains("tags")) {
             auto& tv = metadata["tags"];
@@ -903,6 +572,12 @@ struct SqliteBackend::Impl {
                 tags_str = tv.get<std::string>();
             }
         }
+        if (metadata.value("keep", false) &&
+            tags_str.find("keep") == std::string::npos)
+            tags_str += (tags_str.empty() ? "" : ",") + std::string("keep");
+        if (metadata.value("bad", false) &&
+            tags_str.find("bad") == std::string::npos)
+            tags_str += (tags_str.empty() ? "" : ",") + std::string("bad");
 
         std::string text = normalize_path(raw_text);
 
@@ -913,6 +588,7 @@ struct SqliteBackend::Impl {
 
         auto ts = ts_override.empty() ? now_iso() : ts_override;
 
+        // FTS5 sync triggers index the row from text/tags — no manual step.
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(db,
             "INSERT INTO summaries (text, embedding, level, status, tags, timestamp) "
@@ -940,31 +616,7 @@ struct SqliteBackend::Impl {
 
         int summary_id = static_cast<int>(sqlite3_last_insert_rowid(db));
         invalidate_cache();
-
         return std::to_string(summary_id);
-    }
-
-    // ---- index BM25 tokens for documents table ------------------------
-    void index_bm25_document_tokens(int document_id, const std::string& text) {
-        auto tokens = BM25Index::tokenize(text);
-        if (tokens.empty()) return;
-
-        std::unordered_map<std::string, int> tf;
-        for (auto& t : tokens) ++tf[t];
-
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db,
-            "INSERT INTO bm25_documents (document_id, token, term_freq) VALUES (?,?,?)",
-            -1, &stmt, nullptr);
-
-        for (auto& [token, freq] : tf) {
-            sqlite3_bind_int(stmt, 1, document_id);
-            sqlite3_bind_text(stmt, 2, token.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int(stmt, 3, freq);
-            sqlite3_step(stmt);
-            sqlite3_reset(stmt);
-        }
-        sqlite3_finalize(stmt);
     }
 
     // ---- store_document: write Level 5 RAG chunk ----------------------
@@ -979,15 +631,20 @@ struct SqliteBackend::Impl {
 
         std::string imported_at = chunk.imported_at.empty() ? now_iso() : chunk.imported_at;
 
-        // chunk_index / chunk_total of 0 mean "unchunked" — store as NULL so
-        // the column reflects the absence of a chunking scheme.
+        // Lean documents schema (reference DDL): path/title/tags/year/
+        // chunk_index. Only `text` is embedded; documents_fts sync triggers
+        // index title/text/tags — no manual keyword step.
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(db,
             "INSERT INTO documents "
-            "(text, embedding, source, section, chunk_index, chunk_total, "
-            " metadata, imported_at, collection, tags) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "(text, embedding, path, title, tags, year, chunk_index, imported_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
             -1, &stmt, nullptr);
+
+        auto bind_opt = [&](int idx, const std::string& v) {
+            if (v.empty()) sqlite3_bind_null(stmt, idx);
+            else sqlite3_bind_text(stmt, idx, v.c_str(), -1, SQLITE_TRANSIENT);
+        };
 
         sqlite3_bind_text(stmt, 1, text.c_str(), -1, SQLITE_TRANSIENT);
         if (defer_embedding) {
@@ -997,21 +654,14 @@ struct SqliteBackend::Impl {
                               static_cast<int>(emb.size() * sizeof(float)),
                               SQLITE_TRANSIENT);
         }
-        if (chunk.source.empty()) sqlite3_bind_null(stmt, 3);
-        else sqlite3_bind_text(stmt, 3, chunk.source.c_str(), -1, SQLITE_TRANSIENT);
-        if (chunk.section.empty()) sqlite3_bind_null(stmt, 4);
-        else sqlite3_bind_text(stmt, 4, chunk.section.c_str(), -1, SQLITE_TRANSIENT);
-        if (chunk.chunk_index <= 0) sqlite3_bind_null(stmt, 5);
-        else sqlite3_bind_int(stmt, 5, chunk.chunk_index);
-        if (chunk.chunk_total <= 0) sqlite3_bind_null(stmt, 6);
-        else sqlite3_bind_int(stmt, 6, chunk.chunk_total);
-        std::string meta_str = chunk.metadata.is_null() || chunk.metadata.empty()
-                                   ? "" : chunk.metadata.dump();
-        if (meta_str.empty()) sqlite3_bind_null(stmt, 7);
-        else sqlite3_bind_text(stmt, 7, meta_str.c_str(), -1, SQLITE_TRANSIENT);
+        bind_opt(3, chunk.path);
+        bind_opt(4, chunk.title);
+        sqlite3_bind_text(stmt, 5, chunk.tags.c_str(), -1, SQLITE_TRANSIENT);
+        if (chunk.year <= 0) sqlite3_bind_null(stmt, 6);
+        else sqlite3_bind_int(stmt, 6, chunk.year);
+        if (chunk.chunk_index <= 0) sqlite3_bind_null(stmt, 7);
+        else sqlite3_bind_int(stmt, 7, chunk.chunk_index);
         sqlite3_bind_text(stmt, 8, imported_at.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 9, chunk.collection.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 10, chunk.tags.c_str(), -1, SQLITE_TRANSIENT);
 
         int rc = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
@@ -1019,9 +669,7 @@ struct SqliteBackend::Impl {
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         }
 
-        int document_id = static_cast<int>(sqlite3_last_insert_rowid(db));
-        index_bm25_document_tokens(document_id, text);
-        return document_id;
+        return static_cast<int>(sqlite3_last_insert_rowid(db));
     }
 
     bool update_text(int memory_id, const std::string& raw_text, json metadata, bool defer_embedding) {
@@ -1029,7 +677,7 @@ struct SqliteBackend::Impl {
 
         // Refuse to mutate protected rows for parity with delete_memory.
         sqlite3_stmt* check_stmt = nullptr;
-        sqlite3_prepare_v2(db, "SELECT tags FROM memories WHERE id = ?",
+        sqlite3_prepare_v2(db, "SELECT tags FROM summaries WHERE summary_id = ?",
                            -1, &check_stmt, nullptr);
         sqlite3_bind_int(check_stmt, 1, memory_id);
         bool exists = false;
@@ -1044,14 +692,8 @@ struct SqliteBackend::Impl {
         sqlite3_finalize(check_stmt);
         if (!exists || protected_row) return false;
 
-        // Mirror store()'s metadata extraction so the dedicated columns
-        // stay in sync if the caller changed collection/category/tags.
-        std::string collection = metadata.value("collection", std::string("memory"));
-        std::string category = metadata.value("category", "");
-        metadata.erase("collection");
-        metadata.erase("category");
-        metadata.erase("timestamp");  // never overwrite original timestamp here
-
+        // Lean v2 summaries: only text/embedding/tags are mutable here.
+        // keep/bad flags fold into tags (parity with store()).
         std::string tags_str;
         if (metadata.contains("tags")) {
             auto& tv = metadata["tags"];
@@ -1063,18 +705,13 @@ struct SqliteBackend::Impl {
             } else if (tv.is_string()) {
                 tags_str = tv.get<std::string>();
             }
-            metadata.erase("tags");
         }
-        if (metadata.value("keep", false)) {
-            if (tags_str.find("keep") == std::string::npos)
-                tags_str += (tags_str.empty() ? "" : ",") + std::string("keep");
-        }
-        metadata.erase("keep");
-        if (metadata.value("bad", false)) {
-            if (tags_str.find("bad") == std::string::npos)
-                tags_str += (tags_str.empty() ? "" : ",") + std::string("bad");
-        }
-        metadata.erase("bad");
+        if (metadata.value("keep", false) &&
+            tags_str.find("keep") == std::string::npos)
+            tags_str += (tags_str.empty() ? "" : ",") + std::string("keep");
+        if (metadata.value("bad", false) &&
+            tags_str.find("bad") == std::string::npos)
+            tags_str += (tags_str.empty() ? "" : ",") + std::string("bad");
 
         std::string text = normalize_path(raw_text);
         std::vector<float> emb;
@@ -1082,12 +719,11 @@ struct SqliteBackend::Impl {
             emb = embedder->encode(text);
         }
 
+        // FTS5 sync triggers re-index from the new text/tags automatically.
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(db,
-            "UPDATE memories "
-            "SET text = ?, embedding = ?, metadata = ?, "
-            "    collection = ?, category = ?, tags = ? "
-            "WHERE id = ?",
+            "UPDATE summaries SET text = ?, embedding = ?, tags = ? "
+            "WHERE summary_id = ?",
             -1, &stmt, nullptr);
 
         sqlite3_bind_text(stmt, 1, text.c_str(), -1, SQLITE_TRANSIENT);
@@ -1098,35 +734,30 @@ struct SqliteBackend::Impl {
                               static_cast<int>(emb.size() * sizeof(float)),
                               SQLITE_TRANSIENT);
         }
-        std::string meta_str = metadata.empty() ? "" : metadata.dump();
-        if (meta_str.empty())
-            sqlite3_bind_null(stmt, 3);
-        else
-            sqlite3_bind_text(stmt, 3, meta_str.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 4, collection.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 5, category.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 6, tags_str.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int (stmt, 7, memory_id);
+        sqlite3_bind_text(stmt, 3, tags_str.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int (stmt, 4, memory_id);
 
         int rc = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
         if (rc != SQLITE_DONE) return false;
 
-        // Rebuild this row's BM25 tokens against the new text.
-        sqlite3_stmt* del = nullptr;
-        sqlite3_prepare_v2(db, "DELETE FROM bm25_index WHERE memory_id = ?",
-                           -1, &del, nullptr);
-        sqlite3_bind_int(del, 1, memory_id);
-        sqlite3_step(del);
-        sqlite3_finalize(del);
-        index_bm25_tokens(memory_id, text);
         invalidate_cache();
         return true;
     }
 
+    // Hybrid search over summaries: vector cosine (cached embeddings) blended
+    // with FTS5 keyword relevance (bm25(summaries_fts)). Both are min-max
+    // normalized and combined with vector_weight/bm25_weight. The result
+    // score reported is the raw cosine; ranking uses the blended score.
+    //
+    // NOTE: the lean v2 summaries table has no collection column, so the
+    // `collections` filter is currently a no-op (kept for API/source compat).
+    // Documents (L5) are not yet merged into general search — that returns
+    // with the documents-search recipe work; this function is structured so
+    // adding a documents pass is a localized change.
     SearchResponse search(const std::string& query, int limit,
                           float min_score,
-                          std::vector<std::string> collections) {
+                          std::vector<std::string> /*collections*/) {
         using clock = std::chrono::high_resolution_clock;
         auto t_start = clock::now();
 
@@ -1134,141 +765,76 @@ struct SqliteBackend::Impl {
         int n = static_cast<int>(cached_ids.size());
         if (n == 0) return {{}, {{"corpus_size", 0}}};
 
-        // ---- collection filter ----------------------------------------
-        std::vector<int> filtered_idx;  // indices into cache arrays
-        if (collections.empty()) {
-            // Default: search all
-            filtered_idx.resize(n);
-            std::iota(filtered_idx.begin(), filtered_idx.end(), 0);
-        } else {
-            bool search_all = false;
-            for (auto& c : collections)
-                if (c == "*" || c == "all") { search_all = true; break; }
-
-            if (search_all) {
-                filtered_idx.resize(n);
-                std::iota(filtered_idx.begin(), filtered_idx.end(), 0);
-            } else {
-                for (int i = 0; i < n; ++i) {
-                    for (auto& c : collections)
-                        if (cached_collections[i] == c) { filtered_idx.push_back(i); break; }
-                }
-            }
-        }
-
-        int filtered_n = static_cast<int>(filtered_idx.size());
-        if (filtered_n == 0) {
-            return {{}, {{"corpus_size", n}, {"filtered_size", 0}}};
-        }
-
         // ---- query embedding ------------------------------------------
         auto t_embed_start = clock::now();
         auto q_vec = embedder->encode(query);
         auto t_embed_end = clock::now();
 
-        // ---- cosine similarity ----------------------------------------
+        // ---- vector cosine --------------------------------------------
         auto t_search_start = clock::now();
-
-        // Map query into Eigen
-        Eigen::Map<Eigen::VectorXf> q(q_vec.data(),
-                                       static_cast<int>(q_vec.size()));
+        Eigen::Map<Eigen::VectorXf> q(q_vec.data(), static_cast<int>(q_vec.size()));
         Eigen::VectorXf q_norm = q.normalized();
 
-        // Build filtered embedding matrix
-        Eigen::MatrixXf filt_emb(filtered_n, config().embedding_dimensions);
-        for (int i = 0; i < filtered_n; ++i) {
-            filt_emb.row(i) = cached_embeddings.row(filtered_idx[i]);
-        }
+        Eigen::MatrixXf emb = cached_embeddings;
+        Eigen::VectorXf norms = emb.rowwise().norm();
+        for (int i = 0; i < n; ++i)
+            if (norms(i) > 1e-12f) emb.row(i) /= norms(i);
+        Eigen::VectorXf similarities = emb * q_norm;   // raw cosine, reported
 
-        // Row-wise normalize
-        Eigen::VectorXf norms = filt_emb.rowwise().norm();
-        for (int i = 0; i < filtered_n; ++i) {
-            if (norms(i) > 1e-12f)
-                filt_emb.row(i) /= norms(i);
-        }
-
-        // Cosine similarities
-        Eigen::VectorXf similarities = filt_emb * q_norm;
-
-        // ---- BM25 hybrid -----------------------------------------------
+        // ---- FTS5 keyword + hybrid blend ------------------------------
         Eigen::VectorXf combined = similarities;
-
-        if (config().bm25_enabled && bm25.is_built()) {
-            // Map filtered_idx to doc IDs for BM25
-            std::vector<int> bm25_ids;
-            bm25_ids.reserve(filtered_n);
-            for (int i : filtered_idx) bm25_ids.push_back(cached_ids[i]);
-
-            auto bm25_scores_vec = bm25.score(query, bm25_ids);
-            Eigen::Map<Eigen::VectorXf> bm25_scores(
-                bm25_scores_vec.data(), filtered_n);
-
-            // Min-max normalize both
-            auto norm_minmax = [](Eigen::VectorXf& v) {
-                float mn = v.minCoeff();
-                float mx = v.maxCoeff();
-                if (mx > mn) v = (v.array() - mn) / (mx - mn);
-            };
-
-            Eigen::VectorXf vec_norm = similarities;
-            Eigen::VectorXf bm25_norm = bm25_scores;
-            norm_minmax(vec_norm);
-            norm_minmax(bm25_norm);
-
-            combined = config().vector_weight * vec_norm + config().bm25_weight * bm25_norm;
+        if (config().bm25_enabled) {
+            auto kw = keyword_scores(fts_match_expr(query));
+            if (!kw.empty()) {
+                Eigen::VectorXf kw_vec(n);
+                for (int i = 0; i < n; ++i) {
+                    auto it = kw.find(cached_ids[i]);
+                    kw_vec(i) = (it == kw.end()) ? 0.0f : it->second;
+                }
+                auto norm_minmax = [](Eigen::VectorXf& v) {
+                    float mn = v.minCoeff(), mx = v.maxCoeff();
+                    if (mx > mn) v = (v.array() - mn) / (mx - mn);
+                };
+                Eigen::VectorXf vec_norm = similarities, kw_norm = kw_vec;
+                norm_minmax(vec_norm);
+                norm_minmax(kw_norm);
+                combined = config().vector_weight * vec_norm +
+                           config().bm25_weight   * kw_norm;
+            }
         }
-
         auto t_search_end = clock::now();
 
-        // ---- top-k selection -------------------------------------------
-        int top_k = std::min(limit, filtered_n);
-        std::vector<int> ranking(filtered_n);
+        // ---- top-k selection ------------------------------------------
+        int top_k = std::min(limit, n);
+        std::vector<int> ranking(n);
         std::iota(ranking.begin(), ranking.end(), 0);
-        std::partial_sort(ranking.begin(), ranking.begin() + top_k,
-                          ranking.end(),
-                          [&](int a, int b) {
-                              return combined(a) > combined(b);
-                          });
+        std::partial_sort(ranking.begin(), ranking.begin() + top_k, ranking.end(),
+                          [&](int a, int b) { return combined(a) > combined(b); });
 
         std::vector<SearchResult> results;
-        std::vector<int> usage_ids;
         for (int k = 0; k < top_k; ++k) {
-            int local_i  = ranking[k];
-            int cache_i  = filtered_idx[local_i];
-            float score  = similarities(local_i);  // report raw cosine
+            int i = ranking[k];
+            float score = similarities(i);   // report raw cosine
             if (score < min_score) continue;
-
-            results.push_back({
-                cached_ids[cache_i],
-                cached_texts[cache_i],
-                score,
-                cached_metadata[cache_i],
-                cached_timestamps[cache_i]
-            });
-            usage_ids.push_back(cached_ids[cache_i]);
+            results.push_back({cached_ids[i], cached_texts[i], score,
+                               cached_metadata[i], cached_timestamps[i]});
         }
 
-        track_usage(usage_ids);
-
-        // ---- timing ----------------------------------------------------
         auto ms = [](auto a, auto b) {
             return std::chrono::duration<double, std::milli>(b - a).count();
         };
-
         json timing = {
             {"embedding_ms", ms(t_embed_start, t_embed_end)},
             {"search_ms",    ms(t_search_start, t_search_end)},
             {"total_ms",     ms(t_start, clock::now())},
-            {"corpus_size",  n},
-            {"filtered_size", filtered_n}
+            {"corpus_size",  n}
         };
-
         return {std::move(results), std::move(timing)};
     }
 
     int count() const {
         sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM memories",
+        sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM summaries",
                            -1, &stmt, nullptr);
         int c = 0;
         if (sqlite3_step(stmt) == SQLITE_ROW)
@@ -1277,73 +843,55 @@ struct SqliteBackend::Impl {
         return c;
     }
 
-    std::vector<SearchResult> load_all(const std::string& collection) {
+    // Lean v2 summaries have no collection column; the `collection` argument
+    // is ignored (kept for API compat). Returns every summary, score 0.
+    std::vector<SearchResult> load_all(const std::string& /*collection*/) {
         std::vector<SearchResult> results;
-        std::string sql = "SELECT id, text, metadata, timestamp, collection, category, tags FROM memories";
-        if (!collection.empty()) {
-            sql += " WHERE collection = ?";
-        }
-        sql += " ORDER BY id";
-
         sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
-        if (!collection.empty()) {
-            sqlite3_bind_text(stmt, 1, collection.c_str(), -1, SQLITE_TRANSIENT);
-        }
+        sqlite3_prepare_v2(db,
+            "SELECT summary_id, text, level, status, tags, timestamp "
+            "FROM summaries ORDER BY summary_id",
+            -1, &stmt, nullptr);
 
         while (sqlite3_step(stmt) == SQLITE_ROW) {
+            auto col = [&](int i) -> const char* {
+                return reinterpret_cast<const char*>(sqlite3_column_text(stmt, i));
+            };
             int id = sqlite3_column_int(stmt, 0);
-            const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-            const char* meta_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-            const char* ts = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-            const char* col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
-            const char* cat = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
-            const char* tag = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
+            const char* text = col(1);
+            const char* lvl  = col(2);
+            const char* st   = col(3);
+            const char* tag  = col(4);
+            const char* ts   = col(5);
 
-            json meta = meta_str ? json::parse(meta_str) : json::object();
-            meta["collection"] = col ? col : "memory";
-            if (cat && cat[0]) meta["category"] = cat;
-            if (tag && tag[0]) meta["tags"] = tag;
+            json meta = json::object();
+            if (lvl && lvl[0]) meta["level"]  = lvl;
+            if (st  && st[0])  meta["status"] = st;
+            if (tag && tag[0]) meta["tags"]   = tag;
 
-            results.push_back({
-                id,
-                text ? text : "",
-                0.0f,
-                std::move(meta),
-                ts ? ts : ""
-            });
+            results.push_back({id, text ? text : "", 0.0f, std::move(meta),
+                               ts ? ts : ""});
         }
         sqlite3_finalize(stmt);
         return results;
     }
 
+    // Rebuild the FTS5 keyword indexes from the content tables. (Kept under
+    // the rebuild_bm25 name for CLI/source compatibility; the underlying
+    // index is now FTS5, not the hand-rolled BM25.) Returns the summary count.
     int rebuild_bm25() {
-        // Clear existing index
-        exec("DELETE FROM bm25_index");
-
-        // Re-index all documents
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db, "SELECT id, text FROM memories",
-                           -1, &stmt, nullptr);
-
-        int doc_count = 0;
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            int id = sqlite3_column_int(stmt, 0);
-            const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-            if (text) {
-                index_bm25_tokens(id, text);
-                ++doc_count;
-            }
-        }
-        sqlite3_finalize(stmt);
+        exec("INSERT INTO summaries_fts(summaries_fts) VALUES('rebuild')");
+        exec("INSERT INTO documents_fts(documents_fts) VALUES('rebuild')");
+        exec("INSERT INTO decisions_fts(decisions_fts) VALUES('rebuild')");
+        exec("INSERT INTO turns_fts(turns_fts) VALUES('rebuild')");
         invalidate_cache();
-        return doc_count;
+        return count();
     }
 
     int rebuild_embeddings(Embedder& emb_ref) {
         // Get total count first
         sqlite3_stmt* count_stmt = nullptr;
-        sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM memories",
+        sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM summaries",
                            -1, &count_stmt, nullptr);
         int total_count = 0;
         if (sqlite3_step(count_stmt) == SQLITE_ROW) {
@@ -1353,12 +901,12 @@ struct SqliteBackend::Impl {
         
         // Re-embed all documents
         sqlite3_stmt* select_stmt = nullptr;
-        sqlite3_prepare_v2(db, "SELECT id, text FROM memories",
+        sqlite3_prepare_v2(db, "SELECT summary_id AS id, text FROM summaries",
                            -1, &select_stmt, nullptr);
 
         sqlite3_stmt* update_stmt = nullptr;
         sqlite3_prepare_v2(db,
-            "UPDATE memories SET embedding = ? WHERE id = ?",
+            "UPDATE summaries SET embedding = ? WHERE summary_id = ?",
             -1, &update_stmt, nullptr);
 
         int doc_count = 0;
@@ -1399,12 +947,12 @@ struct SqliteBackend::Impl {
     int backfill_embeddings(Embedder& emb_ref) {
         sqlite3_stmt* select_stmt = nullptr;
         sqlite3_prepare_v2(db,
-            "SELECT id, text FROM memories WHERE embedding IS NULL",
+            "SELECT summary_id AS id, text FROM summaries WHERE embedding IS NULL",
             -1, &select_stmt, nullptr);
 
         sqlite3_stmt* update_stmt = nullptr;
         sqlite3_prepare_v2(db,
-            "UPDATE memories SET embedding = ? WHERE id = ?",
+            "UPDATE summaries SET embedding = ? WHERE summary_id = ?",
             -1, &update_stmt, nullptr);
 
         int updated = 0;
@@ -1431,22 +979,15 @@ struct SqliteBackend::Impl {
 
     std::vector<std::string> collections() const {
         std::vector<std::string> result;
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db,
-            "SELECT DISTINCT collection FROM memories",
-            -1, &stmt, nullptr);
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            const char* col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-            if (col) result.emplace_back(col);
-        }
-        sqlite3_finalize(stmt);
+        // Lean v2 summaries have no collection column — collections are not a
+        // v2 concept. Return empty (kept for API compat).
         return result;
     }
 
     bool delete_memory(int memory_id) {
         // Check if memory has keep tag in dedicated column
         sqlite3_stmt* check_stmt;
-        sqlite3_prepare_v2(db, "SELECT tags FROM memories WHERE id = ?", -1, &check_stmt, nullptr);
+        sqlite3_prepare_v2(db, "SELECT tags FROM summaries WHERE summary_id = ?", -1, &check_stmt, nullptr);
         sqlite3_bind_int(check_stmt, 1, memory_id);
         if (sqlite3_step(check_stmt) == SQLITE_ROW) {
             const char* tags = reinterpret_cast<const char*>(sqlite3_column_text(check_stmt, 0));
@@ -1459,7 +1000,7 @@ struct SqliteBackend::Impl {
         
         // Not protected, proceed with deletion
         sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db, "DELETE FROM memories WHERE id = ?",
+        sqlite3_prepare_v2(db, "DELETE FROM summaries WHERE summary_id = ?",
                            -1, &stmt, nullptr);
         sqlite3_bind_int(stmt, 1, memory_id);
         sqlite3_step(stmt);
@@ -1480,7 +1021,7 @@ struct SqliteBackend::Impl {
         std::vector<int> deletable_ids;
         for (int memory_id : memory_ids) {
             sqlite3_stmt* check_stmt;
-            sqlite3_prepare_v2(db, "SELECT tags FROM memories WHERE id = ?", -1, &check_stmt, nullptr);
+            sqlite3_prepare_v2(db, "SELECT tags FROM summaries WHERE summary_id = ?", -1, &check_stmt, nullptr);
             sqlite3_bind_int(check_stmt, 1, memory_id);
             bool has_keep = false;
             if (sqlite3_step(check_stmt) == SQLITE_ROW) {
@@ -1498,8 +1039,8 @@ struct SqliteBackend::Impl {
         
         if (deletable_ids.empty()) return 0;
 
-        // Build SQL: DELETE FROM memories WHERE id IN (?,?,...)
-        std::string sql = "DELETE FROM memories WHERE id IN (";
+        // Build SQL: DELETE FROM summaries WHERE summary_id IN (?,?,...)
+        std::string sql = "DELETE FROM summaries WHERE summary_id IN (";
         for (size_t i = 0; i < deletable_ids.size(); ++i) {
             if (i > 0) sql += ",";
             sql += "?";
@@ -1526,26 +1067,28 @@ struct SqliteBackend::Impl {
                                                  const std::string& before = "") {
         std::vector<SearchResult> results;
 
-        // Build SQL WHERE using dedicated columns where possible
-        std::string sql = "SELECT id, text, metadata, timestamp, collection, category, tags FROM memories";
+        // Lean v2 summaries expose level / status / tags / timestamp. Filter
+        // on those columns; any other requested key matches nothing (there is
+        // no free-form metadata blob in the lean schema).
+        std::string sql = "SELECT summary_id, text, level, status, tags, timestamp "
+                          "FROM summaries";
         std::string where;
         std::vector<std::string> binds;
-        // Track which keys are handled by SQL so we skip them in C++ filtering
-        std::set<std::string> sql_keys;
 
         for (auto it = metadata_filter.begin(); it != metadata_filter.end(); ++it) {
-            if (it.key() == "collection" || it.key() == "category") {
-                where += (where.empty() ? " WHERE " : " AND ") + it.key() + " = ?";
+            const std::string& k = it.key();
+            if (k == "level" || k == "status") {
+                where += (where.empty() ? " WHERE " : " AND ") + k + " = ?";
                 binds.push_back(it.value().get<std::string>());
-                sql_keys.insert(it.key());
-            } else if (it.key() == "tags") {
+            } else if (k == "tags") {
                 where += (where.empty() ? " WHERE " : " AND ") + std::string("tags LIKE ?");
                 binds.push_back("%" + it.value().get<std::string>() + "%");
-                sql_keys.insert(it.key());
+            } else {
+                // Unsupported key under the lean schema → no rows match.
+                return results;
             }
         }
 
-        // Add temporal filtering
         if (!after.empty()) {
             where += (where.empty() ? " WHERE " : " AND ") + std::string("timestamp >= ?");
             binds.push_back(after);
@@ -1556,7 +1099,7 @@ struct SqliteBackend::Impl {
         }
 
         sql += where + " ORDER BY timestamp DESC";
-        if (limit > 0) sql += " LIMIT " + std::to_string(limit * 2);  // over-fetch for C++ filtering
+        if (limit > 0) sql += " LIMIT " + std::to_string(limit);
 
         sqlite3_stmt* stmt = nullptr;
         sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
@@ -1565,40 +1108,23 @@ struct SqliteBackend::Impl {
         }
 
         while (sqlite3_step(stmt) == SQLITE_ROW) {
+            auto col = [&](int i) -> const char* {
+                return reinterpret_cast<const char*>(sqlite3_column_text(stmt, i));
+            };
             int id = sqlite3_column_int(stmt, 0);
-            const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-            const char* meta_str = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-            const char* ts = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-            const char* col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
-            const char* cat = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
-            const char* tag = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 6));
+            const char* text = col(1);
+            const char* lvl  = col(2);
+            const char* st   = col(3);
+            const char* tag  = col(4);
+            const char* ts   = col(5);
 
-            // Reconstruct full metadata
-            json metadata = meta_str ? json::parse(meta_str) : json::object();
-            metadata["collection"] = col ? col : "memory";
-            if (cat && cat[0]) metadata["category"] = cat;
-            if (tag && tag[0]) metadata["tags"] = tag;
+            json metadata = json::object();
+            if (lvl && lvl[0]) metadata["level"]  = lvl;
+            if (st  && st[0])  metadata["status"] = st;
+            if (tag && tag[0]) metadata["tags"]   = tag;
 
-            // Check remaining (non-SQL) filter fields in C++
-            bool match = true;
-            for (auto it = metadata_filter.begin(); it != metadata_filter.end(); ++it) {
-                if (sql_keys.count(it.key())) continue;  // already filtered by SQL
-                if (!metadata.contains(it.key()) || metadata[it.key()] != it.value()) {
-                    match = false;
-                    break;
-                }
-            }
-
-            if (match) {
-                results.push_back({
-                    id,
-                    text ? text : "",
-                    0.0f,
-                    std::move(metadata),
-                    ts ? ts : ""
-                });
-                if (limit > 0 && (int)results.size() >= limit) break;
-            }
+            results.push_back({id, text ? text : "", 0.0f, std::move(metadata),
+                               ts ? ts : ""});
         }
         sqlite3_finalize(stmt);
         return results;
@@ -1760,9 +1286,13 @@ int SqliteBackend::cleanup_old_conversations(int max_age_hours) {
     char cutoff_str[32];
     std::strftime(cutoff_str, sizeof(cutoff_str), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&cutoff_t));
 
+    // v2: raw verbatim exchanges (L1 turns) are what age out by retention;
+    // their gist is preserved in the L2/L3 summaries. Purge old turns by
+    // timestamp. (Pre-v2 this deleted summaries tagged collection='conversation';
+    // that column is gone in the lean schema.)
     sqlite3_stmt* stmt;
     sqlite3_prepare_v2(pImpl->db,
-        "DELETE FROM memories WHERE collection = 'conversation' AND timestamp < ?",
+        "DELETE FROM turns WHERE timestamp < ?",
         -1, &stmt, nullptr);
     sqlite3_bind_text(stmt, 1, cutoff_str, -1, SQLITE_STATIC);
 

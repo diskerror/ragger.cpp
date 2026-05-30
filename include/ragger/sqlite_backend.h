@@ -47,7 +47,9 @@ public:
                      json metadata = {},
                      bool defer_embedding = false) override;
 
-    /// Search with hybrid vector + BM25. collections={} means all.
+    /// Hybrid search over summaries: vector cosine blended with FTS5 keyword
+    /// relevance. (`collections` is currently a no-op — lean v2 summaries has
+    /// no collection column; kept for API compat.)
     SearchResponse search(const std::string& query,
                           int limit = 5,
                           float min_score = 0.0f,

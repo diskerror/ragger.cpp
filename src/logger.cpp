@@ -21,12 +21,18 @@ std::mutex logger::logMutex;
 std::ofstream logger::logFile;
 unsigned int logger::instanceCount = 0;
 
-std::function<void(std::string const&)> logger::trace;
-std::function<void(std::string const&)> logger::debug;
-std::function<void(std::string const&)> logger::info;
-std::function<void(std::string const&)> logger::warn;
-std::function<void(std::string const&)> logger::error;
-std::function<void(std::string const&)> logger::critical;
+// Default the sinks to no-ops so logging is always safe, even before any
+// logger instance is constructed (e.g. library consumers and tests that
+// build a Server without first standing up the logger). The constructor
+// reassigns these to real sinks; until then a log call is a silent no-op
+// rather than a bad_function_call crash.
+namespace { const auto kNoop = [](std::string const&) {}; }
+std::function<void(std::string const&)> logger::trace    = kNoop;
+std::function<void(std::string const&)> logger::debug    = kNoop;
+std::function<void(std::string const&)> logger::info     = kNoop;
+std::function<void(std::string const&)> logger::warn     = kNoop;
+std::function<void(std::string const&)> logger::error    = kNoop;
+std::function<void(std::string const&)> logger::critical = kNoop;
 
 logger::logger(const std::string &logFileName, const std::string &level) {
     instanceCount++;
