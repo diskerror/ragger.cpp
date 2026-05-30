@@ -85,7 +85,13 @@ private:
     
     /// Fork a background process to summarize turns
     void bg_summarize(const std::vector<std::pair<std::string, std::string>>& turns);
-    
+
+    /// Per-turn fading-memory summarization (issue #22): in a forked child,
+    /// produce a per-turn L2 summary and fold it into the running L3 session
+    /// summary, starting a new L3 on topic shift. Uses the memory model.
+    void summarize_turn(const std::string& user_text,
+                        const std::string& assistant_text);
+
     /// Check if pause has elapsed and summarize if needed
     void check_pause_summary();
     

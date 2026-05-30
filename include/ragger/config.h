@@ -69,6 +69,11 @@ struct Config {
     int inference_max_tokens = 4096;
     std::vector<InferenceEndpointConfig> inference_endpoints;
 
+    // --- Memory model ([inference.memory]) — summarization/routing ---
+    std::string inference_memory_model   = "";
+    std::string inference_memory_api_url = "";
+    std::string inference_memory_api_key = "";
+
     // --- Logging ---
     std::string log_file;   //  ~/.ragger/activity.log
     std::string log_level   = "warn";   //  trace, debug, info, warn, error, and critical

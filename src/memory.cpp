@@ -77,6 +77,24 @@ bool RaggerMemory::update_document_embedding(int document_id,
     return backend_->update_document_embedding(document_id, emb);
 }
 
+int RaggerMemory::store_summary(const std::string& text, const std::string& level,
+                                const std::string& status, const std::string& model_name) {
+    return backend_->store_summary(text, level, status, model_name);
+}
+
+std::optional<std::pair<int, std::string>> RaggerMemory::current_session_summary() {
+    return backend_->current_session_summary();
+}
+
+bool RaggerMemory::update_summary_text(int summary_id, const std::string& text,
+                                       const std::string& model_name) {
+    return backend_->update_summary_text(summary_id, text, model_name);
+}
+
+bool RaggerMemory::set_summary_status(int summary_id, const std::string& status) {
+    return backend_->set_summary_status(summary_id, status);
+}
+
 bool RaggerMemory::update_text(int memory_id, const std::string& text, json metadata,
                                 bool defer_embedding) {
     return backend_->update_text(memory_id, text, std::move(metadata), defer_embedding);

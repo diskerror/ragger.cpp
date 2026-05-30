@@ -104,7 +104,22 @@ InferenceClient InferenceClient::from_config(const Config& cfg) {
         endpoints.insert(endpoints.end(), named.begin(), named.end());
     }
 
-    return InferenceClient(endpoints, cfg.inference_model, cfg.inference_max_tokens);
+    // Memory-model endpoint (optional). When [inference.memory] gives its own
+    // api_url, prepend an endpoint so the memory model's glob is matched before
+    // the general endpoints (first match wins). When no api_url is given, the
+    // memory model is assumed served by one of the endpoints above.
+    if (!cfg.inference_memory_api_url.empty()) {
+        std::string mm = cfg.inference_memory_model.empty()
+                             ? std::string("*") : cfg.inference_memory_model;
+        endpoints.insert(endpoints.begin(),
+                         Endpoint("memory", cfg.inference_memory_api_url,
+                                  cfg.inference_memory_api_key, mm, ""));
+    }
+
+    InferenceClient client(endpoints, cfg.inference_model, cfg.inference_max_tokens);
+    client.memory_model = cfg.inference_memory_model.empty()
+                              ? client.model : cfg.inference_memory_model;
+    return client;
 }
 
 // -----------------------------------------------------------------------
@@ -408,6 +423,10 @@ static size_t stream_callback(char* ptr, size_t size, size_t nmemb, void* userda
     }
 
     return total;
+}
+
+std::string InferenceClient::chat_memory(const std::vector<Message>& messages) {
+    return chat(messages, memory_model);
 }
 
 std::string InferenceClient::chat(const std::vector<Message>& messages,
