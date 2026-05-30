@@ -1154,6 +1154,11 @@ void Server::Impl::setup_lm_proxy_routes() {
                 auto cancelled  = std::make_shared<std::atomic<bool>>(false);
                 auto status     = std::make_shared<std::atomic<long>>(0);
                 auto accum      = std::make_shared<SseChatAccumulator>();
+                // Full assistant text accumulated across all pause-flushes, so
+                // the turn (issue #41) is captured ONCE at stream end rather
+                // than once per flush. req_model is the targeted model.
+                auto full_assistant = std::make_shared<std::string>();
+                std::string req_model = body_json.value("model", std::string());
                 auto chunk_count = std::make_shared<std::atomic<size_t>>(0);
                 auto byte_count  = std::make_shared<std::atomic<size_t>>(0);
                 auto flush_count = std::make_shared<std::atomic<size_t>>(0);
@@ -1171,6 +1176,7 @@ void Server::Impl::setup_lm_proxy_routes() {
                     std::lock_guard<std::mutex> lk(*flush_mtx);
                     std::string text = accum->take();
                     if (text.empty()) return;
+                    *full_assistant += text;   // accumulate for turn capture
                     try {
                         auto& session = mgr_ptr->get_or_create(
                             sid, username, backend_ptr);
@@ -1290,7 +1296,31 @@ void Server::Impl::setup_lm_proxy_routes() {
 
                                 // Final flush if upstream succeeded
                                 long code = status->load();
-                                if (code >= 200 && code < 300) do_flush();
+                                if (code >= 200 && code < 300) {
+                                    do_flush();
+                                    // Capture the whole exchange as one raw L1
+                                    // turn (embedded), uniform with chat and the
+                                    // non-stream path (issue #41). Once per
+                                    // stream — not per flush. Snapshot the
+                                    // accumulated text under flush_mtx so a late
+                                    // pause-flush can't race the read.
+                                    std::string final_assistant;
+                                    {
+                                        std::lock_guard<std::mutex> lk(*flush_mtx);
+                                        final_assistant = *full_assistant;
+                                    }
+                                    if (!captured_user_msg.empty() &&
+                                        !final_assistant.empty()) {
+                                        try {
+                                            backend_ptr->store_turn(
+                                                captured_user_msg, final_assistant,
+                                                req_model, /*defer_embedding=*/false);
+                                        } catch (const std::exception& e) {
+                                            Diskerror::logger::error(std::format(
+                                                lang::ERR_PROXY_TURN_PERSIST, e.what()));
+                                        }
+                                    }
+                                }
 
                                 auto ms = std::chrono::duration_cast<
                                     std::chrono::milliseconds>(
@@ -1365,6 +1395,18 @@ void Server::Impl::setup_lm_proxy_routes() {
                             }
                             memory.backend()->save_chat_session(
                                 sid, username, messages_array.dump());
+                        } catch (const std::exception& e) {
+                            Diskerror::logger::error(std::format(lang::ERR_PROXY_TURN_PERSIST, e.what()));
+                        }
+
+                        // Capture the exchange as a raw L1 turn (embedded),
+                        // uniform with Ragger Chat (issue #41). The model is
+                        // the one the request targeted.
+                        try {
+                            memory.backend()->store_turn(
+                                captured_user_msg, assistant_text,
+                                body_json.value("model", std::string()),
+                                /*defer_embedding=*/false);
                         } catch (const std::exception& e) {
                             Diskerror::logger::error(std::format(lang::ERR_PROXY_TURN_PERSIST, e.what()));
                         }

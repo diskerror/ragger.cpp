@@ -28,6 +28,7 @@ constexpr const char* CLI_USAGE_USERDEL       = "Usage: ragger userdel <username
 constexpr const char* CLI_USAGE_PASSWD        = "Usage: ragger passwd <username>";
 constexpr const char* CLI_USAGE_IMPORT        = "Usage: ragger import <file> [file...] [--collection name]";
 constexpr const char* CLI_USAGE_EXPORT        = "Usage: ragger export <all|table> [-e|--embeddings] [--output file]";
+constexpr const char* CLI_USAGE_EMBED           = "Usage: ragger embed";
 constexpr const char* CLI_UNKNOWN_COMMAND     = "Unknown command: {}";
 
 // --- Status messages ---
@@ -147,6 +148,8 @@ constexpr const char* MSG_EMBEDDINGS_REBUILT  = "✓ Embeddings rebuilt: {} docu
 constexpr const char* CHAT_PROMPT_USER        = "You: ";
 constexpr const char* CHAT_PROMPT_ASSISTANT   = "Assistant: ";
 constexpr const char* WARN_STORE_TURN         = "Warning: failed to store turn: {}";
+constexpr const char* WARN_EMBED_SUBPROCESS   = "Warning: embed subprocess failed (attempt {}/{}); embedding skipped";
+constexpr const char* WARN_IMPORT_EMBED_SKIPPED = "Warning: {}/{} chunks left unembedded (embed subprocess failed or timed out); re-import to retry";
 constexpr const char* WARN_ORPHAN_CHECK       = "Warning: orphan check failed: {}";
 constexpr const char* WARN_SUMMARY            = "Warning: summary generation failed: {}";
 constexpr const char* ERR_NO_SYSTEM_PROMPT    = "Error: no system prompt files found. ";
@@ -272,6 +275,7 @@ Commands:
   rebuild-bm25       Rebuild the BM25 keyword index
   rebuild-embeddings Rebuild embeddings for all memories
   show-embedding-model  Show current embedding model info
+  embed               Embed text from stdin, write JSON array to stdout
   help               Show this help
   version            Show version
 Options:

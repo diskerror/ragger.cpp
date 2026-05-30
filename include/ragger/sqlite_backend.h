@@ -37,9 +37,22 @@ public:
     std::string store(const std::string& text, json metadata = {},
                       bool defer_embedding = false) override;
 
-    /// Store a Level 5 RAG document chunk. Indexes tokens into bm25_documents.
+    /// Store a Level 5 RAG document chunk.
     int store_document(const DocumentChunk& chunk,
                        bool defer_embedding = false) override;
+
+    /// Store / finalize a raw L1 conversation turn (turns table).
+    int store_turn(const std::string& user_text,
+                   const std::string& assistant_text,
+                   const std::string& model_name = "",
+                   bool defer_embedding = false) override;
+    bool finalize_turn(int turn_id,
+                       const std::string& assistant_text,
+                       const std::string& model_name = "") override;
+
+    /// Write back a document's embedding (import path).
+    bool update_document_embedding(int document_id,
+                                   const std::vector<float>& emb) override;
 
     /// Replace text + metadata of an existing row.
     bool update_text(int memory_id,

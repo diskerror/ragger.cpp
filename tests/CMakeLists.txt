@@ -45,3 +45,9 @@ add_test(NAME test_embedder COMMAND test_embedder)
 add_executable(test_logger test_logger.cpp)
 target_link_libraries(test_logger PRIVATE ragger_core)
 add_test(NAME test_logger COMMAND test_logger)
+
+add_executable(test_embed_executor test_embed_executor.cpp)
+target_link_libraries(test_embed_executor PRIVATE ragger_core)
+# Point the test at the freshly-built ragger binary it spawns.
+target_compile_definitions(test_embed_executor PRIVATE RAGGER_BIN="$<TARGET_FILE:ragger>")
+add_test(NAME test_embed_executor COMMAND test_embed_executor)

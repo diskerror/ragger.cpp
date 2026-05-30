@@ -672,6 +672,106 @@ struct SqliteBackend::Impl {
         return static_cast<int>(sqlite3_last_insert_rowid(db));
     }
 
+    // ---- turns (L1) raw exchange capture ------------------------------
+    // Resolve a model name to its models.model_id, creating the row if it
+    // doesn't exist. Empty name → 0 (callers bind NULL).
+    int get_or_create_model(const std::string& name) {
+        if (name.empty()) return 0;
+        sqlite3_stmt* s = nullptr;
+        sqlite3_prepare_v2(db, "SELECT model_id FROM models WHERE name = ?", -1, &s, nullptr);
+        sqlite3_bind_text(s, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+        int id = 0;
+        if (sqlite3_step(s) == SQLITE_ROW) id = sqlite3_column_int(s, 0);
+        sqlite3_finalize(s);
+        if (id) return id;
+        sqlite3_prepare_v2(db, "INSERT INTO models (name) VALUES (?)", -1, &s, nullptr);
+        sqlite3_bind_text(s, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(s);
+        sqlite3_finalize(s);
+        return static_cast<int>(sqlite3_last_insert_rowid(db));
+    }
+
+    // Embedding for a turn is over the joined exchange (user + assistant),
+    // using the same U+001F unit-separator as chat's summary turns.
+    static std::string turn_embed_text(const std::string& u, const std::string& a) {
+        return a.empty() ? u : (u + "\n\x1F\n" + a);
+    }
+
+    // Store a raw L1 turn. An empty assistant_text writes a *partial* row
+    // (assistant + embedding NULL) for the prompt-arrival/finalize flow;
+    // otherwise the exchange is embedded unless defer_embedding. FTS5 sync
+    // triggers index user_text/assistant_text. Returns turn_id.
+    int store_turn(const std::string& user_text, const std::string& assistant_text,
+                   const std::string& model_name, bool defer_embedding) {
+        std::string u = normalize_path(user_text);
+        std::string a = normalize_path(assistant_text);
+        int model_id  = get_or_create_model(model_name);
+
+        std::vector<float> emb;
+        bool have_emb = false;
+        if (!defer_embedding && !a.empty()) {
+            emb = embedder->encode(turn_embed_text(u, a));
+            have_emb = true;
+        }
+
+        sqlite3_stmt* s = nullptr;
+        sqlite3_prepare_v2(db,
+            "INSERT INTO turns (model_id, user_text, assistant_text, embedding, timestamp) "
+            "VALUES (?,?,?,?,?)",
+            -1, &s, nullptr);
+        if (model_id) sqlite3_bind_int(s, 1, model_id); else sqlite3_bind_null(s, 1);
+        sqlite3_bind_text(s, 2, u.c_str(), -1, SQLITE_TRANSIENT);
+        if (a.empty()) sqlite3_bind_null(s, 3);
+        else sqlite3_bind_text(s, 3, a.c_str(), -1, SQLITE_TRANSIENT);
+        if (have_emb)
+            sqlite3_bind_blob(s, 4, emb.data(),
+                              static_cast<int>(emb.size() * sizeof(float)), SQLITE_TRANSIENT);
+        else sqlite3_bind_null(s, 4);
+        sqlite3_bind_text(s, 5, now_iso().c_str(), -1, SQLITE_TRANSIENT);
+
+        int rc = sqlite3_step(s);
+        sqlite3_finalize(s);
+        if (rc != SQLITE_DONE)
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+        return static_cast<int>(sqlite3_last_insert_rowid(db));
+    }
+
+    // Finalize a partial turn: set assistant_text, (re)embed the exchange,
+    // and record the model. Returns false if the turn doesn't exist.
+    bool finalize_turn(int turn_id, const std::string& assistant_text,
+                       const std::string& model_name) {
+        sqlite3_stmt* g = nullptr;
+        sqlite3_prepare_v2(db, "SELECT user_text FROM turns WHERE turn_id = ?", -1, &g, nullptr);
+        sqlite3_bind_int(g, 1, turn_id);
+        std::string u;
+        bool found = false;
+        if (sqlite3_step(g) == SQLITE_ROW) {
+            found = true;
+            const char* p = reinterpret_cast<const char*>(sqlite3_column_text(g, 0));
+            u = p ? p : "";
+        }
+        sqlite3_finalize(g);
+        if (!found) return false;
+
+        std::string a = normalize_path(assistant_text);
+        int model_id  = get_or_create_model(model_name);
+        auto emb = embedder->encode(turn_embed_text(u, a));
+
+        sqlite3_stmt* s = nullptr;
+        sqlite3_prepare_v2(db,
+            "UPDATE turns SET assistant_text = ?, embedding = ?, "
+            "model_id = COALESCE(?, model_id) WHERE turn_id = ?",
+            -1, &s, nullptr);
+        sqlite3_bind_text(s, 1, a.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(s, 2, emb.data(),
+                          static_cast<int>(emb.size() * sizeof(float)), SQLITE_TRANSIENT);
+        if (model_id) sqlite3_bind_int(s, 3, model_id); else sqlite3_bind_null(s, 3);
+        sqlite3_bind_int(s, 4, turn_id);
+        int rc = sqlite3_step(s);
+        sqlite3_finalize(s);
+        return rc == SQLITE_DONE;
+    }
+
     bool update_text(int memory_id, const std::string& raw_text, json metadata, bool defer_embedding) {
         if (metadata.is_null()) metadata = json::object();
 
@@ -977,6 +1077,25 @@ struct SqliteBackend::Impl {
         return updated;
     }
 
+    // Set a document's embedding (used by the import path after embedding
+    // chunks via the subprocess executor). Returns true on a row update.
+    bool update_document_embedding(int document_id, const std::vector<float>& emb) {
+        sqlite3_stmt* s = nullptr;
+        sqlite3_prepare_v2(db,
+            "UPDATE documents SET embedding = ? WHERE document_id = ?",
+            -1, &s, nullptr);
+        sqlite3_bind_blob(s, 1, emb.data(),
+                          static_cast<int>(emb.size() * sizeof(float)), SQLITE_TRANSIENT);
+        sqlite3_bind_int(s, 2, document_id);
+        int rc = sqlite3_step(s);
+        sqlite3_finalize(s);
+        if (rc == SQLITE_DONE && sqlite3_changes(db) > 0) {
+            invalidate_cache();
+            return true;
+        }
+        return false;
+    }
+
     std::vector<std::string> collections() const {
         std::vector<std::string> result;
         // Lean v2 summaries have no collection column — collections are not a
@@ -1159,6 +1278,17 @@ int SqliteBackend::store_document(const DocumentChunk& chunk, bool defer_embeddi
     return pImpl->store_document(chunk, defer_embedding);
 }
 
+int SqliteBackend::store_turn(const std::string& user_text,
+                              const std::string& assistant_text,
+                              const std::string& model_name, bool defer_embedding) {
+    return pImpl->store_turn(user_text, assistant_text, model_name, defer_embedding);
+}
+
+bool SqliteBackend::finalize_turn(int turn_id, const std::string& assistant_text,
+                                  const std::string& model_name) {
+    return pImpl->finalize_turn(turn_id, assistant_text, model_name);
+}
+
 bool SqliteBackend::update_text(int memory_id, const std::string& text, json metadata, bool defer_embedding) {
     return pImpl->update_text(memory_id, text, std::move(metadata), defer_embedding);
 }
@@ -1183,6 +1313,11 @@ int SqliteBackend::rebuild_embeddings(Embedder& embedder) {
 
 int SqliteBackend::backfill_embeddings(Embedder& embedder) {
     return pImpl->backfill_embeddings(embedder);
+}
+
+bool SqliteBackend::update_document_embedding(int document_id,
+                                              const std::vector<float>& emb) {
+    return pImpl->update_document_embedding(document_id, emb);
 }
 
 std::vector<std::string> SqliteBackend::collections() const {

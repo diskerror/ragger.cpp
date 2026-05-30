@@ -142,6 +142,11 @@ normalize_home = true
 
 [import]
 minimum_chunk_size = 300
+
+[embed]
+timeout_ms = 5000
+retries = 1
+max_workers = 4
 )";
 
 // -----------------------------------------------------------------------
@@ -413,6 +418,11 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
         else if (section == "import") {
             if (key == "minimum_chunk_size") cfg.minimum_chunk_size = std::stoi(val);
         }
+        else if (section == "embed") {
+            if (key == "timeout_ms") cfg.embed_timeout_ms = std::stoi(val);
+            else if (key == "retries") cfg.embed_retries = std::stoi(val);
+            else if (key == "max_workers") cfg.embed_max_workers = std::stoi(val);
+        }
         else if (section == "chat") {
             if (key == "store_turns") cfg.chat_store_turns = val;
             else if (key == "summarize_on_pause") cfg.chat_summarize_on_pause = parse_bool(val);
@@ -634,6 +644,11 @@ int reload_config() {
     // Import
     RELOAD(minimum_chunk_size);
 
+    // Embed (subprocess settings)
+    RELOAD(embed_timeout_ms);
+    RELOAD(embed_retries);
+    RELOAD(embed_max_workers);
+
     // Model aliases
     if (cfg.model_aliases != fresh.model_aliases) {
         cfg.model_aliases = fresh.model_aliases;
@@ -664,6 +679,23 @@ int reload_config() {
     #undef RELOAD
 
     return changes;
+}
+
+// --- executable path (for spawning `ragger embed`) ---------------------
+static std::string g_executable_path;
+
+void set_executable_path(const std::string& argv0) {
+    if (argv0.empty()) return;
+    // Resolve to an absolute path when possible; realpath handles a relative
+    // or PATH-less invocation. Fall back to the raw argv0.
+    char buf[4096];
+    if (::realpath(argv0.c_str(), buf)) g_executable_path = buf;
+    else g_executable_path = argv0;
+}
+
+const std::string& executable_path() {
+    static const std::string fallback = "ragger";  // resolved via PATH
+    return g_executable_path.empty() ? fallback : g_executable_path;
 }
 
 } // namespace ragger
