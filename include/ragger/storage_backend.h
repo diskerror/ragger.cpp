@@ -47,6 +47,21 @@ public:
     virtual int store_document(const DocumentChunk& chunk,
                                bool defer_embedding = false) = 0;
 
+    /// Store a raw L1 conversation turn into the `turns` table. An empty
+    /// `assistant_text` writes a partial row (embedding NULL) for the
+    /// prompt-arrival/finalize flow. `model_name` resolves/creates a models
+    /// row (turns.model_id). Returns the new turn_id.
+    virtual int store_turn(const std::string& user_text,
+                           const std::string& assistant_text,
+                           const std::string& model_name = "",
+                           bool defer_embedding = false) = 0;
+
+    /// Finalize a partial turn: set assistant_text, embed the exchange, and
+    /// record the model. Returns false if the turn_id doesn't exist.
+    virtual bool finalize_turn(int turn_id,
+                               const std::string& assistant_text,
+                               const std::string& model_name = "") = 0;
+
     /// Replace text + metadata of an existing row. Re-embeds (or NULLs the
     /// embedding when `defer_embedding`) and rebuilds the row's BM25 tokens.
     /// Preserves id and original timestamp. Returns false if the row

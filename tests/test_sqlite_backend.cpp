@@ -564,6 +564,71 @@ void test_store_document(ragger::Embedder& emb) {
     cleanup();
 }
 
+// Uniform turn capture (issue #41): store_turn writes a raw L1 exchange into
+// the `turns` table with a model reference; the partial/finalize flow embeds
+// the exchange once the assistant reply arrives.
+void test_store_turn(ragger::Embedder& emb) {
+    cleanup();
+    {
+        ragger::SqliteBackend db(emb, TEMP_DB);
+
+        // Complete turn in one call — embedded immediately.
+        int t1 = db.store_turn("What is the capital of France?",
+                               "The capital of France is Paris.", "test-model");
+        assert(t1 > 0);
+
+        // Partial turn (no assistant yet) → embedding NULL → finalize fills it.
+        int t2 = db.store_turn("Tell me about photosynthesis.", "", "test-model",
+                               /*defer_embedding=*/true);
+        assert(t2 > 0 && t2 != t1);
+        assert(db.finalize_turn(t2, "Plants convert sunlight into energy.",
+                                "test-model"));
+        db.close();
+    }
+
+    sqlite3* raw = nullptr;
+    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+
+    // Both rows present, both have assistant_text and a non-NULL embedding,
+    // and a model_id resolved to the 'test-model' models row.
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(raw,
+        "SELECT t.user_text, t.assistant_text, "
+        "       length(t.embedding), m.name "
+        "FROM turns t JOIN models m ON m.model_id = t.model_id "
+        "ORDER BY t.turn_id", -1, &st, nullptr);
+    int rows = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        const char* u = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+        const char* a = reinterpret_cast<const char*>(sqlite3_column_text(st, 1));
+        int emb_bytes = sqlite3_column_int(st, 2);
+        const char* model = reinterpret_cast<const char*>(sqlite3_column_text(st, 3));
+        assert(u && a && a[0] != '\0');          // assistant filled in
+        assert(emb_bytes == 384 * (int)sizeof(float));  // embedded
+        assert(model && std::string(model) == "test-model");
+        ++rows;
+    }
+    sqlite3_finalize(st);
+    assert(rows == 2);
+
+    // The model row was created exactly once, not duplicated.
+    sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM models WHERE name='test-model'",
+                       -1, &st, nullptr);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int(st, 0) == 1);
+    sqlite3_finalize(st);
+
+    // finalize_turn on a non-existent id returns false.
+    {
+        ragger::SqliteBackend db2(emb, TEMP_DB);
+        assert(!db2.finalize_turn(99999, "x", "test-model"));
+        db2.close();
+    }
+
+    sqlite3_close(raw);
+    cleanup();
+}
+
 void test_path_normalization(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
@@ -673,6 +738,7 @@ int main() {
     test_timestamp_format(emb);
     test_v2_summaries_backing(emb);
     test_store_document(emb);
+    test_store_turn(emb);
     test_path_normalization(emb);
     test_token_rotated_at(emb);
     test_preferred_model(emb);

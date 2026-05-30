@@ -142,6 +142,10 @@ normalize_home = true
 
 [import]
 minimum_chunk_size = 300
+
+[embed]
+timeout_ms = 5000
+retries = 1
 )";
 
 // -----------------------------------------------------------------------
@@ -413,6 +417,10 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
         else if (section == "import") {
             if (key == "minimum_chunk_size") cfg.minimum_chunk_size = std::stoi(val);
         }
+        else if (section == "embed") {
+            if (key == "timeout_ms") cfg.embed_timeout_ms = std::stoi(val);
+            else if (key == "retries") cfg.embed_retries = std::stoi(val);
+        }
         else if (section == "chat") {
             if (key == "store_turns") cfg.chat_store_turns = val;
             else if (key == "summarize_on_pause") cfg.chat_summarize_on_pause = parse_bool(val);
@@ -633,6 +641,10 @@ int reload_config() {
 
     // Import
     RELOAD(minimum_chunk_size);
+
+    // Embed (subprocess settings)
+    RELOAD(embed_timeout_ms);
+    RELOAD(embed_retries);
 
     // Model aliases
     if (cfg.model_aliases != fresh.model_aliases) {

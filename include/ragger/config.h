@@ -47,6 +47,10 @@ struct Config {
     float bm25_k1              = 1.5f;
     float bm25_b               = 0.75f;
 
+    // --- Embed (subprocess) ---
+    int embed_timeout_ms = 5000;
+    int embed_retries    = 1;
+
     // --- Inference ---
     struct InferenceEndpointConfig {
         std::string name;

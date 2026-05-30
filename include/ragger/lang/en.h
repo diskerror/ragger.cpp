@@ -28,6 +28,7 @@ constexpr const char* CLI_USAGE_USERDEL       = "Usage: ragger userdel <username
 constexpr const char* CLI_USAGE_PASSWD        = "Usage: ragger passwd <username>";
 constexpr const char* CLI_USAGE_IMPORT        = "Usage: ragger import <file> [file...] [--collection name]";
 constexpr const char* CLI_USAGE_EXPORT        = "Usage: ragger export <all|table> [-e|--embeddings] [--output file]";
+constexpr const char* CLI_USAGE_EMBED           = "Usage: ragger embed";
 constexpr const char* CLI_UNKNOWN_COMMAND     = "Unknown command: {}";
 
 // --- Status messages ---
@@ -272,6 +273,7 @@ Commands:
   rebuild-bm25       Rebuild the BM25 keyword index
   rebuild-embeddings Rebuild embeddings for all memories
   show-embedding-model  Show current embedding model info
+  embed               Embed text from stdin, write JSON array to stdout
   help               Show this help
   version            Show version
 Options:

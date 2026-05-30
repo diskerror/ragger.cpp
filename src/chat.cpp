@@ -195,18 +195,12 @@ int Chat::store_partial_turn(const std::string &user_text) {
     if (store_turns_ == "false") return -1;
 
     try {
-        json meta = {
-            {"collection", "memory"},
-            {"category", "conversation"},
-            {"source", "ragger-chat"},
-            {"role", "exchange"},
-            {"partial", true} // assistant reply not yet appended
-        };
-        // Defer embedding: finalize_turn will replace this row's text in
-        // a few seconds anyway. Embedding now would be discarded work.
-        auto id_str = memory_.store(user_text, meta,
-                                    /*common=*/false, /*defer_embedding=*/true);
-        return std::stoi(id_str);
+        // Partial L1 turn: the assistant half + the embedding are filled in
+        // by finalize_turn() once the reply completes (embedding deferred —
+        // there's no exchange to embed yet). `model_` is the conversation
+        // model, recorded on the turn.
+        return memory_.store_turn(user_text, /*assistant_text=*/"", model_,
+                                  /*defer_embedding=*/true);
     }
     catch (const std::exception &e) {
         Diskerror::logger::warn(std::format(ragger::lang::WARN_STORE_TURN, e.what()));
@@ -219,55 +213,27 @@ int Chat::finalize_turn(int partial_id,
                         const std::string &assistant_text) {
     if (store_turns_ == "false") return -1;
 
-    // ASCII Unit Separator (U+001F) between user and assistant halves —
-    // structural marker, near-zero semantic weight in tokenizers, can't
-    // collide with content the way "---" or "Assistant:" can.
-    std::string turn_text = user_text + "\n\x1F\n" + assistant_text;
-    json meta = {
-        {"collection", "memory"},
-        {"category", "conversation"},
-        {"source", "ragger-chat"},
-        {"role", "exchange"}
-    };
-
     int row_id = -1;
     try {
-        // Update the partial row in place — preserves id and the original
-        // (prompt-arrival) timestamp, which is the correct value for
-        // recency-weighted retrieval. Embedding is deferred; the fork
-        // below picks up this row plus any leftover NULLs.
-        if (partial_id >= 0 && memory_.update_text(partial_id, turn_text, meta,
-                                                   /*defer_embedding=*/true)) {
+        // Complete the partial row in place — preserves turn_id and the
+        // original (prompt-arrival) timestamp, and embeds the full exchange.
+        if (partial_id >= 0 &&
+            memory_.finalize_turn(partial_id, assistant_text, model_)) {
             row_id = partial_id;
         }
         else {
-            // Partial row missing/protected — fall back to a fresh row.
-            auto id_str = memory_.store(turn_text, meta,
-                                        /*common=*/false, /*defer_embedding=*/true);
-            row_id = std::stoi(id_str);
+            // Partial row missing — store a complete turn instead.
+            row_id = memory_.store_turn(user_text, assistant_text, model_,
+                                        /*defer_embedding=*/false);
         }
     }
     catch (const std::exception &e) {
         std::cerr << std::format(ragger::lang::WARN_STORE_TURN, e.what()) << std::endl;
         return -1;
     }
-
-    // Spawn a backfill child. SQLite isn't fork-safe across an open
-    // connection, so the child opens its own RaggerMemory — whose
-    // constructor already runs backfill_embeddings() and exits. Same
-    // fork pattern as bg_summarize.
-    pid_t pid = fork();
-    if (pid == 0) {
-        try {
-            const auto &cfg = config();
-            RaggerMemory child_memory(cfg.resolved_db_path(), cfg.resolved_model_dir());
-            child_memory.close();
-        }
-        catch (...) {
-            // Silent — next finalize or startup will retry.
-        }
-        _exit(0);
-    }
+    // Embedding is synchronous here (turns table), so no backfill fork is
+    // needed. Issue #41 part 3 (spawned embedder + timeout) makes this
+    // non-blocking later.
     return row_id;
 }
 

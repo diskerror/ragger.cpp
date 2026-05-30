@@ -34,6 +34,17 @@ public:
     /// (issue #48). Returns the new document id.
     int store_document(const DocumentChunk& chunk, bool defer_embedding = false);
 
+    /// Capture a raw L1 conversation turn into the `turns` table. Empty
+    /// assistant_text → partial row (finalize later). Returns turn_id.
+    int store_turn(const std::string& user_text,
+                   const std::string& assistant_text = "",
+                   const std::string& model_name = "",
+                   bool defer_embedding = false);
+    /// Finalize a partial turn (set assistant_text + embed + model).
+    bool finalize_turn(int turn_id,
+                       const std::string& assistant_text,
+                       const std::string& model_name = "");
+
     /// Replace text + metadata of an existing memory (re-embeds unless
     /// `defer_embedding`, rebuilds BM25 tokens, preserves id and original
     /// timestamp). Returns false if the row is missing or has the keep tag.

@@ -912,7 +912,23 @@ int main(int argc, char **argv) {
                 std::println(ragger::lang::MSG_EMBEDDING_PATH, model_path);
             else
                 std::println(ragger::lang::MSG_EMBEDDING_PATH_DEFAULT);
-
+        }
+        else if (command == "embed") {
+            std::string text((std::istreambuf_iterator<char>(std::cin)),
+                             std::istreambuf_iterator<char>());
+            if (text.empty()) {
+                std::cerr << "Error: empty input" << "\n";
+                return 1;
+            }
+            try {
+                ragger::Embedder embedder(cfg.resolved_model_dir());
+                std::vector<float> vec = embedder.encode(text);
+                nlohmann::json arr = vec;
+                std::cout << arr.dump() << "\n";
+            } catch (const std::exception &e) {
+                std::cerr << std::format(ragger::lang::ERR_INFERENCE, e.what()) << "\n";
+                return 1;
+            }
         }
         else if (command == "useradd") {
             // Create a new user and issue a bearer token. Token is printed
