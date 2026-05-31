@@ -685,6 +685,15 @@ void test_summary_primitives(ragger::Embedder& emb) {
     assert(!db.update_summary_text(99999, "x", "memo-model"));
     assert(!db.set_summary_status(99999, "complete"));
 
+    // Recipe ingredients (issue #23): recency-based fetch.
+    auto turns = db.recent_summaries("turn", 5);
+    assert(turns.size() == 1);
+    auto sessions = db.recent_summaries("session", 5);
+    assert(sessions.size() == 2);                 // l3 (complete) + l3b (current)
+    assert(db.recent_summaries("project", 5).empty());
+    assert(db.recent_summaries("turn", 0).empty());
+    assert(db.current_decisions(5).empty());      // none created
+
     db.close();
     cleanup();
 }

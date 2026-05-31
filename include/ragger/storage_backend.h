@@ -82,6 +82,12 @@ public:
                                      const std::string& model_name = "") = 0;
     /// Set a summary's status (e.g. mark a session summary 'complete').
     virtual bool set_summary_status(int summary_id, const std::string& status) = 0;
+    /// Recent summaries of a given level ('turn'|'session'|'project'), newest
+    /// first — recipe ingredients for tiered payload assembly (issue #23).
+    virtual std::vector<std::string> recent_summaries(const std::string& level,
+                                                      int limit) = 0;
+    /// Current (active) decisions, newest first.
+    virtual std::vector<std::string> current_decisions(int limit) = 0;
 
     /// Replace text + metadata of an existing row. Re-embeds (or NULLs the
     /// embedding when `defer_embedding`) and rebuilds the row's BM25 tokens.

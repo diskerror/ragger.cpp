@@ -2,6 +2,7 @@
  * Chat implementation — conversation REPL with persistence
  */
 #include "ragger/chat.h"
+#include "ragger/chat_sessions.h"   // PayloadPiece / assemble_payload (issue #23)
 #include "ragger/config.h"
 #include "ragger/lang.h"
 #include "diskerror/logger.h"
@@ -786,40 +787,77 @@ void Chat::run() {
 
         update_activity();
 
-        // Search memory for context
-        std::vector<std::string> context_chunks;
-        try {
-            auto result = memory_.search(line, max_memory_results_, 0.3f);
-            for (const auto &r: result.results) {
-                context_chunks.push_back(r.text);
+        // ---- Tiered payload assembly (issue #23) ----------------------
+        // Assemble the payload from the storage hierarchy and fit it to the
+        // context budget by priority shrinking, instead of sending the whole
+        // history every turn. Default recipe (positional order top→bottom):
+        // persona, project summary, session summary, recent turn summaries,
+        // decisions; then the verbatim raw-turn window and the new message.
+        // Shed priority (1=keep longest): new msg(1) > persona(2) > prev
+        // turn(3) > session(4) > decisions(5) > turn summaries(7) > project(8).
+        const auto& cfg = config();
+        std::vector<PayloadPiece> pieces;
+        int ord = 0;
+
+        std::string persona = (!messages_.empty() && messages_[0].role == "system")
+                                  ? messages_[0].content : std::string();
+        if (!persona.empty())
+            pieces.push_back({PieceKind::System, 2, ord++, false, "", "", persona});
+
+        // Project summary (L4) — broad context (empty until #25).
+        for (auto& t : memory_.recent_summaries("project", 1))
+            pieces.push_back({PieceKind::System, 8, ord, false, "", "## Project summary", t});
+        ++ord;
+
+        // Running session summary (L3).
+        if (auto s = memory_.current_session_summary())
+            pieces.push_back({PieceKind::System, 4, ord, false, "", "## Session summary", s->second});
+        ++ord;
+
+        // Recent per-turn summaries (L2), chronological.
+        {
+            auto ts = memory_.recent_summaries("turn", cfg.chat_summary_count);
+            std::reverse(ts.begin(), ts.end());
+            std::string block;
+            for (auto& t : ts) { if (!block.empty()) block += "\n"; block += "- " + t; }
+            if (!block.empty())
+                pieces.push_back({PieceKind::System, 7, ord, false, "", "## Recent conversation", block});
+        }
+        ++ord;
+
+        // Active decisions (L6) — positionally last, but outrank summaries.
+        {
+            auto ds = memory_.current_decisions(max_memory_results_);
+            std::string block;
+            for (auto& d : ds) { if (!block.empty()) block += "\n"; block += "- " + d; }
+            if (!block.empty())
+                pieces.push_back({PieceKind::System, 5, ord, false, "", "## Decisions", block});
+        }
+        ++ord;
+
+        // Verbatim raw-turn window (L1) — the last `verbatim_turns` exchanges
+        // from history; the most recent one is protected (never shed).
+        {
+            int vt = cfg.chat_verbatim_turns < 0 ? 0 : cfg.chat_verbatim_turns;
+            int n  = (int)messages_.size();
+            int conv_start = (n > 0 && messages_[0].role == "system") ? 1 : 0;
+            int pairs = (n - conv_start) / 2;
+            int take  = std::min(vt, pairs);
+            int begin = n - take * 2;
+            for (int i = begin; i + 1 < n; i += 2) {
+                bool most_recent = (i + 2 >= n);
+                pieces.push_back({PieceKind::Turn, 3, 0, most_recent, messages_[(size_t)i].role,   "", messages_[(size_t)i].content});
+                pieces.push_back({PieceKind::Turn, 3, 0, most_recent, messages_[(size_t)i+1].role, "", messages_[(size_t)i+1].content});
             }
         }
-        catch (const std::exception &e) {
-            std::cerr << std::format(ragger::lang::WARN_MEMORY_SEARCH, e.what()) << std::endl;
-        }
 
-        // Build message with context
-        std::vector<Message> current_messages = messages_;
+        // New user message — always last, never shed.
+        pieces.push_back({PieceKind::Turn, 1, 0, true, "user", "", line});
 
-        if (!context_chunks.empty()) {
-            std::string context_text;
-            for (size_t i = 0; i < context_chunks.size(); ++i) {
-                if (i > 0) context_text += "\n\n---\n\n";
-                context_text += context_chunks[i];
-            }
-            std::string memory_block = "\n\n## Relevant memories:\n\n" + context_text;
-
-            // Append to existing system message or create one
-            if (!current_messages.empty() && current_messages[0].role == "system") {
-                current_messages[0].content += memory_block;
-            }
-            else {
-                current_messages.insert(current_messages.begin(),
-                                        {"system", memory_block});
-            }
-        }
-
-        current_messages.push_back({"user", line});
+        int ctx    = max_context > 0 ? max_context : 8192;
+        int budget = ctx * (100 - cfg.chat_budget_reserve_pct) / 100;
+        auto assembled = assemble_payload(std::move(pieces), budget, cfg.chat_chars_per_token);
+        std::vector<Message> current_messages = std::move(assembled.messages);
 
         // Persist the user prompt before the LLM call. If the call crashes
         // mid-stream the row stays — durable evidence of what was asked.

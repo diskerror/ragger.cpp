@@ -113,6 +113,18 @@ struct Config {
     int  chat_max_memory_results = 3;
     int  chat_persona_pct        = 25;  // % of context for persona
     float chat_chars_per_token   = 4.0f;
+
+    // --- Payload assembly (issue #23): windows + context budget ---
+    int   chat_verbatim_turns       = 1;    // L1 raw turns to include (count)
+    int   chat_verbatim_minutes     = 0;    // L1 time window, 0 = count only
+    int   chat_summary_count        = 20;   // L2 recent per-turn summaries
+    int   chat_summary_minutes      = 30;   // L2 time window
+    float chat_search_min_score     = 0.3f; // relevance gate for search tiers
+    int   chat_budget_persona_pct   = 20;   // % of max_context for persona
+    int   chat_budget_session_pct   = 15;   // % for running/project summaries
+    int   chat_budget_summaries_pct = 25;   // % for per-turn summaries + raw turns
+    int   chat_budget_search_pct    = 15;   // % for RAG/decisions/project hits
+    int   chat_budget_reserve_pct   = 25;   // % reserved for the response
     int  chat_stream_flush_seconds = 8;  // proxy stream: flush to DB after N idle sec (0 = flush only at end)
     std::string system_prompt_file = "~/.ragger/SYSTEM.md";  // base system prompt file
     std::string persona_dir        = "~/.ragger";            // directory for SOUL.md, USER.md, MEMORY.md, etc.
