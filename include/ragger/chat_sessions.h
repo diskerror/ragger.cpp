@@ -18,6 +18,41 @@ namespace ragger {
 // Forward declaration
 class StorageBackend;
 
+// --- Budget-aware payload assembly (issue #23) -------------------------
+// A candidate piece of the inference payload. Lower `priority` = more
+// important (shed last; 1=highest .. 9=lowest). SYSTEM pieces are merged into
+// the leading system message in priority order, each under its `label`;
+// TURN pieces are appended as conversation messages in the order added.
+// `keep` pieces are never shed (the new user message, the previous raw turn).
+enum class PieceKind { System, Turn };
+
+struct PayloadPiece {
+    PieceKind   kind     = PieceKind::System;
+    int         priority = 5;
+    bool        keep     = false;
+    std::string role;      // TURN pieces: "user" / "assistant"
+    std::string label;     // SYSTEM pieces: header, e.g. "## Session summary"
+    std::string content;
+};
+
+struct AssembledPayload {
+    std::vector<Message> messages;
+    int  estimated_tokens = 0;
+    int  shed_count       = 0;
+    bool fit              = true;   // false if even keep pieces exceed budget
+};
+
+/// Rough token estimate (chars / chars_per_token, min 1 for non-empty).
+int estimate_tokens(const std::string& text, float chars_per_token);
+
+/// Fit prioritized pieces into `token_budget` by shedding the lowest-
+/// importance non-keep pieces first (issue #23 shrinking). SYSTEM pieces are
+/// concatenated into messages[0] in priority order; TURN pieces follow in
+/// order. `token_budget` is the post-reserve budget (caller subtracts the
+/// response reserve from max_context).
+AssembledPayload assemble_payload(std::vector<PayloadPiece> pieces,
+                                  int token_budget, float chars_per_token);
+
 struct ChatSession {
     std::string session_id;
     std::string username;

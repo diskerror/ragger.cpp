@@ -10,6 +10,7 @@
 
 #include <format>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -74,6 +75,74 @@ std::vector<Message> ChatSession::build_messages(
     }
 
     return result;
+}
+
+// -----------------------------------------------------------------------
+// Budget-aware payload assembly (issue #23)
+// -----------------------------------------------------------------------
+int estimate_tokens(const std::string& text, float chars_per_token) {
+    if (text.empty()) return 0;
+    if (chars_per_token <= 0.0f) chars_per_token = 4.0f;
+    int t = static_cast<int>(static_cast<float>(text.size()) / chars_per_token);
+    return t < 1 ? 1 : t;
+}
+
+AssembledPayload assemble_payload(std::vector<PayloadPiece> pieces,
+                                  int token_budget, float chars_per_token) {
+    auto cost = [&](const PayloadPiece& p) {
+        int c = estimate_tokens(p.content, chars_per_token);
+        if (p.kind == PieceKind::System && !p.label.empty())
+            c += estimate_tokens(p.label, chars_per_token);
+        return c;
+    };
+
+    // Shed the lowest-importance (highest priority number) non-keep pieces
+    // first until the estimated total fits the budget.
+    std::vector<char> alive(pieces.size(), 1);
+    int total = 0;
+    for (const auto& p : pieces) total += cost(p);
+
+    int shed = 0;
+    while (total > token_budget) {
+        int victim = -1, worst = -1;
+        for (size_t i = 0; i < pieces.size(); ++i) {
+            if (!alive[i] || pieces[i].keep) continue;
+            if (pieces[i].priority > worst) { worst = pieces[i].priority; victim = (int)i; }
+        }
+        if (victim < 0) break;  // only keep pieces remain
+        alive[(size_t)victim] = 0;
+        total -= cost(pieces[(size_t)victim]);
+        ++shed;
+    }
+
+    AssembledPayload out;
+    out.estimated_tokens = total;
+    out.shed_count = shed;
+    out.fit = (total <= token_budget);
+
+    // System block: surviving SYSTEM pieces in priority order (ascending).
+    std::vector<int> sys_idx;
+    for (size_t i = 0; i < pieces.size(); ++i)
+        if (alive[i] && pieces[i].kind == PieceKind::System) sys_idx.push_back((int)i);
+    std::stable_sort(sys_idx.begin(), sys_idx.end(),
+                     [&](int a, int b) { return pieces[(size_t)a].priority < pieces[(size_t)b].priority; });
+
+    std::string sys;
+    for (int i : sys_idx) {
+        const auto& p = pieces[(size_t)i];
+        if (p.content.empty()) continue;
+        if (!sys.empty()) sys += "\n\n";
+        if (!p.label.empty()) sys += p.label + "\n";
+        sys += p.content;
+    }
+    if (!sys.empty()) out.messages.push_back({"system", sys});
+
+    // Conversation: surviving TURN pieces in original order.
+    for (size_t i = 0; i < pieces.size(); ++i)
+        if (alive[i] && pieces[i].kind == PieceKind::Turn)
+            out.messages.push_back({pieces[i].role, pieces[i].content});
+
+    return out;
 }
 
 // -----------------------------------------------------------------------
