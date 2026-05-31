@@ -292,6 +292,16 @@ void apply_user_overrides(Config& cfg, const Config& user) {
     cfg.chat_max_memory_results = user.chat_max_memory_results;
     cfg.chat_persona_pct = user.chat_persona_pct;
     cfg.chat_chars_per_token = user.chat_chars_per_token;
+    cfg.chat_verbatim_turns = user.chat_verbatim_turns;
+    cfg.chat_verbatim_minutes = user.chat_verbatim_minutes;
+    cfg.chat_summary_count = user.chat_summary_count;
+    cfg.chat_summary_minutes = user.chat_summary_minutes;
+    cfg.chat_search_min_score = user.chat_search_min_score;
+    cfg.chat_budget_persona_pct = user.chat_budget_persona_pct;
+    cfg.chat_budget_session_pct = user.chat_budget_session_pct;
+    cfg.chat_budget_summaries_pct = user.chat_budget_summaries_pct;
+    cfg.chat_budget_search_pct = user.chat_budget_search_pct;
+    cfg.chat_budget_reserve_pct = user.chat_budget_reserve_pct;
     // Note: max_turn_retention_minutes, max_turns_stored, and all *_limit
     // keys are SERVER_LOCKED — they stay as loaded from system config.
 
@@ -453,6 +463,16 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "max_memory_results") cfg.chat_max_memory_results = std::stoi(val);
             else if (key == "persona_pct") cfg.chat_persona_pct = std::stoi(val);
             else if (key == "chars_per_token") cfg.chat_chars_per_token = std::stof(val);
+            else if (key == "verbatim_turns")   cfg.chat_verbatim_turns = std::stoi(val);
+            else if (key == "verbatim_minutes") cfg.chat_verbatim_minutes = std::stoi(val);
+            else if (key == "summary_count")    cfg.chat_summary_count = std::stoi(val);
+            else if (key == "summary_minutes")  cfg.chat_summary_minutes = std::stoi(val);
+            else if (key == "search_min_score") cfg.chat_search_min_score = std::stof(val);
+            else if (key == "budget_persona_pct")   cfg.chat_budget_persona_pct = std::stoi(val);
+            else if (key == "budget_session_pct")   cfg.chat_budget_session_pct = std::stoi(val);
+            else if (key == "budget_summaries_pct") cfg.chat_budget_summaries_pct = std::stoi(val);
+            else if (key == "budget_search_pct")    cfg.chat_budget_search_pct = std::stoi(val);
+            else if (key == "budget_reserve_pct")   cfg.chat_budget_reserve_pct = std::stoi(val);
             else if (key == "stream_flush_seconds") cfg.chat_stream_flush_seconds = std::stoi(val);
             else if (key == "max_persona_chars_limit") cfg.chat_max_persona_chars_limit = std::stoi(val);
             else if (key == "max_memory_results_limit") cfg.chat_max_memory_results_limit = std::stoi(val);
@@ -685,6 +705,16 @@ int reload_config() {
     RELOAD(chat_max_memory_results);
     RELOAD(chat_persona_pct);
     RELOAD(chat_chars_per_token);
+    RELOAD(chat_verbatim_turns);
+    RELOAD(chat_verbatim_minutes);
+    RELOAD(chat_summary_count);
+    RELOAD(chat_summary_minutes);
+    RELOAD(chat_search_min_score);
+    RELOAD(chat_budget_persona_pct);
+    RELOAD(chat_budget_session_pct);
+    RELOAD(chat_budget_summaries_pct);
+    RELOAD(chat_budget_search_pct);
+    RELOAD(chat_budget_reserve_pct);
     RELOAD(chat_stream_flush_seconds);
     RELOAD(system_prompt_file);
     RELOAD(persona_dir);
