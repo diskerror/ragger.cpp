@@ -124,8 +124,14 @@ AssembledPayload assemble_payload(std::vector<PayloadPiece> pieces,
     std::vector<int> sys_idx;
     for (size_t i = 0; i < pieces.size(); ++i)
         if (alive[i] && pieces[i].kind == PieceKind::System) sys_idx.push_back((int)i);
-    std::stable_sort(sys_idx.begin(), sys_idx.end(),
-                     [&](int a, int b) { return pieces[(size_t)a].priority < pieces[(size_t)b].priority; });
+    // Positional order is `order` (then priority as tiebreak) — decoupled
+    // from shed priority so e.g. decisions can sit last yet outrank summaries.
+    std::stable_sort(sys_idx.begin(), sys_idx.end(), [&](int a, int b) {
+        const auto& pa = pieces[(size_t)a];
+        const auto& pb = pieces[(size_t)b];
+        if (pa.order != pb.order) return pa.order < pb.order;
+        return pa.priority < pb.priority;
+    });
 
     std::string sys;
     for (int i : sys_idx) {

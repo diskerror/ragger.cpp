@@ -28,7 +28,10 @@ enum class PieceKind { System, Turn };
 
 struct PayloadPiece {
     PieceKind   kind     = PieceKind::System;
-    int         priority = 5;
+    int         priority = 5;   // shed importance: 1=highest..9=lowest
+    int         order    = 0;   // SYSTEM positional order in messages[0] (asc);
+                                // decoupled from priority (e.g. decisions sit
+                                // last but outrank summaries in importance)
     bool        keep     = false;
     std::string role;      // TURN pieces: "user" / "assistant"
     std::string label;     // SYSTEM pieces: header, e.g. "## Session summary"
