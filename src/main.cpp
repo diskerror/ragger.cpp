@@ -54,7 +54,10 @@ namespace fs = std::filesystem;
 static void do_import(ragger::RaggerMemory &memory,
                       const std::string &filepath,
                       const std::string &collection,
-                      int min_chunk_size) {
+                      int min_chunk_size,
+                      const std::string &title,
+                      int year,
+                      const std::string &tags) {
     if (!fs::exists(filepath)) {
         throw std::runtime_error(std::format(ragger::lang::ERR_FILE_NOT_FOUND, filepath));
     }
@@ -82,12 +85,13 @@ static void do_import(ragger::RaggerMemory &memory,
 
     const int total = static_cast<int>(chunks.size());
 
-    // Default document title to the filename stem so chunks share a title for
-    // grouping; path records the origin. year/tags are left for callers that
-    // have that metadata (frontmatter or API import); markdown import sets
-    // neither. (The lean v2 documents schema has no collection column, so the
-    // `collection` argument is not stored here.)
-    const std::string doc_title = fs::path(filepath).stem().string();
+    // Title/year/tags group and prioritise documents (issue #23 search).
+    // `--title` overrides the default (filename stem); `--year`/`--tags`
+    // come from the caller. All chunks of one file share these. (The lean v2
+    // documents schema has no collection column, so `collection` isn't stored.)
+    const std::string doc_title = title.empty()
+                                      ? fs::path(filepath).stem().string()
+                                      : title;
 
     // Store every chunk first WITHOUT embedding (fast), then embed the bodies
     // out-of-process with bounded concurrency + per-call timeout (issue #41).
@@ -101,6 +105,8 @@ static void do_import(ragger::RaggerMemory &memory,
         ragger::DocumentChunk doc;
         doc.text        = chunks[i].text;
         doc.title       = doc_title;
+        doc.tags        = tags;
+        doc.year        = year;
         doc.path        = filepath;
         doc.chunk_index = i + 1;
         doc.imported_at = import_ts;
@@ -636,6 +642,9 @@ int main(int argc, char **argv) {
             ("lm-proxy-url", Diskerror::po::value<std::string>(), CLI_LM_PROXY_URL)
             ("collection", Diskerror::po::value<std::string>()->default_value(""), CLI_COLLECTION)
             ("min-chunk-size", Diskerror::po::value<int>(), CLI_MIN_CHUNK_SIZE)
+            ("title", Diskerror::po::value<std::string>()->default_value(""), CLI_TITLE)
+            ("year", Diskerror::po::value<int>()->default_value(0), CLI_YEAR)
+            ("tags", Diskerror::po::value<std::string>()->default_value(""), CLI_TAGS)
             // admin flags removed — sudo is the admin gate
             ("yes,y", CLI_YES)
             ("dump-payloads", Diskerror::po::value<std::string>(), CLI_DUMP_PAYLOADS)
@@ -821,9 +830,13 @@ int main(int argc, char **argv) {
                 Diskerror::logger::error(ragger::lang::CLI_USAGE_IMPORT);
                 return 1;
             }
+            std::string imp_title = opts["title"].as<std::string>();
+            int         imp_year  = opts["year"].as<int>();
+            std::string imp_tags  = opts["tags"].as<std::string>();
             ragger::RaggerMemory memory(db_path, model_dir);
             for (auto &filepath: args) {
-                do_import(memory, filepath, collection, min_chunk_size);
+                do_import(memory, filepath, collection, min_chunk_size,
+                          imp_title, imp_year, imp_tags);
             }
 
         }

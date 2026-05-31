@@ -26,7 +26,7 @@ constexpr const char* CLI_USAGE_USERADD       = "Usage: ragger useradd <username
 constexpr const char* CLI_USAGE_USERMOD       = "Usage: ragger usermod <username>";
 constexpr const char* CLI_USAGE_USERDEL       = "Usage: ragger userdel <username>";
 constexpr const char* CLI_USAGE_PASSWD        = "Usage: ragger passwd <username>";
-constexpr const char* CLI_USAGE_IMPORT        = "Usage: ragger import <file> [file...] [--collection name]";
+constexpr const char* CLI_USAGE_IMPORT        = "Usage: ragger import <file> [file...] [--title T] [--year YYYY] [--tags a,b,c] [--collection name]";
 constexpr const char* CLI_USAGE_EXPORT        = "Usage: ragger export <all|table> [-e|--embeddings] [--output file]";
 constexpr const char* CLI_USAGE_EMBED           = "Usage: ragger embed";
 constexpr const char* CLI_UNKNOWN_COMMAND     = "Unknown command: {}";
@@ -431,6 +431,9 @@ constexpr const char* ERR_LOG_OPEN            = "failed to open log file: \"{}\"
 // --- CLI option descriptions ---
 constexpr const char* CLI_COLLECTION          = "Collection name";
 constexpr const char* CLI_MIN_CHUNK_SIZE      = "Min chunk size for import";
+constexpr const char* CLI_TITLE               = "Document title (import; default: filename)";
+constexpr const char* CLI_YEAR                = "Document publish year (import)";
+constexpr const char* CLI_TAGS                = "Document tags/subjects, comma-separated (import)";
 constexpr const char* CLI_YES                 = "Skip confirmation prompts (for scripting)";
 constexpr const char* CLI_DUMP_PAYLOADS       = "Write raw request JSON to this directory (one file per prompt)";
 
