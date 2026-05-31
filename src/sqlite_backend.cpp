@@ -819,6 +819,44 @@ struct SqliteBackend::Impl {
         return out;
     }
 
+    // Recipe ingredients (issue #23): recent summaries of a given level, and
+    // current decisions — fetched by recency (not semantic search) for the
+    // default tiered payload. Returned newest-first.
+    std::vector<std::string> recent_summaries(const std::string& level, int limit) {
+        std::vector<std::string> out;
+        if (limit <= 0) return out;
+        sqlite3_stmt* s = nullptr;
+        sqlite3_prepare_v2(db,
+            "SELECT text FROM summaries WHERE level = ? "
+            "ORDER BY timestamp DESC, summary_id DESC LIMIT ?",
+            -1, &s, nullptr);
+        sqlite3_bind_text(s, 1, level.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(s, 2, limit);
+        while (sqlite3_step(s) == SQLITE_ROW) {
+            const char* p = reinterpret_cast<const char*>(sqlite3_column_text(s, 0));
+            if (p) out.emplace_back(p);
+        }
+        sqlite3_finalize(s);
+        return out;
+    }
+
+    std::vector<std::string> current_decisions(int limit) {
+        std::vector<std::string> out;
+        if (limit <= 0) return out;
+        sqlite3_stmt* s = nullptr;
+        sqlite3_prepare_v2(db,
+            "SELECT text FROM decisions WHERE status = 'current' "
+            "ORDER BY timestamp DESC, decision_id DESC LIMIT ?",
+            -1, &s, nullptr);
+        sqlite3_bind_int(s, 1, limit);
+        while (sqlite3_step(s) == SQLITE_ROW) {
+            const char* p = reinterpret_cast<const char*>(sqlite3_column_text(s, 0));
+            if (p) out.emplace_back(p);
+        }
+        sqlite3_finalize(s);
+        return out;
+    }
+
     // Replace a summary's text + embedding, update its model. False if absent.
     bool update_summary_text(int summary_id, const std::string& text,
                              const std::string& model_name) {
@@ -1390,6 +1428,15 @@ bool SqliteBackend::update_summary_text(int summary_id, const std::string& text,
 
 bool SqliteBackend::set_summary_status(int summary_id, const std::string& status) {
     return pImpl->set_summary_status(summary_id, status);
+}
+
+std::vector<std::string> SqliteBackend::recent_summaries(const std::string& level,
+                                                         int limit) {
+    return pImpl->recent_summaries(level, limit);
+}
+
+std::vector<std::string> SqliteBackend::current_decisions(int limit) {
+    return pImpl->current_decisions(limit);
 }
 
 bool SqliteBackend::update_text(int memory_id, const std::string& text, json metadata, bool defer_embedding) {

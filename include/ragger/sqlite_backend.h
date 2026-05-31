@@ -62,6 +62,8 @@ public:
     bool update_summary_text(int summary_id, const std::string& text,
                              const std::string& model_name = "") override;
     bool set_summary_status(int summary_id, const std::string& status) override;
+    std::vector<std::string> recent_summaries(const std::string& level, int limit) override;
+    std::vector<std::string> current_decisions(int limit) override;
 
     /// Replace text + metadata of an existing row.
     bool update_text(int memory_id,

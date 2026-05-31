@@ -95,6 +95,15 @@ bool RaggerMemory::set_summary_status(int summary_id, const std::string& status)
     return backend_->set_summary_status(summary_id, status);
 }
 
+std::vector<std::string> RaggerMemory::recent_summaries(const std::string& level,
+                                                        int limit) {
+    return backend_->recent_summaries(level, limit);
+}
+
+std::vector<std::string> RaggerMemory::current_decisions(int limit) {
+    return backend_->current_decisions(limit);
+}
+
 bool RaggerMemory::update_text(int memory_id, const std::string& text, json metadata,
                                 bool defer_embedding) {
     return backend_->update_text(memory_id, text, std::move(metadata), defer_embedding);
