@@ -32,6 +32,33 @@ using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 // -----------------------------------------------------------------------
+// IEEE half-precision (f16) helpers — embeddings are stored as f16 to
+// halve blob size; all in-memory math stays float32.
+// _Float16 is native on Apple Silicon.
+// -----------------------------------------------------------------------
+static inline uint16_t f32_to_f16(float f) {
+    _Float16 h = static_cast<_Float16>(f);
+    uint16_t bits;
+    std::memcpy(&bits, &h, sizeof(bits));
+    return bits;
+}
+static inline float f16_to_f32(uint16_t bits) {
+    _Float16 h;
+    std::memcpy(&h, &bits, sizeof(h));
+    return static_cast<float>(h);
+}
+// Convert a float vector to f16 and bind it as the embedding blob.
+// SQLITE_TRANSIENT makes sqlite copy immediately, so the temporary is safe.
+static inline void bind_embedding(sqlite3_stmt* s, int idx,
+                                  const std::vector<float>& emb) {
+    std::vector<uint16_t> h(emb.size());
+    for (size_t i = 0; i < emb.size(); ++i) h[i] = f32_to_f16(emb[i]);
+    sqlite3_bind_blob(s, idx, h.data(),
+                      static_cast<int>(h.size() * sizeof(uint16_t)),
+                      SQLITE_TRANSIENT);
+}
+
+// -----------------------------------------------------------------------
 // Impl
 // -----------------------------------------------------------------------
 struct SqliteBackend::Impl {
@@ -460,12 +487,14 @@ struct SqliteBackend::Impl {
 
             const void* blob = sqlite3_column_blob(stmt, 2);
             int blob_bytes   = sqlite3_column_bytes(stmt, 2);
-            int n_floats     = blob_bytes / sizeof(float);
-            // NULL or wrong-sized embedding (deferred-embedding row before
-            // backfill) → zero vector. Cosine yields 0; FTS5 still matches text.
+            int n_halfs      = blob_bytes / static_cast<int>(sizeof(uint16_t));
+            // NULL / wrong-sized (e.g. a legacy f32 blob, or a deferred row
+            // before backfill) → zero vector. Cosine yields 0; FTS5 still
+            // matches text. Old f32 DBs need `rebuild-embeddings`.
             std::vector<float> emb(expected_dims, 0.0f);
-            if (n_floats == expected_dims && blob != nullptr) {
-                std::memcpy(emb.data(), blob, blob_bytes);
+            if (n_halfs == expected_dims && blob != nullptr) {
+                const uint16_t* h = static_cast<const uint16_t*>(blob);
+                for (int i = 0; i < expected_dims; ++i) emb[i] = f16_to_f32(h[i]);
             }
             emb_rows.push_back(std::move(emb));
 
@@ -599,9 +628,7 @@ struct SqliteBackend::Impl {
         if (defer_embedding) {
             sqlite3_bind_null(stmt, 2);
         } else {
-            sqlite3_bind_blob(stmt, 2, emb.data(),
-                              static_cast<int>(emb.size() * sizeof(float)),
-                              SQLITE_TRANSIENT);
+            bind_embedding(stmt, 2, emb);
         }
         sqlite3_bind_text(stmt, 3, level.c_str(),    -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 4, status.c_str(),   -1, SQLITE_TRANSIENT);
@@ -650,9 +677,7 @@ struct SqliteBackend::Impl {
         if (defer_embedding) {
             sqlite3_bind_null(stmt, 2);
         } else {
-            sqlite3_bind_blob(stmt, 2, emb.data(),
-                              static_cast<int>(emb.size() * sizeof(float)),
-                              SQLITE_TRANSIENT);
+            bind_embedding(stmt, 2, emb);
         }
         bind_opt(3, chunk.path);
         bind_opt(4, chunk.title);
@@ -724,8 +749,7 @@ struct SqliteBackend::Impl {
         if (a.empty()) sqlite3_bind_null(s, 3);
         else sqlite3_bind_text(s, 3, a.c_str(), -1, SQLITE_TRANSIENT);
         if (have_emb)
-            sqlite3_bind_blob(s, 4, emb.data(),
-                              static_cast<int>(emb.size() * sizeof(float)), SQLITE_TRANSIENT);
+            bind_embedding(s, 4, emb);
         else sqlite3_bind_null(s, 4);
         sqlite3_bind_text(s, 5, now_iso().c_str(), -1, SQLITE_TRANSIENT);
 
@@ -763,8 +787,7 @@ struct SqliteBackend::Impl {
             "model_id = COALESCE(?, model_id) WHERE turn_id = ?",
             -1, &s, nullptr);
         sqlite3_bind_text(s, 1, a.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_blob(s, 2, emb.data(),
-                          static_cast<int>(emb.size() * sizeof(float)), SQLITE_TRANSIENT);
+        bind_embedding(s, 2, emb);
         if (model_id) sqlite3_bind_int(s, 3, model_id); else sqlite3_bind_null(s, 3);
         sqlite3_bind_int(s, 4, turn_id);
         int rc = sqlite3_step(s);
@@ -788,8 +811,7 @@ struct SqliteBackend::Impl {
             -1, &s, nullptr);
         if (model_id) sqlite3_bind_int(s, 1, model_id); else sqlite3_bind_null(s, 1);
         sqlite3_bind_text(s, 2, t.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_blob(s, 3, emb.data(),
-                          static_cast<int>(emb.size() * sizeof(float)), SQLITE_TRANSIENT);
+        bind_embedding(s, 3, emb);
         sqlite3_bind_text(s, 4, level.c_str(),  -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(s, 5, status.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(s, 6, now_iso().c_str(), -1, SQLITE_TRANSIENT);
@@ -832,8 +854,7 @@ struct SqliteBackend::Impl {
             "model_id = COALESCE(?, model_id) WHERE summary_id = ?",
             -1, &s, nullptr);
         sqlite3_bind_text(s, 1, t.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_blob(s, 2, emb.data(),
-                          static_cast<int>(emb.size() * sizeof(float)), SQLITE_TRANSIENT);
+        bind_embedding(s, 2, emb);
         if (model_id) sqlite3_bind_int(s, 3, model_id); else sqlite3_bind_null(s, 3);
         sqlite3_bind_int(s, 4, summary_id);
         int rc = sqlite3_step(s);
@@ -914,9 +935,7 @@ struct SqliteBackend::Impl {
         if (defer_embedding) {
             sqlite3_bind_null(stmt, 2);
         } else {
-            sqlite3_bind_blob(stmt, 2, emb.data(),
-                              static_cast<int>(emb.size() * sizeof(float)),
-                              SQLITE_TRANSIENT);
+            bind_embedding(stmt, 2, emb);
         }
         sqlite3_bind_text(stmt, 3, tags_str.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int (stmt, 4, memory_id);
@@ -1103,9 +1122,7 @@ struct SqliteBackend::Impl {
             auto emb = emb_ref.encode(text);
 
             // Update database
-            sqlite3_bind_blob(update_stmt, 1, emb.data(),
-                            static_cast<int>(emb.size() * sizeof(float)),
-                            SQLITE_TRANSIENT);
+            bind_embedding(update_stmt, 1, emb);
             sqlite3_bind_int(update_stmt, 2, id);
             sqlite3_step(update_stmt);
             sqlite3_reset(update_stmt);
@@ -1146,9 +1163,7 @@ struct SqliteBackend::Impl {
             if (!text) continue;
 
             auto emb = emb_ref.encode(text);
-            sqlite3_bind_blob(update_stmt, 1, emb.data(),
-                              static_cast<int>(emb.size() * sizeof(float)),
-                              SQLITE_TRANSIENT);
+            bind_embedding(update_stmt, 1, emb);
             sqlite3_bind_int(update_stmt, 2, id);
             sqlite3_step(update_stmt);
             sqlite3_reset(update_stmt);
@@ -1168,8 +1183,7 @@ struct SqliteBackend::Impl {
         sqlite3_prepare_v2(db,
             "UPDATE documents SET embedding = ? WHERE document_id = ?",
             -1, &s, nullptr);
-        sqlite3_bind_blob(s, 1, emb.data(),
-                          static_cast<int>(emb.size() * sizeof(float)), SQLITE_TRANSIENT);
+        bind_embedding(s, 1, emb);
         sqlite3_bind_int(s, 2, document_id);
         int rc = sqlite3_step(s);
         sqlite3_finalize(s);
