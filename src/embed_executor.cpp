@@ -9,6 +9,7 @@
 #include "nlohmann_json.hpp"
 
 #include <spawn.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <unistd.h>
@@ -54,6 +55,14 @@ std::optional<std::string> run_once(const std::string& exe,
     int out_pipe[2] = {-1, -1};   // parent reads child stdout
     if (pipe(in_pipe) != 0) return std::nullopt;
     if (pipe(out_pipe) != 0) { close(in_pipe[0]); close(in_pipe[1]); return std::nullopt; }
+
+    // Mark every pipe fd close-on-exec. Critical for batch(): without this, a
+    // concurrently-spawning worker's child inherits THIS pipe's write end, so
+    // the child here never sees EOF on stdin and hangs until timeout. The
+    // dup2 file-actions below give the child fresh, non-CLOEXEC stdio.
+    // (macOS lacks pipe2(O_CLOEXEC), so set it explicitly.)
+    for (int fd : {in_pipe[0], in_pipe[1], out_pipe[0], out_pipe[1]})
+        fcntl(fd, F_SETFD, FD_CLOEXEC);
 
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
