@@ -7,6 +7,7 @@
 #include "ragger/lang.h"
 #include "ragger/util/fs.h"
 #include "ragger/util/time.h"
+#include "ragger/util/sqlite.h"
 #include <format>
 #include "nlohmann_json.hpp"
 
@@ -390,25 +391,23 @@ struct SqliteBackend::Impl {
         cached_metadata.clear();
         cached_timestamps.clear();
 
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db,
+        Stmt s(db,
             "SELECT summary_id, text, embedding, level, status, tags, timestamp "
-            "FROM summaries",
-            -1, &stmt, nullptr);
+            "FROM summaries");
 
         std::vector<std::vector<float>> emb_rows;
         const int expected_dims = config().embedding_dimensions;
 
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
+        while (s.step()) {
             auto col_text = [&](int i) -> std::string {
-                const char* s = reinterpret_cast<const char*>(sqlite3_column_text(stmt, i));
-                return s ? s : "";
+                const char* p = reinterpret_cast<const char*>(sqlite3_column_text(s.raw(), i));
+                return p ? p : "";
             };
-            cached_ids.push_back(sqlite3_column_int(stmt, 0));
+            cached_ids.push_back(s.column_int(0));
             cached_texts.push_back(col_text(1));
 
-            const void* blob = sqlite3_column_blob(stmt, 2);
-            int blob_bytes   = sqlite3_column_bytes(stmt, 2);
+            const void* blob = s.column_blob(2);
+            int blob_bytes   = s.column_bytes(2);
             int n_halfs      = blob_bytes / static_cast<int>(sizeof(uint16_t));
             // NULL / wrong-sized (e.g. a legacy f32 blob, or a deferred row
             // before backfill) → zero vector. Cosine yields 0; FTS5 still
@@ -431,7 +430,6 @@ struct SqliteBackend::Impl {
 
             cached_timestamps.push_back(col_text(6));
         }
-        sqlite3_finalize(stmt);
 
         // Pack into Eigen matrix (rows × dims). Every row is padded/zeroed to
         // expected_dims so NULL-embedding rows don't poison the matrix shape.
@@ -471,19 +469,15 @@ struct SqliteBackend::Impl {
     std::unordered_map<int, float> keyword_scores(const std::string& match_expr) {
         std::unordered_map<int, float> out;
         if (match_expr.empty()) return out;
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db,
+        Stmt s(db,
                 "SELECT rowid, bm25(summaries_fts) FROM summaries_fts "
-                "WHERE summaries_fts MATCH ?",
-                -1, &stmt, nullptr) != SQLITE_OK)
-            return out;   // malformed expr etc. → no keyword contribution
-        sqlite3_bind_text(stmt, 1, match_expr.c_str(), -1, SQLITE_TRANSIENT);
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            int id   = sqlite3_column_int(stmt, 0);
-            double s = sqlite3_column_double(stmt, 1);
-            out[id]  = static_cast<float>(-s);
+                "WHERE summaries_fts MATCH ?");
+        s.bind(1, match_expr);
+        while (s.step()) {
+            int id   = s.column_int(0);
+            double val = s.column_double(1);
+            out[id]  = static_cast<float>(-val);
         }
-        sqlite3_finalize(stmt);
         return out;
     }
 
@@ -541,25 +535,19 @@ struct SqliteBackend::Impl {
 
         // FTS5 sync triggers index the row from text/tags — no manual step.
         sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db,
+        Stmt s(db,
             "INSERT INTO summaries (text, embedding, level, status, tags, timestamp) "
-            "VALUES (?,?,?,?,?,?)",
-            -1, &stmt, nullptr);
+            "VALUES (?,?,?,?,?,?)");
 
-        sqlite3_bind_text(stmt, 1, text.c_str(), -1, SQLITE_TRANSIENT);
+        s.bind(1, text);
         if (defer_embedding) {
-            sqlite3_bind_null(stmt, 2);
+            s.bind_null(2);
         } else {
-            bind_embedding(stmt, 2, emb);
+            bind_embedding(s.raw(), 2, emb);
         }
-        sqlite3_bind_text(stmt, 3, level.c_str(),    -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 4, status.c_str(),   -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 5, tags_str.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 6, ts.c_str(),       -1, SQLITE_TRANSIENT);
+        s.bind(3, level).bind(4, status).bind(5, tags_str).bind(6, ts);
 
-        int rc = sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
-        if (rc != SQLITE_DONE) {
+        if (!s.exec()) {
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         }
 
@@ -583,36 +571,32 @@ struct SqliteBackend::Impl {
         // Lean documents schema (reference DDL): path/title/tags/year/
         // chunk_index. Only `text` is embedded; documents_fts sync triggers
         // index title/text/tags — no manual keyword step.
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db,
+        Stmt s(db,
             "INSERT INTO documents "
             "(text, embedding, path, title, tags, year, chunk_index, imported_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            -1, &stmt, nullptr);
+            "VALUES (?,?,?,?,?,?,?,?)");
 
         auto bind_opt = [&](int idx, const std::string& v) {
-            if (v.empty()) sqlite3_bind_null(stmt, idx);
-            else sqlite3_bind_text(stmt, idx, v.c_str(), -1, SQLITE_TRANSIENT);
+            if (v.empty()) s.bind_null(idx);
+            else s.bind(idx, v);
         };
 
-        sqlite3_bind_text(stmt, 1, text.c_str(), -1, SQLITE_TRANSIENT);
+        s.bind(1, text);
         if (defer_embedding) {
-            sqlite3_bind_null(stmt, 2);
+            s.bind_null(2);
         } else {
-            bind_embedding(stmt, 2, emb);
+            bind_embedding(s.raw(), 2, emb);
         }
         bind_opt(3, chunk.path);
         bind_opt(4, chunk.title);
-        sqlite3_bind_text(stmt, 5, chunk.tags.c_str(), -1, SQLITE_TRANSIENT);
-        if (chunk.year <= 0) sqlite3_bind_null(stmt, 6);
-        else sqlite3_bind_int(stmt, 6, chunk.year);
-        if (chunk.chunk_index <= 0) sqlite3_bind_null(stmt, 7);
-        else sqlite3_bind_int(stmt, 7, chunk.chunk_index);
-        sqlite3_bind_text(stmt, 8, imported_at.c_str(), -1, SQLITE_TRANSIENT);
+        s.bind(5, chunk.tags);
+        if (chunk.year <= 0) s.bind_null(6);
+        else s.bind(6, chunk.year);
+        if (chunk.chunk_index <= 0) s.bind_null(7);
+        else s.bind(7, chunk.chunk_index);
+        s.bind(8, imported_at);
 
-        int rc = sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
-        if (rc != SQLITE_DONE) {
+        if (!s.exec()) {
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         }
 
@@ -624,17 +608,14 @@ struct SqliteBackend::Impl {
     // doesn't exist. Empty name → 0 (callers bind NULL).
     int get_or_create_model(const std::string& name) {
         if (name.empty()) return 0;
-        sqlite3_stmt* s = nullptr;
-        sqlite3_prepare_v2(db, "SELECT model_id FROM models WHERE name = ?", -1, &s, nullptr);
-        sqlite3_bind_text(s, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+        Stmt s(db, "SELECT model_id FROM models WHERE name = ?");
+        s.bind(1, name);
         int id = 0;
-        if (sqlite3_step(s) == SQLITE_ROW) id = sqlite3_column_int(s, 0);
-        sqlite3_finalize(s);
+        if (s.step()) id = s.column_int(0);
         if (id) return id;
-        sqlite3_prepare_v2(db, "INSERT INTO models (name) VALUES (?)", -1, &s, nullptr);
-        sqlite3_bind_text(s, 1, name.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_step(s);
-        sqlite3_finalize(s);
+        Stmt ins(db, "INSERT INTO models (name) VALUES (?)");
+        ins.bind(1, name);
+        ins.step();
         return static_cast<int>(sqlite3_last_insert_rowid(db));
     }
 
@@ -661,23 +642,19 @@ struct SqliteBackend::Impl {
             have_emb = true;
         }
 
-        sqlite3_stmt* s = nullptr;
-        sqlite3_prepare_v2(db,
+        Stmt s(db,
             "INSERT INTO turns (model_id, user_text, assistant_text, embedding, timestamp) "
-            "VALUES (?,?,?,?,?)",
-            -1, &s, nullptr);
-        if (model_id) sqlite3_bind_int(s, 1, model_id); else sqlite3_bind_null(s, 1);
-        sqlite3_bind_text(s, 2, u.c_str(), -1, SQLITE_TRANSIENT);
-        if (a.empty()) sqlite3_bind_null(s, 3);
-        else sqlite3_bind_text(s, 3, a.c_str(), -1, SQLITE_TRANSIENT);
+            "VALUES (?,?,?,?,?)");
+        if (model_id) s.bind(1, model_id); else s.bind_null(1);
+        s.bind(2, u);
+        if (a.empty()) s.bind_null(3);
+        else s.bind(3, a);
         if (have_emb)
-            bind_embedding(s, 4, emb);
-        else sqlite3_bind_null(s, 4);
-        sqlite3_bind_text(s, 5, local_timestamp().c_str(), -1, SQLITE_TRANSIENT);
+            bind_embedding(s.raw(), 4, emb);
+        else s.bind_null(4);
+        s.bind(5, local_timestamp());
 
-        int rc = sqlite3_step(s);
-        sqlite3_finalize(s);
-        if (rc != SQLITE_DONE)
+        if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         return static_cast<int>(sqlite3_last_insert_rowid(db));
     }
@@ -686,35 +663,28 @@ struct SqliteBackend::Impl {
     // and record the model. Returns false if the turn doesn't exist.
     bool finalize_turn(int turn_id, const std::string& assistant_text,
                        const std::string& model_name) {
-        sqlite3_stmt* g = nullptr;
-        sqlite3_prepare_v2(db, "SELECT user_text FROM turns WHERE turn_id = ?", -1, &g, nullptr);
-        sqlite3_bind_int(g, 1, turn_id);
+        Stmt g(db, "SELECT user_text FROM turns WHERE turn_id = ?");
+        g.bind(1, turn_id);
         std::string u;
         bool found = false;
-        if (sqlite3_step(g) == SQLITE_ROW) {
+        if (g.step()) {
             found = true;
-            const char* p = reinterpret_cast<const char*>(sqlite3_column_text(g, 0));
-            u = p ? p : "";
+            u = g.column_text(0);
         }
-        sqlite3_finalize(g);
         if (!found) return false;
 
         std::string a = normalize_path(assistant_text);
         int model_id  = get_or_create_model(model_name);
         auto emb = embedder->encode(turn_embed_text(u, a));
 
-        sqlite3_stmt* s = nullptr;
-        sqlite3_prepare_v2(db,
+        Stmt s(db,
             "UPDATE turns SET assistant_text = ?, embedding = ?, "
-            "model_id = COALESCE(?, model_id) WHERE turn_id = ?",
-            -1, &s, nullptr);
-        sqlite3_bind_text(s, 1, a.c_str(), -1, SQLITE_TRANSIENT);
-        bind_embedding(s, 2, emb);
-        if (model_id) sqlite3_bind_int(s, 3, model_id); else sqlite3_bind_null(s, 3);
-        sqlite3_bind_int(s, 4, turn_id);
-        int rc = sqlite3_step(s);
-        sqlite3_finalize(s);
-        return rc == SQLITE_DONE;
+            "model_id = COALESCE(?, model_id) WHERE turn_id = ?");
+        s.bind(1, a);
+        bind_embedding(s.raw(), 2, emb);
+        if (model_id) s.bind(3, model_id); else s.bind_null(3);
+        s.bind(4, turn_id);
+        return s.exec();
     }
 
     // ---- summaries (L2/L3) pipeline primitives (issue #22) ------------
@@ -726,20 +696,14 @@ struct SqliteBackend::Impl {
         int model_id  = get_or_create_model(model_name);
         auto emb = embedder->encode(t);
 
-        sqlite3_stmt* s = nullptr;
-        sqlite3_prepare_v2(db,
+        Stmt s(db,
             "INSERT INTO summaries (model_id, text, embedding, level, status, tags, timestamp) "
-            "VALUES (?,?,?,?,?,'',?)",
-            -1, &s, nullptr);
-        if (model_id) sqlite3_bind_int(s, 1, model_id); else sqlite3_bind_null(s, 1);
-        sqlite3_bind_text(s, 2, t.c_str(), -1, SQLITE_TRANSIENT);
-        bind_embedding(s, 3, emb);
-        sqlite3_bind_text(s, 4, level.c_str(),  -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(s, 5, status.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(s, 6, local_timestamp().c_str(), -1, SQLITE_TRANSIENT);
-        int rc = sqlite3_step(s);
-        sqlite3_finalize(s);
-        if (rc != SQLITE_DONE)
+            "VALUES (?,?,?,?,?,'',?)");
+        if (model_id) s.bind(1, model_id); else s.bind_null(1);
+        s.bind(2, t);
+        bind_embedding(s.raw(), 3, emb);
+        s.bind(4, level).bind(5, status).bind(6, local_timestamp());
+        if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_cache();
         return static_cast<int>(sqlite3_last_insert_rowid(db));
@@ -747,19 +711,15 @@ struct SqliteBackend::Impl {
 
     // The current running L3 session summary, if any: (summary_id, text).
     std::optional<std::pair<int, std::string>> current_session_summary() {
-        sqlite3_stmt* s = nullptr;
-        sqlite3_prepare_v2(db,
+        Stmt s(db,
             "SELECT summary_id, text FROM summaries "
             "WHERE level='session' AND status='current' "
-            "ORDER BY summary_id DESC LIMIT 1",
-            -1, &s, nullptr);
+            "ORDER BY summary_id DESC LIMIT 1");
         std::optional<std::pair<int, std::string>> out;
-        if (sqlite3_step(s) == SQLITE_ROW) {
-            int id = sqlite3_column_int(s, 0);
-            const char* p = reinterpret_cast<const char*>(sqlite3_column_text(s, 1));
-            out = std::make_pair(id, std::string(p ? p : ""));
+        if (s.step()) {
+            int id = s.column_int(0);
+            out = std::make_pair(id, s.column_text(1));
         }
-        sqlite3_finalize(s);
         return out;
     }
 
@@ -769,35 +729,28 @@ struct SqliteBackend::Impl {
     std::vector<std::string> recent_summaries(const std::string& level, int limit) {
         std::vector<std::string> out;
         if (limit <= 0) return out;
-        sqlite3_stmt* s = nullptr;
-        sqlite3_prepare_v2(db,
+        Stmt s(db,
             "SELECT text FROM summaries WHERE level = ? "
-            "ORDER BY timestamp DESC, summary_id DESC LIMIT ?",
-            -1, &s, nullptr);
-        sqlite3_bind_text(s, 1, level.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(s, 2, limit);
-        while (sqlite3_step(s) == SQLITE_ROW) {
-            const char* p = reinterpret_cast<const char*>(sqlite3_column_text(s, 0));
+            "ORDER BY timestamp DESC, summary_id DESC LIMIT ?");
+        s.bind(1, level).bind(2, limit);
+        while (s.step()) {
+            const char* p = reinterpret_cast<const char*>(sqlite3_column_text(s.raw(), 0));
             if (p) out.emplace_back(p);
         }
-        sqlite3_finalize(s);
         return out;
     }
 
     std::vector<std::string> current_decisions(int limit) {
         std::vector<std::string> out;
         if (limit <= 0) return out;
-        sqlite3_stmt* s = nullptr;
-        sqlite3_prepare_v2(db,
+        Stmt s(db,
             "SELECT text FROM decisions WHERE status = 'current' "
-            "ORDER BY timestamp DESC, decision_id DESC LIMIT ?",
-            -1, &s, nullptr);
-        sqlite3_bind_int(s, 1, limit);
-        while (sqlite3_step(s) == SQLITE_ROW) {
-            const char* p = reinterpret_cast<const char*>(sqlite3_column_text(s, 0));
+            "ORDER BY timestamp DESC, decision_id DESC LIMIT ?");
+        s.bind(1, limit);
+        while (s.step()) {
+            const char* p = reinterpret_cast<const char*>(sqlite3_column_text(s.raw(), 0));
             if (p) out.emplace_back(p);
         }
-        sqlite3_finalize(s);
         return out;
     }
 
@@ -808,53 +761,41 @@ struct SqliteBackend::Impl {
         int model_id  = get_or_create_model(model_name);
         auto emb = embedder->encode(t);
 
-        sqlite3_stmt* s = nullptr;
-        sqlite3_prepare_v2(db,
+        Stmt s(db,
             "UPDATE summaries SET text = ?, embedding = ?, "
-            "model_id = COALESCE(?, model_id) WHERE summary_id = ?",
-            -1, &s, nullptr);
-        sqlite3_bind_text(s, 1, t.c_str(), -1, SQLITE_TRANSIENT);
-        bind_embedding(s, 2, emb);
-        if (model_id) sqlite3_bind_int(s, 3, model_id); else sqlite3_bind_null(s, 3);
-        sqlite3_bind_int(s, 4, summary_id);
-        int rc = sqlite3_step(s);
-        sqlite3_finalize(s);
-        bool ok = (rc == SQLITE_DONE && sqlite3_changes(db) > 0);
+            "model_id = COALESCE(?, model_id) WHERE summary_id = ?");
+        s.bind(1, t);
+        bind_embedding(s.raw(), 2, emb);
+        if (model_id) s.bind(3, model_id); else s.bind_null(3);
+        s.bind(4, summary_id);
+        bool ok = s.exec() && sqlite3_changes(db) > 0;
         if (ok) invalidate_cache();
         return ok;
     }
 
     // Set a summary's status (e.g. mark a session summary 'complete').
     bool set_summary_status(int summary_id, const std::string& status) {
-        sqlite3_stmt* s = nullptr;
-        sqlite3_prepare_v2(db,
-            "UPDATE summaries SET status = ? WHERE summary_id = ?",
-            -1, &s, nullptr);
-        sqlite3_bind_text(s, 1, status.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(s, 2, summary_id);
-        int rc = sqlite3_step(s);
-        sqlite3_finalize(s);
-        return rc == SQLITE_DONE && sqlite3_changes(db) > 0;
+        Stmt s(db,
+            "UPDATE summaries SET status = ? WHERE summary_id = ?");
+        s.bind(1, status).bind(2, summary_id);
+        return s.exec() && sqlite3_changes(db) > 0;
     }
 
     bool update_text(int memory_id, const std::string& raw_text, json metadata, bool defer_embedding) {
         if (metadata.is_null()) metadata = json::object();
 
         // Refuse to mutate protected rows for parity with delete_memory.
-        sqlite3_stmt* check_stmt = nullptr;
-        sqlite3_prepare_v2(db, "SELECT tags FROM summaries WHERE summary_id = ?",
-                           -1, &check_stmt, nullptr);
-        sqlite3_bind_int(check_stmt, 1, memory_id);
+        Stmt check_stmt(db, "SELECT tags FROM summaries WHERE summary_id = ?");
+        check_stmt.bind(1, memory_id);
         bool exists = false;
         bool protected_row = false;
-        if (sqlite3_step(check_stmt) == SQLITE_ROW) {
+        if (check_stmt.step()) {
             exists = true;
-            const char* tags = reinterpret_cast<const char*>(sqlite3_column_text(check_stmt, 0));
+            const char* tags = reinterpret_cast<const char*>(sqlite3_column_text(check_stmt.raw(), 0));
             if (tags && std::string(tags).find("keep") != std::string::npos) {
                 protected_row = true;
             }
         }
-        sqlite3_finalize(check_stmt);
         if (!exists || protected_row) return false;
 
         // Lean v2 summaries: only text/embedding/tags are mutable here.
@@ -885,24 +826,20 @@ struct SqliteBackend::Impl {
         }
 
         // FTS5 sync triggers re-index from the new text/tags automatically.
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db,
+        Stmt stmt(db,
             "UPDATE summaries SET text = ?, embedding = ?, tags = ? "
-            "WHERE summary_id = ?",
-            -1, &stmt, nullptr);
+            "WHERE summary_id = ?");
 
-        sqlite3_bind_text(stmt, 1, text.c_str(), -1, SQLITE_TRANSIENT);
+        stmt.bind(1, text);
         if (defer_embedding) {
-            sqlite3_bind_null(stmt, 2);
+            stmt.bind_null(2);
         } else {
-            bind_embedding(stmt, 2, emb);
+            bind_embedding(stmt.raw(), 2, emb);
         }
-        sqlite3_bind_text(stmt, 3, tags_str.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int (stmt, 4, memory_id);
+        stmt.bind(3, tags_str);
+        stmt.bind(4, memory_id);
 
-        int rc = sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
-        if (rc != SQLITE_DONE) return false;
+        if (!stmt.exec()) return false;
 
         invalidate_cache();
         return true;
@@ -996,13 +933,10 @@ struct SqliteBackend::Impl {
     }
 
     int count() const {
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM summaries",
-                           -1, &stmt, nullptr);
+        Stmt s(db, "SELECT COUNT(*) FROM summaries");
         int c = 0;
-        if (sqlite3_step(stmt) == SQLITE_ROW)
-            c = sqlite3_column_int(stmt, 0);
-        sqlite3_finalize(stmt);
+        if (s.step())
+            c = s.column_int(0);
         return c;
     }
 
@@ -1010,17 +944,15 @@ struct SqliteBackend::Impl {
     // is ignored (kept for API compat). Returns every summary, score 0.
     std::vector<SearchResult> load_all(const std::string& /*collection*/) {
         std::vector<SearchResult> results;
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db,
+        Stmt s(db,
             "SELECT summary_id, text, level, status, tags, timestamp "
-            "FROM summaries ORDER BY summary_id",
-            -1, &stmt, nullptr);
+            "FROM summaries ORDER BY summary_id");
 
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
+        while (s.step()) {
             auto col = [&](int i) -> const char* {
-                return reinterpret_cast<const char*>(sqlite3_column_text(stmt, i));
+                return reinterpret_cast<const char*>(sqlite3_column_text(s.raw(), i));
             };
-            int id = sqlite3_column_int(stmt, 0);
+            int id = s.column_int(0);
             const char* text = col(1);
             const char* lvl  = col(2);
             const char* st   = col(3);
@@ -1035,7 +967,6 @@ struct SqliteBackend::Impl {
             results.push_back({id, text ? text : "", 0.0f, std::move(meta),
                                ts ? ts : ""});
         }
-        sqlite3_finalize(stmt);
         return results;
     }
 
@@ -1055,12 +986,9 @@ struct SqliteBackend::Impl {
 
         int total_count = 0;
         for (auto& t : tables) {
-            sqlite3_stmt* s = nullptr;
-            auto q = std::format("SELECT COUNT(*) FROM {}", t.table);
-            sqlite3_prepare_v2(db, q.c_str(), -1, &s, nullptr);
-            if (sqlite3_step(s) == SQLITE_ROW)
-                total_count += sqlite3_column_int(s, 0);
-            sqlite3_finalize(s);
+            Stmt s(db, std::format("SELECT COUNT(*) FROM {}", t.table));
+            if (s.step())
+                total_count += s.column_int(0);
         }
 
         int doc_count = 0;
@@ -1068,40 +996,34 @@ struct SqliteBackend::Impl {
             std::string sel = t.extra_col
                 ? std::format("SELECT {} AS id, {}, {} FROM {}", t.id_col, t.text_col, t.extra_col, t.table)
                 : std::format("SELECT {} AS id, {} AS text FROM {}", t.id_col, t.text_col, t.table);
-            auto upd = std::format("UPDATE {} SET embedding = ? WHERE {} = ?", t.table, t.id_col);
+            std::string upd = std::format("UPDATE {} SET embedding = ? WHERE {} = ?", t.table, t.id_col);
 
-            sqlite3_stmt* select_stmt = nullptr;
-            sqlite3_prepare_v2(db, sel.c_str(), -1, &select_stmt, nullptr);
-            sqlite3_stmt* update_stmt = nullptr;
-            sqlite3_prepare_v2(db, upd.c_str(), -1, &update_stmt, nullptr);
+            Stmt select_stmt(db, sel);
 
-            while (sqlite3_step(select_stmt) == SQLITE_ROW) {
-                int id = sqlite3_column_int(select_stmt, 0);
-                const char* col1 = reinterpret_cast<const char*>(sqlite3_column_text(select_stmt, 1));
+            while (select_stmt.step()) {
+                int id = select_stmt.column_int(0);
+                const char* col1 = reinterpret_cast<const char*>(sqlite3_column_text(select_stmt.raw(), 1));
                 if (!col1) continue;
 
                 std::string embed_text;
                 if (t.extra_col) {
-                    const char* col2 = reinterpret_cast<const char*>(sqlite3_column_text(select_stmt, 2));
+                    const char* col2 = reinterpret_cast<const char*>(sqlite3_column_text(select_stmt.raw(), 2));
                     embed_text = turn_embed_text(col1, col2 ? col2 : "");
                 } else {
                     embed_text = col1;
                 }
 
                 auto emb = emb_ref.encode(embed_text);
-                bind_embedding(update_stmt, 1, emb);
-                sqlite3_bind_int(update_stmt, 2, id);
-                sqlite3_step(update_stmt);
-                sqlite3_reset(update_stmt);
+                Stmt update(db, upd);
+                bind_embedding(update.raw(), 1, emb);
+                update.bind(2, id);
+                update.step();
 
                 ++doc_count;
                 std::cout << std::format(ragger::lang::MSG_REBUILD_EMBEDDINGS_PROGRESS,
                                          doc_count, total_count);
                 std::cout.flush();
             }
-
-            sqlite3_finalize(select_stmt);
-            sqlite3_finalize(update_stmt);
         }
 
         std::cout << "\n";
@@ -1110,31 +1032,22 @@ struct SqliteBackend::Impl {
     }
 
     int backfill_embeddings(Embedder& emb_ref) {
-        sqlite3_stmt* select_stmt = nullptr;
-        sqlite3_prepare_v2(db,
-            "SELECT summary_id AS id, text FROM summaries WHERE embedding IS NULL",
-            -1, &select_stmt, nullptr);
-
-        sqlite3_stmt* update_stmt = nullptr;
-        sqlite3_prepare_v2(db,
-            "UPDATE summaries SET embedding = ? WHERE summary_id = ?",
-            -1, &update_stmt, nullptr);
+        Stmt select_stmt(db,
+            "SELECT summary_id AS id, text FROM summaries WHERE embedding IS NULL");
 
         int updated = 0;
-        while (sqlite3_step(select_stmt) == SQLITE_ROW) {
-            int id = sqlite3_column_int(select_stmt, 0);
-            const char* text = reinterpret_cast<const char*>(sqlite3_column_text(select_stmt, 1));
+        while (select_stmt.step()) {
+            int id = select_stmt.column_int(0);
+            const char* text = reinterpret_cast<const char*>(sqlite3_column_text(select_stmt.raw(), 1));
             if (!text) continue;
 
             auto emb = emb_ref.encode(text);
-            bind_embedding(update_stmt, 1, emb);
-            sqlite3_bind_int(update_stmt, 2, id);
-            sqlite3_step(update_stmt);
-            sqlite3_reset(update_stmt);
+            Stmt update(db, "UPDATE summaries SET embedding = ? WHERE summary_id = ?");
+            bind_embedding(update.raw(), 1, emb);
+            update.bind(2, id);
+            update.step();
             ++updated;
         }
-        sqlite3_finalize(select_stmt);
-        sqlite3_finalize(update_stmt);
 
         if (updated > 0) invalidate_cache();
         return updated;
@@ -1143,15 +1056,11 @@ struct SqliteBackend::Impl {
     // Set a document's embedding (used by the import path after embedding
     // chunks via the subprocess executor). Returns true on a row update.
     bool update_document_embedding(int document_id, const std::vector<float>& emb) {
-        sqlite3_stmt* s = nullptr;
-        sqlite3_prepare_v2(db,
-            "UPDATE documents SET embedding = ? WHERE document_id = ?",
-            -1, &s, nullptr);
-        bind_embedding(s, 1, emb);
-        sqlite3_bind_int(s, 2, document_id);
-        int rc = sqlite3_step(s);
-        sqlite3_finalize(s);
-        if (rc == SQLITE_DONE && sqlite3_changes(db) > 0) {
+        Stmt s(db,
+            "UPDATE documents SET embedding = ? WHERE document_id = ?");
+        bind_embedding(s.raw(), 1, emb);
+        s.bind(2, document_id);
+        if (s.exec() && sqlite3_changes(db) > 0) {
             invalidate_cache();
             return true;
         }
@@ -1167,27 +1076,21 @@ struct SqliteBackend::Impl {
 
     bool delete_memory(int memory_id) {
         // Check if memory has keep tag in dedicated column
-        sqlite3_stmt* check_stmt;
-        sqlite3_prepare_v2(db, "SELECT tags FROM summaries WHERE summary_id = ?", -1, &check_stmt, nullptr);
-        sqlite3_bind_int(check_stmt, 1, memory_id);
-        if (sqlite3_step(check_stmt) == SQLITE_ROW) {
-            const char* tags = reinterpret_cast<const char*>(sqlite3_column_text(check_stmt, 0));
+        Stmt check_stmt(db, "SELECT tags FROM summaries WHERE summary_id = ?");
+        check_stmt.bind(1, memory_id);
+        if (check_stmt.step()) {
+            const char* tags = reinterpret_cast<const char*>(sqlite3_column_text(check_stmt.raw(), 0));
             if (tags && std::string(tags).find("keep") != std::string::npos) {
-                sqlite3_finalize(check_stmt);
                 return false;  // protected
             }
         }
-        sqlite3_finalize(check_stmt);
-        
+
         // Not protected, proceed with deletion
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db, "DELETE FROM summaries WHERE summary_id = ?",
-                           -1, &stmt, nullptr);
-        sqlite3_bind_int(stmt, 1, memory_id);
-        sqlite3_step(stmt);
+        Stmt stmt(db, "DELETE FROM summaries WHERE summary_id = ?");
+        stmt.bind(1, memory_id);
+        stmt.step();
         int changes = sqlite3_changes(db);
-        sqlite3_finalize(stmt);
-        
+
         if (changes > 0) {
             invalidate_cache();
             return true;
@@ -1201,23 +1104,21 @@ struct SqliteBackend::Impl {
         // Filter out IDs with keep tag
         std::vector<int> deletable_ids;
         for (int memory_id : memory_ids) {
-            sqlite3_stmt* check_stmt;
-            sqlite3_prepare_v2(db, "SELECT tags FROM summaries WHERE summary_id = ?", -1, &check_stmt, nullptr);
-            sqlite3_bind_int(check_stmt, 1, memory_id);
+            Stmt check_stmt(db, "SELECT tags FROM summaries WHERE summary_id = ?");
+            check_stmt.bind(1, memory_id);
             bool has_keep = false;
-            if (sqlite3_step(check_stmt) == SQLITE_ROW) {
-                const char* tags = reinterpret_cast<const char*>(sqlite3_column_text(check_stmt, 0));
+            if (check_stmt.step()) {
+                const char* tags = reinterpret_cast<const char*>(sqlite3_column_text(check_stmt.raw(), 0));
                 if (tags && std::string(tags).find("keep") != std::string::npos) {
                     has_keep = true;
                 }
             }
-            sqlite3_finalize(check_stmt);
-            
+
             if (!has_keep) {
                 deletable_ids.push_back(memory_id);
             }
         }
-        
+
         if (deletable_ids.empty()) return 0;
 
         // Build SQL: DELETE FROM summaries WHERE summary_id IN (?,?,...)
@@ -1228,14 +1129,12 @@ struct SqliteBackend::Impl {
         }
         sql += ")";
 
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+        Stmt stmt(db, sql);
         for (size_t i = 0; i < deletable_ids.size(); ++i) {
-            sqlite3_bind_int(stmt, static_cast<int>(i + 1), deletable_ids[i]);
+            stmt.bind(static_cast<int>(i + 1), deletable_ids[i]);
         }
-        sqlite3_step(stmt);
+        stmt.step();
         int changes = sqlite3_changes(db);
-        sqlite3_finalize(stmt);
 
         if (changes > 0) {
             invalidate_cache();
@@ -1282,17 +1181,16 @@ struct SqliteBackend::Impl {
         sql += where + " ORDER BY timestamp DESC";
         if (limit > 0) sql += " LIMIT " + std::to_string(limit);
 
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr);
+        Stmt stmt(db, sql);
         for (size_t i = 0; i < binds.size(); ++i) {
-            sqlite3_bind_text(stmt, static_cast<int>(i + 1), binds[i].c_str(), -1, SQLITE_TRANSIENT);
+            stmt.bind(static_cast<int>(i + 1), binds[i]);
         }
 
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
+        while (stmt.step()) {
             auto col = [&](int i) -> const char* {
-                return reinterpret_cast<const char*>(sqlite3_column_text(stmt, i));
+                return reinterpret_cast<const char*>(sqlite3_column_text(stmt.raw(), i));
             };
-            int id = sqlite3_column_int(stmt, 0);
+            int id = stmt.column_int(0);
             const char* text = col(1);
             const char* lvl  = col(2);
             const char* st   = col(3);
@@ -1307,7 +1205,6 @@ struct SqliteBackend::Impl {
             results.push_back({id, text ? text : "", 0.0f, std::move(metadata),
                                ts ? ts : ""});
         }
-        sqlite3_finalize(stmt);
         return results;
     }
 
@@ -1435,67 +1332,51 @@ void SqliteBackend::save_chat_session(const std::string& session_id, const std::
     std::string buf = pImpl->local_timestamp();
 
     // Check if session exists
-    sqlite3_stmt* check_stmt;
-    sqlite3_prepare_v2(pImpl->db,
-        "SELECT session_id FROM chat_sessions WHERE session_id = ?",
-        -1, &check_stmt, nullptr);
-    sqlite3_bind_text(check_stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-    bool exists = (sqlite3_step(check_stmt) == SQLITE_ROW);
-    sqlite3_finalize(check_stmt);
+    Stmt check_stmt(pImpl->db,
+        "SELECT session_id FROM chat_sessions WHERE session_id = ?");
+    check_stmt.bind(1, session_id);
+    bool exists = check_stmt.step();
 
-    sqlite3_stmt* stmt;
     if (exists) {
         // Update
-        sqlite3_prepare_v2(pImpl->db,
-            "UPDATE chat_sessions SET messages = ?, updated = ?, web_token = ? WHERE session_id = ?",
-            -1, &stmt, nullptr);
-        sqlite3_bind_text(stmt, 1, messages_json.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, buf.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 3, web_token.empty() ? nullptr : web_token.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 4, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        Stmt s(pImpl->db,
+            "UPDATE chat_sessions SET messages = ?, updated = ?, web_token = ? WHERE session_id = ?");
+        s.bind(1, messages_json).bind(2, buf);
+        if (web_token.empty()) s.bind_null(3); else s.bind(3, web_token);
+        s.bind(4, session_id);
+        s.step();
     } else {
         // Insert
-        sqlite3_prepare_v2(pImpl->db,
+        Stmt s(pImpl->db,
             "INSERT INTO chat_sessions (session_id, username, messages, web_token, created, updated) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            -1, &stmt, nullptr);
-        sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 3, messages_json.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 4, web_token.empty() ? nullptr : web_token.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 5, buf.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 6, buf.c_str(), -1, SQLITE_TRANSIENT);
+            "VALUES (?, ?, ?, ?, ?, ?)");
+        s.bind(1, session_id).bind(2, username).bind(3, messages_json);
+        if (web_token.empty()) s.bind_null(4); else s.bind(4, web_token);
+        s.bind(5, buf).bind(6, buf);
+        s.step();
     }
-    sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
 }
 
 std::optional<std::string> SqliteBackend::get_chat_session(const std::string& session_id) {
-    sqlite3_stmt* stmt;
-    sqlite3_prepare_v2(pImpl->db,
-        "SELECT messages FROM chat_sessions WHERE session_id = ?",
-        -1, &stmt, nullptr);
-    sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    Stmt stmt(pImpl->db,
+        "SELECT messages FROM chat_sessions WHERE session_id = ?");
+    stmt.bind(1, session_id);
 
     std::optional<std::string> result;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char* msgs = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    if (stmt.step()) {
+        const char* msgs = reinterpret_cast<const char*>(sqlite3_column_text(stmt.raw(), 0));
         if (msgs) {
             result = std::string(msgs);
         }
     }
-    sqlite3_finalize(stmt);
     return result;
 }
 
 void SqliteBackend::delete_chat_session(const std::string& session_id) {
-    sqlite3_stmt* stmt;
-    sqlite3_prepare_v2(pImpl->db,
-        "DELETE FROM chat_sessions WHERE session_id = ?",
-        -1, &stmt, nullptr);
-    sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
+    Stmt stmt(pImpl->db,
+        "DELETE FROM chat_sessions WHERE session_id = ?");
+    stmt.bind(1, session_id);
+    stmt.step();
 }
 
 int SqliteBackend::cleanup_old_conversations(int max_age_hours) {
@@ -1509,67 +1390,47 @@ int SqliteBackend::cleanup_old_conversations(int max_age_hours) {
     // their gist is preserved in the L2/L3 summaries. Purge old turns by
     // timestamp. (Pre-v2 this deleted summaries tagged collection='conversation';
     // that column is gone in the lean schema.)
-    sqlite3_stmt* stmt;
-    sqlite3_prepare_v2(pImpl->db,
-        "DELETE FROM turns WHERE timestamp < ?",
-        -1, &stmt, nullptr);
-    sqlite3_bind_text(stmt, 1, cutoff_str.c_str(), -1, SQLITE_TRANSIENT);
+    Stmt stmt(pImpl->db,
+        "DELETE FROM turns WHERE timestamp < ?");
+    stmt.bind(1, cutoff_str);
 
     int deleted = 0;
-    if (sqlite3_step(stmt) == SQLITE_DONE) {
+    if (stmt.exec()) {
         deleted = static_cast<int>(sqlite3_changes(pImpl->db));
     }
-    sqlite3_finalize(stmt);
     return deleted;
 }
 
 // --- User management methods (single-user mode) ---
 std::optional<UserInfo> SqliteBackend::get_user_by_username(const std::string& username) {
-    sqlite3_stmt* stmt = nullptr;
-    const char* sql = "SELECT id, username, token_hash FROM users WHERE username = ?";
-    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
-        return std::nullopt;
-    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
-    
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
+    Stmt stmt(pImpl->db, "SELECT id, username, token_hash FROM users WHERE username = ?");
+    stmt.bind(1, username);
+
+    if (stmt.step()) {
         UserInfo user;
-        user.id = sqlite3_column_int(stmt, 0);
-        user.username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        const char* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-        user.token_hash = hash ? std::string(hash) : "";
-        sqlite3_finalize(stmt);
+        user.id = stmt.column_int(0);
+        user.username = stmt.column_text(1);
+        user.token_hash = stmt.column_text(2);
         return user;
     }
-    sqlite3_finalize(stmt);
     return std::nullopt;
 }
 
 std::optional<std::string> SqliteBackend::get_user_password(const std::string& username) {
-    sqlite3_stmt* stmt = nullptr;
-    const char* sql = "SELECT password_hash FROM users WHERE username = ?";
-    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
-        return std::nullopt;
-    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
-    
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        std::string result = hash ? std::string(hash) : "";
-        sqlite3_finalize(stmt);
+    Stmt stmt(pImpl->db, "SELECT password_hash FROM users WHERE username = ?");
+    stmt.bind(1, username);
+
+    if (stmt.step()) {
+        std::string result = stmt.column_text(0);
         return !result.empty() ? std::make_optional(result) : std::nullopt;
     }
-    sqlite3_finalize(stmt);
     return std::nullopt;
 }
 
 void SqliteBackend::update_user_token(const std::string& username, const std::string& new_hash) {
-    sqlite3_stmt* stmt = nullptr;
-    const char* sql = "UPDATE users SET token_hash = ? WHERE username = ?";
-    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, new_hash.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_step(stmt);
-    }
-    sqlite3_finalize(stmt);
+    Stmt stmt(pImpl->db, "UPDATE users SET token_hash = ? WHERE username = ?");
+    stmt.bind(1, new_hash).bind(2, username);
+    stmt.step();
 }
 
 void SqliteBackend::create_web_session(const std::string& token, const std::string& username,
@@ -1578,132 +1439,78 @@ void SqliteBackend::create_web_session(const std::string& token, const std::stri
     std::string created = pImpl->local_timestamp();
     std::string expires = pImpl->local_timestamp(
         std::chrono::system_clock::to_time_t(now + std::chrono::seconds(ttl_seconds)));
-    
-    sqlite3_stmt* stmt = nullptr;
-    const char* sql = "INSERT OR REPLACE INTO web_sessions (token, username, user_id, created, expires) VALUES (?,?,?,?,?)";
-    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(stmt, 3, user_id);
-        sqlite3_bind_text(stmt, 4, created.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 5, expires.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_step(stmt);
-    }
-    sqlite3_finalize(stmt);
+
+    Stmt stmt(pImpl->db,
+        "INSERT OR REPLACE INTO web_sessions (token, username, user_id, created, expires) VALUES (?,?,?,?,?)");
+    stmt.bind(1, token).bind(2, username).bind(3, user_id);
+    stmt.bind(4, created).bind(5, expires);
+    stmt.step();
 }
 
 int SqliteBackend::create_user(const std::string& username, const std::string& token_hash) {
     std::string timestamp = pImpl->local_timestamp();
-
-    sqlite3_stmt* stmt = nullptr;
-    const char* sql = "INSERT INTO users (username, token_hash, created, modified) VALUES (?,?,?,?)";
-    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
-        return -1;
-    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, token_hash.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 3, timestamp.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 4, timestamp.c_str(), -1, SQLITE_TRANSIENT);
-    
-    if (sqlite3_step(stmt) == SQLITE_DONE) {
-        int id = static_cast<int>(sqlite3_last_insert_rowid(pImpl->db));
-        sqlite3_finalize(stmt);
-        return id;
-    }
-    sqlite3_finalize(stmt);
-    return -1;
+    Stmt s(pImpl->db,
+           "INSERT INTO users (username, token_hash, created, modified) VALUES (?,?,?,?)");
+    s.bind(1, username).bind(2, token_hash).bind(3, timestamp).bind(4, timestamp);
+    s.step();
+    // changes()==0 means the INSERT failed (e.g. duplicate username) — keep
+    // the original -1 contract rather than returning a stale rowid.
+    return sqlite3_changes(pImpl->db) > 0
+        ? static_cast<int>(sqlite3_last_insert_rowid(pImpl->db))
+        : -1;
 }
 
 bool SqliteBackend::delete_user(const std::string& username) {
-    sqlite3_stmt* stmt = nullptr;
-    const char* sql = "DELETE FROM users WHERE username = ?";
-    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
-        return false;
-    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
-    
-    sqlite3_step(stmt);
-    int changes = sqlite3_changes(pImpl->db);
-    sqlite3_finalize(stmt);
-    return changes > 0;
+    Stmt s(pImpl->db, "DELETE FROM users WHERE username = ?");
+    s.bind(1, username);
+    s.step();
+    return sqlite3_changes(pImpl->db) > 0;
 }
 
 void SqliteBackend::set_user_password(const std::string& username, const std::string& password_hash) {
-    sqlite3_stmt* stmt = nullptr;
-    const char* sql = "UPDATE users SET password_hash = ? WHERE username = ?";
-    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, password_hash.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_step(stmt);
-    }
-    sqlite3_finalize(stmt);
+    Stmt s(pImpl->db, "UPDATE users SET password_hash = ? WHERE username = ?");
+    s.bind(1, password_hash).bind(2, username).step();
 }
 
 std::optional<std::string> SqliteBackend::get_setting(const std::string& key) {
-    sqlite3_stmt* stmt = nullptr;
-    const char* sql = "SELECT value FROM settings WHERE key = ?";
-    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
-        return std::nullopt;
-    sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
-    
-    std::optional<std::string> result;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char* v = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        if (v) result = std::string(v);
-    }
-    sqlite3_finalize(stmt);
-    return result;
+    Stmt s(pImpl->db, "SELECT value FROM settings WHERE key = ?");
+    s.bind(1, key);
+    if (s.step()) return s.column_text_opt(0);
+    return std::nullopt;
 }
 
 void SqliteBackend::set_setting(const std::string& key, const std::string& value) {
-    sqlite3_stmt* stmt = nullptr;
-    const char* sql = "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)";
-    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, value.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_step(stmt);
-    }
-    sqlite3_finalize(stmt);
+    Stmt s(pImpl->db, "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
+    s.bind(1, key).bind(2, value).step();
 }
 
 std::optional<UserInfo> SqliteBackend::get_user_by_token_hash(const std::string& token_hash) {
-    sqlite3_stmt* stmt = nullptr;
-    const char* sql = "SELECT id, username, token_hash FROM users WHERE token_hash = ?";
-    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
-        return std::nullopt;
-    sqlite3_bind_text(stmt, 1, token_hash.c_str(), -1, SQLITE_TRANSIENT);
-    
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
+    Stmt s(pImpl->db, "SELECT id, username, token_hash FROM users WHERE token_hash = ?");
+    s.bind(1, token_hash);
+    if (s.step()) {
         UserInfo user;
-        user.id = sqlite3_column_int(stmt, 0);
-        user.username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        const char* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-        user.token_hash = hash ? std::string(hash) : "";
-        sqlite3_finalize(stmt);
+        user.id = s.column_int(0);
+        user.username = s.column_text(1);
+        user.token_hash = s.column_text(2);
         return user;
     }
-    sqlite3_finalize(stmt);
     return std::nullopt;
 }
 
 std::optional<UserInfo> SqliteBackend::get_web_session(const std::string& token) {
     std::string now_str = pImpl->local_timestamp();
 
-    sqlite3_stmt* stmt = nullptr;
-    const char* sql = "SELECT u.id, u.username, u.token_hash FROM users u JOIN web_sessions ws ON u.id = ws.user_id WHERE ws.token = ? AND ws.expires > ?";
-    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
-        return std::nullopt;
-    sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, now_str.c_str(), -1, SQLITE_TRANSIENT);
-    
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
+    Stmt stmt(pImpl->db,
+        "SELECT u.id, u.username, u.token_hash FROM users u JOIN web_sessions ws ON u.id = ws.user_id WHERE ws.token = ? AND ws.expires > ?");
+    stmt.bind(1, token).bind(2, now_str);
+
+    if (stmt.step()) {
         UserInfo user;
-        user.id = sqlite3_column_int(stmt, 0);
-        user.username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        const char* hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-        user.token_hash = hash ? std::string(hash) : "";
-        sqlite3_finalize(stmt);
+        user.id = stmt.column_int(0);
+        user.username = stmt.column_text(1);
+        user.token_hash = stmt.column_text(2);
         return user;
     }
-    sqlite3_finalize(stmt);
     return std::nullopt;
 }
 
