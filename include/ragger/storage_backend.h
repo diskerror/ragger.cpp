@@ -42,7 +42,7 @@ public:
                               bool defer_embedding = false) = 0;
 
     /// Store a Level 5 RAG document chunk into the `documents` table.
-    /// Indexes tokens into `bm25_documents`. Returns the new row id.
+    /// FTS5 sync triggers index the row's text. Returns the new row id.
     /// `chunk.imported_at` is honoured when non-empty so every chunk of one
     /// import shares a single timestamp (issue #48).
     virtual int store_document(const DocumentChunk& chunk,
@@ -90,7 +90,7 @@ public:
     virtual std::vector<std::string> current_decisions(int limit) = 0;
 
     /// Replace text + metadata of an existing row. Re-embeds (or NULLs the
-    /// embedding when `defer_embedding`) and rebuilds the row's BM25 tokens.
+    /// embedding when `defer_embedding`); FTS5 sync triggers reindex the row.
     /// Preserves id and original timestamp. Returns false if the row
     /// doesn't exist or is protected (keep tag).
     virtual bool update_text(int memory_id,

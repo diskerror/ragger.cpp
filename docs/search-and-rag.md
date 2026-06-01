@@ -95,27 +95,10 @@ bm25_enabled = false
 
 ## BM25 Tuning
 
-BM25 has two tuning parameters:
-
-| Parameter | Default | Description                                                         |
-|-----------|---------|---------------------------------------------------------------------|
-| `k1`      | `1.5`   | Term frequency saturation (higher = more weight to repeated terms)  |
-| `b`       | `0.75`  | Document length normalization (0 = ignore length, 1 = full penalty) |
-
-**Typical values:**
-
-- `k1 = 1.2` to `2.0` (1.5 is standard)
-- `b = 0.5` to `1.0` (0.75 is standard)
-
-Set via config:
-
-```ini
-[search]
-bm25_k1 = 1.5
-bm25_b = 0.75
-```
-
-Most users don't need to tune these. The defaults work well for general text.
+Keyword relevance is computed by SQLite's built-in FTS5 `bm25()` ranking
+function, which uses fixed internal parameters (`k1` and `b`). These are not
+exposed as config — the only keyword knob is `bm25_weight`, which sets how
+much the keyword score contributes to the hybrid blend (see above).
 
 ## Chunking Strategy
 

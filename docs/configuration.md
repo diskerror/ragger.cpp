@@ -87,8 +87,6 @@ that install.sh copies to `~/.ragger/settings.ini` on first run.
 | `bm25_enabled`      | `true`  | Enable BM25 hybrid search                         |
 | `bm25_weight`       | `3`     | BM25 score weight (ratio, not percentage)         |
 | `vector_weight`     | `7`     | Vector score weight (ratio, not percentage)       |
-| `bm25_k1`           | `1.5`   | BM25 term frequency saturation                    |
-| `bm25_b`            | `0.75`  | BM25 document length normalization                |
 | `query_log`         | `true`  | Enable query logging to `~/.ragger/query.log`     |
 | `max_search_limit`  | `0`     | Ceiling for user `default_limit` (0 = no ceiling) |
 

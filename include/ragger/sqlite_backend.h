@@ -19,7 +19,6 @@ namespace ragger {
 using json = nlohmann::json;
 
 class Embedder;
-class BM25Index;
 
 class SqliteBackend : public StorageBackend {
 public:

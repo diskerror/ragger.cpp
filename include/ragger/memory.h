@@ -61,7 +61,7 @@ public:
     std::vector<std::string> current_decisions(int limit);
 
     /// Replace text + metadata of an existing memory (re-embeds unless
-    /// `defer_embedding`, rebuilds BM25 tokens, preserves id and original
+    /// `defer_embedding`, FTS5 triggers reindex, preserves id and original
     /// timestamp). Returns false if the row is missing or has the keep tag.
     bool update_text(int memory_id, const std::string& text, json metadata = {},
                      bool defer_embedding = false);

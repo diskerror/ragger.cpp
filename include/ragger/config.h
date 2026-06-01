@@ -44,8 +44,6 @@ struct Config {
     bool  bm25_enabled         = true;
     float bm25_weight          = 3.0f;
     float vector_weight        = 7.0f;
-    float bm25_k1              = 1.5f;
-    float bm25_b               = 0.75f;
 
     // --- Embed (subprocess) ---
     int embed_timeout_ms  = 5000;

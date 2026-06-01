@@ -106,8 +106,6 @@ default_min_score = 0.4
 bm25_enabled = true
 bm25_weight = 3
 vector_weight = 7
-bm25_k1 = 1.5
-bm25_b = 0.75
 
 [inference]
 # Default model for chat
@@ -265,9 +263,7 @@ void apply_user_overrides(Config& cfg, const Config& user) {
     cfg.bm25_enabled = user.bm25_enabled;
     cfg.bm25_weight = user.bm25_weight;
     cfg.vector_weight = user.vector_weight;
-    cfg.bm25_k1 = user.bm25_k1;
-    cfg.bm25_b = user.bm25_b;
-    
+
     // Inference (user can only pick model)
     cfg.inference_model = user.inference_model;
     cfg.inference_default = user.inference_default;
@@ -389,8 +385,6 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "bm25_enabled")     cfg.bm25_enabled = parse_bool(val);
             else if (key == "bm25_weight")      cfg.bm25_weight = std::stof(val);
             else if (key == "vector_weight")    cfg.vector_weight = std::stof(val);
-            else if (key == "bm25_k1")          cfg.bm25_k1 = std::stof(val);
-            else if (key == "bm25_b")           cfg.bm25_b = std::stof(val);
             else if (key == "max_search_limit") cfg.max_search_limit = std::stoi(val);
         }
         else if (section == "inference") {
@@ -638,8 +632,6 @@ int reload_config() {
     RELOAD(bm25_enabled);
     RELOAD(bm25_weight);
     RELOAD(vector_weight);
-    RELOAD(bm25_k1);
-    RELOAD(bm25_b);
 
     // Inference
     RELOAD(inference_model);
