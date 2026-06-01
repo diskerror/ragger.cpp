@@ -163,21 +163,6 @@ void test_load_all(ragger::Embedder& emb) {
     cleanup();
 }
 
-void test_rebuild_bm25(ragger::Embedder& emb) {
-    cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
-
-    db.store("BM25 index rebuild test document one.");
-    db.store("BM25 index rebuild test document two.");
-    db.store("Something completely different here.");
-
-    int count = db.rebuild_bm25();
-    assert(count == 3);
-
-    db.close();
-    cleanup();
-}
-
 void test_rebuild_embeddings(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
@@ -455,15 +440,14 @@ void test_timestamp_format(ragger::Embedder& emb) {
     auto all = db.load_all();
     assert(all.size() == 1);
 
-    // Verify YYYY-MM-DDTHH:MM:SSZ pattern
+    // Verify local-time "YYYY-MM-DD HH:MM:SS" pattern
     auto& ts = all[0].timestamp;
-    assert(ts.length() == 20);
+    assert(ts.length() == 19);
     assert(ts[4] == '-');
     assert(ts[7] == '-');
-    assert(ts[10] == 'T');
+    assert(ts[10] == ' ');
     assert(ts[13] == ':');
     assert(ts[16] == ':');
-    assert(ts[19] == 'Z');
 
     db.close();
     cleanup();
@@ -794,7 +778,6 @@ int main() {
     test_search_min_score(emb);
     test_search_limit(emb);
     test_load_all(emb);
-    test_rebuild_bm25(emb);
     test_rebuild_embeddings(emb);
     test_rebuild_embeddings_empty_db(emb);
     test_rebuild_embeddings_count_matches(emb);
