@@ -444,15 +444,17 @@ struct SqliteBackend::Impl {
         return out;
     }
 
-    // ---- iso timestamp ------------------------------------------------
-    static std::string now_iso() {
-        auto now = std::chrono::system_clock::now();
-        auto tt  = std::chrono::system_clock::to_time_t(now);
-        std::tm gm{};
-        gmtime_r(&tt, &gm);
+    // ---- local timestamp ("%F %T" == "YYYY-MM-DD HH:MM:SS") ----------
+    static std::string local_timestamp(std::time_t tt) {
+        std::tm local{};
+        localtime_r(&tt, &local);
         char buf[32];
-        std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &gm);
-        return std::string(buf) + "Z";
+        std::strftime(buf, sizeof(buf), "%F %T", &local);
+        return std::string(buf);
+    }
+    static std::string local_timestamp() {
+        return local_timestamp(
+            std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
     }
 
     // ---- cache --------------------------------------------------------
@@ -615,7 +617,7 @@ struct SqliteBackend::Impl {
             emb = embedder->encode(text);
         }
 
-        auto ts = ts_override.empty() ? now_iso() : ts_override;
+        auto ts = ts_override.empty() ? local_timestamp() : ts_override;
 
         // FTS5 sync triggers index the row from text/tags — no manual step.
         sqlite3_stmt* stmt = nullptr;
@@ -656,7 +658,7 @@ struct SqliteBackend::Impl {
             emb = embedder->encode(text);
         }
 
-        std::string imported_at = chunk.imported_at.empty() ? now_iso() : chunk.imported_at;
+        std::string imported_at = chunk.imported_at.empty() ? local_timestamp() : chunk.imported_at;
 
         // Lean documents schema (reference DDL): path/title/tags/year/
         // chunk_index. Only `text` is embedded; documents_fts sync triggers
@@ -751,7 +753,7 @@ struct SqliteBackend::Impl {
         if (have_emb)
             bind_embedding(s, 4, emb);
         else sqlite3_bind_null(s, 4);
-        sqlite3_bind_text(s, 5, now_iso().c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(s, 5, local_timestamp().c_str(), -1, SQLITE_TRANSIENT);
 
         int rc = sqlite3_step(s);
         sqlite3_finalize(s);
@@ -814,7 +816,7 @@ struct SqliteBackend::Impl {
         bind_embedding(s, 3, emb);
         sqlite3_bind_text(s, 4, level.c_str(),  -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(s, 5, status.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(s, 6, now_iso().c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(s, 6, local_timestamp().c_str(), -1, SQLITE_TRANSIENT);
         int rc = sqlite3_step(s);
         sqlite3_finalize(s);
         if (rc != SQLITE_DONE)
@@ -1508,10 +1510,7 @@ std::vector<SearchResult> SqliteBackend::search_by_metadata(const json& metadata
 
 void SqliteBackend::save_chat_session(const std::string& session_id, const std::string& username,
                                      const std::string& messages_json, const std::string& web_token) {
-    auto now = std::chrono::system_clock::now();
-    auto now_t = std::chrono::system_clock::to_time_t(now);
-    char buf[32];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&now_t));
+    std::string buf = pImpl->local_timestamp();
 
     // Check if session exists
     sqlite3_stmt* check_stmt;
@@ -1529,7 +1528,7 @@ void SqliteBackend::save_chat_session(const std::string& session_id, const std::
             "UPDATE chat_sessions SET messages = ?, updated = ?, web_token = ? WHERE session_id = ?",
             -1, &stmt, nullptr);
         sqlite3_bind_text(stmt, 1, messages_json.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, buf, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, buf.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 3, web_token.empty() ? nullptr : web_token.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 4, session_id.c_str(), -1, SQLITE_TRANSIENT);
     } else {
@@ -1542,8 +1541,8 @@ void SqliteBackend::save_chat_session(const std::string& session_id, const std::
         sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 3, messages_json.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 4, web_token.empty() ? nullptr : web_token.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 5, buf, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 6, buf, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 5, buf.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 6, buf.c_str(), -1, SQLITE_TRANSIENT);
     }
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -1578,12 +1577,11 @@ void SqliteBackend::delete_chat_session(const std::string& session_id) {
 }
 
 int SqliteBackend::cleanup_old_conversations(int max_age_hours) {
-    auto now = std::chrono::system_clock::now();
-    auto cutoff = now - std::chrono::duration_cast<std::chrono::system_clock::duration>(
-        std::chrono::duration<double, std::ratio<3600>>(max_age_hours));
-    auto cutoff_t = std::chrono::system_clock::to_time_t(cutoff);
-    char cutoff_str[32];
-    std::strftime(cutoff_str, sizeof(cutoff_str), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&cutoff_t));
+    auto cutoff = std::chrono::system_clock::now() -
+        std::chrono::duration_cast<std::chrono::system_clock::duration>(
+            std::chrono::duration<double, std::ratio<3600>>(max_age_hours));
+    std::string cutoff_str = pImpl->local_timestamp(
+        std::chrono::system_clock::to_time_t(cutoff));
 
     // v2: raw verbatim exchanges (L1 turns) are what age out by retention;
     // their gist is preserved in the L2/L3 summaries. Purge old turns by
@@ -1593,7 +1591,7 @@ int SqliteBackend::cleanup_old_conversations(int max_age_hours) {
     sqlite3_prepare_v2(pImpl->db,
         "DELETE FROM turns WHERE timestamp < ?",
         -1, &stmt, nullptr);
-    sqlite3_bind_text(stmt, 1, cutoff_str, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 1, cutoff_str.c_str(), -1, SQLITE_TRANSIENT);
 
     int deleted = 0;
     if (sqlite3_step(stmt) == SQLITE_DONE) {
@@ -1655,20 +1653,9 @@ void SqliteBackend::update_user_token(const std::string& username, const std::st
 void SqliteBackend::create_web_session(const std::string& token, const std::string& username,
                                         int user_id, int ttl_seconds) {
     auto now = std::chrono::system_clock::now();
-    auto now_tt = std::chrono::system_clock::to_time_t(now);
-    std::tm now_gm{};
-    gmtime_r(&now_tt, &now_gm);
-    char now_buf[32];
-    std::strftime(now_buf, sizeof(now_buf), "%Y-%m-%dT%H:%M:%SZ", &now_gm);
-    std::string created(now_buf);
-    
-    auto expires_tp = now + std::chrono::seconds(ttl_seconds);
-    auto expires_tt = std::chrono::system_clock::to_time_t(expires_tp);
-    std::tm expires_gm{};
-    gmtime_r(&expires_tt, &expires_gm);
-    char expires_buf[32];
-    std::strftime(expires_buf, sizeof(expires_buf), "%Y-%m-%dT%H:%M:%SZ", &expires_gm);
-    std::string expires(expires_buf);
+    std::string created = pImpl->local_timestamp();
+    std::string expires = pImpl->local_timestamp(
+        std::chrono::system_clock::to_time_t(now + std::chrono::seconds(ttl_seconds)));
     
     sqlite3_stmt* stmt = nullptr;
     const char* sql = "INSERT OR REPLACE INTO web_sessions (token, username, user_id, created, expires) VALUES (?,?,?,?,?)";
@@ -1740,14 +1727,8 @@ void SqliteBackend::update_user_token_rotated_at(const std::string& username, co
 }
 
 int SqliteBackend::create_user(const std::string& username, const std::string& token_hash) {
-    auto now = std::chrono::system_clock::now();
-    auto now_tt = std::chrono::system_clock::to_time_t(now);
-    std::tm now_gm{};
-    gmtime_r(&now_tt, &now_gm);
-    char now_buf[32];
-    std::strftime(now_buf, sizeof(now_buf), "%Y-%m-%dT%H:%M:%SZ", &now_gm);
-    std::string timestamp(now_buf);
-    
+    std::string timestamp = pImpl->local_timestamp();
+
     sqlite3_stmt* stmt = nullptr;
     const char* sql = "INSERT INTO users (username, token_hash, created, modified) VALUES (?,?,?,?)";
     if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
@@ -1838,14 +1819,8 @@ std::optional<UserInfo> SqliteBackend::get_user_by_token_hash(const std::string&
 }
 
 std::optional<UserInfo> SqliteBackend::get_web_session(const std::string& token) {
-    auto now = std::chrono::system_clock::now();
-    auto now_tt = std::chrono::system_clock::to_time_t(now);
-    std::tm now_gm{};
-    gmtime_r(&now_tt, &now_gm);
-    char now_buf[32];
-    std::strftime(now_buf, sizeof(now_buf), "%Y-%m-%dT%H:%M:%SZ", &now_gm);
-    std::string now_str(now_buf);
-    
+    std::string now_str = pImpl->local_timestamp();
+
     sqlite3_stmt* stmt = nullptr;
     const char* sql = "SELECT u.id, u.username, u.token_hash FROM users u JOIN web_sessions ws ON u.id = ws.user_id WHERE ws.token = ? AND ws.expires > ?";
     if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
