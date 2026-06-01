@@ -8,6 +8,8 @@
 #include "diskerror/logger.h"
 #include "ragger/memory.h"
 #include "ragger/inference.h"
+#include "ragger/workspace.h"
+#include "ragger/util/time.h"
 #include <unistd.h>  // fork, _exit
 #include <algorithm>
 #include <chrono>
@@ -47,149 +49,32 @@ Chat::Chat(RaggerMemory &memory, InferenceClient &inference, const std::string &
 }
 
 std::string Chat::load_workspace_files(int max_context) {
-    /**
-     * Load workspace MD files with priority-based truncation.
-     *
-     * Priority order: SOUL.md > USER.md > AGENTS.md > TOOLS.md > MEMORY.md
-     *
-     * For small contexts (< 32768 tokens):
-     *   - Calculate persona budget: max_context * chars_per_token * (persona_pct / 100)
-     *   - Apply user ceiling (chat_max_persona_chars) if set and smaller
-     *   - Load files in priority order
-     *   - Paragraph-aware truncation for last file that doesn't fit
-     *
-     * For large/unknown contexts:
-     *   - Load everything, apply user ceiling only
-     */
+    // Compute the persona character budget, then delegate the actual file
+    // assembly to the shared loader (ragger::load_workspace, workspace.cpp) so
+    // the CLI and the HTTP server build an identical persona block.
+    //
+    // Small contexts (< PERSONA_SIZING_THRESHOLD) get a percentage-based
+    // budget (capped by the user ceiling); large/unknown contexts use the user
+    // ceiling only (0 = unlimited).
     const auto &cfg = config();
 
-    std::string ragger_dir = expand_path(cfg.persona_dir);
-
-    // Calculate persona budget
     int max_persona_chars = 0;
     if (max_context > 0 && max_context < PERSONA_SIZING_THRESHOLD) {
-        // Small context — apply percentage-based sizing
         int persona_budget = static_cast<int>(
             max_context * cfg.chat_chars_per_token * (cfg.chat_persona_pct / 100.0f)
         );
         persona_budget = std::max(persona_budget, 500); // minimum budget
-
-        // Apply user ceiling if set and smaller
-        if (cfg.chat_max_persona_chars > 0) {
-            max_persona_chars = std::min(cfg.chat_max_persona_chars, persona_budget);
-        }
-        else {
-            max_persona_chars = persona_budget;
-        }
+        max_persona_chars = (cfg.chat_max_persona_chars > 0)
+            ? std::min(cfg.chat_max_persona_chars, persona_budget)
+            : persona_budget;
     }
     else {
-        // Large or unknown context — user ceiling only (0 = unlimited)
         max_persona_chars = cfg.chat_max_persona_chars;
     }
 
-    // system_prompt_file (default: SYSTEM.md) is loaded first.
-    // Persona files follow; the list excludes any file that resolves to the same path.
-    std::string sys_path = expand_path(cfg.system_prompt_file);
-    std::string sys_norm = fs::path(sys_path).lexically_normal().string();
-
-    // Build ordered list: system_prompt_file by full path, then persona files by name
-    std::vector<std::string> full_paths;
-    full_paths.push_back(sys_path);
-    for (const char *fname: {"SOUL.md", "USER.md", "MEMORY.md"}) {
-        std::string p = ragger_dir + "/" + fname;
-        if (fs::path(p).lexically_normal().string() != sys_norm) full_paths.push_back(p);
-    }
-
-    std::vector<std::string> sections;
-    int total_chars = 0;
-
-    for (const auto &path: full_paths) {
-        std::string label = fs::path(path).filename().string();
-        if (!fs::exists(path)) {
-            continue; // file not found — silently skip
-        }
-
-        // Read file
-        std::ifstream file(path);
-        if (!file) continue;
-        std::string content((std::istreambuf_iterator<char>(file)),
-                            std::istreambuf_iterator<char>());
-
-        // Trim trailing whitespace
-        size_t end = content.find_last_not_of(" \t\r\n");
-        if (end != std::string::npos) {
-            content = content.substr(0, end + 1);
-        }
-        else {
-            content.clear();
-        }
-
-        if (content.empty()) continue;
-
-        // Check if we need to truncate
-        if (max_persona_chars > 0) {
-            // Account for separator size (sections.size() gives count of separators needed)
-            int separator_overhead = static_cast<int>(sections.size()) * 8; // "\n\n---\n\n" = 8 chars
-            int remaining = max_persona_chars - total_chars - separator_overhead;
-
-            if (remaining <= 0) {
-                break; // No space left
-            }
-
-            if (static_cast<int>(content.size()) > remaining) {
-                // Paragraph-aware truncation
-                std::vector<std::string> paragraphs;
-                std::istringstream stream(content);
-                std::string buffer;
-
-                // Split by double newline
-                for (std::string line; std::getline(stream, line);) {
-                    if (line.empty() && !buffer.empty()) {
-                        paragraphs.push_back(buffer);
-                        buffer.clear();
-                    }
-                    else {
-                        if (!buffer.empty()) buffer += "\n";
-                        buffer += line;
-                    }
-                }
-                if (!buffer.empty()) {
-                    paragraphs.push_back(buffer);
-                }
-
-                // Keep as many complete paragraphs as fit
-                std::string truncated;
-                for (const auto &p: paragraphs) {
-                    if (static_cast<int>(truncated.size() + p.size() + 2) > remaining) {
-                        break;
-                    }
-                    if (!truncated.empty()) truncated += "\n\n";
-                    truncated += p;
-                }
-
-                // If we got at least some content, use it
-                if (!truncated.empty()) {
-                    truncated += "\n\n[... " + label + " truncated ...]";
-                    sections.push_back(truncated);
-                    total_chars += static_cast<int>(truncated.size());
-                }
-                // If even first paragraph doesn't fit, skip this file entirely
-                break; // Stop loading more files
-            }
-        }
-
-        sections.push_back(content);
-        total_chars += static_cast<int>(content.size());
-    }
-
-    // Join sections with separator
-    std::string result;
-    for (size_t i = 0; i < sections.size(); ++i) {
-        if (i > 0) result += "\n\n---\n\n";
-        result += sections[i];
-    }
-
-    return result;
+    return load_workspace(max_persona_chars > 0
+                              ? std::optional<int>(max_persona_chars)
+                              : std::nullopt);
 }
 
 int Chat::store_partial_turn(const std::string &user_text) {
@@ -279,13 +164,10 @@ void Chat::check_orphaned_turns() {
         for (const auto &turn: turns) {
             if (turn.metadata.value("mode", "") != "session") {
                 // Check if timestamp is old (> 5 minutes means from previous session)
-                std::tm tm = {};
-                std::istringstream ss(turn.timestamp);
-                ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
+                auto parsed = parse_db_timestamp(turn.timestamp);
+                if (!parsed) continue; // couldn't parse
 
-                if (ss.fail()) continue; // couldn't parse
-
-                auto tp = std::chrono::system_clock::from_time_t(std::mktime(&tm));
+                auto tp = std::chrono::system_clock::from_time_t(*parsed);
                 auto now = std::chrono::system_clock::now();
                 auto age_minutes = std::chrono::duration_cast<std::chrono::minutes>(now - tp).count();
 
@@ -355,60 +237,6 @@ void Chat::check_orphaned_turns() {
 }
 
 
-void Chat::bg_summarize(
-    const std::vector<std::pair<std::string, std::string> > &turns_to_summarize) {
-    if (turns_to_summarize.empty()) return;
-
-    auto turns_copy = turns_to_summarize;
-
-    pid_t pid = fork();
-    if (pid != 0) {
-        // Parent: return immediately
-        return;
-    }
-
-    // Child process: fresh connections (SQLite not fork-safe)
-    try {
-        const auto &cfg = config();
-        RaggerMemory child_memory(cfg.resolved_db_path(), cfg.resolved_model_dir());
-        InferenceClient child_inference = InferenceClient::from_config(cfg);
-
-        std::string conversation_text;
-        for (const auto &turn: turns_copy) {
-            conversation_text += "**User:** " + turn.first + "\n\n";
-            conversation_text += "**Assistant:** " + turn.second + "\n\n";
-        }
-
-        std::vector<Message> summary_messages = {
-            {
-                "system", "Summarize this conversation into a concise memory entry. "
-                "Extract: key facts, decisions, questions asked, topics discussed. "
-                "Write in third person past tense. Be brief — this will be stored "
-                "as a memory chunk for future retrieval."
-            },
-            {"user", conversation_text}
-        };
-
-        std::string summary = child_inference.chat(summary_messages, model_);
-
-        if (!summary.empty()) {
-            json meta = {
-                {"collection", "memory"},
-                {"category", "session-summary"},
-                {"source", "ragger-chat"},
-                {"turns", turns_copy.size()}
-            };
-            child_memory.store(summary, meta);
-        }
-
-        child_memory.close();
-    }
-    catch (...) {
-        // Silent failure in background child
-    }
-    _exit(0);
-}
-
 void Chat::summarize_turn(const std::string &user_text,
                           const std::string &assistant_text) {
     if (store_turns_ == "false") return;
@@ -477,12 +305,6 @@ void Chat::summarize_turn(const std::string &user_text,
         // Silent failure in background child — a missed summary is recoverable.
     }
     _exit(0);
-}
-
-void Chat::check_pause_summary() {
-    // Superseded by per-turn summarize_turn() (issue #22): the running L3 is
-    // kept current on every turn, so there is no batch of turns to flush on
-    // idle. Left as a no-op hook for a future pause-driven session boundary.
 }
 
 void Chat::quit_summary() {
@@ -603,9 +425,6 @@ void Chat::run() {
     // Main REPL loop
     std::string line;
     while (true) {
-        // Check for pause summary before waiting for input
-        check_pause_summary();
-
         std::cout << ragger::lang::CHAT_PROMPT_USER << std::flush;
         if (!std::getline(std::cin, line)) {
             std::cout << std::endl << ragger::lang::MSG_CHAT_GOODBYE << std::endl;

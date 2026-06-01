@@ -60,7 +60,6 @@ struct UserInfo {
     std::string username;
     // is_admin removed — sudo is the admin gate
     std::string token_hash;
-    std::string preferred_model;  // empty = system default
 };
 
 

@@ -171,18 +171,6 @@ public:
     virtual void create_web_session(const std::string& token, const std::string& username,
                                     int user_id, int ttl_seconds) = 0;
 
-    /// Get user's preferred model (empty string if none set).
-    virtual std::optional<std::string> get_user_preferred_model(const std::string& username) = 0;
-
-    /// Set/clear user's preferred model.
-    virtual void update_user_preferred_model(const std::string& username, const std::string& model) = 0;
-
-    /// Get timestamp when token was last rotated.
-    virtual std::optional<std::string> get_user_token_rotated_at(const std::string& username) = 0;
-
-    /// Update the token rotated timestamp.
-    virtual void update_user_token_rotated_at(const std::string& username, const std::string& timestamp) = 0;
-
     /// Create a new user. Returns user_id or -1 on error.
     virtual int create_user(const std::string& username, const std::string& token_hash) = 0;
 

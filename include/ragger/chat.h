@@ -82,9 +82,6 @@ private:
     
     /// Check for orphaned turns from previous session (crash recovery)
     void check_orphaned_turns();
-    
-    /// Fork a background process to summarize turns
-    void bg_summarize(const std::vector<std::pair<std::string, std::string>>& turns);
 
     /// Per-turn fading-memory summarization (issue #22): in a forked child,
     /// produce a per-turn L2 summary and fold it into the running L3 session
@@ -92,9 +89,6 @@ private:
     void summarize_turn(const std::string& user_text,
                         const std::string& assistant_text);
 
-    /// Check if pause has elapsed and summarize if needed
-    void check_pause_summary();
-    
     /// Summarize conversation on quit
     void quit_summary();
     

@@ -5,6 +5,7 @@
 #include "ragger/config.h"
 #include "ragger/lang.h"
 #include "ragger/sqlite_backend.h"
+#include "ragger/workspace.h"
 #include "diskerror/logger.h"
 #include "nlohmann_json.hpp"
 
@@ -219,42 +220,11 @@ ChatSession& ChatSessionManager::get_or_create(
 }
 
 std::string ChatSessionManager::load_workspace_files() {
-    // Load persona/workspace files in priority order.
-    // The combined content serves as the system prompt for Ragger-owned sessions
-    // (CLI and browser chat). Proxy behavior is controlled by proxy_system_prompt config.
-    const auto& cfg = config();
-    std::string persona_dir = expand_path(cfg.persona_dir);
-    std::string result;
-
-    auto load_file = [&](const std::string& path, const std::string& label) {
-        if (!fs::exists(path)) return;
-        std::ifstream f(path);
-        if (!f.is_open()) return;
-        std::string content((std::istreambuf_iterator<char>(f)),
-                             std::istreambuf_iterator<char>());
-        auto end = content.find_last_not_of(" \t\r\n");
-        if (end != std::string::npos) content = content.substr(0, end + 1);
-        if (content.empty()) return;
-        if (!result.empty()) result += "\n\n---\n\n";
-        result += "## " + label + "\n\n" + content;
-    };
-
-    // system_prompt_file first (configurable; default ~/.ragger/SYSTEM.md)
-    std::string sys_path = expand_path(cfg.system_prompt_file);
-    load_file(sys_path, fs::path(sys_path).filename().string());
-
-    // Persona files from persona_dir (SOUL.md, USER.md, MEMORY.md)
-    for (const auto& fname : {"SOUL.md", "USER.md", "MEMORY.md"}) {
-        std::string fpath = persona_dir + "/" + fname;
-        if (fs::path(fpath).lexically_normal() == fs::path(sys_path).lexically_normal()) continue;
-        load_file(fpath, fname);
-    }
-
-    if (result.empty()) {
-        Diskerror::logger::info(std::format(lang::MSG_NO_PERSONA_FILES, persona_dir));
-    }
-
-    return result;
+    // The combined persona/workspace content serves as the system prompt for
+    // Ragger-owned sessions (CLI + browser chat). Proxy behavior is controlled
+    // by proxy_system_prompt config. Loaded in full (no budget) via the shared
+    // loader — see workspace.cpp.
+    return load_workspace(std::nullopt);
 }
 
 std::vector<ChatSessionManager::ExpiredSession>

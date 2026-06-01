@@ -5,6 +5,8 @@
 #include "ragger/embedder.h"
 #include "ragger/config.h"
 #include "ragger/lang.h"
+#include "ragger/util/fs.h"
+#include "ragger/util/time.h"
 #include <format>
 #include "nlohmann_json.hpp"
 
@@ -115,8 +117,8 @@ struct SqliteBackend::Impl {
 
         exec("PRAGMA journal_mode=WAL");
         exec("PRAGMA foreign_keys = ON");
-        // Only ensure users table + user columns exist (skip memories/BM25)
-        create_users_schema();
+        // Only ensure users + session tables exist (skip memory tables/FTS).
+        create_user_schema();
     }
 
     ~Impl() { close(); }
@@ -133,24 +135,12 @@ struct SqliteBackend::Impl {
     }
 
     void create_schema() {
-        // Users table — token-based auth
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS users (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                username   TEXT NOT NULL UNIQUE,
-                token_hash TEXT NOT NULL,
-                created    TEXT NOT NULL,
-                modified   TEXT NOT NULL
-            )
-        )");
-        exec(R"(
-            CREATE TRIGGER IF NOT EXISTS users_modified
-            AFTER UPDATE ON users
-            BEGIN
-                UPDATE users SET modified = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-                WHERE id = NEW.id;
-            END
-        )");
+        // Users, settings, and session tables — credentials (for read-only
+        // document access) plus web/chat session persistence. These are a
+        // separate concern from the v2 memory tables ("out of scope" in
+        // scripts/schema_v2_fading_memory.sql); one declarative definition,
+        // shared with the DB-only constructor.
+        create_user_schema();
 
         // ---- v2 fading-memory schema (issue #33): turns / summaries /
         //      decisions / documents / models, with FTS5 (issue #49).
@@ -231,23 +221,9 @@ struct SqliteBackend::Impl {
         )");
         exec("CREATE INDEX IF NOT EXISTS idx_documents_imported_at ON documents(imported_at)");
 
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-        )");
         // FTS5 — external-content virtual tables + sync triggers replace
         // the old hand-rolled bm25_* sidecars (issue #49).
         create_fts_schema();
-
-        // Schema upgrades for the users/sessions tables (idempotent).
-        // The v2 memory tables are created fresh — no in-place migration.
-        migrate_add_token_rotated_at();
-        migrate_add_preferred_model();
-        migrate_add_password_hash();
-        migrate_add_web_sessions();
-        migrate_add_chat_sessions();
     }
 
     /// FTS5 external-content virtual tables + sync triggers for the four
@@ -327,114 +303,65 @@ struct SqliteBackend::Impl {
         END)");
     }
 
-    void migrate_add_token_rotated_at() {
-        // Check if column exists
-        sqlite3_stmt* stmt;
-        sqlite3_prepare_v2(db, "PRAGMA table_info(users)", -1, &stmt, nullptr);
-        bool has_token_rotated_at = false;
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            std::string col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-            if (col == "token_rotated_at") has_token_rotated_at = true;
-        }
-        sqlite3_finalize(stmt);
-
-        if (!has_token_rotated_at) {
-            exec("ALTER TABLE users ADD COLUMN token_rotated_at TEXT");
-            std::cerr << ragger::lang::MSG_MIGRATE_TOKEN_ROTATED_AT << "\n";
-        }
-    }
-
-    void migrate_add_preferred_model() {
-        // Check if column exists
-        sqlite3_stmt* stmt;
-        sqlite3_prepare_v2(db, "PRAGMA table_info(users)", -1, &stmt, nullptr);
-        bool has_preferred_model = false;
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            std::string col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-            if (col == "preferred_model") has_preferred_model = true;
-        }
-        sqlite3_finalize(stmt);
-
-        if (!has_preferred_model) {
-            exec("ALTER TABLE users ADD COLUMN preferred_model TEXT");
-            std::cerr << ragger::lang::MSG_MIGRATE_PREFERRED_MODEL << "\n";
-        }
-    }
-
-    void migrate_add_password_hash() {
-        sqlite3_stmt* stmt;
-        sqlite3_prepare_v2(db, "PRAGMA table_info(users)", -1, &stmt, nullptr);
-        bool has_password_hash = false;
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            std::string col = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-            if (col == "password_hash") has_password_hash = true;
-        }
-        sqlite3_finalize(stmt);
-
-        if (!has_password_hash) {
-            exec("ALTER TABLE users ADD COLUMN password_hash TEXT");
-            std::cerr << ragger::lang::MSG_MIGRATE_PASSWORD_HASH << "\n";
-        }
-    }
-
-    void migrate_add_web_sessions() {
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS web_sessions (
-                token    TEXT PRIMARY KEY,
-                username TEXT NOT NULL,
-                user_id  INTEGER NOT NULL,
-                created  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                expires  TEXT NOT NULL
-            )
-        )");
-    }
-
-    void migrate_add_chat_sessions() {
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS chat_sessions (
-                session_id TEXT PRIMARY KEY,
-                web_token  TEXT,
-                username   TEXT NOT NULL,
-                messages   TEXT NOT NULL,
-                created    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                updated    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                FOREIGN KEY (web_token) REFERENCES web_sessions(token) ON DELETE SET NULL
-            )
-        )");
-    }
-
-    /// Minimal schema for user management only (no memories/BM25).
-    void create_users_schema() {
+    /// Users, settings, and session tables — declarative, no in-place
+    /// migration (single-user app; pre-v2 data is exported out-of-band).
+    /// `users` mirrors the reference DDL (scripts/schema_v2_fading_memory.sql)
+    /// plus `password_hash` for credentialed read access to `documents`;
+    /// settings/web_sessions/chat_sessions are the separate web/chat
+    /// session-persistence concern. Shared by both constructors.
+    void create_user_schema() {
         exec(R"(
             CREATE TABLE IF NOT EXISTS users (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                username   TEXT NOT NULL UNIQUE,
-                token_hash TEXT NOT NULL,
-                created    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                modified   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                username      TEXT NOT NULL UNIQUE,
+                token_hash    TEXT NOT NULL,
+                password_hash TEXT,
+                created       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime')),
+                modified      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime'))
             )
         )");
-        
+        exec(R"(
+            CREATE TRIGGER IF NOT EXISTS users_modified
+            AFTER UPDATE ON users
+            BEGIN
+                UPDATE users SET modified = strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime')
+                WHERE id = NEW.id;
+            END
+        )");
         exec(R"(
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             )
         )");
-        
-        migrate_add_token_rotated_at();
-        migrate_add_preferred_model();
-        migrate_add_password_hash();
-        migrate_add_web_sessions();
-        migrate_add_chat_sessions();
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS web_sessions (
+                token    TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                user_id  INTEGER NOT NULL,
+                created  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime')),
+                expires  TEXT NOT NULL
+            )
+        )");
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                session_id TEXT PRIMARY KEY,
+                web_token  TEXT,
+                username   TEXT NOT NULL,
+                messages   TEXT NOT NULL,
+                created    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime')),
+                updated    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime')),
+                FOREIGN KEY (web_token) REFERENCES web_sessions(token) ON DELETE SET NULL
+            )
+        )");
     }
 
     // ---- path normalization -------------------------------------------
     static std::string normalize_path(const std::string& text) {
         if (!config().normalize_home_path) return text;
-        const char* home = std::getenv("HOME");
-        if (!home) return text;
-        std::string prefix = std::string(home) + "/";
+        std::string home = home_dir();
+        if (home.empty()) return text;
+        std::string prefix = home + "/";
         std::string out = text;
         size_t pos = 0;
         while ((pos = out.find(prefix, pos)) != std::string::npos) {
@@ -445,17 +372,10 @@ struct SqliteBackend::Impl {
     }
 
     // ---- local timestamp ("%F %T" == "YYYY-MM-DD HH:MM:SS") ----------
-    static std::string local_timestamp(std::time_t tt) {
-        std::tm local{};
-        localtime_r(&tt, &local);
-        char buf[32];
-        std::strftime(buf, sizeof(buf), "%F %T", &local);
-        return std::string(buf);
-    }
-    static std::string local_timestamp() {
-        return local_timestamp(
-            std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
-    }
+    // Thin aliases over the shared formatter (ragger/util/time.h) so every
+    // DB timestamp uses one local-time format.
+    static std::string local_timestamp(std::time_t tt) { return db_timestamp(tt); }
+    static std::string local_timestamp() { return db_timestamp(); }
 
     // ---- cache --------------------------------------------------------
     void invalidate_cache() { cache_valid = false; }
@@ -1667,62 +1587,6 @@ void SqliteBackend::create_web_session(const std::string& token, const std::stri
         sqlite3_bind_int(stmt, 3, user_id);
         sqlite3_bind_text(stmt, 4, created.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 5, expires.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_step(stmt);
-    }
-    sqlite3_finalize(stmt);
-}
-
-std::optional<std::string> SqliteBackend::get_user_preferred_model(const std::string& username) {
-    sqlite3_stmt* stmt = nullptr;
-    const char* sql = "SELECT preferred_model FROM users WHERE username = ?";
-    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
-        return std::nullopt;
-    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
-    
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char* model = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        auto result = model ? std::make_optional(std::string(model)) : std::nullopt;
-        sqlite3_finalize(stmt);
-        return result;
-    }
-    sqlite3_finalize(stmt);
-    return std::nullopt;
-}
-
-void SqliteBackend::update_user_preferred_model(const std::string& username, const std::string& model) {
-    sqlite3_stmt* stmt = nullptr;
-    const char* sql = "INSERT OR REPLACE INTO users (username, preferred_model) VALUES (?,?)";
-    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, model.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_step(stmt);
-    }
-    sqlite3_finalize(stmt);
-}
-
-std::optional<std::string> SqliteBackend::get_user_token_rotated_at(const std::string& username) {
-    sqlite3_stmt* stmt = nullptr;
-    const char* sql = "SELECT token_rotated_at FROM users WHERE username = ?";
-    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) != SQLITE_OK)
-        return std::nullopt;
-    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
-    
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char* rotated = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        auto result = rotated ? std::make_optional(std::string(rotated)) : std::nullopt;
-        sqlite3_finalize(stmt);
-        return result;
-    }
-    sqlite3_finalize(stmt);
-    return std::nullopt;
-}
-
-void SqliteBackend::update_user_token_rotated_at(const std::string& username, const std::string& timestamp) {
-    sqlite3_stmt* stmt = nullptr;
-    const char* sql = "UPDATE users SET token_rotated_at = ? WHERE username = ?";
-    if (sqlite3_prepare_v2(pImpl->db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, timestamp.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_step(stmt);
     }
     sqlite3_finalize(stmt);

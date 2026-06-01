@@ -36,11 +36,8 @@ constexpr const char* MSG_LOADED_MEMORIES     = "Loaded {} memories";
 constexpr const char* MSG_BACKFILLED_EMBEDDINGS  = "Backfilled embeddings for {} row(s).";
 
 // --- Migration / maintenance ---
-// (Legacy in-place `memories`-table migrations were removed — pre-v2 data is
-//  copied into a fresh v2 DB out-of-band, not migrated in place.)
-constexpr const char* MSG_MIGRATE_TOKEN_ROTATED_AT   = "Migrated users: added token_rotated_at column";
-constexpr const char* MSG_MIGRATE_PREFERRED_MODEL    = "Migrated users: added preferred_model column";
-constexpr const char* MSG_MIGRATE_PASSWORD_HASH      = "Migrated users: added password_hash column";
+// (The schema is declarative — there is no in-place migration. Pre-v2 data is
+//  copied into a fresh v2 DB out-of-band.)
 constexpr const char* MSG_REBUILD_EMBEDDINGS_PROGRESS = "\rRebuilding embeddings: {}/{}";
 constexpr const char* WARN_FORMAT_LOAD_FAILED        = "Failed to load format {}: {}";
 constexpr const char* MSG_STORED_WITH_ID      = "Stored with id: {}";

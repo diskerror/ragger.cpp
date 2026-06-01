@@ -137,24 +137,11 @@ std::string ensure_token() {
     return token;
 }
 
-// --- Static ISO timestamp (informational use only) ---
-
-static std::string iso_timestamp_now() {
-    auto tt = std::chrono::system_clock::to_time_t(
-                  std::chrono::system_clock::now());
-    std::tm gm{};
-    gmtime_r(&tt, &gm);
-    char buf[32];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &gm);
-    return buf;
-}
-
 // NOTE: The old time-seeded token rotation system (server.secret +
 // token_for_minute + 24h verify window) has been removed. Tokens are now
 // plain random values: generate_token() → hash_token() → stored in DB.
-// The framework (users.token_hash, users.token_rotated_at, issue_token,
-// verify_token) is kept for the planned labeled-token system (see GitHub
-// issue: "Labeled API tokens").
+// The framework (users.token_hash, issue_token, verify_token) is kept for the
+// planned labeled-token system (see GitHub issue: "Labeled API tokens").
 
 // PBKDF2 password hashing
 static const int PBKDF2_ITERATIONS = 600000;
@@ -253,13 +240,11 @@ bool verify_password(StorageBackend& db, const std::string& user, const std::str
 }
 
 std::string issue_token(StorageBackend& db, const std::string& user) {
-    // Generate a fresh random token, store its hash, record issue time.
-    // Returns the raw token — caller must deliver it to the user once;
-    // only the hash is stored in the DB.
+    // Generate a fresh random token and store its hash. Returns the raw token —
+    // caller must deliver it to the user once; only the hash is stored.
     std::string token = generate_token();
     std::string token_hash = hash_token(token);
     db.update_user_token(user, token_hash);
-    db.update_user_token_rotated_at(user, iso_timestamp_now());
     return token;
 }
 

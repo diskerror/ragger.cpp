@@ -41,6 +41,8 @@
 #include "ragger/sqlite_backend.h"
 #include "ragger/server.h"
 #include "ragger/embedder.h"
+#include "ragger/util/fs.h"
+#include "ragger/util/time.h"
 #include "ragger/storage_types.h"
 #include "ragger/sqlite_backend.h"
 #include "nlohmann_json.hpp"
@@ -62,9 +64,7 @@ static void do_import(ragger::RaggerMemory &memory,
         throw std::runtime_error(std::format(ragger::lang::ERR_FILE_NOT_FOUND, filepath));
     }
 
-    std::ifstream file(filepath);
-    std::string text((std::istreambuf_iterator<char>(file)),
-                     std::istreambuf_iterator<char>());
+    std::string text = ragger::read_file_to_string(filepath);
 
     auto chunks = ragger::chunk_markdown(text, min_chunk_size);
 
@@ -72,16 +72,7 @@ static void do_import(ragger::RaggerMemory &memory,
     std::println(ragger::lang::MSG_IMPORTING_CHUNKS, chunks.size(), filename);
 
     // Single timestamp shared across every chunk of this import (issue #48).
-    std::string import_ts;
-    {
-        auto now = std::chrono::system_clock::now();
-        auto tt  = std::chrono::system_clock::to_time_t(now);
-        std::tm gm{};
-        gmtime_r(&tt, &gm);
-        char buf[32];
-        std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &gm);
-        import_ts = std::string(buf) + "Z";
-    }
+    std::string import_ts = ragger::db_timestamp();
 
     const int total = static_cast<int>(chunks.size());
 

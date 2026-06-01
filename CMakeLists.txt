@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 if(APPLE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
 endif()
-project(ragger VERSION 0.9.3 LANGUAGES CXX)
+project(ragger VERSION 0.9.4 LANGUAGES CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -129,6 +129,9 @@ add_library(ragger_core STATIC
     src/chat.cpp
     src/client.cpp
     src/config.cpp
+    src/util/time.cpp
+    src/util/fs.cpp
+    src/workspace.cpp
     src/embedder.cpp
     src/embed_executor.cpp
     src/tokenizer_wrapper.cpp

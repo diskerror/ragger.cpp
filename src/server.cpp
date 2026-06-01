@@ -182,16 +182,11 @@ struct Server::Impl {
             }).detach();
         }
 
-        // 2. Purge old conversation entries from all known user DBs
+        // 2. Purge old conversation entries. The retention cutoff is computed
+        //    inside cleanup_old_conversations() (local-time, matching the
+        //    stored turn timestamps) — see ragger/util/time.h.
         int conversations_cleaned = 0;
         if (max_age_hours > 0) {
-            auto now = std::chrono::system_clock::now();
-            auto cutoff = now - std::chrono::duration_cast<std::chrono::system_clock::duration>(
-                std::chrono::duration<double, std::ratio<3600>>(max_age_hours));
-            auto cutoff_t = std::chrono::system_clock::to_time_t(cutoff);
-            char cutoff_str[32];
-            std::strftime(cutoff_str, sizeof(cutoff_str), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&cutoff_t));
-
             // Single-user mode: clean up the main memory's DB
             try {
                 ragger::SqliteBackend temp_backend(memory.backend()->db_path());
@@ -331,7 +326,7 @@ struct Server::Impl {
                 if (pw) username = pw->pw_name;
                 
                 int user_id = memory.backend()->create_user(username, token_hash);
-                user = UserInfo{user_id, username, token_hash, ""};
+                user = UserInfo{user_id, username, token_hash};
                 Diskerror::logger::info(std::format(lang::MSG_CREATED_USER, username, user_id));
             }
             default_user_ = user;
@@ -674,58 +669,6 @@ struct Server::Impl {
             }
         });
 
-        // PUT /user/model — set preferred model
-        // PUT /user/model
-        svr.Put("/user/model", [this](const httplib::Request& req, httplib::Response& res) {
-            auto user = _check_auth(req);
-            if (!user) { res.status = 401; res.set_content("Unauthorized", "text/plain"); return; }
-            try {
-                auto body = json::parse(req.body);
-                std::string model = body.value("model", "");
-                if (model.empty()) { res.status = 400; res.set_content(lang::HTTP_MISSING_MODEL, "text/plain"); return; }
-                std::string resolved = config().resolve_model(model);
-                memory.backend()->update_user_preferred_model(user->username, resolved);
-                preload_local_model(resolved);
-                json response = {{"status", "updated"}, {"model", resolved}};
-                Diskerror::logger::debug("PUT /user/model 200");
-                res.set_content(response.dump(), "application/json");
-            } catch (const json::exception& e) {
-                res.status = 400; res.set_content(std::string("JSON error: ") + e.what(), "text/plain");
-            } catch (const std::exception& e) {
-                Diskerror::logger::critical(std::string("PUT /user/model failed: ") + e.what());
-                res.status = 500; res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
-            }
-        });
-
-        // GET /user/model
-        svr.Get("/user/model", [this](const httplib::Request& req, httplib::Response& res) {
-            auto user = _check_auth(req);
-            if (!user) { res.status = 401; res.set_content("Unauthorized", "text/plain"); return; }
-            try {
-                auto model_opt = memory.backend()->get_user_preferred_model(user->username);
-                json response = model_opt ? json{{"model", *model_opt}} : json{{"model", nullptr}};
-                Diskerror::logger::debug("GET /user/model 200");
-                res.set_content(response.dump(), "application/json");
-            } catch (const std::exception& e) {
-                Diskerror::logger::critical(std::string("GET /user/model failed: ") + e.what());
-                res.status = 500; res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
-            }
-        });
-
-        // DELETE /user/model
-        svr.Delete("/user/model", [this](const httplib::Request& req, httplib::Response& res) {
-            auto user = _check_auth(req);
-            if (!user) { res.status = 401; res.set_content("Unauthorized", "text/plain"); return; }
-            try {
-                memory.backend()->update_user_preferred_model(user->username, "");
-                Diskerror::logger::debug("DELETE /user/model 200");
-                res.set_content(R"({"status":"cleared"})", "application/json");
-            } catch (const std::exception& e) {
-                Diskerror::logger::critical(std::string("DELETE /user/model failed: ") + e.what());
-                res.status = 500; res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
-            }
-        });
-
         // GET /user/token
         svr.Get("/user/token", [this](const httplib::Request& req, httplib::Response& res) {
             auto user = _check_auth(req);
@@ -787,10 +730,8 @@ struct Server::Impl {
                     Diskerror::logger::critical(std::format(lang::ERR_MEMORY_SEARCH_FAIL, e.what()));
                 }
 
-                // Resolve model
-                auto preferred_model = memory.backend()->get_user_preferred_model(user->username);
-                std::string use_model = preferred_model.value_or("");
-                if (use_model.empty()) use_model = request_model;
+                // Resolve model: request override, else the server default.
+                std::string use_model = request_model;
                 if (use_model.empty()) use_model = inference_->model;
                 use_model = config().resolve_model(use_model);
 

@@ -5,6 +5,7 @@
 #include "ragger/config.h"
 #include "ragger/api_formats.h"
 #include "ragger/lang.h"
+#include "ragger/util/time.h"
 #include "nlohmann_json.hpp"
 
 #include <curl/curl.h>
@@ -521,15 +522,7 @@ void InferenceClient::chat_stream(const std::vector<Message>& messages,
 
     // Dump raw request payload to file if requested (pretty-printed for readability)
     if (!payload_dump_dir_.empty()) {
-        auto now = std::chrono::system_clock::now();
-        auto tt  = std::chrono::system_clock::to_time_t(now);
-        auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       now.time_since_epoch()).count() % 1000;
-        std::ostringstream fname;
-        fname << payload_dump_dir_ << "/request_";
-        fname << std::put_time(std::localtime(&tt), "%Y%m%d_%H%M%S");
-        fname << "_" << std::setfill('0') << std::setw(3) << ms << ".json";
-        std::ofstream f(fname.str());
+        std::ofstream f(payload_dump_dir_ + "/request_" + file_stamp() + ".json");
         if (f.is_open()) f << payload.dump(2);
     }
 
@@ -575,15 +568,7 @@ void InferenceClient::chat_stream(const std::vector<Message>& messages,
 
     // Dump raw SSE response if requested
     if (!payload_dump_dir_.empty()) {
-        auto now = std::chrono::system_clock::now();
-        auto tt  = std::chrono::system_clock::to_time_t(now);
-        auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       now.time_since_epoch()).count() % 1000;
-        std::ostringstream fname;
-        fname << payload_dump_dir_ << "/response_";
-        fname << std::put_time(std::localtime(&tt), "%Y%m%d_%H%M%S");
-        fname << "_" << std::setfill('0') << std::setw(3) << ms << ".txt";
-        std::ofstream f(fname.str());
+        std::ofstream f(payload_dump_dir_ + "/response_" + file_stamp() + ".txt");
         if (f.is_open()) f << stream_data.raw_response;
     }
 

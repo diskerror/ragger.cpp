@@ -3,6 +3,7 @@
  */
 #include "ragger/config.h"
 #include "ragger/lang.h"
+#include "ragger/util/fs.h"
 
 #include <cstdlib>
 #include <ctime>
@@ -37,14 +38,9 @@ std::string normalize_lm_proxy_url(std::string url) {
 
 std::string expand_path(const std::string& path) {
     if (path.empty() || path[0] != '~') return path;
-    const char* home = std::getenv("HOME");
-    if (!home) {
-        // Fallback: look up home directory from passwd entry
-        struct passwd* pw = getpwuid(getuid());
-        if (pw && pw->pw_dir) home = pw->pw_dir;
-    }
-    if (!home) return path;
-    return std::string(home) + path.substr(1);
+    std::string home = home_dir();
+    if (home.empty()) return path;
+    return home + path.substr(1);
 }
 
 std::string Config::resolved_db_path() const {
