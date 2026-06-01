@@ -1120,12 +1120,17 @@ struct SqliteBackend::Impl {
     }
 
     int rebuild_embeddings(Embedder& emb_ref) {
-        struct TableSpec { const char* table; const char* id_col; const char* text_col; };
+        struct TableSpec {
+            const char* table;
+            const char* id_col;
+            const char* text_col;
+            const char* extra_col;  // if set, combined with text_col via turn_embed_text
+        };
         static constexpr TableSpec tables[] = {
-            { "turns",     "turn_id",     "user_text" },
-            { "summaries", "summary_id",  "text"      },
-            { "decisions", "decision_id", "text"      },
-            { "documents", "document_id", "text"      },
+            { "turns",     "turn_id",     "user_text", "assistant_text" },
+            { "summaries", "summary_id",  "text",      nullptr          },
+            { "decisions", "decision_id", "text",      nullptr          },
+            { "documents", "document_id", "text",      nullptr          },
         };
 
         int total_count = 0;
@@ -1140,7 +1145,9 @@ struct SqliteBackend::Impl {
 
         int doc_count = 0;
         for (auto& t : tables) {
-            auto sel = std::format("SELECT {} AS id, {} AS text FROM {}", t.id_col, t.text_col, t.table);
+            std::string sel = t.extra_col
+                ? std::format("SELECT {} AS id, {}, {} FROM {}", t.id_col, t.text_col, t.extra_col, t.table)
+                : std::format("SELECT {} AS id, {} AS text FROM {}", t.id_col, t.text_col, t.table);
             auto upd = std::format("UPDATE {} SET embedding = ? WHERE {} = ?", t.table, t.id_col);
 
             sqlite3_stmt* select_stmt = nullptr;
@@ -1150,10 +1157,18 @@ struct SqliteBackend::Impl {
 
             while (sqlite3_step(select_stmt) == SQLITE_ROW) {
                 int id = sqlite3_column_int(select_stmt, 0);
-                const char* text = reinterpret_cast<const char*>(sqlite3_column_text(select_stmt, 1));
-                if (!text) continue;
+                const char* col1 = reinterpret_cast<const char*>(sqlite3_column_text(select_stmt, 1));
+                if (!col1) continue;
 
-                auto emb = emb_ref.encode(text);
+                std::string embed_text;
+                if (t.extra_col) {
+                    const char* col2 = reinterpret_cast<const char*>(sqlite3_column_text(select_stmt, 2));
+                    embed_text = turn_embed_text(col1, col2 ? col2 : "");
+                } else {
+                    embed_text = col1;
+                }
+
+                auto emb = emb_ref.encode(embed_text);
                 bind_embedding(update_stmt, 1, emb);
                 sqlite3_bind_int(update_stmt, 2, id);
                 sqlite3_step(update_stmt);
