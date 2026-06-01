@@ -1119,68 +1119,57 @@ struct SqliteBackend::Impl {
         return results;
     }
 
-    // Rebuild the FTS5 keyword indexes from the content tables. (Kept under
-    // the rebuild_bm25 name for CLI/source compatibility; the underlying
-    // index is now FTS5, not the hand-rolled BM25.) Returns the summary count.
-    int rebuild_bm25() {
-        exec("INSERT INTO summaries_fts(summaries_fts) VALUES('rebuild')");
-        exec("INSERT INTO documents_fts(documents_fts) VALUES('rebuild')");
-        exec("INSERT INTO decisions_fts(decisions_fts) VALUES('rebuild')");
-        exec("INSERT INTO turns_fts(turns_fts) VALUES('rebuild')");
-        invalidate_cache();
-        return count();
-    }
-
     int rebuild_embeddings(Embedder& emb_ref) {
-        // Get total count first
-        sqlite3_stmt* count_stmt = nullptr;
-        sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM summaries",
-                           -1, &count_stmt, nullptr);
-        int total_count = 0;
-        if (sqlite3_step(count_stmt) == SQLITE_ROW) {
-            total_count = sqlite3_column_int(count_stmt, 0);
-        }
-        sqlite3_finalize(count_stmt);
-        
-        // Re-embed all documents
-        sqlite3_stmt* select_stmt = nullptr;
-        sqlite3_prepare_v2(db, "SELECT summary_id AS id, text FROM summaries",
-                           -1, &select_stmt, nullptr);
+        struct TableSpec { const char* table; const char* id_col; const char* text_col; };
+        static constexpr TableSpec tables[] = {
+            { "turns",     "turn_id",     "user_text" },
+            { "summaries", "summary_id",  "text"      },
+            { "decisions", "decision_id", "text"      },
+            { "documents", "document_id", "text"      },
+        };
 
-        sqlite3_stmt* update_stmt = nullptr;
-        sqlite3_prepare_v2(db,
-            "UPDATE summaries SET embedding = ? WHERE summary_id = ?",
-            -1, &update_stmt, nullptr);
+        int total_count = 0;
+        for (auto& t : tables) {
+            sqlite3_stmt* s = nullptr;
+            auto q = std::format("SELECT COUNT(*) FROM {}", t.table);
+            sqlite3_prepare_v2(db, q.c_str(), -1, &s, nullptr);
+            if (sqlite3_step(s) == SQLITE_ROW)
+                total_count += sqlite3_column_int(s, 0);
+            sqlite3_finalize(s);
+        }
 
         int doc_count = 0;
-        while (sqlite3_step(select_stmt) == SQLITE_ROW) {
-            int id = sqlite3_column_int(select_stmt, 0);
-            const char* text = reinterpret_cast<const char*>(sqlite3_column_text(select_stmt, 1));
-            if (!text) continue;
+        for (auto& t : tables) {
+            auto sel = std::format("SELECT {} AS id, {} AS text FROM {}", t.id_col, t.text_col, t.table);
+            auto upd = std::format("UPDATE {} SET embedding = ? WHERE {} = ?", t.table, t.id_col);
 
-            // Generate new embedding
-            auto emb = emb_ref.encode(text);
+            sqlite3_stmt* select_stmt = nullptr;
+            sqlite3_prepare_v2(db, sel.c_str(), -1, &select_stmt, nullptr);
+            sqlite3_stmt* update_stmt = nullptr;
+            sqlite3_prepare_v2(db, upd.c_str(), -1, &update_stmt, nullptr);
 
-            // Update database
-            bind_embedding(update_stmt, 1, emb);
-            sqlite3_bind_int(update_stmt, 2, id);
-            sqlite3_step(update_stmt);
-            sqlite3_reset(update_stmt);
+            while (sqlite3_step(select_stmt) == SQLITE_ROW) {
+                int id = sqlite3_column_int(select_stmt, 0);
+                const char* text = reinterpret_cast<const char*>(sqlite3_column_text(select_stmt, 1));
+                if (!text) continue;
 
-            ++doc_count;
+                auto emb = emb_ref.encode(text);
+                bind_embedding(update_stmt, 1, emb);
+                sqlite3_bind_int(update_stmt, 2, id);
+                sqlite3_step(update_stmt);
+                sqlite3_reset(update_stmt);
 
-            // Print progress counter
-            std::cout << std::format(ragger::lang::MSG_REBUILD_EMBEDDINGS_PROGRESS,
-                                     doc_count, total_count);
-            std::cout.flush();
+                ++doc_count;
+                std::cout << std::format(ragger::lang::MSG_REBUILD_EMBEDDINGS_PROGRESS,
+                                         doc_count, total_count);
+                std::cout.flush();
+            }
+
+            sqlite3_finalize(select_stmt);
+            sqlite3_finalize(update_stmt);
         }
 
-        sqlite3_finalize(select_stmt);
-        sqlite3_finalize(update_stmt);
-        
-        // Print final newline
         std::cout << "\n";
-        
         invalidate_cache();
         return doc_count;
     }
@@ -1470,8 +1459,6 @@ int SqliteBackend::count() const { return pImpl->count(); }
 std::vector<SearchResult> SqliteBackend::load_all(const std::string& collection) {
     return pImpl->load_all(collection);
 }
-
-int SqliteBackend::rebuild_bm25() { return pImpl->rebuild_bm25(); }
 
 int SqliteBackend::rebuild_embeddings(Embedder& embedder) {
     return pImpl->rebuild_embeddings(embedder);

@@ -112,9 +112,6 @@ public:
     /// Load all memories. Returns vector of SearchResult (score=0).
     virtual std::vector<SearchResult> load_all(const std::string& collection = "") = 0;
 
-    /// Rebuild BM25 index from all stored documents. Returns doc count.
-    virtual int rebuild_bm25() = 0;
-
     /// Rebuild embeddings for all stored documents. Returns doc count.
     virtual int rebuild_embeddings(Embedder& embedder) = 0;
 

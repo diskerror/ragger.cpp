@@ -77,9 +77,6 @@ public:
     /// Load all memories (for export). Optionally filter by collection.
     std::vector<SearchResult> load_all(const std::string& collection = "");
 
-    /// Rebuild BM25 index. Returns doc count.
-    int rebuild_bm25();
-
     /// Rebuild embeddings for all documents. Returns doc count.
     int rebuild_embeddings();
 

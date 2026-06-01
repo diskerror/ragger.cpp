@@ -124,10 +124,6 @@ std::vector<SearchResult> RaggerMemory::load_all(const std::string& collection) 
     return backend_->load_all(collection);
 }
 
-int RaggerMemory::rebuild_bm25() {
-    return backend_->rebuild_bm25();
-}
-
 int RaggerMemory::rebuild_embeddings() {
     return backend_->rebuild_embeddings(*embedder_);
 }

@@ -85,9 +85,6 @@ public:
     /// Load all memories. Returns vector of SearchResult (score=0).
     std::vector<SearchResult> load_all(const std::string& collection = "") override;
 
-    /// Rebuild BM25 index from all stored documents. Returns doc count.
-    int rebuild_bm25() override;
-
     /// Rebuild embeddings for all stored documents. Returns doc count.
     int rebuild_embeddings(Embedder& embedder) override;
     int backfill_embeddings(Embedder& embedder) override;

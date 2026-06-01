@@ -892,12 +892,6 @@ int main(int argc, char **argv) {
             ragger::run_mcp(*mem_ptr);
 
         }
-        else if (command == "rebuild-bm25") {
-            ragger::RaggerMemory memory(db_path, model_dir);
-            int count = memory.rebuild_bm25();
-            std::cout << std::format(ragger::lang::MSG_BM25_REBUILT, count) << "\n";
-
-        }
         else if (command == "rebuild-embeddings") {
 
             // Get count first (before loading full memory)

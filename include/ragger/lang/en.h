@@ -136,7 +136,6 @@ constexpr const char* MSG_USER_REGISTERED     = "✓ Registered in database (use
 constexpr const char* WARN_DB_DEFERRED        = "Warning: DB registration deferred ({})";
 
 // --- Rebuild ---
-constexpr const char* MSG_BM25_REBUILT        = "✓ BM25 index rebuilt: {} documents";
 constexpr const char* MSG_REBUILD_CONFIRM     = "This will re-embed all {} memories. The server should be stopped first.";
 constexpr const char* PROMPT_CONTINUE         = "Continue? [y/N] ";
 constexpr const char* MSG_ABORTED             = "Aborted.";
@@ -272,7 +271,6 @@ Commands:
   housekeeping       Trigger housekeeping on running daemon
   reload             Reload config on running daemon (SIGHUP)
                      options: --user <name>, --dry-run
-  rebuild-bm25       Rebuild the BM25 keyword index
   rebuild-embeddings Rebuild embeddings for all memories
   show-embedding-model  Show current embedding model info
   embed               Embed text from stdin, write JSON array to stdout
