@@ -90,6 +90,14 @@ if [ ! -f "$RAGGER_HOME/SOUL.md" ] && [ -f "$SRC/SOUL.md" ]; then
     cp "$SRC/SOUL.md" "$RAGGER_HOME/SOUL.md"
 fi
 
+# Agent memory-usage instructions (served by `ragger mcp` via the MCP
+# initialize `instructions` field). Install if missing — preserves user edits.
+if [ ! -f "$RAGGER_HOME/agent-memory-instructions.md" ] && \
+   [ -f "$SRC/docs/agent-memory-instructions.md" ]; then
+    info "Installing agent memory instructions"
+    cp "$SRC/docs/agent-memory-instructions.md" "$RAGGER_HOME/agent-memory-instructions.md"
+fi
+
 # Web UI
 if [ -d "$SRC/web" ]; then
     info "Installing web UI to $WEB_DIR"
