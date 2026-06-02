@@ -5,16 +5,22 @@
 
 #include "ragger/lang.h"
 
-#include <cstring>
 #include <format>
 #include <stdexcept>
-#include <sstream>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+#include <string>
+
+#include <curl/curl.h>
 
 namespace ragger {
+
+namespace {
+// libcurl write callback — append the response body into a std::string.
+size_t write_to_string(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    auto* out = static_cast<std::string*>(userdata);
+    out->append(ptr, size * nmemb);
+    return size * nmemb;
+}
+} // namespace
 
 RaggerClient::RaggerClient(const std::string& host, int port,
                            const std::string& token)
@@ -200,104 +206,48 @@ RaggerClient::HttpResponse RaggerClient::http_delete(const std::string& path) co
 RaggerClient::HttpResponse RaggerClient::http_request(const std::string& method,
                                                         const std::string& path,
                                                         const std::string& body) const {
-    // Create socket
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
-        throw std::runtime_error(std::format(lang::ERR_CLIENT_SOCKET, strerror(errno)));
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        throw std::runtime_error(std::format(lang::ERR_CLIENT_SOCKET, "curl_easy_init failed"));
     }
-    
-    // Set timeout (5 seconds)
-    struct timeval timeout;
-    timeout.tv_sec = 5;
-    timeout.tv_usec = 0;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-    
-    // Connect
-    struct sockaddr_in server_addr;
-    std::memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(port_);
-    
-    if (inet_pton(AF_INET, host_.c_str(), &server_addr.sin_addr) <= 0) {
-        close(sock);
-        throw std::runtime_error(std::format(lang::ERR_CLIENT_ADDRESS, host_));
-    }
-    
-    if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        close(sock);
-        throw std::runtime_error(std::format(lang::ERR_CLIENT_CONNECT, strerror(errno)));
-    }
-    
-    // Build HTTP request
-    std::string request = std::format("{0} {1} HTTP/1.1\r\nHost: {2}:{3}\r\nContent-Type: application/json\r\n", method, path, host_, port_);
-    
+
+    std::string url = std::format("http://{}:{}{}", host_, port_, path);
+    std::string response_body;
+
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    std::string auth_header;
     if (!token_.empty()) {
-        request += std::format("Authorization: Bearer {} \r\n", token_);
+        auth_header = "Authorization: Bearer " + token_;
+        headers = curl_slist_append(headers, auth_header.c_str());
     }
-    
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     if (!body.empty()) {
-        request += std::format("Content-Length: {} \r\n", body.length());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
     }
-    
-    request += "Connection: close\r\n";
-    request += "\r\n";
-    
-    if (!body.empty()) {
-        request += body;
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_to_string);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);        // matches the old 5s socket timeout
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+    CURLcode rc = curl_easy_perform(curl);
+    long status = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (rc != CURLE_OK) {
+        throw std::runtime_error(std::format(lang::ERR_CLIENT_CONNECT, curl_easy_strerror(rc)));
     }
-    
-    // Send request
-    std::string req_str = request;
-    ssize_t sent = send(sock, req_str.c_str(), req_str.length(), 0);
-    if (sent < 0) {
-        close(sock);
-        throw std::runtime_error(std::format(lang::ERR_CLIENT_SEND, strerror(errno)));
-    }
-    
-    // Read response
-    std::string response_data;
-    char buffer[4096];
-    ssize_t bytes_read;
-    
-    while ((bytes_read = recv(sock, buffer, sizeof(buffer), 0)) > 0) {
-        response_data.append(buffer, bytes_read);
-    }
-    
-    close(sock);
-    
-    if (bytes_read < 0) {
-        throw std::runtime_error(std::format(lang::ERR_CLIENT_READ, strerror(errno)));
-    }
-    
-    // Parse response
+
     HttpResponse result;
-    
-    // Find status line
-    size_t status_end = response_data.find("\r\n");
-    if (status_end == std::string::npos) {
-        throw std::runtime_error(lang::ERR_CLIENT_NO_STATUS);
-    }
-    
-    std::string status_line = response_data.substr(0, status_end);
-    
-    // Parse status code (format: "HTTP/1.1 200 OK")
-    size_t first_space = status_line.find(' ');
-    size_t second_space = status_line.find(' ', first_space + 1);
-    
-    if (first_space == std::string::npos || second_space == std::string::npos) {
-        throw std::runtime_error(lang::ERR_CLIENT_BAD_STATUS);
-    }
-    
-    std::string status_code_str = status_line.substr(first_space + 1, second_space - first_space - 1);
-    result.status = std::stoi(status_code_str);
-    
-    // Find body (after \r\n\r\n)
-    size_t body_start = response_data.find("\r\n\r\n");
-    if (body_start != std::string::npos) {
-        result.body = response_data.substr(body_start + 4);
-    }
-    
+    result.status = static_cast<int>(status);
+    result.body = std::move(response_body);
     return result;
 }
 
