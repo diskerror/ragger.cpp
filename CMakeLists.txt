@@ -171,7 +171,7 @@ target_link_libraries(ragger_core PUBLIC
 # ---------------------------------------------------------------------------
 # ragger executable
 # ---------------------------------------------------------------------------
-add_executable(ragger src/main.cpp)
+add_executable(ragger src/main.cpp src/daemon_control.cpp)
 target_link_libraries(ragger PRIVATE
     ragger_core
     c_lib_po)
