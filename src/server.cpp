@@ -11,6 +11,7 @@
 #include "ragger/config.h"
 #include "ragger/inference.h"
 #include "ragger/chat_sessions.h"
+#include "ragger/summarizer.h"
 #include "nlohmann_json.hpp"
 
 #include "httplib.h"
@@ -152,20 +153,7 @@ struct Server::Impl {
             auto* mem_ptr = user_mem;
             std::thread([turns, username, sid_short, inf, mem_ptr]() {
                 try {
-                    // Build conversation text
-                    std::string conv;
-                    for (auto& [user_text, asst_text] : turns) {
-                        conv += "**User:** " + user_text + "\n\n";
-                        conv += "**Assistant:** " + asst_text + "\n\n";
-                    }
-
-                    std::vector<Message> messages = {
-                        {"system", "Summarize this conversation into a concise memory entry. "
-                         "Extract key facts, decisions, and action items. Be brief but complete."},
-                        {"user", conv}
-                    };
-
-                    std::string summary = inf->chat(messages);
+                    std::string summary = summarize_transcript(*inf, turns);
 
                     if (!summary.empty()) {
                         json meta = {

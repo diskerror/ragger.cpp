@@ -9,6 +9,7 @@
 #include "ragger/memory.h"
 #include "ragger/inference.h"
 #include "ragger/workspace.h"
+#include "ragger/summarizer.h"
 #include "ragger/util/time.h"
 #include <unistd.h>  // fork, _exit
 #include <algorithm>
@@ -205,7 +206,7 @@ void Chat::check_orphaned_turns() {
 
         if (!turn_pairs.empty()) {
             // Summarize orphaned turns
-            std::string summary = summarize_conversation(turn_pairs);
+            std::string summary = summarize_transcript(inference_, turn_pairs);
 
             if (!summary.empty()) {
                 // Store summary
@@ -318,38 +319,6 @@ void Chat::quit_summary() {
         if (cur) memory_.set_summary_status(cur->first, "complete");
     }
     catch (...) {
-    }
-}
-
-std::string Chat::summarize_conversation(const std::vector<std::pair<std::string, std::string> > &turns) {
-    if (turns.empty()) {
-        return "";
-    }
-
-    // Build conversation text
-    std::string conversation_text;
-    for (const auto &turn: turns) {
-        conversation_text += "**User:** " + turn.first + "\n\n";
-        conversation_text += "**Assistant:** " + turn.second + "\n\n";
-    }
-
-    // Build summary request
-    std::vector<Message> summary_messages = {
-        {
-            "system", "Summarize this conversation into a concise memory entry. "
-            "Extract: key facts, decisions, questions asked, topics discussed. "
-            "Write in third person past tense. Be brief — this will be stored "
-            "as a memory chunk for future retrieval."
-        },
-        {"user", conversation_text}
-    };
-
-    try {
-        return inference_.chat(summary_messages, model_);
-    }
-    catch (const std::exception &e) {
-        std::cerr << std::format(ragger::lang::WARN_SUMMARY, e.what()) << std::endl;
-        return "";
     }
 }
 

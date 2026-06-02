@@ -91,10 +91,7 @@ private:
 
     /// Summarize conversation on quit
     void quit_summary();
-    
-    /// Generate summary from conversation turns
-    std::string summarize_conversation(const std::vector<std::pair<std::string, std::string>>& turns);
-    
+
     /// Update last activity timestamp
     void update_activity() {
         last_activity_ = std::chrono::system_clock::now();

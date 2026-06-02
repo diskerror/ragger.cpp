@@ -132,6 +132,7 @@ add_library(ragger_core STATIC
     src/util/time.cpp
     src/util/fs.cpp
     src/workspace.cpp
+    src/summarizer.cpp
     src/embedder.cpp
     src/embed_executor.cpp
     src/tokenizer_wrapper.cpp
