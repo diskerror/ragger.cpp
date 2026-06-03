@@ -111,12 +111,14 @@ bool RaggerMemory::update_document_embedding(int document_id,
 }
 
 int RaggerMemory::store_summary(const std::string& text, const std::string& level,
-                                const std::string& status, const std::string& model_name) {
-    return backend_->store_summary(text, level, status, model_name);
+                                const std::string& status, const std::string& model_name,
+                                const std::string& session_guid) {
+    return backend_->store_summary(text, level, status, model_name, session_guid);
 }
 
-std::optional<std::pair<int, std::string>> RaggerMemory::current_session_summary() {
-    return backend_->current_session_summary();
+std::optional<std::pair<int, std::string>>
+RaggerMemory::current_session_summary(const std::string& session_guid) {
+    return backend_->current_session_summary(session_guid);
 }
 
 bool RaggerMemory::update_summary_text(int summary_id, const std::string& text,

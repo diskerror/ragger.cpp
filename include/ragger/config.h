@@ -114,6 +114,7 @@ struct Config {
     // --- Housekeeping / retention ---
     float cleanup_max_age_hours  = 336.0f;  // 2 weeks
     int   housekeeping_interval  = 60;      // seconds; 0 = disabled, <10 clamped to 10
+    int   summary_pause_minutes  = 20;      // idle gap that closes a session's running (L3) summary
 
     // --- System ceilings (0 = no limit) ---
     int  max_search_limit             = 0;

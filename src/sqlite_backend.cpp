@@ -770,18 +770,21 @@ struct SqliteBackend::Impl {
     // Insert a summary row. level: 'turn' (L2) | 'session' (L3) | 'project'.
     // status: 'current' (running L3) | 'complete'. Embeds text, records model.
     int store_summary(const std::string& text, const std::string& level,
-                      const std::string& status, const std::string& model_name) {
+                      const std::string& status, const std::string& model_name,
+                      const std::string& session_guid) {
         std::string t = normalize_path(text);
-        int model_id  = get_or_create_model(model_name);
+        int model_id   = get_or_create_model(model_name);
+        int session_id = get_or_create_session(session_guid);
         auto emb = embedder->encode(t);
 
         Stmt s(db,
-            "INSERT INTO summaries (model_id, text, embedding, level, status, tags, timestamp) "
-            "VALUES (?,?,?,?,?,'',?)");
+            "INSERT INTO summaries (model_id, session_id, text, embedding, level, status, tags, timestamp) "
+            "VALUES (?,?,?,?,?,?,'',?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
-        s.bind(2, t);
-        bind_embedding(s.raw(), 3, emb);
-        s.bind(4, level).bind(5, status).bind(6, local_timestamp());
+        if (session_id) s.bind(2, session_id); else s.bind_null(2);
+        s.bind(3, t);
+        bind_embedding(s.raw(), 4, emb);
+        s.bind(5, level).bind(6, status).bind(7, local_timestamp());
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_cache();
@@ -789,11 +792,17 @@ struct SqliteBackend::Impl {
     }
 
     // The current running L3 session summary, if any: (summary_id, text).
-    std::optional<std::pair<int, std::string>> current_session_summary() {
-        Stmt s(db,
+    std::optional<std::pair<int, std::string>> current_session_summary(
+            const std::string& session_guid) {
+        // Per-session when a guid is given; legacy global when empty.
+        std::string sql =
             "SELECT summary_id, text FROM summaries "
-            "WHERE level='session' AND status='current' "
-            "ORDER BY summary_id DESC LIMIT 1");
+            "WHERE level='session' AND status='current'";
+        if (!session_guid.empty())
+            sql += " AND session_id = (SELECT session_id FROM sessions WHERE guid = ?)";
+        sql += " ORDER BY summary_id DESC LIMIT 1";
+        Stmt s(db, sql);
+        if (!session_guid.empty()) s.bind(1, session_guid);
         std::optional<std::pair<int, std::string>> out;
         if (s.step()) {
             int id = s.column_int(0);
@@ -1361,13 +1370,14 @@ bool SqliteBackend::finalize_turn(int turn_id, const std::string& assistant_text
 }
 
 int SqliteBackend::store_summary(const std::string& text, const std::string& level,
-                                 const std::string& status, const std::string& model_name) {
-    return pImpl->store_summary(text, level, status, model_name);
+                                 const std::string& status, const std::string& model_name,
+                                 const std::string& session_guid) {
+    return pImpl->store_summary(text, level, status, model_name, session_guid);
 }
 
 std::optional<std::pair<int, std::string>>
-SqliteBackend::current_session_summary() {
-    return pImpl->current_session_summary();
+SqliteBackend::current_session_summary(const std::string& session_guid) {
+    return pImpl->current_session_summary(session_guid);
 }
 
 bool SqliteBackend::update_summary_text(int summary_id, const std::string& text,

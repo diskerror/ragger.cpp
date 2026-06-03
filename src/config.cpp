@@ -411,6 +411,7 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
                 int v = std::stoi(val);
                 cfg.housekeeping_interval = (v == 0) ? 0 : std::max(v, 10);
             }
+            else if (key == "summary_pause_minutes") cfg.summary_pause_minutes = std::stoi(val);
         }
         else if (section == "models") {
             cfg.model_aliases[key] = val;
@@ -624,6 +625,7 @@ int reload_config() {
     // Housekeeping / retention
     RELOAD(cleanup_max_age_hours);
     RELOAD(housekeeping_interval);
+    RELOAD(summary_pause_minutes);
     RELOAD(capture_turns);
     RELOAD(build_context);
 

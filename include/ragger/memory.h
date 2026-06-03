@@ -58,8 +58,10 @@ public:
 
     // --- summaries (L2/L3) pipeline (issue #22) ---
     int store_summary(const std::string& text, const std::string& level,
-                      const std::string& status, const std::string& model_name = "");
-    std::optional<std::pair<int, std::string>> current_session_summary();
+                      const std::string& status, const std::string& model_name = "",
+                      const std::string& session_guid = "");
+    std::optional<std::pair<int, std::string>>
+        current_session_summary(const std::string& session_guid = "");
     bool update_summary_text(int summary_id, const std::string& text,
                              const std::string& model_name = "");
     bool set_summary_status(int summary_id, const std::string& status);

@@ -90,10 +90,12 @@ public:
     /// 'current'|'complete'); embeds text, records model. Returns summary_id.
     virtual int store_summary(const std::string& text, const std::string& level,
                               const std::string& status,
-                              const std::string& model_name = "") = 0;
+                              const std::string& model_name = "",
+                              const std::string& session_guid = "") = 0;
     /// The current running L3 session summary, if any: (summary_id, text).
+    /// Scoped to `session_guid` when given; legacy global when empty.
     virtual std::optional<std::pair<int, std::string>>
-        current_session_summary() = 0;
+        current_session_summary(const std::string& session_guid = "") = 0;
     /// Replace a summary's text + embedding (and model). False if absent.
     virtual bool update_summary_text(int summary_id, const std::string& text,
                                      const std::string& model_name = "") = 0;
