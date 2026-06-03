@@ -91,35 +91,8 @@ public:
     /// Resolve which endpoint handles a given model name
     Endpoint& resolve_endpoint(const std::string& model);
 
-    // LM Proxy pass-through (OpenAI-compatible routes)
-    void set_lm_proxy_url(const std::string& url) { lm_proxy_url_ = url; }
-    const std::string& lm_proxy_url() const { return lm_proxy_url_; }
-    struct ProxyResponse {
-        long        status_code;
-        std::string body;
-    };
-    ProxyResponse proxy_request(const std::string& path,
-                                const std::string& method = "GET",
-                                const std::string& body = "");
-    std::vector<std::string> proxy_list_models();
-
-    /// Streaming variant of proxy_request. Forwards each chunk from upstream
-    /// to on_chunk as it arrives. Returning false from on_chunk aborts the
-    /// transfer (libcurl tears down the connection cleanly on next write).
-    /// on_status is invoked once, before the first chunk, with the HTTP status.
-    /// Blocks until the upstream closes or on_chunk returns false.
-    /// Returns final HTTP status (0 if the connection failed before any
-    /// response was received).
-    long proxy_request_stream(
-        const std::string& path,
-        const std::string& method,
-        const std::string& body,
-        std::function<bool(std::string_view)> on_chunk,
-        std::function<void(long)> on_status = nullptr);
-
 private:
     std::string forced_endpoint_;
-    std::string lm_proxy_url_;  // LM proxy URL for OpenAI-compatible pass-through
     std::string payload_dump_dir_;  // if set, write raw request JSON here
 };
 

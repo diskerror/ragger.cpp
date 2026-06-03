@@ -287,16 +287,6 @@ struct Server::Impl {
             inference_ = std::make_unique<InferenceClient>(std::move(client));
             Diskerror::logger::info(std::format(lang::MSG_INFERENCE_ENABLED, inference_->_endpoints.size()));
         }
-        
-        // LM Proxy pass-through (if configured)
-        if (!cfg.lm_proxy_url.empty()) {
-            if (inference_) {
-                inference_->set_lm_proxy_url(cfg.lm_proxy_url);
-                Diskerror::logger::info(std::format(lang::MSG_LM_PROXY_ENABLED, cfg.lm_proxy_url));
-            } else {
-                Diskerror::logger::error(lang::ERR_LM_PROXY_NO_ENDPOINT);
-            }
-        }
     }
 
     void bootstrap_auth() {
@@ -434,7 +424,6 @@ struct Server::Impl {
         return memory;
     }
 
-    void setup_lm_proxy_routes();
 
     void setup_routes() {
         // GET /health
@@ -550,6 +539,33 @@ struct Server::Impl {
             json response = {{"results", results}, {"timing", timing}};
             Diskerror::logger::trace(std::format(lang::DBG_QUERY_LOG, query, search_response.results.size(), duration.count()));
             Diskerror::logger::debug(std::format(lang::DBG_HTTP, "POST", "/search", "200"));
+            res.set_content(response.dump(), "application/json");
+        }));
+
+        // POST /turn — ingest one agent-pushed conversation turn for background
+        // summarization. Same five-field payload as the capture_turn MCP tool;
+        // both call ragger::capture_turn(). No-op unless [server] capture_turns.
+        svr.Post("/turn", guarded([this](const UserInfo& user,
+                                         const httplib::Request& req, httplib::Response& res) {
+            auto body = json::parse(req.body);
+            std::string user_text  = body.value("user", "");
+            std::string assistant  = body.value("assistant", "");
+            std::string model      = body.value("model", "");
+            std::string session_id = body.value("session_id", "");
+            if (user_text.empty()) {
+                Diskerror::logger::debug("POST /turn 400");
+                res.status = 400;
+                res.set_content(json{{"error", "missing required field: user"}}.dump(),
+                                "application/json");
+                return;
+            }
+            auto& mem = _get_memory(user.username);
+            auto result = capture_turn(mem, user_text, assistant, model, session_id);
+            json response = {
+                {"status",  result.captured ? "captured" : "disabled"},
+                {"turn_id", result.turn_id}
+            };
+            Diskerror::logger::debug(std::format(lang::DBG_HTTP, "POST", "/turn", "200"));
             res.set_content(response.dump(), "application/json");
         }));
 
@@ -849,484 +865,9 @@ struct Server::Impl {
         // Static file serving — use httplib's built-in mount if web root exists
         // We set this up as a catch-all handler for unmatched GET requests
         svr.set_mount_point("/", resolve_web_root());
-
-        // LM Proxy: OpenAI-compatible pass-through routes (if configured)
-        if (inference_ && !inference_->lm_proxy_url().empty()) {
-            setup_lm_proxy_routes();
-        }
     }
 };
 
-// -----------------------------------------------------------------------
-// LM Proxy: OpenAI-compatible pass-through routes
-// -----------------------------------------------------------------------
-// -------------------------------------------------------------------------
-// SseChatAccumulator — extract assistant content deltas from an OpenAI-style
-// SSE stream in parallel with byte-level forwarding. Pure byte passthrough
-// stays intact; this only *observes* the stream for turn capture.
-//
-// Ignores tool_calls, reasoning, and other non-content deltas.
-// Broken/partial JSON events are skipped silently.
-// -------------------------------------------------------------------------
-namespace {
-
-class SseChatAccumulator {
-public:
-    /// Feed a raw byte chunk from upstream. Returns true iff this chunk
-    /// delivered at least one content delta (used to reset idle timer).
-    bool feed(std::string_view chunk) {
-        buf_.append(chunk.data(), chunk.size());
-        bool got_content = false;
-
-        // Events are separated by a blank line (\n\n or \r\n\r\n).
-        while (true) {
-            auto sep = buf_.find("\n\n");
-            size_t sep_len = 2;
-            if (sep == std::string::npos) {
-                sep = buf_.find("\r\n\r\n");
-                sep_len = 4;
-                if (sep == std::string::npos) break;
-            }
-            std::string event = buf_.substr(0, sep);
-            buf_.erase(0, sep + sep_len);
-            if (process_event(event)) got_content = true;
-        }
-        return got_content;
-    }
-
-    /// Pop accumulated assistant text and clear the buffer.
-    std::string take() {
-        std::string out;
-        out.swap(pending_);
-        return out;
-    }
-
-    bool empty() const { return pending_.empty(); }
-    bool done()  const { return done_; }
-
-private:
-    /// Process a single SSE event (may contain multiple `data:` lines).
-    /// Returns true if this event contributed content.
-    bool process_event(const std::string& event) {
-        bool got = false;
-        size_t pos = 0;
-        while (pos < event.size()) {
-            size_t nl = event.find('\n', pos);
-            std::string line = (nl == std::string::npos)
-                ? event.substr(pos)
-                : event.substr(pos, nl - pos);
-            pos = (nl == std::string::npos) ? event.size() : nl + 1;
-
-            // Strip trailing \r (CRLF)
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            // Field parsing: only care about "data:" lines
-            if (line.rfind("data:", 0) != 0) continue;
-            std::string data = line.substr(5);
-            // optional leading space after colon
-            if (!data.empty() && data.front() == ' ') data.erase(0, 1);
-
-            if (data == "[DONE]") { done_ = true; continue; }
-
-            auto j = nlohmann::json::parse(data, nullptr, false);
-            if (j.is_discarded()) continue;
-            if (!j.contains("choices") || !j["choices"].is_array() ||
-                j["choices"].empty()) continue;
-            const auto& c0 = j["choices"][0];
-            if (!c0.contains("delta")) continue;
-            const auto& delta = c0["delta"];
-            if (delta.contains("content") && delta["content"].is_string()) {
-                const auto s = delta["content"].get<std::string>();
-                if (!s.empty()) { pending_ += s; got = true; }
-            }
-        }
-        return got;
-    }
-
-    std::string buf_;       // inter-chunk line-assembly buffer
-    std::string pending_;   // content since last take()
-    bool done_ = false;
-};
-
-/// Extract the last user message from a chat-completions request body.
-/// Returns empty string if not a chat shape or no user message found.
-inline std::string extract_last_user_message(const nlohmann::json& body_json) {
-    if (body_json.is_discarded()) return {};
-    if (!body_json.contains("messages") || !body_json["messages"].is_array()) return {};
-    for (auto it = body_json["messages"].rbegin();
-         it != body_json["messages"].rend(); ++it) {
-        if (it->contains("role") && (*it)["role"] == "user" &&
-            it->contains("content") && (*it)["content"].is_string()) {
-            return (*it)["content"].get<std::string>();
-        }
-    }
-    return {};
-}
-
-} // anonymous namespace
-
-void Server::Impl::setup_lm_proxy_routes() {
-    // Helper: forward a POST to upstream. Two branches:
-    //   stream=false → buffered forward, single-shot turn capture after reply
-    //   stream=true  → byte-passthrough SSE, parallel capture + pause-flush
-    // Capture failures never break the proxy in either branch.
-    auto forward_post = [this](const std::string& path,
-                               const httplib::Request& req,
-                               httplib::Response& res) {
-        try {
-            // Parse body once: used for stream detection and capture.
-            auto body_json = json::parse(req.body, nullptr, false);
-            const bool stream_requested =
-                !body_json.is_discarded() &&
-                body_json.contains("stream") && body_json["stream"] == true;
-
-            // Apply proxy_system_prompt policy to chat completions.
-            std::string forwarded_body = req.body;
-            const auto& proxy_mode = config().proxy_system_prompt;
-            if (path == "/v1/chat/completions" && proxy_mode != "ignore"
-                && !body_json.is_discarded() && body_json.contains("messages")) {
-                std::string persona = ChatSessionManager::load_workspace_files();
-                if (!persona.empty()) {
-                    auto& msgs = body_json["messages"];
-                    if (proxy_mode == "prepend") {
-                        // Insert persona as first system message, before existing messages
-                        json sys_msg = {{"role", "system"}, {"content", persona}};
-                        msgs.insert(msgs.begin(), sys_msg);
-                    } else if (proxy_mode == "replace") {
-                        // Replace existing system messages with persona
-                        json new_msgs = json::array();
-                        new_msgs.push_back({{"role", "system"}, {"content", persona}});
-                        for (auto& m : msgs) {
-                            if (m.value("role", "") != "system")
-                                new_msgs.push_back(m);
-                        }
-                        msgs = new_msgs;
-                    }
-                    forwarded_body = body_json.dump();
-                }
-            }
-
-            // ------------------------------------------------------------
-            // Streaming branch (SSE passthrough with parallel capture)
-            // ------------------------------------------------------------
-            if (stream_requested && path == "/v1/chat/completions") {
-                const std::string captured_user_msg =
-                    extract_last_user_message(body_json);
-
-                // Username resolution (default user on localhost / unix socket)
-                auto user = _check_auth(req);
-                std::string username = user ? user->username : "default";
-
-                // Session id: explicit header wins; else fresh per-request sid
-                std::string sid = req.get_header_value("X-Ragger-Session");
-                if (sid.empty()) {
-                    sid = "proxy-" + ChatSessionManager::generate_id();
-                }
-
-                // Shared streaming state (all captured by copy in lambdas)
-                auto mtx        = std::make_shared<std::mutex>();
-                auto cv         = std::make_shared<std::condition_variable>();
-                auto queue      = std::make_shared<std::vector<std::string>>();
-                auto done       = std::make_shared<std::atomic<bool>>(false);
-                auto cancelled  = std::make_shared<std::atomic<bool>>(false);
-                auto status     = std::make_shared<std::atomic<long>>(0);
-                auto accum      = std::make_shared<SseChatAccumulator>();
-                // Full assistant text accumulated across all pause-flushes, so
-                // the turn (issue #41) is captured ONCE at stream end rather
-                // than once per flush. req_model is the targeted model.
-                auto full_assistant = std::make_shared<std::string>();
-                std::string req_model = body_json.value("model", std::string());
-                auto chunk_count = std::make_shared<std::atomic<size_t>>(0);
-                auto byte_count  = std::make_shared<std::atomic<size_t>>(0);
-                auto flush_count = std::make_shared<std::atomic<size_t>>(0);
-                auto user_flushed = std::make_shared<std::atomic<bool>>(false);
-                auto flush_mtx   = std::make_shared<std::mutex>();
-                auto last_tok_ms = std::make_shared<std::atomic<int64_t>>(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch()).count());
-
-                // Persistence helper — serialized via flush_mtx.
-                // Called on each pause-flush and once at stream end.
-                auto* mgr_ptr     = &session_mgr_;
-                auto* backend_ptr = memory.backend();
-                auto do_flush = [=, this]() {
-                    std::lock_guard<std::mutex> lk(*flush_mtx);
-                    std::string text = accum->take();
-                    if (text.empty()) return;
-                    *full_assistant += text;   // accumulate for turn capture
-                    try {
-                        auto& session = mgr_ptr->get_or_create(
-                            sid, username, backend_ptr);
-                        if (!user_flushed->exchange(true)) {
-                            if (!captured_user_msg.empty()) {
-                                session.add_user_message(captured_user_msg);
-                            }
-                        }
-                        session.add_assistant_message(text);
-                        json arr = json::array();
-                        for (const auto& m : session.messages) {
-                            arr.push_back({{"role", m.role},
-                                           {"content", m.content}});
-                        }
-                        backend_ptr->save_chat_session(
-                            sid, username, arr.dump());
-                        flush_count->fetch_add(1);
-                    } catch (const std::exception& e) {
-                        Diskerror::logger::critical(std::format(lang::ERR_PROXY_FLUSH, e.what()));
-                    }
-                };
-
-                // Response headers must be set before the first chunk.
-                res.set_header("Content-Type", "text/event-stream");
-                res.set_header("Cache-Control", "no-cache");
-                res.set_header("Connection", "keep-alive");
-                res.set_header("X-Session-Id", sid);
-
-                auto* inf = inference_.get();
-                std::string req_body = forwarded_body;  // copy for thread
-
-                // Producer thread: upstream curl → queue + accumulator
-                std::thread([=]() {
-                    try {
-                        inf->proxy_request_stream(
-                            path, "POST", req_body,
-                            [=](std::string_view chunk) -> bool {
-                                if (cancelled->load()) return false;
-                                {
-                                    std::lock_guard<std::mutex> lk(*mtx);
-                                    queue->emplace_back(chunk);
-                                }
-                                chunk_count->fetch_add(1);
-                                byte_count->fetch_add(chunk.size());
-                                if (accum->feed(chunk)) {
-                                    last_tok_ms->store(
-                                        std::chrono::duration_cast<
-                                            std::chrono::milliseconds>(
-                                            std::chrono::steady_clock::now()
-                                                .time_since_epoch()).count());
-                                }
-                                cv->notify_one();
-                                return true;
-                            },
-                            [=](long code) { status->store(code); });
-                    } catch (const std::exception& e) {
-                        Diskerror::logger::critical(std::format(lang::ERR_PROXY_UPSTREAM, e.what()));
-                    }
-                    done->store(true);
-                    cv->notify_one();
-                }).detach();
-
-                // Idle pause-flush thread (disabled when flush_sec <= 0)
-                int flush_sec = config().chat_stream_flush_seconds;
-                if (flush_sec > 0) {
-                    std::thread([=]() {
-                        using namespace std::chrono;
-                        while (!done->load() && !cancelled->load()) {
-                            std::this_thread::sleep_for(milliseconds(500));
-                            auto now = duration_cast<milliseconds>(
-                                steady_clock::now().time_since_epoch()).count();
-                            if (now - last_tok_ms->load() >= flush_sec * 1000 &&
-                                !accum->empty()) {
-                                do_flush();
-                                // Reset timer so we don't hammer-flush on
-                                // long idles with no new tokens.
-                                last_tok_ms->store(now);
-                            }
-                        }
-                    }).detach();
-                }
-
-                // Consumer: drain queue → client
-                auto t0 = std::chrono::steady_clock::now();
-                res.set_chunked_content_provider("text/event-stream",
-                    [=](size_t /*offset*/, httplib::DataSink& sink) -> bool {
-                        while (true) {
-                            std::vector<std::string> batch;
-                            {
-                                std::unique_lock<std::mutex> lk(*mtx);
-                                cv->wait_for(lk,
-                                    std::chrono::milliseconds(100),
-                                    [&] {
-                                        return !queue->empty() || done->load();
-                                    });
-                                batch.swap(*queue);
-                            }
-                            for (const auto& bytes : batch) {
-                                if (!sink.write(bytes.data(), bytes.size())) {
-                                    cancelled->store(true);
-                                    Diskerror::logger::debug(lang::MSG_PROXY_CLIENT_DISC);
-                                    return false;
-                                }
-                            }
-                            if (done->load()) {
-                                // Drain anything the producer enqueued
-                                // between the batch swap and now.
-                                std::vector<std::string> tail;
-                                {
-                                    std::lock_guard<std::mutex> lk(*mtx);
-                                    tail.swap(*queue);
-                                }
-                                for (const auto& bytes : tail) {
-                                    sink.write(bytes.data(), bytes.size());
-                                }
-                                sink.done();
-
-                                // Final flush if upstream succeeded
-                                long code = status->load();
-                                if (code >= 200 && code < 300) {
-                                    do_flush();
-                                    // Capture the whole exchange as one raw L1
-                                    // turn (embedded), uniform with chat and the
-                                    // non-stream path (issue #41). Once per
-                                    // stream — not per flush. Snapshot the
-                                    // accumulated text under flush_mtx so a late
-                                    // pause-flush can't race the read.
-                                    std::string final_assistant;
-                                    {
-                                        std::lock_guard<std::mutex> lk(*flush_mtx);
-                                        final_assistant = *full_assistant;
-                                    }
-                                    if (!captured_user_msg.empty() &&
-                                        !final_assistant.empty()) {
-                                        try {
-                                            backend_ptr->store_turn(
-                                                captured_user_msg, final_assistant,
-                                                req_model, /*defer_embedding=*/false);
-                                        } catch (const std::exception& e) {
-                                            Diskerror::logger::error(std::format(
-                                                lang::ERR_PROXY_TURN_PERSIST, e.what()));
-                                        }
-                                    }
-                                }
-
-                                auto ms = std::chrono::duration_cast<
-                                    std::chrono::milliseconds>(
-                                    std::chrono::steady_clock::now() - t0).count();
-                                Diskerror::logger::debug(std::format(lang::DBG_PROXY_STREAM_STATS, path, code, chunk_count->load(), byte_count->load(), ms, flush_count->load()));
-                                return false;
-                            }
-                        }
-                    });
-                return;
-            }
-
-            // ------------------------------------------------------------
-            // Buffered branch (non-stream) — unchanged semantics
-            // ------------------------------------------------------------
-            // Reject stream=true on paths we don't stream (e.g. /v1/completions)
-            if (stream_requested) {
-                res.status = 400;
-                res.set_content(json{{"error", lang::HTTP_STREAMING_REJECTED}}.dump(),
-                    "application/json");
-                Diskerror::logger::debug(std::format(lang::DBG_HTTP_DETAIL, "POST", path, "400", "streaming rejected"));
-                return;
-            }
-
-            // Extract last user message for capture (chat path only)
-            std::string captured_user_msg;
-            if (path == "/v1/chat/completions") {
-                captured_user_msg = extract_last_user_message(body_json);
-            }
-
-            auto resp = inference_->proxy_request(path, "POST", forwarded_body);
-            res.status = static_cast<int>(resp.status_code);
-            Diskerror::logger::debug(std::format(lang::DBG_HTTP, "POST", path, resp.status_code));
-            res.set_content(resp.body, "application/json");
-
-            // Capture turn on successful chat completions only
-            if (path == "/v1/chat/completions" &&
-                resp.status_code >= 200 && resp.status_code < 300 &&
-                !captured_user_msg.empty()) {
-                try {
-                    auto up = json::parse(resp.body, nullptr, false);
-                    std::string assistant_text;
-                    if (!up.is_discarded() &&
-                        up.contains("choices") && up["choices"].is_array() &&
-                        !up["choices"].empty()) {
-                        const auto& choice0 = up["choices"][0];
-                        if (choice0.contains("message") &&
-                            choice0["message"].contains("content") &&
-                            choice0["message"]["content"].is_string()) {
-                            assistant_text = choice0["message"]["content"].get<std::string>();
-                        }
-                    }
-                    if (!assistant_text.empty()) {
-                        auto user = _check_auth(req);
-                        std::string username = user ? user->username : "default";
-
-                        std::string sid = req.get_header_value("X-Ragger-Session");
-                        if (sid.empty()) sid = "proxy:" + username;
-
-                        auto& session = session_mgr_.get_or_create(
-                            sid, username, memory.backend());
-                        session.add_user_message(captured_user_msg);
-                        session.add_assistant_message(assistant_text);
-
-                        try {
-                            json messages_array = json::array();
-                            for (const auto& m : session.messages) {
-                                messages_array.push_back({
-                                    {"role", m.role},
-                                    {"content", m.content}
-                                });
-                            }
-                            memory.backend()->save_chat_session(
-                                sid, username, messages_array.dump());
-                        } catch (const std::exception& e) {
-                            Diskerror::logger::error(std::format(lang::ERR_PROXY_TURN_PERSIST, e.what()));
-                        }
-
-                        // Capture the exchange as a raw L1 turn (embedded),
-                        // uniform with Ragger Chat (issue #41). The model is
-                        // the one the request targeted.
-                        try {
-                            memory.backend()->store_turn(
-                                captured_user_msg, assistant_text,
-                                body_json.value("model", std::string()),
-                                /*defer_embedding=*/false);
-                        } catch (const std::exception& e) {
-                            Diskerror::logger::error(std::format(lang::ERR_PROXY_TURN_PERSIST, e.what()));
-                        }
-
-                        res.set_header("X-Session-Id", sid);
-                    }
-                } catch (const std::exception& e) {
-                    Diskerror::logger::error(std::format(lang::ERR_PROXY_TURN_CAPTURE, e.what()));
-                }
-            }
-        } catch (const std::exception& e) {
-            Diskerror::logger::error(std::format(lang::ERR_LM_PROXY_PATH, path, e.what()));
-            res.status = 502;
-            res.set_content(json{{"error", lang::HTTP_UPSTREAM_UNAVAILABLE}}.dump(), "application/json");
-        }
-    };
-
-    // GET /v1/models - list available models from upstream
-    svr.Get("/v1/models", [this](const httplib::Request&, httplib::Response& res) {
-        try {
-            auto models = inference_->proxy_list_models();
-            json response = {{"object", "list"}, {"data", json::array()}};
-            for (const auto& model : models) {
-                response["data"].push_back({{"id", model}, {"object", "model"}, {"owned_by", "lm-proxy"}});
-            }
-            Diskerror::logger::debug(std::format(lang::DBG_HTTP, "GET", "/v1/models", "200"));
-            res.set_content(response.dump(), "application/json");
-        } catch (const std::exception& e) {
-            Diskerror::logger::error(std::format(lang::ERR_LM_PROXY_MODELS, e.what()));
-            res.status = 502;
-            res.set_content(json{{"error", lang::HTTP_UPSTREAM_UNAVAILABLE}}.dump(), "application/json");
-        }
-    });
-
-    // POST /v1/chat/completions - forward to upstream
-    svr.Post("/v1/chat/completions", [this, forward_post](const httplib::Request& req, httplib::Response& res) {
-        forward_post("/v1/chat/completions", req, res);
-    });
-
-    // POST /v1/completions - forward to upstream
-    svr.Post("/v1/completions", [this, forward_post](const httplib::Request& req, httplib::Response& res) {
-        forward_post("/v1/completions", req, res);
-    });
-}
 
 Server::Server(RaggerMemory& memory,
                const std::string& host,

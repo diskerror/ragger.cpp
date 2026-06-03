@@ -63,8 +63,10 @@ int RaggerMemory::store_document(const DocumentChunk& chunk, bool defer_embeddin
 
 int RaggerMemory::store_turn(const std::string& user_text,
                              const std::string& assistant_text,
-                             const std::string& model_name, bool defer_embedding) {
-    return backend_->store_turn(user_text, assistant_text, model_name, defer_embedding);
+                             const std::string& model_name, bool defer_embedding,
+                             const std::string& session_guid) {
+    return backend_->store_turn(user_text, assistant_text, model_name,
+                                defer_embedding, session_guid);
 }
 
 bool RaggerMemory::finalize_turn(int turn_id, const std::string& assistant_text,
@@ -152,6 +154,20 @@ std::vector<SearchResult> RaggerMemory::search_by_metadata(const json& metadata_
 
 void RaggerMemory::close() {
     if (backend_) backend_->close();
+}
+
+CaptureResult capture_turn(RaggerMemory& memory,
+                           const std::string& user,
+                           const std::string& assistant,
+                           const std::string& model,
+                           const std::string& session_id) {
+    // Gate: turn capture is opt-in. Agent-driven store/search are unaffected.
+    if (!config().capture_turns) return {false, -1};
+    // A turn needs at least the user side; skip empty pushes.
+    if (user.empty()) return {false, -1};
+    int turn_id = memory.store_turn(user, assistant, model,
+                                    /*defer_embedding=*/false, session_id);
+    return {true, turn_id};
 }
 
 } // namespace ragger

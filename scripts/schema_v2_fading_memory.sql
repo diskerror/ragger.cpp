@@ -1,16 +1,15 @@
 -- schema_v2_fading_memory.sql
 --
--- The v2 fading-memory storage schema: five tables (turns / summaries /
--- decisions / documents / models) plus FTS5 (issue #49) replacing the
--- hand-rolled bm25_* sidecars.
+-- The v2 fading-memory storage schema: turns / summaries / decisions /
+-- documents, plus the models + sessions lookup tables, plus FTS5 (issue #49)
+-- replacing the hand-rolled bm25_* sidecars.
 --
 -- This is the reference DDL — it becomes the body of the C++ create_schema()
 -- in sqlite_backend.cpp. Pre-v2 data is preserved separately by export
 -- (see scripts/, backup-*.sql / memories-content-*.json) and re-imported
 -- later; there is no in-place transform.
 --
--- Out of scope here (unchanged, separate concerns): users, settings,
--- web_sessions, chat_sessions.
+-- Out of scope here (unchanged, separate concerns): settings.
 
 -- ---------------------------------------------------------------------------
 -- users  -- who else has read access to documents.
@@ -32,17 +31,29 @@ CREATE TABLE models (
 );
 
 -- ---------------------------------------------------------------------------
+-- sessions  -- lookup; turns + summaries reference it. Normalizes the long
+-- conversation GUIDs (from the agent's turn hook) to a compact integer id,
+-- mirroring `models`. The grouping key for session summaries and recipes.
+-- ---------------------------------------------------------------------------
+CREATE TABLE sessions (
+    session_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guid       TEXT NOT NULL UNIQUE
+);
+
+-- ---------------------------------------------------------------------------
 -- turns (L1)  -- raw verbatim exchanges
 -- ---------------------------------------------------------------------------
 CREATE TABLE turns (
     turn_id        INTEGER PRIMARY KEY AUTOINCREMENT,
     model_id       INTEGER REFERENCES models (model_id),
+    session_id     INTEGER REFERENCES sessions (session_id),
     user_text      TEXT NOT NULL,
     assistant_text TEXT,
     embedding      BLOB, -- embed(user_text + assistant_text)
     timestamp      TEXT NOT NULL
 );
 CREATE INDEX idx_turns_timestamp ON turns (timestamp);
+CREATE INDEX idx_turns_session   ON turns (session_id);
 
 -- ---------------------------------------------------------------------------
 -- summaries (L2/L3/L4)
@@ -53,6 +64,7 @@ CREATE INDEX idx_turns_timestamp ON turns (timestamp);
 CREATE TABLE summaries (
     summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
     model_id   INTEGER REFERENCES models (model_id),
+    session_id INTEGER REFERENCES sessions (session_id),
     text       TEXT NOT NULL,
     embedding  BLOB,
     level      TEXT NOT NULL, -- 'turn' | 'session' | 'project'
@@ -63,6 +75,7 @@ CREATE TABLE summaries (
 CREATE INDEX idx_summaries_level ON summaries (level);
 CREATE INDEX idx_summaries_status ON summaries (status);
 CREATE INDEX idx_summaries_timestamp ON summaries (timestamp);
+CREATE INDEX idx_summaries_session ON summaries (session_id);
 
 -- ---------------------------------------------------------------------------
 -- decisions (L6)

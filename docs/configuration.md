@@ -58,11 +58,12 @@ that install.sh copies to `~/.ragger/settings.ini` on first run.
 
 ### `[server]`
 
-| Key          | Default     | Description                           |
-|--------------|-------------|---------------------------------------|
-| `host`       | `127.0.0.1` | Bind address for HTTP server          |
-| `port`       | `8432`      | Port for HTTP server                  |
-| `auth_token` | (none)      | Bearer token for HTTP auth (optional) |
+| Key             | Default     | Description                                                              |
+|-----------------|-------------|--------------------------------------------------------------------------|
+| `host`          | `127.0.0.1` | Bind address for HTTP server                                             |
+| `port`          | `8432`      | Port for HTTP server                                                     |
+| `auth_token`    | (none)      | Bearer token for HTTP auth (optional)                                    |
+| `capture_turns` | `false`     | When `true`, accept agent-pushed turns (capture_turn / `POST /turn`) into the `turns` table for background summarization. When `false`, turn capture is a no-op; agent-driven `search`/`store` are unaffected. |
 
 ### `[storage]`
 

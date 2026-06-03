@@ -111,8 +111,7 @@ void test_chat_section_parsing() {
           << "max_memory_results = 10\n"
           << "persona_pct = 30\n"
           << "chars_per_token = 3.5\n"
-          << "persona_dir = /opt/ragger/persona\n"
-          << "proxy_system_prompt = prepend\n";
+          << "persona_dir = /opt/ragger/persona\n";
     }
 
     ragger::Config cfg = ragger::load_config(path).value();
@@ -125,7 +124,6 @@ void test_chat_section_parsing() {
     assert(cfg.chat_persona_pct == 30);
     assert(cfg.chat_chars_per_token == 3.5f);
     assert(cfg.persona_dir == "/opt/ragger/persona");
-    assert(cfg.proxy_system_prompt == "prepend");
 
     fs::remove(path);
     std::println(" OK");
@@ -286,7 +284,6 @@ void test_default_values() {
     assert(cfg.inference_max_tokens == 4096);
     assert(cfg.minimum_chunk_size == 300);
     assert(cfg.persona_dir == "~/.ragger");
-    assert(cfg.proxy_system_prompt == "ignore");
 
     fs::remove(path);
     std::println(" OK");
@@ -305,19 +302,6 @@ int main() {
     test_inline_comments();
 
     test_default_values();
-
-    // normalize_lm_proxy_url (issue #45)
-    using ragger::normalize_lm_proxy_url;
-    assert(normalize_lm_proxy_url("http://host:1234")        == "http://host:1234");
-    assert(normalize_lm_proxy_url("http://host:1234/")       == "http://host:1234");
-    assert(normalize_lm_proxy_url("http://host:1234/v1")     == "http://host:1234");
-    assert(normalize_lm_proxy_url("http://host:1234/v1/")    == "http://host:1234");
-    assert(normalize_lm_proxy_url("http://host:1234/v1////") == "http://host:1234");
-    // Only one /v1 segment is stripped — paranoia case
-    assert(normalize_lm_proxy_url("http://host:1234/v1/v1")  == "http://host:1234/v1");
-    // Non-/v1 path is preserved
-    assert(normalize_lm_proxy_url("http://host:1234/api")    == "http://host:1234/api");
-    assert(normalize_lm_proxy_url("")                        == "");
 
     // expand_path with ~
     std::string expanded = ragger::expand_path("~/.ragger/memories.db");

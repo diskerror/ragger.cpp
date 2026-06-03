@@ -213,6 +213,24 @@ curl -X POST http://localhost:8432/search \
 
 ---
 
+**POST** `/turn`
+
+Ingest one completed conversation turn (user + assistant) for background
+summarization. Called from an agent's turn hook. The same five-field payload is
+accepted by the `capture_turn` MCP tool. Requires `[server] capture_turns = true`;
+otherwise the call is accepted but a no-op (`status: "disabled"`).
+
+Body fields: `user` (required), `assistant`, `model`, `session_id` (groups turns
+for session summaries). Response: `{ "status": "captured" | "disabled", "turn_id": <int> }`.
+
+```bash
+curl -X POST http://localhost:8432/turn \
+  -H "Content-Type: application/json" \
+  -d '{"user": "how do I rebuild?", "assistant": "run build.sh clean", "model": "devstral", "session_id": "sess-abc-123"}'
+```
+
+---
+
 ## MCP Server
 
 Ragger implements the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)

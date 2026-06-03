@@ -269,6 +269,7 @@ class McpClient {
 interface RaggerTransport {
   search(query: string, limit?: number, min_score?: number, collections?: string[]): Promise<{ results: Array<{ text: string; score: number; metadata: Record<string, string>; timestamp?: string }> }>;
   store(text: string, metadata?: Record<string, unknown>): Promise<{ id: string; status: string }>;
+  captureTurn(user: string, assistant: string, model: string, session_id: string): Promise<{ status: string; turn_id: number }>;
   count(): Promise<{ count: number }>;
   health(): Promise<{ status: string; memories?: number }>;
 }
@@ -280,6 +281,9 @@ function makeHttpTransport(serverUrl: string): RaggerTransport {
     },
     async store(text, metadata) {
       return raggerFetch(serverUrl, "/store", { text, metadata }) as Promise<{ id: string; status: string }>;
+    },
+    async captureTurn(user, assistant, model, session_id) {
+      return raggerFetch(serverUrl, "/turn", { user, assistant, model, session_id }) as Promise<{ status: string; turn_id: number }>;
     },
     async count() {
       return raggerFetch(serverUrl, "/count") as Promise<{ count: number }>;
@@ -303,6 +307,9 @@ function makeMcpTransport(client: McpClient): RaggerTransport {
     async store(text, metadata) {
       return client.callTool("store", { text, ...(metadata ? { metadata } : {}) }) as Promise<{ id: string; status: string }>;
     },
+    async captureTurn(user, assistant, model, session_id) {
+      return client.callTool("capture_turn", { user, assistant, model, session_id }) as Promise<{ status: string; turn_id: number }>;
+    },
     async count() {
       // MCP doesn't have a count tool — do a search with limit 0 or return unknown
       // For now, return a placeholder since count isn't a critical tool
@@ -318,21 +325,6 @@ function makeMcpTransport(client: McpClient): RaggerTransport {
 // ============================================================================
 // Capture Helpers
 // ============================================================================
-
-const CAPTURE_TRIGGERS = [
-  /remember|zapamatuj|pamatuj/i,
-  /prefer|like|love|hate|want|need/i,
-  /my\s+\w+\s+is|is\s+my/i,
-  /i (always|never|usually)/i,
-  /important|decision|decided/i,
-];
-
-function shouldCapture(text: string): boolean {
-  if (text.length < 10 || text.length > 500) return false;
-  if (text.includes("<relevant-memories>")) return false;
-  if (text.startsWith("<") && text.includes("</")) return false;
-  return CAPTURE_TRIGGERS.some((r) => r.test(text));
-}
 
 function escapeForPrompt(text: string): string {
   return text.replace(/[<>"'&]/g, (c) =>
@@ -492,7 +484,10 @@ const raggerPlugin = {
     // ========================================================================
 
     if (autoRecall) {
-      api.on("before_agent_start", async (event) => {
+      // before_prompt_build is the current recall hook (before_agent_start is
+      // deprecated). It receives the prompt + session messages and may return
+      // prependContext to inject memories ahead of the model call.
+      api.on("before_prompt_build", async (event) => {
         if (!transport || !event.prompt || event.prompt.length < 5) return;
 
         try {
@@ -522,31 +517,39 @@ const raggerPlugin = {
     // ========================================================================
 
     if (autoCapture) {
+      // agent_end fires once per completed turn with the final messages. We
+      // push the raw user→assistant exchange to Ragger's capture_turn; the
+      // daemon stores it (and summarizes) only when [server] capture_turns is
+      // on. No client-side heuristics — the turn boundary is the trigger.
       api.on("agent_end", async (event) => {
         if (!transport || !event.success || !event.messages || event.messages.length === 0) return;
 
         try {
-          const texts: string[] = [];
+          // Last user message and last assistant message of the turn.
+          let user = "";
+          let assistant = "";
           for (const msg of event.messages) {
             if (!msg || typeof msg !== "object") continue;
-            const msgObj = msg as Record<string, unknown>;
-            if (msgObj.role !== "user") continue;
-            if (typeof msgObj.content === "string") {
-              texts.push(msgObj.content);
-            }
+            const m = msg as Record<string, unknown>;
+            if (typeof m.content !== "string") continue;
+            if (m.role === "user") user = m.content;
+            else if (m.role === "assistant") assistant = m.content;
           }
+          if (!user) return;
 
-          const toCapture = texts.filter(shouldCapture);
-          if (toCapture.length === 0) return;
+          const ev = event as Record<string, unknown>;
+          const session_id =
+            (typeof ev.sessionId === "string" && ev.sessionId) ||
+            (typeof ev.runId === "string" && ev.runId) ||
+            "openclaw";
+          const model =
+            (typeof ev.resolvedModel === "string" && ev.resolvedModel) ||
+            (typeof ev.model === "string" && ev.model) ||
+            "";
 
-          let stored = 0;
-          for (const text of toCapture.slice(0, 3)) {
-            await transport.store(text, { collection: "memory", source: "auto-capture" });
-            stored++;
-          }
-
-          if (stored > 0) {
-            api.logger.info(`ragger: auto-captured ${stored} memories`);
+          const result = await transport.captureTurn(user, assistant, model, String(session_id));
+          if (result.status === "captured") {
+            api.logger.info?.(`ragger: captured turn ${result.turn_id} (session ${session_id})`);
           }
         } catch (err) {
           api.logger.warn(`ragger: capture failed: ${String(err)}`);

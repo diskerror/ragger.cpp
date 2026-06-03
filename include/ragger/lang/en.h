@@ -17,7 +17,6 @@ constexpr const char* CLI_HOST                = "Server bind address (overrides 
 constexpr const char* CLI_PORT                = "Server port (overrides config)";
 constexpr const char* CLI_DB                  = "SQLite database path (overrides config)";
 constexpr const char* CLI_MODEL_DIR           = "Model directory path (overrides config)";
-constexpr const char* CLI_LM_PROXY_URL        = "LM proxy upstream URL (OpenAI-compatible pass-through)";
 constexpr const char* CLI_COMMAND             = "Command";
 constexpr const char* CLI_ARGS                = "Command arguments";
 constexpr const char* CLI_USAGE_SEARCH        = "Usage: ragger search <query>";
@@ -304,20 +303,11 @@ constexpr const char* MSG_INFERENCE_CLIENT_OK   = "Inference client reloaded";
 constexpr const char* ERR_INFERENCE_CLIENT_FAIL = "Inference client reload failed: {}";
 constexpr const char* MSG_CONFIG_RELOADED_NONE  = "Config reloaded: no changes";
 constexpr const char* MSG_INFERENCE_ENABLED     = "Inference: enabled ({} endpoint(s))";
-constexpr const char* MSG_LM_PROXY_ENABLED      = "LM proxy: enabled ({})";
-constexpr const char* ERR_LM_PROXY_NO_ENDPOINT  = "LM proxy configured but no inference endpoint available";
 constexpr const char* MSG_CREATED_USER          = "Created user: {} (id={})";
 constexpr const char* MSG_SINGLE_USER_MODE      = "Single-user mode initialized";
 constexpr const char* ERR_MEMORY_SEARCH_FAIL    = "Memory search failed for /chat: {}";
 constexpr const char* ERR_NO_SYSTEM_PROMPT_FILES = "No system prompt files found (SYSTEM.md, SOUL.md, USER.md, etc.) — ";
 constexpr const char* ERR_LOGIN                 = "Login error: {}";
-constexpr const char* ERR_PROXY_FLUSH           = "Proxy stream flush failed: {}";
-constexpr const char* ERR_PROXY_UPSTREAM        = "Proxy stream upstream error: {}";
-constexpr const char* MSG_PROXY_CLIENT_DISC     = "proxy stream: client disconnected";
-constexpr const char* ERR_PROXY_TURN_PERSIST    = "Proxy turn persist failed: {}";
-constexpr const char* ERR_PROXY_TURN_CAPTURE    = "Proxy turn capture failed: {}";
-constexpr const char* ERR_LM_PROXY_PATH         = "LM proxy {} failed: {}";
-constexpr const char* ERR_LM_PROXY_MODELS       = "LM proxy /v1/models failed: {}";
 constexpr const char* MSG_BIND_UNIX_SOCKET      = "Binding AF_UNIX socket: {}";
 constexpr const char* ERR_LISTEN_UNIX           = "listen() on unix socket returned false: {} (errno={})";
 constexpr const char* MSG_BIND_TCP              = "Binding TCP {}:{}";
@@ -326,7 +316,6 @@ constexpr const char* ERR_LISTEN_TCP            = "listen() on TCP returned fals
 // --- Server: debug HTTP logging ---
 constexpr const char* DBG_HTTP                  = "{} {} {}";
 constexpr const char* DBG_HTTP_DETAIL           = "{} {} {} ({})";
-constexpr const char* DBG_PROXY_STREAM_STATS    = "POST {} stream {} ({} chunks, {} bytes, {}ms, flushed {}×)";
 constexpr const char* DBG_QUERY_LOG             = "query=\"{}\" results={} time={}ms";
 
 // --- Server: HTTP response bodies ---
@@ -346,8 +335,6 @@ constexpr const char* HTTP_LOGIN_CREDENTIALS_REQ = "username and password requir
 constexpr const char* HTTP_LOGIN_INVALID        = "invalid credentials";
 constexpr const char* HTTP_LOGIN_NO_PASSWORD    = "no password set — use 'ragger passwd' first";
 constexpr const char* HTTP_LOGIN_FAILED         = "login failed";
-constexpr const char* HTTP_STREAMING_REJECTED   = "streaming only supported on /v1/chat/completions";
-constexpr const char* HTTP_UPSTREAM_UNAVAILABLE = "upstream unavailable";
 
 // --- Server: startup/runtime ---
 constexpr const char* MSG_HEALTH_CHECK_TCP      = "  Health check: curl http://{}/health";
@@ -385,8 +372,6 @@ constexpr const char* ERR_CLIENT_BAD_STATUS   = "Invalid HTTP response: malforme
 
 // --- Inference errors ---
 constexpr const char* ERR_CURL_INIT           = "Failed to initialize libcurl";
-constexpr const char* ERR_CURL_INIT_PROXY     = "Failed to initialize libcurl for proxy";
-constexpr const char* ERR_CURL_INIT_PROXY_STREAM = "Failed to initialize libcurl for proxy stream";
 constexpr const char* ERR_HTTP_REQUEST        = "HTTP request failed: {}";
 constexpr const char* ERR_INFERENCE_API       = "Inference API error {}: {}";
 constexpr const char* ERR_INFERENCE_API_STATUS = "Inference API error {}";
@@ -396,11 +381,6 @@ constexpr const char* ERR_NO_ENDPOINTS        = "No inference endpoints configur
 constexpr const char* ERR_ENGINE_UNREACHABLE  = "Inference engine not reachable at {}";
 constexpr const char* ERR_MODEL_LOAD_TIMEOUT  = "Model {} load timed out (POST {})";
 constexpr const char* ERR_MODEL_LOAD_FAILED   = "Failed to load model {} (POST {}: {})";
-constexpr const char* ERR_LM_PROXY_NOT_CONFIGURED = "LM proxy not configured";
-constexpr const char* ERR_PROXY_CONNECT       = "Proxy connection failed: {}";
-constexpr const char* ERR_PROXY_STREAM        = "Proxy stream failed: {}";
-constexpr const char* ERR_UPSTREAM_STATUS     = "Upstream returned status {}";
-constexpr const char* ERR_UPSTREAM_PARSE      = "Failed to parse upstream model list";
 
 // --- Auth errors ---
 constexpr const char* ERR_URANDOM_OPEN        = "Failed to open /dev/urandom";

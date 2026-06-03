@@ -110,5 +110,7 @@ This gives the agent three tools:
 - **memory_get** — Get the count of stored memories
 
 With `autoRecall` enabled, relevant memories are automatically injected
-into context before each agent turn. With `autoCapture`, important user
-messages are stored automatically after conversations.
+into context before each agent turn (via the `before_prompt_build` hook).
+With `autoCapture`, each completed turn is pushed to Ragger's `capture_turn`
+(via the `agent_end` hook) for background summarization — the daemon stores
+it only when `[server] capture_turns` is enabled.

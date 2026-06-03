@@ -21,6 +21,16 @@ using json = nlohmann::json;
 
 class Embedder;
 
+/// One raw L1 turn as read back from the `turns` table (session-scoped
+/// queries). `model_name` is empty when the turn recorded no model.
+struct TurnRecord {
+    int         turn_id;
+    std::string user_text;
+    std::string assistant_text;
+    std::string model_name;
+    std::string timestamp;
+};
+
 /**
  * Abstract base class for storage backends.
  *
@@ -51,11 +61,18 @@ public:
     /// Store a raw L1 conversation turn into the `turns` table. An empty
     /// `assistant_text` writes a partial row (embedding NULL) for the
     /// prompt-arrival/finalize flow. `model_name` resolves/creates a models
-    /// row (turns.model_id). Returns the new turn_id.
+    /// row (turns.model_id). `session_guid` resolves/creates a sessions row
+    /// (turns.session_id) — empty leaves it NULL. Returns the new turn_id.
     virtual int store_turn(const std::string& user_text,
                            const std::string& assistant_text,
                            const std::string& model_name = "",
-                           bool defer_embedding = false) = 0;
+                           bool defer_embedding = false,
+                           const std::string& session_guid = "") = 0;
+
+    /// All raw turns belonging to a session GUID, oldest first. Empty if the
+    /// session is unknown. Grouping primitive for session summaries/recipes.
+    virtual std::vector<TurnRecord> turns_by_session(
+        const std::string& session_guid) = 0;
 
     /// Finalize a partial turn: set assistant_text, embed the exchange, and
     /// record the model. Returns false if the turn_id doesn't exist.

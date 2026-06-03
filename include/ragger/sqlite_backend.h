@@ -44,7 +44,10 @@ public:
     int store_turn(const std::string& user_text,
                    const std::string& assistant_text,
                    const std::string& model_name = "",
-                   bool defer_embedding = false) override;
+                   bool defer_embedding = false,
+                   const std::string& session_guid = "") override;
+    std::vector<TurnRecord> turns_by_session(
+        const std::string& session_guid) override;
     bool finalize_turn(int turn_id,
                        const std::string& assistant_text,
                        const std::string& model_name = "") override;

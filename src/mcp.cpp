@@ -109,6 +109,28 @@ static nlohmann::json tools_list() {
                 }},
                 {"required", nlohmann::json::array({"query"})}
             }}
+        },
+        {
+            {"name", "capture_turn"},
+            {"description", "Push a completed conversation turn (user + assistant) "
+                           "into memory for background summarization. Called from an "
+                           "agent's turn hook; no-op unless turn capture is enabled."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"user",       {{"type", "string"},
+                                    {"description", "The user message of the turn."}}},
+                    {"assistant",  {{"type", "string"},
+                                    {"description", "The assistant reply of the turn."}}},
+                    {"model",      {{"type", "string"},
+                                    {"description", "Model that produced the reply."}}},
+                    {"session_id", {{"type", "string"},
+                                    {"description", "Conversation/session GUID grouping the turn."}}},
+                    {"metadata",   {{"type", "object"},
+                                    {"description", "Optional metadata (source, hook, etc.). Reserved."}}}
+                }},
+                {"required", nlohmann::json::array({"user"})}
+            }}
         }
     })}};
 }
@@ -160,6 +182,19 @@ static nlohmann::json tool_call(RaggerMemory& memory,
             });
         }
         return text_result(arr.dump());
+
+    } else if (tool_name == "capture_turn") {
+        const auto user = arguments.value("user", "");
+        if (user.empty())
+            return error_result(ragger::lang::ERR_MCP_TEXT_REQUIRED);
+        const auto assistant = arguments.value("assistant", "");
+        const auto model     = arguments.value("model", "");
+        const auto session   = arguments.value("session_id", "");
+        const auto result    = capture_turn(memory, user, assistant, model, session);
+        return text_result(nlohmann::json({
+            {"status",  result.captured ? "captured" : "disabled"},
+            {"turn_id", result.turn_id}
+        }).dump());
 
     } else {
         return error_result(std::format(lang::ERR_MCP_UNKNOWN_TOOL, tool_name));

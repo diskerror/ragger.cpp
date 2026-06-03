@@ -94,8 +94,12 @@ struct Config {
     // --- Import ---
     int  minimum_chunk_size    = 300;
 
-    // --- LM Proxy (OpenAI-compatible pass-through) ---
-    std::string lm_proxy_url = "";  // if set, forward /v1/* to this URL
+    // --- Turn capture ---
+    // When true, the capture_turn entry point (MCP tool + HTTP POST /turn)
+    // ingests agent-pushed raw turns into the `turns` table for background
+    // summarization. When false, capture_turn is a no-op. Agent-driven
+    // search/store tools are unaffected (always available).
+    bool capture_turns = false;
 
     // --- Model aliases ---
     std::map<std::string, std::string> model_aliases;  // short name → full name or .gguf filename
@@ -123,10 +127,8 @@ struct Config {
     int   chat_budget_summaries_pct = 25;   // % for per-turn summaries + raw turns
     int   chat_budget_search_pct    = 15;   // % for RAG/decisions/project hits
     int   chat_budget_reserve_pct   = 25;   // % reserved for the response
-    int  chat_stream_flush_seconds = 8;  // proxy stream: flush to DB after N idle sec (0 = flush only at end)
     std::string system_prompt_file = "~/.ragger/SYSTEM.md";  // base system prompt file
     std::string persona_dir        = "~/.ragger";            // directory for SOUL.md, USER.md, MEMORY.md, etc.
-    std::string proxy_system_prompt = "ignore";              // "ignore", "prepend", "replace"
 
     // --- System ceilings (0 = no limit) ---
     int  max_search_limit             = 0;
@@ -144,12 +146,6 @@ struct Config {
 
 /// Expand ~ to $HOME in a path string.
 std::string expand_path(const std::string& path);
-
-/// Normalise lm_proxy_url so users can supply either origin-only or a
-/// trailing /v1 (with or without slash). Strips trailing slash(es) and one
-/// trailing "/v1" segment so the proxy code can safely prepend /v1/* paths
-/// without producing /v1/v1/... See issue #45.
-std::string normalize_lm_proxy_url(std::string url);
 
 /// Find system config file using search order. Returns path or throws.
 /// @param cli_path  Path from --config (empty if not given)

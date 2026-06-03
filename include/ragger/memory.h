@@ -37,11 +37,13 @@ public:
     int store_document(const DocumentChunk& chunk, bool defer_embedding = false);
 
     /// Capture a raw L1 conversation turn into the `turns` table. Empty
-    /// assistant_text → partial row (finalize later). Returns turn_id.
+    /// assistant_text → partial row (finalize later). `session_guid` groups
+    /// the turn under a session (empty leaves it NULL). Returns turn_id.
     int store_turn(const std::string& user_text,
                    const std::string& assistant_text = "",
                    const std::string& model_name = "",
-                   bool defer_embedding = false);
+                   bool defer_embedding = false,
+                   const std::string& session_guid = "");
     /// Finalize a partial turn (set assistant_text + embed + model).
     bool finalize_turn(int turn_id,
                        const std::string& assistant_text,
@@ -106,5 +108,24 @@ private:
     std::unique_ptr<Embedder>      embedder_;
     std::unique_ptr<StorageBackend> backend_;      // single user DB
 };
+
+/// Outcome of capture_turn(). `captured` is false when turn capture is
+/// disabled (config [server] capture_turns) or the turn is empty; `turn_id`
+/// is the new turns row id when captured, else -1.
+struct CaptureResult {
+    bool captured;
+    int  turn_id;
+};
+
+/// Shared entry point behind the `capture_turn` MCP tool and HTTP POST /turn:
+/// ingest one agent-pushed raw turn (user+assistant) under a session GUID for
+/// background summarization. No-op (captured=false) unless config [server]
+/// capture_turns is true. Both transports disassemble their envelope and call
+/// this; the gate and storage policy live here, once.
+CaptureResult capture_turn(RaggerMemory& memory,
+                           const std::string& user,
+                           const std::string& assistant,
+                           const std::string& model,
+                           const std::string& session_id);
 
 } // namespace ragger

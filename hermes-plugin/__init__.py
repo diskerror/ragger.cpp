@@ -261,13 +261,25 @@ class RaggerMemoryProvider(MemoryProvider):
         return f"## Ragger Memory\n{result}"
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """No-op: Ragger storage is agent-driven via ragger_store.
+        """Push the completed turn to Ragger's capture_turn (HTTP POST /turn).
 
-        Unlike cloud memory providers, Ragger is a local store under user
-        control. Storing raw turns automatically would fill the DB with
-        unstructured conversation noise. The agent uses ragger_store
-        explicitly when something is worth keeping.
+        The daemon stores the raw turn — and later summarizes it — only when
+        [server] capture_turns is enabled; otherwise this is a server-side
+        no-op. session_id groups turns for session summaries. Agent-driven
+        ragger_store remains the path for explicitly-curated memories.
         """
+        if self._breaker_open() or not user_content:
+            return
+        result = self._post("/turn", {
+            "user": user_content,
+            "assistant": assistant_content,
+            "model": "",
+            "session_id": session_id,
+        }, timeout=4.0)
+        if result is None:
+            self._record_fail()
+        else:
+            self._record_ok()
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [SEARCH_SCHEMA, STORE_SCHEMA]

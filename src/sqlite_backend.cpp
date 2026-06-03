@@ -135,6 +135,18 @@ struct SqliteBackend::Impl {
         }
     }
 
+    /// True if `table` has a column named `col`. Used to guard one-time
+    /// ADD COLUMN migrations (SQLite has no ADD COLUMN IF NOT EXISTS).
+    /// The table name is inlined (PRAGMA table_info doesn't take a bound
+    /// parameter reliably); callers pass internal constants, never user input.
+    bool column_exists(const std::string& table, const std::string& col) {
+        Stmt s(db, "PRAGMA table_info(" + table + ")");
+        while (s.step()) {
+            if (s.column_text(1) == col) return true;  // col 1 = column name
+        }
+        return false;
+    }
+
     void create_schema() {
         // Users, settings, and session tables — credentials (for read-only
         // document access) plus web/chat session persistence. These are a
@@ -156,12 +168,23 @@ struct SqliteBackend::Impl {
             )
         )");
 
+        // sessions — lookup table; turns + summaries reference it. Normalizes
+        // the long conversation GUID (from the agent turn hook) to a compact
+        // integer id, mirroring `models`. Grouping key for session summaries.
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guid       TEXT NOT NULL UNIQUE
+            )
+        )");
+
         // turns (L1) — raw verbatim exchanges. embedding nullable for the
         // deferred-embedding path (partial row written, backfilled later).
         exec(R"(
             CREATE TABLE IF NOT EXISTS turns (
                 turn_id        INTEGER PRIMARY KEY AUTOINCREMENT,
                 model_id       INTEGER REFERENCES models(model_id),
+                session_id     INTEGER REFERENCES sessions(session_id),
                 user_text      TEXT NOT NULL,
                 assistant_text TEXT,
                 embedding      BLOB,
@@ -178,6 +201,7 @@ struct SqliteBackend::Impl {
             CREATE TABLE IF NOT EXISTS summaries (
                 summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 model_id   INTEGER REFERENCES models(model_id),
+                session_id INTEGER REFERENCES sessions(session_id),
                 text       TEXT NOT NULL,
                 embedding  BLOB,
                 level      TEXT NOT NULL,
@@ -189,6 +213,19 @@ struct SqliteBackend::Impl {
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_level     ON summaries(level)");
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_status    ON summaries(status)");
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_timestamp ON summaries(timestamp)");
+
+        // In-place migration for pre-sessions databases: add the session_id
+        // FK column to turns/summaries if an existing DB predates it. SQLite
+        // has no ADD COLUMN IF NOT EXISTS, so guard on pragma_table_info.
+        // (Fresh DBs already have the column from the CREATE above.)
+        if (!column_exists("turns", "session_id"))
+            exec("ALTER TABLE turns ADD COLUMN session_id "
+                 "INTEGER REFERENCES sessions(session_id)");
+        if (!column_exists("summaries", "session_id"))
+            exec("ALTER TABLE summaries ADD COLUMN session_id "
+                 "INTEGER REFERENCES sessions(session_id)");
+        exec("CREATE INDEX IF NOT EXISTS idx_turns_session     ON turns(session_id)");
+        exec("CREATE INDEX IF NOT EXISTS idx_summaries_session ON summaries(session_id)");
 
         // decisions (L6).
         exec(R"(
@@ -619,6 +656,21 @@ struct SqliteBackend::Impl {
         return static_cast<int>(sqlite3_last_insert_rowid(db));
     }
 
+    /// Resolve a session GUID to its compact integer id, inserting on first
+    /// sighting. Empty guid → 0 (NULL session_id), mirroring get_or_create_model.
+    int get_or_create_session(const std::string& guid) {
+        if (guid.empty()) return 0;
+        Stmt s(db, "SELECT session_id FROM sessions WHERE guid = ?");
+        s.bind(1, guid);
+        int id = 0;
+        if (s.step()) id = s.column_int(0);
+        if (id) return id;
+        Stmt ins(db, "INSERT INTO sessions (guid) VALUES (?)");
+        ins.bind(1, guid);
+        ins.step();
+        return static_cast<int>(sqlite3_last_insert_rowid(db));
+    }
+
     // Embedding for a turn is over the joined exchange (user + assistant),
     // using the same U+001F unit-separator as chat's summary turns.
     static std::string turn_embed_text(const std::string& u, const std::string& a) {
@@ -630,10 +682,12 @@ struct SqliteBackend::Impl {
     // otherwise the exchange is embedded unless defer_embedding. FTS5 sync
     // triggers index user_text/assistant_text. Returns turn_id.
     int store_turn(const std::string& user_text, const std::string& assistant_text,
-                   const std::string& model_name, bool defer_embedding) {
+                   const std::string& model_name, bool defer_embedding,
+                   const std::string& session_guid) {
         std::string u = normalize_path(user_text);
         std::string a = normalize_path(assistant_text);
-        int model_id  = get_or_create_model(model_name);
+        int model_id   = get_or_create_model(model_name);
+        int session_id = get_or_create_session(session_guid);
 
         std::vector<float> emb;
         bool have_emb = false;
@@ -643,20 +697,45 @@ struct SqliteBackend::Impl {
         }
 
         Stmt s(db,
-            "INSERT INTO turns (model_id, user_text, assistant_text, embedding, timestamp) "
-            "VALUES (?,?,?,?,?)");
+            "INSERT INTO turns (model_id, session_id, user_text, assistant_text, embedding, timestamp) "
+            "VALUES (?,?,?,?,?,?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
-        s.bind(2, u);
-        if (a.empty()) s.bind_null(3);
-        else s.bind(3, a);
+        if (session_id) s.bind(2, session_id); else s.bind_null(2);
+        s.bind(3, u);
+        if (a.empty()) s.bind_null(4);
+        else s.bind(4, a);
         if (have_emb)
-            bind_embedding(s.raw(), 4, emb);
-        else s.bind_null(4);
-        s.bind(5, local_timestamp());
+            bind_embedding(s.raw(), 5, emb);
+        else s.bind_null(5);
+        s.bind(6, local_timestamp());
 
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         return static_cast<int>(sqlite3_last_insert_rowid(db));
+    }
+
+    /// All turns belonging to a session GUID, oldest first. Empty if the
+    /// session is unknown. Powers session-scoped summarization/recipes.
+    std::vector<TurnRecord> turns_by_session(const std::string& session_guid) {
+        std::vector<TurnRecord> out;
+        if (session_guid.empty()) return out;
+        Stmt s(db,
+            "SELECT t.turn_id, t.user_text, t.assistant_text, m.name, t.timestamp "
+            "FROM turns t "
+            "JOIN sessions ss ON t.session_id = ss.session_id "
+            "LEFT JOIN models m ON t.model_id = m.model_id "
+            "WHERE ss.guid = ? ORDER BY t.turn_id ASC");
+        s.bind(1, session_guid);
+        while (s.step()) {
+            out.push_back({
+                s.column_int(0),
+                s.column_text(1),
+                s.column_text(2),
+                s.column_text(3),
+                s.column_text(4)
+            });
+        }
+        return out;
     }
 
     // Finalize a partial turn: set assistant_text, (re)embed the exchange,
@@ -1239,8 +1318,15 @@ int SqliteBackend::store_document(const DocumentChunk& chunk, bool defer_embeddi
 
 int SqliteBackend::store_turn(const std::string& user_text,
                               const std::string& assistant_text,
-                              const std::string& model_name, bool defer_embedding) {
-    return pImpl->store_turn(user_text, assistant_text, model_name, defer_embedding);
+                              const std::string& model_name, bool defer_embedding,
+                              const std::string& session_guid) {
+    return pImpl->store_turn(user_text, assistant_text, model_name,
+                             defer_embedding, session_guid);
+}
+
+std::vector<TurnRecord> SqliteBackend::turns_by_session(
+        const std::string& session_guid) {
+    return pImpl->turns_by_session(session_guid);
 }
 
 bool SqliteBackend::finalize_turn(int turn_id, const std::string& assistant_text,

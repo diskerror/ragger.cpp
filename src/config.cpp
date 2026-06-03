@@ -24,18 +24,6 @@ namespace fs = std::filesystem;
 // -----------------------------------------------------------------------
 // Path helpers
 // -----------------------------------------------------------------------
-std::string normalize_lm_proxy_url(std::string url) {
-    // Drop trailing slashes
-    while (!url.empty() && url.back() == '/') url.pop_back();
-    // Drop one trailing "/v1" segment if present
-    static constexpr std::string_view v1_suffix = "/v1";
-    if (url.size() >= v1_suffix.size() &&
-        url.compare(url.size() - v1_suffix.size(), v1_suffix.size(), v1_suffix) == 0) {
-        url.erase(url.size() - v1_suffix.size());
-    }
-    return url;
-}
-
 std::string expand_path(const std::string& path) {
     if (path.empty() || path[0] != '~') return path;
     std::string home = home_dir();
@@ -365,6 +353,7 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "bind") cfg.bind_address = val;
             else if (key == "port") cfg.port = std::stoi(val);
             else if (key == "server_name" || key == "hostname") cfg.server_name = val;
+            else if (key == "capture_turns") cfg.capture_turns = parse_bool(val);
         }
         else if (section == "storage") {
             if      (key == "db_path") cfg.db_path = val;
@@ -389,7 +378,6 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "api_key")    cfg.inference_api_key = val;
             else if (key == "max_tokens") cfg.inference_max_tokens = std::stoi(val);
             else if (key == "default")    cfg.inference_default = val;
-            else if (key == "lm_proxy_url") cfg.lm_proxy_url = normalize_lm_proxy_url(val);
         }
         else if (section == "inference.memory") {
             // The memory model (summarization/routing). Captured into dedicated
@@ -463,12 +451,10 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "budget_summaries_pct") cfg.chat_budget_summaries_pct = std::stoi(val);
             else if (key == "budget_search_pct")    cfg.chat_budget_search_pct = std::stoi(val);
             else if (key == "budget_reserve_pct")   cfg.chat_budget_reserve_pct = std::stoi(val);
-            else if (key == "stream_flush_seconds") cfg.chat_stream_flush_seconds = std::stoi(val);
             else if (key == "max_persona_chars_limit") cfg.chat_max_persona_chars_limit = std::stoi(val);
             else if (key == "max_memory_results_limit") cfg.chat_max_memory_results_limit = std::stoi(val);
             else if (key == "system_prompt_file") cfg.system_prompt_file = val;
             else if (key == "persona_dir") cfg.persona_dir = val;
-            else if (key == "proxy_system_prompt") cfg.proxy_system_prompt = val;
         }
         else if (section == "models") {
             cfg.model_aliases[key] = val;
@@ -638,7 +624,6 @@ int reload_config() {
     RELOAD(inference_memory_model);
     RELOAD(inference_memory_api_url);
     RELOAD(inference_memory_api_key);
-    RELOAD(lm_proxy_url);
     // Endpoints: replace entirely if different
     if (cfg.inference_endpoints.size() != fresh.inference_endpoints.size()) {
         cfg.inference_endpoints = fresh.inference_endpoints;
@@ -703,10 +688,9 @@ int reload_config() {
     RELOAD(chat_budget_summaries_pct);
     RELOAD(chat_budget_search_pct);
     RELOAD(chat_budget_reserve_pct);
-    RELOAD(chat_stream_flush_seconds);
     RELOAD(system_prompt_file);
     RELOAD(persona_dir);
-    RELOAD(proxy_system_prompt);
+    RELOAD(capture_turns);
 
     // System ceilings
     RELOAD(max_search_limit);

@@ -307,7 +307,6 @@ int main(int argc, char **argv) {
             ("port,p", Diskerror::po::value<int>(), CLI_PORT)
             ("db", Diskerror::po::value<std::string>(), CLI_DB)
             ("model-dir", Diskerror::po::value<std::string>(), CLI_MODEL_DIR)
-            ("lm-proxy-url", Diskerror::po::value<std::string>(), CLI_LM_PROXY_URL)
             ("collection", Diskerror::po::value<std::string>()->default_value(""), CLI_COLLECTION)
             ("min-chunk-size", Diskerror::po::value<int>(), CLI_MIN_CHUNK_SIZE)
             ("title", Diskerror::po::value<std::string>()->default_value(""), CLI_TITLE)
@@ -364,10 +363,6 @@ int main(int argc, char **argv) {
     Diskerror::logger log(cfg.log_file, cfg.log_level);
 
     // CLI overrides
-    if (opts.count("lm-proxy-url"))
-        ragger::mutable_config().lm_proxy_url =
-            ragger::normalize_lm_proxy_url(opts["lm-proxy-url"].as<std::string>());
-
     std::string host = opts.count("host") ? opts["host"].as<std::string>() : cfg.bind_address;
     int port = opts.count("port") ? opts["port"].as<int>() : cfg.port;
     std::string db_path = opts.count("db") ? opts["db"].as<std::string>() : "";
