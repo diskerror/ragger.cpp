@@ -143,4 +143,8 @@ else:
 PYEOF
 
 echo ""
-info "OpenClaw plugin installed. Restart OpenClaw to pick up the changes."
+info "OpenClaw plugin installed."
+echo ""
+echo "  Start the Ragger daemon:        ragger start"
+echo "  Restart the OpenClaw gateway to pick up the changes."
+echo ""
