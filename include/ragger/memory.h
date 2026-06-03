@@ -128,4 +128,19 @@ CaptureResult capture_turn(RaggerMemory& memory,
                            const std::string& model,
                            const std::string& session_id);
 
+/// Result of build_context(). `enabled` is false when the read side is off
+/// (config [server] build_context, which requires capture_turns); `turns` are
+/// the session's raw turns, oldest first, when enabled.
+struct SessionContext {
+    bool                    enabled;
+    std::vector<TurnRecord> turns;
+};
+
+/// Shared entry point behind the `build_context` MCP tool and HTTP
+/// GET /session/<id>: assemble a session's turns into a context payload for
+/// the agent to inject. No-op (enabled=false) unless BOTH capture_turns and
+/// build_context are on. Currently returns the session's raw turns; the
+/// recipe-based assembly (budgeting, summaries) is the future read layer.
+SessionContext build_context(RaggerMemory& memory, const std::string& session_id);
+
 } // namespace ragger

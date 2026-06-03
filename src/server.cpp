@@ -451,6 +451,34 @@ struct Server::Impl {
             res.set_content(response.dump(), "application/json");
         }));
 
+        // GET /session/<guid> — build a context payload from a session's turns.
+        // Read-side counterpart to /turn; same gate via ragger::build_context()
+        // (requires [server] capture_turns + build_context). Same data is
+        // returned by the `build_context` MCP tool.
+        svr.Get(R"(/session/([^/]+))", guarded([this](const UserInfo& user,
+                                                      const httplib::Request& req, httplib::Response& res) {
+            std::string sid = req.matches[1];
+            auto& mem = _get_memory(user.username);
+            auto ctx = build_context(mem, sid);
+            if (!ctx.enabled) {
+                res.set_content(json{{"status", "disabled"}}.dump(), "application/json");
+                return;
+            }
+            json turns = json::array();
+            for (const auto& t : ctx.turns) {
+                turns.push_back({
+                    {"turn_id",   t.turn_id},
+                    {"user",      t.user_text},
+                    {"assistant", t.assistant_text},
+                    {"model",     t.model_name},
+                    {"timestamp", t.timestamp}
+                });
+            }
+            json response = {{"status", "ok"}, {"session_id", sid}, {"turns", turns}};
+            Diskerror::logger::debug(std::format(lang::DBG_HTTP, "GET", "/session", "200"));
+            res.set_content(response.dump(), "application/json");
+        }));
+
         // DELETE /memory/:id
         svr.Delete(R"(/memory/(\d+))", guarded([this](const UserInfo& user,
                                                       const httplib::Request& req, httplib::Response& res) {

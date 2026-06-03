@@ -131,6 +131,21 @@ static nlohmann::json tools_list() {
                 }},
                 {"required", nlohmann::json::array({"user"})}
             }}
+        },
+        {
+            {"name", "build_context"},
+            {"description", "Assemble a conversation/session's turns into a context "
+                           "payload (oldest first) for injection. Use a session_id from "
+                           "this or another thread to recall it. No-op unless turn "
+                           "capture and context building are both enabled."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"session_id", {{"type", "string"},
+                                    {"description", "Conversation/session GUID to build context from."}}}
+                }},
+                {"required", nlohmann::json::array({"session_id"})}
+            }}
         }
     })}};
 }
@@ -194,6 +209,27 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         return text_result(nlohmann::json({
             {"status",  result.captured ? "captured" : "disabled"},
             {"turn_id", result.turn_id}
+        }).dump());
+
+    } else if (tool_name == "build_context") {
+        const auto session = arguments.value("session_id", "");
+        const auto ctx = build_context(memory, session);
+        if (!ctx.enabled)
+            return text_result(nlohmann::json({{"status", "disabled"}}).dump());
+        nlohmann::json turns = nlohmann::json::array();
+        for (const auto& t : ctx.turns) {
+            turns.push_back({
+                {"turn_id",   t.turn_id},
+                {"user",      t.user_text},
+                {"assistant", t.assistant_text},
+                {"model",     t.model_name},
+                {"timestamp", t.timestamp}
+            });
+        }
+        return text_result(nlohmann::json({
+            {"status",     "ok"},
+            {"session_id", session},
+            {"turns",      turns}
         }).dump());
 
     } else {

@@ -328,6 +328,7 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "port") cfg.port = std::stoi(val);
             else if (key == "server_name" || key == "hostname") cfg.server_name = val;
             else if (key == "capture_turns") cfg.capture_turns = parse_bool(val);
+            else if (key == "build_context") cfg.build_context = parse_bool(val);
         }
         else if (section == "storage") {
             if      (key == "db_path") cfg.db_path = val;
@@ -617,6 +618,7 @@ int reload_config() {
     RELOAD(cleanup_max_age_hours);
     RELOAD(housekeeping_interval);
     RELOAD(capture_turns);
+    RELOAD(build_context);
 
     // System ceilings
     RELOAD(max_search_limit);

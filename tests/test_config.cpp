@@ -264,6 +264,8 @@ void test_default_values() {
     assert(cfg.normalize_home_path == true);
     assert(cfg.cleanup_max_age_hours == 336.0f);
     assert(cfg.housekeeping_interval == 60);
+    assert(cfg.capture_turns == false);
+    assert(cfg.build_context == false);
     assert(cfg.max_search_limit == 0);
     assert(cfg.inference_max_tokens == 4096);
     assert(cfg.minimum_chunk_size == 300);

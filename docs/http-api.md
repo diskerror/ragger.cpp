@@ -231,6 +231,21 @@ curl -X POST http://localhost:8432/turn \
 
 ---
 
+**GET** `/session/<session_id>`
+
+Build a context payload from a session's captured turns (oldest first) — the
+read-side counterpart to `/turn`, and the same data returned by the
+`build_context` MCP tool. Requires `[server] capture_turns` **and**
+`build_context`; otherwise returns `{ "status": "disabled" }`.
+
+Response: `{ "status": "ok", "session_id": "...", "turns": [ { turn_id, user, assistant, model, timestamp }, ... ] }`.
+
+```bash
+curl http://localhost:8432/session/sess-abc-123
+```
+
+---
+
 ## MCP Server
 
 Ragger implements the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)

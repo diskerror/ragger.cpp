@@ -91,12 +91,17 @@ struct Config {
     // --- Import ---
     int  minimum_chunk_size    = 300;
 
-    // --- Turn capture ---
-    // When true, the capture_turn entry point (MCP tool + HTTP POST /turn)
-    // ingests agent-pushed raw turns into the `turns` table for background
-    // summarization. When false, capture_turn is a no-op. Agent-driven
-    // search/store tools are unaffected (always available).
+    // --- Turn handling ---
+    // capture_turns (write side): when true, the capture_turn entry point
+    // (MCP tool + HTTP POST /turn) ingests agent-pushed raw turns into the
+    // `turns` table. When false, capture_turn is a no-op.
     bool capture_turns = false;
+    // build_context (read side): when true, the build_context entry point
+    // (MCP tool + HTTP GET /session/<id>) assembles a session's turns into a
+    // context payload for the agent to inject. Only meaningful when
+    // capture_turns is also true — there's nothing to build from otherwise.
+    // Agent-driven search/store tools are unaffected by either flag.
+    bool build_context = false;
 
     // --- Model aliases ---
     std::map<std::string, std::string> model_aliases;  // short name → full name or .gguf filename

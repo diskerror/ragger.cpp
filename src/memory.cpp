@@ -170,4 +170,12 @@ CaptureResult capture_turn(RaggerMemory& memory,
     return {true, turn_id};
 }
 
+SessionContext build_context(RaggerMemory& memory, const std::string& session_id) {
+    // Gate: the read side requires both capture (something to read) and the
+    // build-context toggle. Off → enabled=false, no turns.
+    if (!config().capture_turns || !config().build_context) return {false, {}};
+    if (session_id.empty()) return {true, {}};
+    return {true, memory.backend()->turns_by_session(session_id)};
+}
+
 } // namespace ragger
