@@ -12,8 +12,6 @@ Ragger installs per-user. The executable lives on `PATH` under
 ~/.ragger/logs/             # daemon logs
 ~/.ragger/models/           # embedding models
 ~/.ragger/formats/          # inference format definitions
-~/.ragger/www/              # web UI assets
-~/.ragger/SOUL.md           # assistant persona
 ```
 
 No `sudo`, no system user, no `/etc/` or `/var/` paths. The daemon
@@ -59,11 +57,11 @@ ragger start         # bring the daemon up
   - **macOS:** `~/Library/LaunchAgents/com.diskerror.ragger.plist`
   - **Linux:** `~/.config/systemd/user/ragger.service` (+ `systemctl --user enable ragger.service`)
 - Installs the default `SOUL.md` to `~/.ragger/` if you don't already have one
-- Copies bundled formats and web assets under `~/.ragger/`
+- Copies bundled formats under `~/.ragger/`
 - Removes a legacy `~/.ragger/bin/` directory if present (old install layout)
 
 It's idempotent — re-run after a rebuild to update the binary. Config,
-database, SOUL.md, and custom formats are preserved.
+database, and custom formats are preserved.
 
 ### Installation locations
 
@@ -115,9 +113,11 @@ User management is split across three standard verbs:
 ragger useradd <name>     # create user + mint bearer token (printed once)
 ragger usermod <name>     # rotate an existing user's token (printed once)
 ragger userdel <name>     # remove user and revoke their token
-ragger passwd  <name>     # set (or clear) web-UI login password — only needed
-                          # for remote browser sessions; loopback is auto-auth
+ragger passwd  <name>     # set (or clear) a user's password credential
 ```
+
+Remote (non-loopback) requests authenticate with the user's bearer token;
+loopback and the unix socket are auto-authenticated as the local user.
 
 `useradd` errors if the user already exists — use `usermod` to rotate. The
 token is shown exactly once — hand it to the sub-user via whatever channel

@@ -140,20 +140,6 @@ public:
     /// Get distinct collection names.
     virtual std::vector<std::string> collections() const = 0;
 
-    // --- Chat sessions (persistent conversation state) ---
-
-    /// Save a chat session.
-    virtual void save_chat_session(const std::string& session_id,
-                                   const std::string& username,
-                                   const std::string& messages_json,
-                                   const std::string& web_token = "") = 0;
-
-    /// Get a chat session. Returns nullopt if not found.
-    virtual std::optional<std::string> get_chat_session(const std::string& session_id) = 0;
-
-    /// Delete a chat session.
-    virtual void delete_chat_session(const std::string& session_id) = 0;
-
     // --- Memory operations ---
 
     /// Delete a memory by ID. Returns true if deleted.
@@ -184,10 +170,6 @@ public:
     /// Update user's token hash.
     virtual void update_user_token(const std::string& username, const std::string& new_hash) = 0;
 
-    /// Create a web session with given token.
-    virtual void create_web_session(const std::string& token, const std::string& username,
-                                    int user_id, int ttl_seconds) = 0;
-
     /// Create a new user. Returns user_id or -1 on error.
     virtual int create_user(const std::string& username, const std::string& token_hash) = 0;
 
@@ -199,9 +181,6 @@ public:
 
     /// Get user info by token hash. Returns nullopt if not found.
     virtual std::optional<UserInfo> get_user_by_token_hash(const std::string& token_hash) = 0;
-
-    /// Get web session by token. Returns nullopt if not found or expired.
-    virtual std::optional<UserInfo> get_web_session(const std::string& token) = 0;
 
     /// Get a settings value by key. Returns nullopt if key doesn't exist.
     virtual std::optional<std::string> get_setting(const std::string& key) = 0;

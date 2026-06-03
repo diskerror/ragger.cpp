@@ -183,8 +183,8 @@ struct SqliteBackend::Impl {
         exec(R"(
             CREATE TABLE IF NOT EXISTS turns (
                 turn_id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                model_id       INTEGER REFERENCES models(model_id),
-                session_id     INTEGER REFERENCES sessions(session_id),
+                model_id       INTEGER REFERENCES models(model_id) ON DELETE SET NULL,
+                session_id     INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                 user_text      TEXT NOT NULL,
                 assistant_text TEXT,
                 embedding      BLOB,
@@ -200,8 +200,8 @@ struct SqliteBackend::Impl {
         exec(R"(
             CREATE TABLE IF NOT EXISTS summaries (
                 summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                model_id   INTEGER REFERENCES models(model_id),
-                session_id INTEGER REFERENCES sessions(session_id),
+                model_id   INTEGER REFERENCES models(model_id) ON DELETE SET NULL,
+                session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                 text       TEXT NOT NULL,
                 embedding  BLOB,
                 level      TEXT NOT NULL,
@@ -220,10 +220,10 @@ struct SqliteBackend::Impl {
         // (Fresh DBs already have the column from the CREATE above.)
         if (!column_exists("turns", "session_id"))
             exec("ALTER TABLE turns ADD COLUMN session_id "
-                 "INTEGER REFERENCES sessions(session_id)");
+                 "INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL");
         if (!column_exists("summaries", "session_id"))
             exec("ALTER TABLE summaries ADD COLUMN session_id "
-                 "INTEGER REFERENCES sessions(session_id)");
+                 "INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL");
         exec("CREATE INDEX IF NOT EXISTS idx_turns_session     ON turns(session_id)");
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_session ON summaries(session_id)");
 
@@ -341,12 +341,10 @@ struct SqliteBackend::Impl {
         END)");
     }
 
-    /// Users, settings, and session tables — declarative, no in-place
-    /// migration (single-user app; pre-v2 data is exported out-of-band).
-    /// `users` mirrors the reference DDL (scripts/schema_v2_fading_memory.sql)
-    /// plus `password_hash` for credentialed read access to `documents`;
-    /// settings/web_sessions/chat_sessions are the separate web/chat
-    /// session-persistence concern. Shared by both constructors.
+    /// Users + settings tables — declarative, no in-place migration
+    /// (single-user app; pre-v2 data is exported out-of-band). `users` mirrors
+    /// the reference DDL (scripts/schema_v2_fading_memory.sql) plus
+    /// `password_hash` for credentialed access. Shared by both constructors.
     void create_user_schema() {
         exec(R"(
             CREATE TABLE IF NOT EXISTS users (
@@ -370,26 +368,6 @@ struct SqliteBackend::Impl {
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            )
-        )");
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS web_sessions (
-                token    TEXT PRIMARY KEY,
-                username TEXT NOT NULL,
-                user_id  INTEGER NOT NULL,
-                created  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime')),
-                expires  TEXT NOT NULL
-            )
-        )");
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS chat_sessions (
-                session_id TEXT PRIMARY KEY,
-                web_token  TEXT,
-                username   TEXT NOT NULL,
-                messages   TEXT NOT NULL,
-                created    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime')),
-                updated    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime')),
-                FOREIGN KEY (web_token) REFERENCES web_sessions(token) ON DELETE SET NULL
             )
         )");
     }
@@ -1411,60 +1389,6 @@ std::vector<SearchResult> SqliteBackend::search_by_metadata(const json& metadata
     return pImpl->search_by_metadata(metadata_filter, limit, after, before);
 }
 
-// --- Chat sessions ---
-
-void SqliteBackend::save_chat_session(const std::string& session_id, const std::string& username,
-                                     const std::string& messages_json, const std::string& web_token) {
-    std::string buf = pImpl->local_timestamp();
-
-    // Check if session exists
-    Stmt check_stmt(pImpl->db,
-        "SELECT session_id FROM chat_sessions WHERE session_id = ?");
-    check_stmt.bind(1, session_id);
-    bool exists = check_stmt.step();
-
-    if (exists) {
-        // Update
-        Stmt s(pImpl->db,
-            "UPDATE chat_sessions SET messages = ?, updated = ?, web_token = ? WHERE session_id = ?");
-        s.bind(1, messages_json).bind(2, buf);
-        if (web_token.empty()) s.bind_null(3); else s.bind(3, web_token);
-        s.bind(4, session_id);
-        s.step();
-    } else {
-        // Insert
-        Stmt s(pImpl->db,
-            "INSERT INTO chat_sessions (session_id, username, messages, web_token, created, updated) "
-            "VALUES (?, ?, ?, ?, ?, ?)");
-        s.bind(1, session_id).bind(2, username).bind(3, messages_json);
-        if (web_token.empty()) s.bind_null(4); else s.bind(4, web_token);
-        s.bind(5, buf).bind(6, buf);
-        s.step();
-    }
-}
-
-std::optional<std::string> SqliteBackend::get_chat_session(const std::string& session_id) {
-    Stmt stmt(pImpl->db,
-        "SELECT messages FROM chat_sessions WHERE session_id = ?");
-    stmt.bind(1, session_id);
-
-    std::optional<std::string> result;
-    if (stmt.step()) {
-        const char* msgs = reinterpret_cast<const char*>(sqlite3_column_text(stmt.raw(), 0));
-        if (msgs) {
-            result = std::string(msgs);
-        }
-    }
-    return result;
-}
-
-void SqliteBackend::delete_chat_session(const std::string& session_id) {
-    Stmt stmt(pImpl->db,
-        "DELETE FROM chat_sessions WHERE session_id = ?");
-    stmt.bind(1, session_id);
-    stmt.step();
-}
-
 int SqliteBackend::cleanup_old_conversations(int max_age_hours) {
     auto cutoff = std::chrono::system_clock::now() -
         std::chrono::duration_cast<std::chrono::system_clock::duration>(
@@ -1519,20 +1443,6 @@ void SqliteBackend::update_user_token(const std::string& username, const std::st
     stmt.step();
 }
 
-void SqliteBackend::create_web_session(const std::string& token, const std::string& username,
-                                        int user_id, int ttl_seconds) {
-    auto now = std::chrono::system_clock::now();
-    std::string created = pImpl->local_timestamp();
-    std::string expires = pImpl->local_timestamp(
-        std::chrono::system_clock::to_time_t(now + std::chrono::seconds(ttl_seconds)));
-
-    Stmt stmt(pImpl->db,
-        "INSERT OR REPLACE INTO web_sessions (token, username, user_id, created, expires) VALUES (?,?,?,?,?)");
-    stmt.bind(1, token).bind(2, username).bind(3, user_id);
-    stmt.bind(4, created).bind(5, expires);
-    stmt.step();
-}
-
 int SqliteBackend::create_user(const std::string& username, const std::string& token_hash) {
     std::string timestamp = pImpl->local_timestamp();
     Stmt s(pImpl->db,
@@ -1578,23 +1488,6 @@ std::optional<UserInfo> SqliteBackend::get_user_by_token_hash(const std::string&
         user.id = s.column_int(0);
         user.username = s.column_text(1);
         user.token_hash = s.column_text(2);
-        return user;
-    }
-    return std::nullopt;
-}
-
-std::optional<UserInfo> SqliteBackend::get_web_session(const std::string& token) {
-    std::string now_str = pImpl->local_timestamp();
-
-    Stmt stmt(pImpl->db,
-        "SELECT u.id, u.username, u.token_hash FROM users u JOIN web_sessions ws ON u.id = ws.user_id WHERE ws.token = ? AND ws.expires > ?");
-    stmt.bind(1, token).bind(2, now_str);
-
-    if (stmt.step()) {
-        UserInfo user;
-        user.id = stmt.column_int(0);
-        user.username = stmt.column_text(1);
-        user.token_hash = stmt.column_text(2);
         return user;
     }
     return std::nullopt;

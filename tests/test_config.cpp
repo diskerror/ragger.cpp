@@ -95,35 +95,21 @@ void test_ceiling_zero_means_no_limit() {
     std::println(" OK");
 }
 
-void test_chat_section_parsing() {
-    std::print("  test_chat_section_parsing...");
+void test_housekeeping_section_parsing() {
+    std::print("  test_housekeeping_section_parsing...");
 
-    std::string path = "/tmp/ragger_test_chat.ini";
+    std::string path = "/tmp/ragger_test_housekeeping.ini";
     {
         std::ofstream f(path);
         f << "[server]\nport = 8432\n"
-          << "[chat]\n"
-          << "store_turns = session\n"
-          << "summarize_on_pause = false\n"
-          << "pause_minutes = 15\n"
-          << "summarize_on_quit = false\n"
-          << "max_persona_chars = 500\n"
-          << "max_memory_results = 10\n"
-          << "persona_pct = 30\n"
-          << "chars_per_token = 3.5\n"
-          << "persona_dir = /opt/ragger/persona\n";
+          << "[housekeeping]\n"
+          << "cleanup_max_age_hours = 168\n"
+          << "housekeeping_interval = 30\n";
     }
 
     ragger::Config cfg = ragger::load_config(path).value();
-    assert(cfg.chat_store_turns == "session");
-    assert(cfg.chat_summarize_on_pause == false);
-    assert(cfg.chat_pause_minutes == 15);
-    assert(cfg.chat_summarize_on_quit == false);
-    assert(cfg.chat_max_persona_chars == 500);
-    assert(cfg.chat_max_memory_results == 10);
-    assert(cfg.chat_persona_pct == 30);
-    assert(cfg.chat_chars_per_token == 3.5f);
-    assert(cfg.persona_dir == "/opt/ragger/persona");
+    assert(cfg.cleanup_max_age_hours == 168.0f);
+    assert(cfg.housekeeping_interval == 30);
 
     fs::remove(path);
     std::println(" OK");
@@ -276,14 +262,11 @@ void test_default_values() {
     assert(cfg.bm25_weight == 3.0f);
     assert(cfg.vector_weight == 7.0f);
     assert(cfg.normalize_home_path == true);
-    assert(cfg.chat_store_turns == "true");
-    assert(cfg.chat_summarize_on_pause == true);
-    assert(cfg.chat_pause_minutes == 10);
-    assert(cfg.chat_max_memory_results == 3);
+    assert(cfg.cleanup_max_age_hours == 336.0f);
+    assert(cfg.housekeeping_interval == 60);
     assert(cfg.max_search_limit == 0);
     assert(cfg.inference_max_tokens == 4096);
     assert(cfg.minimum_chunk_size == 300);
-    assert(cfg.persona_dir == "~/.ragger");
 
     fs::remove(path);
     std::println(" OK");
@@ -295,7 +278,7 @@ int main() {
     test_server_locked_override();
     test_system_ceilings();
     test_ceiling_zero_means_no_limit();
-    test_chat_section_parsing();
+    test_housekeeping_section_parsing();
     test_inference_endpoint_parsing();
     test_socket_bind_config();
     test_bool_parsing_variants();

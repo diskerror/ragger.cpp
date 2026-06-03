@@ -126,12 +126,10 @@ find_package(OpenSSL REQUIRED)
 # ragger library (core logic, no main())
 # ---------------------------------------------------------------------------
 add_library(ragger_core STATIC
-    src/chat.cpp
     src/client.cpp
     src/config.cpp
     src/util/time.cpp
     src/util/fs.cpp
-    src/workspace.cpp
     src/summarizer.cpp
     src/embedder.cpp
     src/embed_executor.cpp
@@ -145,7 +143,6 @@ add_library(ragger_core STATIC
     src/api_formats.cpp
     src/logger.cpp
     src/auth.cpp
-    src/chat_sessions.cpp
     src/mcp.cpp
 )
 target_include_directories(ragger_core PUBLIC

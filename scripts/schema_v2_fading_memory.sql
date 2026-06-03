@@ -45,8 +45,8 @@ CREATE TABLE sessions (
 -- ---------------------------------------------------------------------------
 CREATE TABLE turns (
     turn_id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    model_id       INTEGER REFERENCES models (model_id),
-    session_id     INTEGER REFERENCES sessions (session_id),
+    model_id       INTEGER REFERENCES models (model_id) ON DELETE SET NULL,
+    session_id     INTEGER REFERENCES sessions (session_id) ON DELETE SET NULL,
     user_text      TEXT NOT NULL,
     assistant_text TEXT,
     embedding      BLOB, -- embed(user_text + assistant_text)
@@ -63,8 +63,8 @@ CREATE INDEX idx_turns_session   ON turns (session_id);
 -- ---------------------------------------------------------------------------
 CREATE TABLE summaries (
     summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    model_id   INTEGER REFERENCES models (model_id),
-    session_id INTEGER REFERENCES sessions (session_id),
+    model_id   INTEGER REFERENCES models (model_id) ON DELETE SET NULL,
+    session_id INTEGER REFERENCES sessions (session_id) ON DELETE SET NULL,
     text       TEXT NOT NULL,
     embedding  BLOB,
     level      TEXT NOT NULL, -- 'turn' | 'session' | 'project'

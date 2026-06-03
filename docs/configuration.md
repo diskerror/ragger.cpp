@@ -26,13 +26,9 @@ When the daemon serves additional sub-users over HTTP (each with a
 token), the daemon owner can cap the parameters those clients send.
 Ceilings are keys with the `_limit` suffix:
 
-| Client-requested value       | Ceiling key                | Default      |
-|------------------------------|----------------------------|--------------|
-| `default_limit`              | `max_search_limit`         | 0 (no limit) |
-| `max_persona_chars`          | `max_persona_chars_limit`  | 0 (no limit) |
-| `max_memory_results`         | `max_memory_results_limit` | 0 (no limit) |
-| `max_turn_retention_minutes` | (hard-set in settings.ini) | —            |
-| `max_turns_stored`           | (hard-set in settings.ini) | —            |
+| Client-requested value | Ceiling key        | Default      |
+|------------------------|--------------------|--------------|
+| `default_limit`        | `max_search_limit` | 0 (no limit) |
 
 **How it works:**
 
@@ -44,8 +40,7 @@ Ceilings are keys with the `_limit` suffix:
 
 When the daemon serves multiple sub-users over HTTP, ceilings prevent
 one client from overwhelming shared resources (e.g., searching 10,000
-results per query, loading 50 MB of persona files into every chat
-session).
+results per query).
 
 For a purely personal install (no sub-users), ceilings are rarely
 needed — leave them at `0`.
@@ -95,26 +90,20 @@ that install.sh copies to `~/.ragger/settings.ini` on first run.
 30% BM25, 70% vector (the ratio is normalized). Using integers avoids
 floating-point config parsing issues.
 
-### `[chat]`
+### `[housekeeping]`
 
-| Key                          | Default | Description                                              |
-|------------------------------|---------|----------------------------------------------------------|
-| `store_turns`                | `true`  | Turn storage mode (`true`, `session`, `false`)           |
-| `summarize_on_pause`         | `true`  | Summarize buffered turns after inactivity                |
-| `summarize_on_quit`          | `true`  | Summarize buffered turns on exit                         |
-| `pause_minutes`              | `10`    | Inactivity threshold for pause summarization             |
-| `max_turn_retention_minutes` | `60`    | Delete turns older than this (0 = no limit)              |
-| `max_turns_stored`           | `100`   | Keep at most this many recent turns (0 = no limit)       |
-| `max_persona_chars`          | `0`     | Limit persona file size (0 = no limit)                   |
-| `max_memory_results`         | `0`     | Limit memory search results in chat (0 = no limit)       |
-| `max_persona_chars_limit`    | `0`     | System ceiling for `max_persona_chars` (0 = no ceiling)  |
-| `max_memory_results_limit`   | `0`     | System ceiling for `max_memory_results` (0 = no ceiling) |
+| Key                     | Default | Description                                          |
+|-------------------------|---------|------------------------------------------------------|
+| `cleanup_max_age_hours` | `336`   | Delete raw turns older than this (0 = keep forever)  |
+| `housekeeping_interval` | `60`    | Seconds between housekeeping passes (0 = disabled)   |
 
 ### `[inference]`
 
+The model is used only for summarization (`[inference.memory]`).
+
 | Key        | Default | Description                         |
 |------------|---------|-------------------------------------|
-| `model`    | (none)  | Default LLM model for `ragger chat` |
+| `model`    | (none)  | LLM model for summarization         |
 | `api_base` | (none)  | OpenAI-compatible API base URL      |
 | `api_key`  | (none)  | API key for inference endpoint      |
 
@@ -153,14 +142,11 @@ vector_weight = 7
 model = qwen/qwen2.5-coder-14b
 api_base = http://localhost:1234/v1
 
-[chat]
-max_persona_chars = 4000
-max_memory_results = 2
-pause_minutes = 15
+[housekeeping]
+cleanup_max_age_hours = 336
 ```
 
 ## Related
 
 - [Getting Started](getting-started.md) — Installation and setup
-- [Chat Persistence](chat-persistence.md) — Turn storage and summarization
 - [Deployment](deployment.md) — Daemon lifecycle and sub-user provisioning

@@ -94,12 +94,6 @@ public:
     /// Get distinct collection names.
     std::vector<std::string> collections() const override;
 
-    // --- Chat sessions (persistent conversation state) ---
-    void save_chat_session(const std::string& session_id, const std::string& username,
-                          const std::string& messages_json, const std::string& web_token = "") override;
-    std::optional<std::string> get_chat_session(const std::string& session_id) override;
-    void delete_chat_session(const std::string& session_id) override;
-
     /// Delete a memory by ID. Returns true if deleted.
     bool delete_memory(int memory_id) override;
 
@@ -126,10 +120,6 @@ public:
     /// Update user's token hash.
     void update_user_token(const std::string& username, const std::string& new_hash) override;
 
-    /// Create a web session with given token.
-    void create_web_session(const std::string& token, const std::string& username,
-                           int user_id, int ttl_seconds) override;
-
     /// Create a new user. Returns user_id or -1 on error.
     int create_user(const std::string& username, const std::string& token_hash) override;
 
@@ -141,9 +131,6 @@ public:
 
     /// Get user info by token hash. Returns nullopt if not found.
     std::optional<UserInfo> get_user_by_token_hash(const std::string& token_hash) override;
-
-    /// Get web session by token. Returns nullopt if not found or expired.
-    std::optional<UserInfo> get_web_session(const std::string& token) override;
 
     /// Get a settings value by key. Returns nullopt if key doesn't exist.
     std::optional<std::string> get_setting(const std::string& key) override;

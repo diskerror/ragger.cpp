@@ -70,11 +70,6 @@ public:
     /// Blocking chat using the memory model (summarization / routing).
     std::string chat_memory(const std::vector<Message>& messages);
 
-    /// Streaming chat (calls callback for each token)
-    void chat_stream(const std::vector<Message>& messages,
-                     std::function<void(const std::string&)> on_token,
-                     const std::string& model = "");
-
     /// Ensure model is loaded in local inference engine (e.g. LM Studio).
     /// Returns empty string if loaded/not applicable, error message otherwise.
     std::string ensure_model_loaded(const std::string& model = "");

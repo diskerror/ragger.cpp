@@ -213,8 +213,6 @@ static const ServerLockedKey SERVER_LOCKED[] = {
     {"embedding", "dimensions"},
     {"embedding", "model_dir"},
     // System ceilings
-    {"chat", "max_persona_chars_limit"},
-    {"chat", "max_memory_results_limit"},
     {"search", "max_search_limit"},
     // Inference endpoints (user can only pick model)
     {"inference", "api_url"},
@@ -263,32 +261,8 @@ void apply_user_overrides(Config& cfg, const Config& user) {
     // Import (all user-overridable)
     cfg.minimum_chunk_size = user.minimum_chunk_size;
 
-    // Chat (user-overridable, but ceilings apply)
-    cfg.chat_store_turns = user.chat_store_turns;
-    cfg.chat_summarize_on_pause = user.chat_summarize_on_pause;
-    cfg.chat_pause_minutes = user.chat_pause_minutes;
-    cfg.chat_summarize_on_quit = user.chat_summarize_on_quit;
-    cfg.chat_max_persona_chars = user.chat_max_persona_chars;
-    cfg.chat_max_memory_results = user.chat_max_memory_results;
-    cfg.chat_persona_pct = user.chat_persona_pct;
-    cfg.chat_chars_per_token = user.chat_chars_per_token;
-    cfg.chat_verbatim_turns = user.chat_verbatim_turns;
-    cfg.chat_verbatim_minutes = user.chat_verbatim_minutes;
-    cfg.chat_summary_count = user.chat_summary_count;
-    cfg.chat_summary_minutes = user.chat_summary_minutes;
-    cfg.chat_search_min_score = user.chat_search_min_score;
-    cfg.chat_budget_persona_pct = user.chat_budget_persona_pct;
-    cfg.chat_budget_session_pct = user.chat_budget_session_pct;
-    cfg.chat_budget_summaries_pct = user.chat_budget_summaries_pct;
-    cfg.chat_budget_search_pct = user.chat_budget_search_pct;
-    cfg.chat_budget_reserve_pct = user.chat_budget_reserve_pct;
-    // Note: max_turn_retention_minutes, max_turns_stored, and all *_limit
-    // keys are SERVER_LOCKED — they stay as loaded from system config.
-
     // Apply system ceilings
     clamp_to_ceiling(cfg.default_search_limit, cfg.max_search_limit);
-    clamp_to_ceiling(cfg.chat_max_memory_results, cfg.chat_max_memory_results_limit);
-    clamp_to_ceiling(cfg.chat_max_persona_chars, cfg.chat_max_persona_chars_limit);
 }
 
 // -----------------------------------------------------------------------
@@ -412,9 +386,6 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
         else if (section == "paths") {
             if (key == "normalize_home") cfg.normalize_home_path = parse_bool(val);
         }
-        else if (section == "web") {
-            if (key == "root" || key == "web_root") cfg.web_root = val;
-        }
         else if (section == "tls" || section == "ssl") {
             if (key == "cert" || key == "tls_cert") cfg.tls_cert = val;
             else if (key == "key" || key == "tls_key") cfg.tls_key = val;
@@ -427,34 +398,12 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "retries") cfg.embed_retries = std::stoi(val);
             else if (key == "max_workers") cfg.embed_max_workers = std::stoi(val);
         }
-        else if (section == "chat") {
-            if (key == "store_turns") cfg.chat_store_turns = val;
-            else if (key == "summarize_on_pause") cfg.chat_summarize_on_pause = parse_bool(val);
-            else if (key == "pause_minutes") cfg.chat_pause_minutes = std::stoi(val);
-            else if (key == "summarize_on_quit") cfg.chat_summarize_on_quit = parse_bool(val);
-            else if (key == "cleanup_max_age_hours") cfg.cleanup_max_age_hours = std::stof(val);
+        else if (section == "housekeeping") {
+            if (key == "cleanup_max_age_hours") cfg.cleanup_max_age_hours = std::stof(val);
             else if (key == "housekeeping_interval") {
                 int v = std::stoi(val);
                 cfg.housekeeping_interval = (v == 0) ? 0 : std::max(v, 10);
             }
-            else if (key == "max_persona_chars") cfg.chat_max_persona_chars = std::stoi(val);
-            else if (key == "max_memory_results") cfg.chat_max_memory_results = std::stoi(val);
-            else if (key == "persona_pct") cfg.chat_persona_pct = std::stoi(val);
-            else if (key == "chars_per_token") cfg.chat_chars_per_token = std::stof(val);
-            else if (key == "verbatim_turns")   cfg.chat_verbatim_turns = std::stoi(val);
-            else if (key == "verbatim_minutes") cfg.chat_verbatim_minutes = std::stoi(val);
-            else if (key == "summary_count")    cfg.chat_summary_count = std::stoi(val);
-            else if (key == "summary_minutes")  cfg.chat_summary_minutes = std::stoi(val);
-            else if (key == "search_min_score") cfg.chat_search_min_score = std::stof(val);
-            else if (key == "budget_persona_pct")   cfg.chat_budget_persona_pct = std::stoi(val);
-            else if (key == "budget_session_pct")   cfg.chat_budget_session_pct = std::stoi(val);
-            else if (key == "budget_summaries_pct") cfg.chat_budget_summaries_pct = std::stoi(val);
-            else if (key == "budget_search_pct")    cfg.chat_budget_search_pct = std::stoi(val);
-            else if (key == "budget_reserve_pct")   cfg.chat_budget_reserve_pct = std::stoi(val);
-            else if (key == "max_persona_chars_limit") cfg.chat_max_persona_chars_limit = std::stoi(val);
-            else if (key == "max_memory_results_limit") cfg.chat_max_memory_results_limit = std::stoi(val);
-            else if (key == "system_prompt_file") cfg.system_prompt_file = val;
-            else if (key == "persona_dir") cfg.persona_dir = val;
         }
         else if (section == "models") {
             cfg.model_aliases[key] = val;
@@ -650,9 +599,6 @@ int reload_config() {
     // Paths
     RELOAD(normalize_home_path);
 
-    // Web
-    RELOAD(web_root);
-
     // Import
     RELOAD(minimum_chunk_size);
 
@@ -667,35 +613,13 @@ int reload_config() {
         ++changes;
     }
 
-    // Chat / housekeeping
-    RELOAD(chat_store_turns);
-    RELOAD(chat_summarize_on_pause);
-    RELOAD(chat_pause_minutes);
-    RELOAD(chat_summarize_on_quit);
+    // Housekeeping / retention
     RELOAD(cleanup_max_age_hours);
     RELOAD(housekeeping_interval);
-    RELOAD(chat_max_persona_chars);
-    RELOAD(chat_max_memory_results);
-    RELOAD(chat_persona_pct);
-    RELOAD(chat_chars_per_token);
-    RELOAD(chat_verbatim_turns);
-    RELOAD(chat_verbatim_minutes);
-    RELOAD(chat_summary_count);
-    RELOAD(chat_summary_minutes);
-    RELOAD(chat_search_min_score);
-    RELOAD(chat_budget_persona_pct);
-    RELOAD(chat_budget_session_pct);
-    RELOAD(chat_budget_summaries_pct);
-    RELOAD(chat_budget_search_pct);
-    RELOAD(chat_budget_reserve_pct);
-    RELOAD(system_prompt_file);
-    RELOAD(persona_dir);
     RELOAD(capture_turns);
 
     // System ceilings
     RELOAD(max_search_limit);
-    RELOAD(chat_max_persona_chars_limit);
-    RELOAD(chat_max_memory_results_limit);
 
     #undef RELOAD
 

@@ -27,7 +27,6 @@
 
 #include "diskerror/program_options.h"
 #include "ragger/auth.h"
-#include "ragger/chat.h"
 #include "ragger/client.h"
 #include "ragger/config.h"
 #include "ragger/export.h"
@@ -122,84 +121,6 @@ static void do_import(ragger::RaggerMemory &memory,
                                             skipped, total));
 }
 
-// -----------------------------------------------------------------------
-// Chat: simple REPL with memory context injection
-// -----------------------------------------------------------------------
-static void do_chat(const std::string &db_path, const std::string &model_dir,
-                    const std::string &dump_payloads_dir) {
-    const auto &cfg = ragger::config();
-
-    // Validate payload dump dir before doing anything else
-    if (!dump_payloads_dir.empty()) {
-        std::error_code ec;
-        bool existed = std::filesystem::exists(dump_payloads_dir);
-        std::filesystem::create_directories(dump_payloads_dir, ec);
-        if (ec) {
-            Diskerror::logger::error(std::format(ragger::lang::ERR_PAYLOAD_DUMP_DIR, dump_payloads_dir, ec.message()));
-            return;
-        }
-        if (!existed) {
-            std::cout << std::format(ragger::lang::MSG_PAYLOAD_DUMP_CREATED, dump_payloads_dir) << "\n";
-        }
-    }
-
-    // Build inference client from config
-    ragger::InferenceClient inference = ragger::InferenceClient::from_config(cfg);
-
-    if (!dump_payloads_dir.empty()) {
-        inference.set_payload_dump_dir(dump_payloads_dir);
-    }
-
-    if (inference._endpoints.empty()) {
-        std::println(ragger::lang::ERR_NO_ENDPOINTS_HINT);
-        return;
-    }
-
-    // Quick connectivity check — GET /models on the first endpoint
-    {
-        auto &ep = inference._endpoints[0];
-        std::string models_url = ep.api_url;
-        // Strip trailing /chat/completions or similar, append /models
-        auto pos = models_url.rfind("/v1");
-        if (pos != std::string::npos)
-            models_url = models_url.substr(0, pos + 3) + "/models";
-        else
-            models_url += "/models";
-
-        CURL *curl = curl_easy_init();
-        if (curl) {
-            std::string response;
-            curl_easy_setopt(curl, CURLOPT_URL, models_url.c_str());
-            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
-            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
-                             +[](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
-                             static_cast<std::string*>(userdata)->append(ptr, size * nmemb);
-                             return size * nmemb;
-                             });
-            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-            CURLcode res = curl_easy_perform(curl);
-            long http_code = 0;
-            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-            curl_easy_cleanup(curl);
-
-            if (res != CURLE_OK) {
-                Diskerror::logger::error(std::format(ragger::lang::ERR_ENDPOINT_UNREACHABLE, ep.name, ep.api_url, curl_easy_strerror(res)));
-                return;
-            }
-            if (http_code >= 400) {
-                Diskerror::logger::error(std::format(ragger::lang::ERR_ENDPOINT_HTTP, ep.name, http_code));
-                return;
-            }
-        }
-    }
-
-    // Load memory for context search
-    ragger::RaggerMemory memory(db_path, model_dir);
-
-    // Create and run chat session
-    ragger::Chat chat(memory, inference, cfg.inference_model);
-    chat.run();
-}
 
 // -----------------------------------------------------------------------
 // Password input (with echo suppression)
@@ -314,7 +235,6 @@ int main(int argc, char **argv) {
             ("tags", Diskerror::po::value<std::string>()->default_value(""), CLI_TAGS)
             // admin flags removed — sudo is the admin gate
             ("yes,y", CLI_YES)
-            ("dump-payloads", Diskerror::po::value<std::string>(), CLI_DUMP_PAYLOADS)
             ("embeddings,e", CLI_EMBEDDINGS)
             ("output,o", Diskerror::po::value<std::string>(), "Output file");
     opts.add_hidden_options()
@@ -388,13 +308,6 @@ int main(int argc, char **argv) {
 
             ragger::Server server(memory, host, port);
             server.run();
-
-        }
-        else if (command == "chat") {
-            std::string dump_dir = opts.count("dump-payloads")
-                                       ? opts["dump-payloads"].as<std::string>()
-                                       : "";
-            do_chat(db_path, model_dir, dump_dir);
 
         }
         else if (command == "search") {
