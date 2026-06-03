@@ -51,6 +51,17 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
             std::format(lang::ERR_VECTOR_TYPE_MISMATCH, *stored_vtype, current_vtype));
     }
 
+    // Vector-length (dimensions) guard: changing dims invalidates every stored
+    // vector. Recorded once; a later change requires `ragger rebuild-embeddings`.
+    const std::string current_dims = std::to_string(config().embedding_dimensions);
+    auto stored_dims = backend_->get_setting("dimensions");
+    if (!stored_dims.has_value()) {
+        backend_->set_setting("dimensions", current_dims);
+    } else if (*stored_dims != current_dims) {
+        throw std::runtime_error(
+            std::format(lang::ERR_DIMENSIONS_MISMATCH, *stored_dims, current_dims));
+    }
+
     // Backfill any rows left without embeddings (deferred-embedding writes
     // that didn't get processed before the previous shutdown). The query is
     // a no-op when nothing is NULL; embedder is already loaded above.

@@ -437,20 +437,22 @@ struct SqliteBackend::Impl {
 
             const void* blob = s.column_blob(2);
             int blob_bytes   = s.column_bytes(2);
-            // Self-describing by size: f16 blobs are dims*2 bytes, f32 are
-            // dims*4. Decode whichever the row actually holds, so an f16 and an
-            // f32 DB both read correctly (and a mixed/legacy DB degrades
-            // per-row). NULL / wrong-sized (e.g. a deferred row before
-            // backfill) → zero vector: cosine yields 0, FTS5 still matches text.
+            // The DB's dtype/length are authoritative (validated against the
+            // settings table at startup), so decode per store_f16_. The byte
+            // count is only a sanity check: a NULL / wrong-sized blob (deferred
+            // row before backfill, or corruption) → zero vector (cosine 0; FTS5
+            // still matches text).
+            const int expected_bytes = expected_dims *
+                static_cast<int>(store_f16_ ? sizeof(uint16_t) : sizeof(float));
             std::vector<float> emb(expected_dims, 0.0f);
-            if (blob != nullptr &&
-                blob_bytes == expected_dims * static_cast<int>(sizeof(uint16_t))) {
-                const uint16_t* h = static_cast<const uint16_t*>(blob);
-                for (int i = 0; i < expected_dims; ++i) emb[i] = f16_to_f32(h[i]);
-            } else if (blob != nullptr &&
-                       blob_bytes == expected_dims * static_cast<int>(sizeof(float))) {
-                const float* f = static_cast<const float*>(blob);
-                for (int i = 0; i < expected_dims; ++i) emb[i] = f[i];
+            if (blob != nullptr && blob_bytes == expected_bytes) {
+                if (store_f16_) {
+                    const uint16_t* h = static_cast<const uint16_t*>(blob);
+                    for (int i = 0; i < expected_dims; ++i) emb[i] = f16_to_f32(h[i]);
+                } else {
+                    const float* f = static_cast<const float*>(blob);
+                    for (int i = 0; i < expected_dims; ++i) emb[i] = f[i];
+                }
             }
             emb_rows.push_back(std::move(emb));
 

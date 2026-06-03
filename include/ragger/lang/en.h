@@ -233,6 +233,7 @@ constexpr const char* ERR_EMPTY_TOKENIZATION  = "Empty tokenization result";
 constexpr const char* ERR_OUTPUT_SHAPE        = "Unexpected output shape from model";
 constexpr const char* ERR_EMBEDDING_MISMATCH  = "Embedding model mismatch: database was built with '{}' but config specifies '{}'. Reorganise your models directory and run 'ragger rebuild' to re-embed.";
 constexpr const char* ERR_VECTOR_TYPE_MISMATCH = "Vector dtype mismatch: database was built with '{}' embeddings but config specifies '{}'. Run 'ragger rebuild-embeddings' to re-encode at the new precision.";
+constexpr const char* ERR_DIMENSIONS_MISMATCH = "Vector length mismatch: database was built with {}-dim embeddings but config specifies {}. Run 'ragger rebuild-embeddings' to re-encode at the new dimensions.";
 
 // --- Errors: tokenizer wrapper ---
 constexpr const char* ERR_TOKENIZER_OPEN      = "Failed to open tokenizer.json: {}";
