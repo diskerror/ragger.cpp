@@ -50,16 +50,9 @@ static inline float f16_to_f32(uint16_t bits) {
     std::memcpy(&h, &bits, sizeof(h));
     return static_cast<float>(h);
 }
-// Convert a float vector to f16 and bind it as the embedding blob.
-// SQLITE_TRANSIENT makes sqlite copy immediately, so the temporary is safe.
-static inline void bind_embedding(sqlite3_stmt* s, int idx,
-                                  const std::vector<float>& emb) {
-    std::vector<uint16_t> h(emb.size());
-    for (size_t i = 0; i < emb.size(); ++i) h[i] = f32_to_f16(emb[i]);
-    sqlite3_bind_blob(s, idx, h.data(),
-                      static_cast<int>(h.size() * sizeof(uint16_t)),
-                      SQLITE_TRANSIENT);
-}
+// (Embedding blobs are written by Impl::bind_embedding, which honours the
+//  configured storage dtype — f16 or f32. SQLITE_TRANSIENT makes sqlite copy
+//  immediately, so the temporary buffer is safe.)
 
 // -----------------------------------------------------------------------
 // Impl
@@ -68,6 +61,26 @@ struct SqliteBackend::Impl {
     sqlite3*    db       = nullptr;
     Embedder*   embedder = nullptr;    // nullable — null for DB-only (user mgmt) mode
     std::string db_path;
+    bool        store_f16_ = true;     // on-disk vector dtype (config vector_type)
+
+    // Bind a float vector as the embedding blob in the configured storage
+    // dtype: f16 (2 bytes/dim, default) or f32 (4 bytes/dim). The decode side
+    // (ensure_cache) distinguishes them by blob size, so the dtype is
+    // self-describing on read.
+    void bind_embedding(sqlite3_stmt* s, int idx,
+                        const std::vector<float>& emb) const {
+        if (store_f16_) {
+            std::vector<uint16_t> h(emb.size());
+            for (size_t i = 0; i < emb.size(); ++i) h[i] = f32_to_f16(emb[i]);
+            sqlite3_bind_blob(s, idx, h.data(),
+                              static_cast<int>(h.size() * sizeof(uint16_t)),
+                              SQLITE_TRANSIENT);
+        } else {
+            sqlite3_bind_blob(s, idx, emb.data(),
+                              static_cast<int>(emb.size() * sizeof(float)),
+                              SQLITE_TRANSIENT);
+        }
+    }
 
     // Embedding cache for the summaries table — invalidated on writes.
     // Vector scores come from here; keyword scores come from FTS5
@@ -84,6 +97,7 @@ struct SqliteBackend::Impl {
     {
         const auto& cfg = config();
         db_path = path.empty() ? cfg.resolved_db_path() : expand_path(path);
+        store_f16_ = (cfg.embedding_vector_type != "f32");
 
         // Create parent dirs
         fs::create_directories(fs::path(db_path).parent_path());
@@ -183,11 +197,11 @@ struct SqliteBackend::Impl {
         exec(R"(
             CREATE TABLE IF NOT EXISTS turns (
                 turn_id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                model_id       INTEGER REFERENCES models(model_id) ON DELETE SET NULL,
-                session_id     INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                 user_text      TEXT NOT NULL,
                 assistant_text TEXT,
                 embedding      BLOB,
+                model_id       INTEGER REFERENCES models(model_id) ON DELETE SET NULL,
+                session_id     INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                 timestamp      TEXT NOT NULL
             )
         )");
@@ -200,11 +214,11 @@ struct SqliteBackend::Impl {
         exec(R"(
             CREATE TABLE IF NOT EXISTS summaries (
                 summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                model_id   INTEGER REFERENCES models(model_id) ON DELETE SET NULL,
-                session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                 text       TEXT NOT NULL,
                 embedding  BLOB,
                 level      TEXT NOT NULL,
+                model_id   INTEGER REFERENCES models(model_id) ON DELETE SET NULL,
+                session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                 status     TEXT NOT NULL,
                 tags       TEXT NOT NULL DEFAULT '',
                 timestamp  TEXT NOT NULL
@@ -423,14 +437,20 @@ struct SqliteBackend::Impl {
 
             const void* blob = s.column_blob(2);
             int blob_bytes   = s.column_bytes(2);
-            int n_halfs      = blob_bytes / static_cast<int>(sizeof(uint16_t));
-            // NULL / wrong-sized (e.g. a legacy f32 blob, or a deferred row
-            // before backfill) → zero vector. Cosine yields 0; FTS5 still
-            // matches text. Old f32 DBs need `rebuild-embeddings`.
+            // Self-describing by size: f16 blobs are dims*2 bytes, f32 are
+            // dims*4. Decode whichever the row actually holds, so an f16 and an
+            // f32 DB both read correctly (and a mixed/legacy DB degrades
+            // per-row). NULL / wrong-sized (e.g. a deferred row before
+            // backfill) → zero vector: cosine yields 0, FTS5 still matches text.
             std::vector<float> emb(expected_dims, 0.0f);
-            if (n_halfs == expected_dims && blob != nullptr) {
+            if (blob != nullptr &&
+                blob_bytes == expected_dims * static_cast<int>(sizeof(uint16_t))) {
                 const uint16_t* h = static_cast<const uint16_t*>(blob);
                 for (int i = 0; i < expected_dims; ++i) emb[i] = f16_to_f32(h[i]);
+            } else if (blob != nullptr &&
+                       blob_bytes == expected_dims * static_cast<int>(sizeof(float))) {
+                const float* f = static_cast<const float*>(blob);
+                for (int i = 0; i < expected_dims; ++i) emb[i] = f[i];
             }
             emb_rows.push_back(std::move(emb));
 

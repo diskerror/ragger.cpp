@@ -38,6 +38,19 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
             std::format(lang::ERR_EMBEDDING_MISMATCH, *stored_model, current_model));
     }
 
+    // Vector-dtype mismatch guard: f16 and f32 blobs have different sizes, so
+    // mixing them in one DB corrupts the vector cache. A whole DB must use one
+    // storage dtype; changing it requires `ragger rebuild-embeddings`.
+    const std::string current_vtype =
+        (config().embedding_vector_type == "f32") ? "f32" : "f16";
+    auto stored_vtype = backend_->get_setting("vector_type");
+    if (!stored_vtype.has_value()) {
+        backend_->set_setting("vector_type", current_vtype);
+    } else if (*stored_vtype != current_vtype) {
+        throw std::runtime_error(
+            std::format(lang::ERR_VECTOR_TYPE_MISMATCH, *stored_vtype, current_vtype));
+    }
+
     // Backfill any rows left without embeddings (deferred-embedding writes
     // that didn't get processed before the previous shutdown). The query is
     // a no-op when nothing is NULL; embedder is already loaded above.

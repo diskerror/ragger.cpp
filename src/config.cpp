@@ -211,6 +211,7 @@ static const ServerLockedKey SERVER_LOCKED[] = {
     {"logging", "log_dir"},
     {"embedding", "model"},
     {"embedding", "dimensions"},
+    {"embedding", "vector_type"},
     {"embedding", "model_dir"},
     // System ceilings
     {"search", "max_search_limit"},
@@ -337,6 +338,7 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
         else if (section == "embedding") {
             if      (key == "model")      cfg.embedding_model = val;
             else if (key == "dimensions") cfg.embedding_dimensions = std::stoi(val);
+            else if (key == "vector_type") cfg.embedding_vector_type = val;
             else if (key == "model_dir")  cfg.model_dir = val;
         }
         else if (section == "search") {
@@ -549,6 +551,7 @@ int reload_config() {
     warn_restart("tls_key", fresh.tls_key != cfg.tls_key);
     warn_restart("embedding_model", fresh.embedding_model != cfg.embedding_model);
     warn_restart("embedding_dimensions", fresh.embedding_dimensions != cfg.embedding_dimensions);
+    warn_restart("embedding_vector_type", fresh.embedding_vector_type != cfg.embedding_vector_type);
 
     // Hot-reloadable fields
     #define RELOAD(field) do { \

@@ -71,9 +71,10 @@ that install.sh copies to `~/.ragger/settings.ini` on first run.
 
 | Key          | Default            | Description                                 |
 |--------------|--------------------|---------------------------------------------|
-| `model`      | `all-MiniLM-L6-v2` | HuggingFace model name                      |
-| `dimensions` | `384`              | Embedding vector size                       |
-| `device`     | `cpu`              | Device for inference (`cpu`, `cuda`, `mps`) |
+| `model`       | `all-MiniLM-L6-v2` | HuggingFace model name                      |
+| `dimensions`  | `384`              | Embedding vector size                       |
+| `vector_type` | `f16`              | On-disk vector precision: `f16` (half the size) or `f32` (full). In-memory math is always f32. A whole DB uses one type; changing it needs `rebuild-embeddings`. Tracked in the `settings` table with `model` for drift protection. |
+| `device`      | `cpu`              | Device for inference (`cpu`, `cuda`, `mps`) |
 
 ### `[search]`
 

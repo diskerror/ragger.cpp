@@ -36,6 +36,11 @@ struct Config {
     // --- Embedding ---
     std::string embedding_model = "all-MiniLM-L6-v2";
     int         embedding_dimensions = 384;
+    // On-disk vector storage precision: "f16" (half, default — half the size)
+    // or "f32" (full). In-memory math is always f32; this only affects the
+    // blob written to the DB. Tracked in the settings table for drift
+    // protection — a whole DB must use one type (model+type are paired).
+    std::string embedding_vector_type = "f16";
     std::string model_dir;   // empty = resolved at runtime (single_user: ~/.ragger/models, daemon: /var/ragger/models)
 
     // --- Search ---

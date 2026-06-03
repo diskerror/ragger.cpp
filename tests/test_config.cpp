@@ -266,6 +266,7 @@ void test_default_values() {
     assert(cfg.housekeeping_interval == 60);
     assert(cfg.capture_turns == false);
     assert(cfg.build_context == false);
+    assert(cfg.embedding_vector_type == "f16");
     assert(cfg.max_search_limit == 0);
     assert(cfg.inference_max_tokens == 4096);
     assert(cfg.minimum_chunk_size == 300);
