@@ -80,6 +80,10 @@ formats_dir = ~/.ragger/formats
 [embedding]
 model = all-MiniLM-L6-v2
 dimensions = 384
+vector_type = f16
+# vector_type: on-disk vector precision, f16 (default) or f32.
+# model + dimensions + vector_type define the DB's vector identity; changing
+# any with data in the DB requires 'ragger rebuild-embeddings'.
 # model_dir: path to ONNX model files (default: /var/ragger/models)
 # All users on the same system must use the same embedding model
 # for vector search to work correctly.

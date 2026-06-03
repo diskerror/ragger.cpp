@@ -470,8 +470,10 @@ int main(int argc, char **argv) {
         }
         else if (command == "rebuild-embeddings") {
 
-            // Get count first (before loading full memory)
-            ragger::RaggerMemory memory_temp(db_path, model_dir);
+            // Get count first (before loading full memory). Skip the guard so
+            // a pending model/dtype/dims change doesn't block the count/confirm.
+            ragger::RaggerMemory memory_temp(db_path, model_dir, "",
+                                             /*skip_embedding_guard=*/true);
             int total_count = memory_temp.count();
             memory_temp.close();
 
@@ -506,9 +508,20 @@ int main(int argc, char **argv) {
                 Diskerror::logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
             }
 
-            // Rebuild embeddings
-            ragger::RaggerMemory memory(db_path, model_dir);
+            // Rebuild embeddings. Skip the drift guard — re-encoding at the
+            // new config is exactly the point — then rewrite the settings
+            // identity so the new model/dtype/dimensions "take". Doing this
+            // *after* the re-encode means an aborted/failed rebuild leaves
+            // settings≠config, so the guard still catches it next startup.
+            ragger::RaggerMemory memory(db_path, model_dir, "",
+                                        /*skip_embedding_guard=*/true);
             int count = memory.rebuild_embeddings();
+            memory.backend()->set_setting(
+                "embedding_model", cfg.resolve_model(cfg.embedding_model));
+            memory.backend()->set_setting(
+                "vector_type", cfg.embedding_vector_type == "f32" ? "f32" : "f16");
+            memory.backend()->set_setting(
+                "dimensions", std::to_string(cfg.embedding_dimensions));
             std::cout << std::format(ragger::lang::MSG_EMBEDDINGS_REBUILT, count) << "\n";
 
         }

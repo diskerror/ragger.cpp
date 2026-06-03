@@ -1019,6 +1019,20 @@ struct SqliteBackend::Impl {
         return c;
     }
 
+    // True if any embedded table holds a non-NULL embedding. EXISTS short-
+    // circuits on the first hit. Deferred (NULL-embedding) rows don't count —
+    // they get the current model on backfill, so they aren't incompatible.
+    bool has_embeddings() const {
+        Stmt s(db,
+            "SELECT EXISTS("
+            "  SELECT 1 FROM summaries  WHERE embedding IS NOT NULL "
+            "  UNION ALL SELECT 1 FROM turns     WHERE embedding IS NOT NULL "
+            "  UNION ALL SELECT 1 FROM documents WHERE embedding IS NOT NULL "
+            "  UNION ALL SELECT 1 FROM decisions WHERE embedding IS NOT NULL "
+            "  LIMIT 1)");
+        return s.step() && s.column_int(0) != 0;
+    }
+
     // Lean v2 summaries have no collection column; the `collection` argument
     // is ignored (kept for API compat). Returns every summary, score 0.
     std::vector<SearchResult> load_all(const std::string& /*collection*/) {
@@ -1373,6 +1387,8 @@ SearchResponse SqliteBackend::search(const std::string& query, int limit,
 }
 
 int SqliteBackend::count() const { return pImpl->count(); }
+
+bool SqliteBackend::has_embeddings() const { return pImpl->has_embeddings(); }
 
 std::vector<SearchResult> SqliteBackend::load_all(const std::string& collection) {
     return pImpl->load_all(collection);

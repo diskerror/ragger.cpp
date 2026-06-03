@@ -126,6 +126,11 @@ public:
     /// Number of stored memories.
     virtual int count() const = 0;
 
+    /// True if any table holds a non-NULL embedding — i.e. the DB has vectors
+    /// that an embedding-config change would invalidate. Used by the startup
+    /// drift guard to decide between hard-error and re-adopt on an empty DB.
+    virtual bool has_embeddings() const = 0;
+
     /// Load all memories. Returns vector of SearchResult (score=0).
     virtual std::vector<SearchResult> load_all(const std::string& collection = "") = 0;
 

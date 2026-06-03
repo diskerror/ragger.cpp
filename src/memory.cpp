@@ -14,7 +14,8 @@ namespace ragger {
 
 RaggerMemory::RaggerMemory(const std::string& db_path,
                            const std::string& model_dir,
-                           const std::string& user_db_path)
+                           const std::string& user_db_path,
+                           bool skip_embedding_guard)
 {
     // Resolve model directory from config or override
     std::string resolved_model_dir = model_dir.empty()
@@ -27,39 +28,45 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     // Create primary backend - single user DB only now
     backend_ = std::make_unique<SqliteBackend>(*embedder_, db_path);
     
-    // Model mismatch guard: stored embeddings are incompatible across models.
+    // --- Embedding identity drift guard (model + dtype + dimensions) -------
+    // The settings table records what built this DB. On startup we compare it
+    // to the current config; thereafter the stored values are authoritative.
+    //   - first use (no stored value)        → record it
+    //   - match                              → fine
+    //   - mismatch + DB has embeddings       → STOP (rebuild or revert the value)
+    //   - mismatch + empty DB                → re-adopt the new value (nothing to
+    //                                          invalidate yet)
+    //   - skip_embedding_guard (rebuild)     → don't touch settings; the
+    //                                          rebuild path rewrites them after
+    //                                          re-encoding (so an aborted rebuild
+    //                                          leaves settings≠config and the
+    //                                          guard still catches it next time).
     const std::string current_model = config().resolve_model(config().embedding_model);
-    auto stored_model = backend_->get_setting("embedding_model");
-    if (!stored_model.has_value()) {
-        // First use — record which model built this database.
-        backend_->set_setting("embedding_model", current_model);
-    } else if (*stored_model != current_model) {
-        throw std::runtime_error(
-            std::format(lang::ERR_EMBEDDING_MISMATCH, *stored_model, current_model));
-    }
-
-    // Vector-dtype mismatch guard: f16 and f32 blobs have different sizes, so
-    // mixing them in one DB corrupts the vector cache. A whole DB must use one
-    // storage dtype; changing it requires `ragger rebuild-embeddings`.
     const std::string current_vtype =
         (config().embedding_vector_type == "f32") ? "f32" : "f16";
-    auto stored_vtype = backend_->get_setting("vector_type");
-    if (!stored_vtype.has_value()) {
-        backend_->set_setting("vector_type", current_vtype);
-    } else if (*stored_vtype != current_vtype) {
-        throw std::runtime_error(
-            std::format(lang::ERR_VECTOR_TYPE_MISMATCH, *stored_vtype, current_vtype));
-    }
-
-    // Vector-length (dimensions) guard: changing dims invalidates every stored
-    // vector. Recorded once; a later change requires `ragger rebuild-embeddings`.
     const std::string current_dims = std::to_string(config().embedding_dimensions);
-    auto stored_dims = backend_->get_setting("dimensions");
-    if (!stored_dims.has_value()) {
-        backend_->set_setting("dimensions", current_dims);
-    } else if (*stored_dims != current_dims) {
-        throw std::runtime_error(
-            std::format(lang::ERR_DIMENSIONS_MISMATCH, *stored_dims, current_dims));
+
+    if (!skip_embedding_guard) {
+        const bool has_data = backend_->has_embeddings();
+        auto guard = [&](const char* key, const std::string& current,
+                         const std::string& err) {
+            auto stored = backend_->get_setting(key);
+            if (!stored.has_value() || *stored == current) {
+                if (!stored.has_value()) backend_->set_setting(key, current);
+                return;
+            }
+            if (has_data) throw std::runtime_error(err);
+            backend_->set_setting(key, current);  // empty DB: re-adopt
+        };
+        guard("embedding_model", current_model,
+              std::format(lang::ERR_EMBEDDING_MISMATCH,
+                          backend_->get_setting("embedding_model").value_or(""), current_model));
+        guard("vector_type", current_vtype,
+              std::format(lang::ERR_VECTOR_TYPE_MISMATCH,
+                          backend_->get_setting("vector_type").value_or(""), current_vtype));
+        guard("dimensions", current_dims,
+              std::format(lang::ERR_DIMENSIONS_MISMATCH,
+                          backend_->get_setting("dimensions").value_or(""), current_dims));
     }
 
     // Backfill any rows left without embeddings (deferred-embedding writes
