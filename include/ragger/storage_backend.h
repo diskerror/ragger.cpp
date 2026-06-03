@@ -131,6 +131,10 @@ public:
     /// drift guard to decide between hard-error and re-adopt on an empty DB.
     virtual bool has_embeddings() const = 0;
 
+    /// Total rows across the four embedded tables (turns, summaries, decisions,
+    /// documents) — the true scope of a `rebuild_embeddings()` pass.
+    virtual int count_embeddable_rows() const = 0;
+
     /// Load all memories. Returns vector of SearchResult (score=0).
     virtual std::vector<SearchResult> load_all(const std::string& collection = "") = 0;
 

@@ -472,9 +472,11 @@ int main(int argc, char **argv) {
 
             // Get count first (before loading full memory). Skip the guard so
             // a pending model/dtype/dims change doesn't block the count/confirm.
+            // Count across all four embedded tables — what the rebuild touches,
+            // not just summaries (count()).
             ragger::RaggerMemory memory_temp(db_path, model_dir, "",
                                              /*skip_embedding_guard=*/true);
-            int total_count = memory_temp.count();
+            int total_count = memory_temp.backend()->count_embeddable_rows();
             memory_temp.close();
 
             // Warning + confirmation prompt

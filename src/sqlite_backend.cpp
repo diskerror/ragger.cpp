@@ -1019,6 +1019,18 @@ struct SqliteBackend::Impl {
         return c;
     }
 
+    // Total rows across the four embedded tables (turns, summaries, decisions,
+    // documents) — i.e. how many rows `rebuild_embeddings()` will re-encode.
+    // (count() alone is just summaries, which understates the rebuild scope.)
+    int count_embeddable_rows() const {
+        int total = 0;
+        for (const char* tbl : {"turns", "summaries", "decisions", "documents"}) {
+            Stmt s(db, std::format("SELECT COUNT(*) FROM {}", tbl));
+            if (s.step()) total += s.column_int(0);
+        }
+        return total;
+    }
+
     // True if any embedded table holds a non-NULL embedding. EXISTS short-
     // circuits on the first hit. Deferred (NULL-embedding) rows don't count —
     // they get the current model on backfill, so they aren't incompatible.
@@ -1389,6 +1401,8 @@ SearchResponse SqliteBackend::search(const std::string& query, int limit,
 int SqliteBackend::count() const { return pImpl->count(); }
 
 bool SqliteBackend::has_embeddings() const { return pImpl->has_embeddings(); }
+
+int SqliteBackend::count_embeddable_rows() const { return pImpl->count_embeddable_rows(); }
 
 std::vector<SearchResult> SqliteBackend::load_all(const std::string& collection) {
     return pImpl->load_all(collection);

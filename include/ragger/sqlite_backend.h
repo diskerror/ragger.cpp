@@ -87,6 +87,9 @@ public:
     /// True if any table holds a non-NULL embedding.
     bool has_embeddings() const override;
 
+    /// Total rows across the four embedded tables (rebuild scope).
+    int count_embeddable_rows() const override;
+
     /// Load all memories. Returns vector of SearchResult (score=0).
     std::vector<SearchResult> load_all(const std::string& collection = "") override;
 

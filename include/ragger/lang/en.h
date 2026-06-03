@@ -132,12 +132,12 @@ constexpr const char* MSG_USER_REGISTERED     = "✓ Registered in database (use
 constexpr const char* WARN_DB_DEFERRED        = "Warning: DB registration deferred ({})";
 
 // --- Rebuild ---
-constexpr const char* MSG_REBUILD_CONFIRM     = "This will re-embed all {} memories. The server should be stopped first.";
+constexpr const char* MSG_REBUILD_CONFIRM     = "This will re-embed all {} stored rows (turns, summaries, decisions, documents). The server should be stopped first.";
 constexpr const char* PROMPT_CONTINUE         = "Continue? [y/N] ";
 constexpr const char* MSG_ABORTED             = "Aborted.";
 constexpr const char* MSG_DB_BACKED_UP        = "Database backed up to: {}";
 constexpr const char* WARN_BACKUP_FAILED      = "Warning: Failed to create backup: {}";
-constexpr const char* MSG_EMBEDDINGS_REBUILT  = "✓ Embeddings rebuilt: {} documents";
+constexpr const char* MSG_EMBEDDINGS_REBUILT  = "✓ Embeddings rebuilt: {} rows";
 
 // --- Chat prompts ---
 constexpr const char* CHAT_PROMPT_USER        = "You: ";
