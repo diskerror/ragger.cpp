@@ -99,7 +99,7 @@ PYEOF
     fi
 
     echo ""
-    info "Uninstall complete. Restart Hermes to pick up the change."
+    info "Uninstall complete. Restart the Hermes gateway (hermes gateway restart) to pick up the change."
     exit 0
 fi
 
@@ -229,7 +229,7 @@ echo ""
 info "Hermes plugin installed."
 echo ""
 echo "  Start the Ragger daemon:  ragger start"
-echo "  Restart Hermes gateway:   hermes restart  (or restart the Telegram bot)"
+echo "  Restart Hermes gateway:   hermes gateway restart  (or restart the Telegram bot)"
 echo ""
 echo "  To verify: send '/memory' or start a conversation — Hermes will show"
 echo "  'Ragger Memory' in the system prompt context block."
