@@ -121,6 +121,22 @@ if [ -d "$SRC/recipes" ]; then
     cp -R "$SRC/recipes/." "$RECIPES_DIR/"
 fi
 
+# Embedding model — fetch from HuggingFace if not already present. The six
+# files together are ~90 MB; one-time download, idempotent re-runs.
+EMBED_MODEL="all-MiniLM-L6-v2"
+EMBED_DIR="$MODEL_DIR/$EMBED_MODEL"
+if [ ! -f "$EMBED_DIR/model.onnx" ]; then
+    info "Downloading $EMBED_MODEL embedding model to $EMBED_DIR"
+    mkdir -p "$EMBED_DIR"
+    HF_BASE="https://huggingface.co/sentence-transformers/$EMBED_MODEL/resolve/main"
+    for f in config.json special_tokens_map.json tokenizer_config.json tokenizer.json vocab.txt; do
+        curl -sSLfo "$EMBED_DIR/$f" "$HF_BASE/$f" || \
+            warn "  failed: $f (you can rerun this script later to retry)"
+    done
+    curl -#Lfo "$EMBED_DIR/model.onnx" "$HF_BASE/onnx/model.onnx" || \
+        warn "  failed: model.onnx (rerun install.sh once you have a network)"
+fi
+
 # ============================================================
 # PHASE 3: Install executable
 # ============================================================

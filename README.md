@@ -96,21 +96,43 @@ cmake -B build -DBOOST_ROOT=/opt/local/libexec/boost/1.88 \
 ## Build dependencies
 
 - **System:** SQLite3, Eigen3, Boost (program_options), OpenSSL, libcurl,
-  Rust (for tokenizers-cpp).
-- **Vendored** (already in the repo): cpp-httplib, ONNX Runtime,
-  tokenizers-cpp, nlohmann/json.
+  Rust (for tokenizers-cpp; rustup stable is fine).
+- **Auto-fetched at configure time:** ONNX Runtime (downloaded into the
+  build dir for your platform). Drop a matching `vendor/onnxruntime/`
+  in place if you want an offline build.
+- **Vendored** (already in the repo): cpp-httplib, nlohmann/json,
+  tokenizers-cpp source.
 
 ```bash
-# macOS (MacPorts)
-sudo port install boost eigen3 sqlite3 rust openssl
+# macOS — MacPorts
+sudo port install boost eigen3 sqlite3 rust openssl curl cmake
 
-# Linux (apt)
-sudo apt install libboost-all-dev libeigen3-dev libsqlite3-dev \
-                 rustc cargo libssl-dev libcurl4-openssl-dev
+# macOS — Homebrew
+brew install boost eigen sqlite openssl@3 curl cmake rustup-init && rustup-init -y
+
+# Debian / Ubuntu
+sudo apt install build-essential cmake pkg-config \
+                 libboost-program-options-dev libeigen3-dev libsqlite3-dev \
+                 libssl-dev libcurl4-openssl-dev
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+# Fedora / RHEL
+sudo dnf install gcc-c++ cmake pkgconf-pkg-config \
+                 boost-devel eigen3-devel sqlite-devel \
+                 openssl-devel libcurl-devel
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ```
 
-macOS and Linux are supported. Windows needs porting (`fork()`, the
-bash/launchctl install scripts).
+Then:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+./scripts/install.sh    # places binary + downloads ~90 MB embedding model
+```
+
+macOS (arm64 and x86_64) and Linux (x86_64 and aarch64) are supported.
+Windows needs porting (`fork()`, the bash/launchctl/systemd install scripts).
 
 ## Documentation
 

@@ -50,9 +50,12 @@ option(RAGGER_BUILD_TESTS "Build test suite" ON)
 # ---------------------------------------------------------------------------
 # Boost (for ProgramOptions via c_lib)
 # ---------------------------------------------------------------------------
-# MacPorts boost188 lives here; adjust if using a different version
-set(BOOST_ROOT "/opt/local/libexec/boost/1.88" CACHE PATH "Boost root")
-find_package(Boost 1.88 REQUIRED COMPONENTS program_options)
+if(APPLE)
+    set(BOOST_ROOT "/opt/local/libexec/boost/1.88" CACHE PATH "Boost root")
+    find_package(Boost 1.88 REQUIRED COMPONENTS program_options)
+else()
+    find_package(Boost 1.74 REQUIRED COMPONENTS program_options)
+endif()
 
 # ---------------------------------------------------------------------------
 # SQLite3
@@ -60,12 +63,64 @@ find_package(Boost 1.88 REQUIRED COMPONENTS program_options)
 find_package(SQLite3 REQUIRED)
 
 # ---------------------------------------------------------------------------
-# ONNX Runtime (vendored pre-built)
+# ONNX Runtime — vendored if present, else fetched at configure time
 # ---------------------------------------------------------------------------
-set(ORT_DIR "${CMAKE_SOURCE_DIR}/vendor/onnxruntime")
+# Repo-local override: drop the matching upstream archive in vendor/onnxruntime/
+# and the lib + headers will be picked up as-is (handy for offline builds).
+# Otherwise we fetch the right tarball for the host platform from the
+# microsoft/onnxruntime GitHub release.
+set(ORT_VERSION "1.24.4" CACHE STRING "ONNX Runtime version to use")
+
+if(APPLE)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+        set(ORT_PKG  "onnxruntime-osx-arm64-${ORT_VERSION}")
+    else()
+        set(ORT_PKG  "onnxruntime-osx-x86_64-${ORT_VERSION}")
+    endif()
+    set(ORT_LIB_NAME "libonnxruntime.dylib")
+elseif(UNIX)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+        set(ORT_PKG  "onnxruntime-linux-aarch64-${ORT_VERSION}")
+    else()
+        set(ORT_PKG  "onnxruntime-linux-x64-${ORT_VERSION}")
+    endif()
+    set(ORT_LIB_NAME "libonnxruntime.so")
+else()
+    message(FATAL_ERROR "Unsupported platform for ONNX Runtime auto-fetch")
+endif()
+
+set(ORT_VENDOR_DIR "${CMAKE_SOURCE_DIR}/vendor/onnxruntime")
+if(EXISTS "${ORT_VENDOR_DIR}/lib/${ORT_LIB_NAME}"
+   AND EXISTS "${ORT_VENDOR_DIR}/include/onnxruntime_cxx_api.h")
+    set(ORT_DIR "${ORT_VENDOR_DIR}")
+    message(STATUS "ONNX Runtime: using vendored ${ORT_DIR}")
+else()
+    set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_PKG}.tgz")
+    set(ORT_CACHE "${CMAKE_BINARY_DIR}/_deps/onnxruntime/${ORT_PKG}")
+    if(NOT EXISTS "${ORT_CACHE}/lib/${ORT_LIB_NAME}")
+        message(STATUS "ONNX Runtime: fetching ${ORT_URL}")
+        file(DOWNLOAD "${ORT_URL}" "${CMAKE_BINARY_DIR}/_deps/${ORT_PKG}.tgz"
+             SHOW_PROGRESS STATUS _ort_dl)
+        list(GET _ort_dl 0 _ort_rc)
+        if(NOT _ort_rc EQUAL 0)
+            message(FATAL_ERROR "ONNX Runtime download failed: ${_ort_dl}")
+        endif()
+        file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/_deps/onnxruntime")
+        execute_process(
+            COMMAND ${CMAKE_COMMAND} -E tar xzf "${CMAKE_BINARY_DIR}/_deps/${ORT_PKG}.tgz"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/_deps/onnxruntime"
+            RESULT_VARIABLE _ort_tar)
+        if(NOT _ort_tar EQUAL 0)
+            message(FATAL_ERROR "ONNX Runtime extract failed: ${_ort_tar}")
+        endif()
+    endif()
+    set(ORT_DIR "${ORT_CACHE}")
+endif()
+
+set(ORT_LIB "${ORT_DIR}/lib/${ORT_LIB_NAME}")
 add_library(onnxruntime SHARED IMPORTED)
 set_target_properties(onnxruntime PROPERTIES
-    IMPORTED_LOCATION "${ORT_DIR}/lib/libonnxruntime.dylib"
+    IMPORTED_LOCATION "${ORT_LIB}"
     INTERFACE_INCLUDE_DIRECTORIES "${ORT_DIR}/include"
 )
 
@@ -87,9 +142,13 @@ add_subdirectory(vendor/tokenizers-cpp)
 # ---------------------------------------------------------------------------
 # Eigen3 (MacPorts)
 # ---------------------------------------------------------------------------
-find_package(Eigen3 3.4 REQUIRED NO_MODULE
-    HINTS /opt/local/share/eigen3/cmake
-)
+if(APPLE)
+    find_package(Eigen3 3.4 REQUIRED NO_MODULE
+        HINTS /opt/local/share/eigen3/cmake
+    )
+else()
+    find_package(Eigen3 3.4 REQUIRED NO_MODULE)
+endif()
 
 # ---------------------------------------------------------------------------
 # Header-only vendored libs (cpp-httplib, nlohmann/json)

@@ -45,16 +45,32 @@ pick the change up.
 Installed once via your package manager:
 
 ```bash
-# macOS (MacPorts)
-sudo port install boost eigen3 sqlite3 rust openssl
+# macOS — MacPorts
+sudo port install boost eigen3 sqlite3 rust openssl curl cmake
 
-# Linux (apt)
-sudo apt install libboost-all-dev libeigen3-dev libsqlite3-dev \
-                 rustc cargo libssl-dev libcurl4-openssl-dev
+# macOS — Homebrew
+brew install boost eigen sqlite openssl@3 curl cmake rustup-init && rustup-init -y
+
+# Debian / Ubuntu
+sudo apt install build-essential cmake pkg-config \
+                 libboost-program-options-dev libeigen3-dev libsqlite3-dev \
+                 libssl-dev libcurl4-openssl-dev
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+# Fedora / RHEL
+sudo dnf install gcc-c++ cmake pkgconf-pkg-config \
+                 boost-devel eigen3-devel sqlite-devel \
+                 openssl-devel libcurl-devel
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ```
 
-Vendored (already in the repo): cpp-httplib, ONNX Runtime,
-tokenizers-cpp, nlohmann/json.
+Vendored (already in the repo): cpp-httplib, tokenizers-cpp sources,
+nlohmann/json. ONNX Runtime is auto-downloaded at configure time for
+your platform; drop a `vendor/onnxruntime/` override in place for
+offline builds.
+
+`scripts/install.sh` downloads the all-MiniLM-L6-v2 embedding model on
+first run (~90 MB). Re-run the script to retry if the network was down.
 
 ## First run
 
