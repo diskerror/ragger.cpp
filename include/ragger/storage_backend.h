@@ -21,14 +21,16 @@ using json = nlohmann::json;
 
 class Embedder;
 
-/// One raw L1 turn as read back from the `turns` table (session-scoped
-/// queries). `model_name` is empty when the turn recorded no model.
+/// One raw L1 turn as read back from the `turns` table. `model_name` is
+/// empty when the turn recorded no model; `session_guid` is empty when the
+/// turn was captured outside a session (turns.session_id IS NULL).
 struct TurnRecord {
     int         turn_id;
     std::string user_text;
     std::string assistant_text;
     std::string model_name;
     std::string timestamp;
+    std::string session_guid;
 };
 
 /**
@@ -88,10 +90,18 @@ public:
     // --- summaries (L2/L3) pipeline (issue #22) ---
     /// Insert a summary (level 'turn'|'session'|'project', status
     /// 'current'|'complete'); embeds text, records model. Returns summary_id.
+    /// `source_timestamp` (when non-empty) overrides the row's timestamp —
+    /// L2 turn summaries inherit the source turn's timestamp so chronology
+    /// is the linkage between turn and its summary (no FK column needed) and
+    /// remains stable across embedding-model changes. `tags` is stored verbatim
+    /// on the row (used to mark drafts: "draft" → housekeeping re-summarizes
+    /// it when inference becomes available again).
     virtual int store_summary(const std::string& text, const std::string& level,
                               const std::string& status,
                               const std::string& model_name = "",
-                              const std::string& session_guid = "") = 0;
+                              const std::string& session_guid = "",
+                              const std::string& source_timestamp = "",
+                              const std::string& tags = "") = 0;
     /// The current running L3 session summary, if any: (summary_id, text).
     /// Scoped to `session_guid` when given; legacy global when empty.
     virtual std::optional<std::pair<int, std::string>>
@@ -101,12 +111,63 @@ public:
                                      const std::string& model_name = "") = 0;
     /// Set a summary's status (e.g. mark a session summary 'complete').
     virtual bool set_summary_status(int summary_id, const std::string& status) = 0;
+    /// Replace a summary's `tags` column (used to clear "draft" once the
+    /// row has been rewritten with a real summary).
+    virtual bool set_summary_tags(int summary_id, const std::string& tags) = 0;
     /// Recent summaries of a given level ('turn'|'session'|'project'), newest
     /// first — recipe ingredients for tiered payload assembly (issue #23).
     virtual std::vector<std::string> recent_summaries(const std::string& level,
                                                       int limit) = 0;
     /// Current (active) decisions, newest first.
     virtual std::vector<std::string> current_decisions(int limit) = 0;
+
+    /// Turns that don't yet have a matching L2 ('turn') summary —
+    /// LEFT JOIN summaries ON (session_id, timestamp) WHERE summary_id IS NULL.
+    /// Returned oldest-first, capped at `limit` (0 = unbounded). Powers the
+    /// summarizer's startup catch-up and housekeeping retry pass.
+    virtual std::vector<TurnRecord> unsummarized_turns(int limit = 0) = 0;
+
+    /// Summary rows tagged 'draft' (heuristic fallback writes that the
+    /// summarizer should rewrite when inference is back). Returned
+    /// oldest-first, capped at `limit` (0 = unbounded). Each entry's
+    /// `turn_id` carries the summary_id (re-using TurnRecord as a transport).
+    struct DraftSummary {
+        int         summary_id;
+        std::string level;
+        std::string session_guid;   // empty when session_id is NULL
+        std::string timestamp;      // source-turn timestamp for L2
+    };
+    virtual std::vector<DraftSummary> draft_summaries(int limit = 0) = 0;
+
+    /// Sessions whose most recent turn is older than `pause_minutes` AND
+    /// that have a `level='session' status='current'` running summary,
+    /// returned as session GUIDs. The summarizer's pause-timer uses this to
+    /// pick sessions whose L3 running summary should be finalized.
+    virtual std::vector<std::string> sessions_needing_close(
+        int pause_minutes) = 0;
+
+    /// All turns belonging to a session GUID, newest-first up to `limit`
+    /// (0 = unbounded). Mirrors `turns_by_session` but in reverse order and
+    /// bounded — used by recipes that walk back from the latest prompt.
+    virtual std::vector<TurnRecord> turns_by_session_desc(
+        const std::string& session_guid, int limit = 0) = 0;
+
+    /// Turn-level (L2) summaries for a session, newest-first up to `limit`.
+    /// Returned with the summary row's timestamp (= the source turn's
+    /// timestamp) so recipes can align them against raw turns.
+    struct SummaryRecord {
+        int         summary_id;
+        std::string text;
+        std::string status;
+        std::string timestamp;
+    };
+    virtual std::vector<SummaryRecord> turn_summaries_by_session_desc(
+        const std::string& session_guid, int limit = 0) = 0;
+
+    /// The session's (level='session') summary rows, newest-first up to
+    /// `limit`. Recipe's session-summary layer pulls from here.
+    virtual std::vector<SummaryRecord> session_summaries_desc(
+        const std::string& session_guid, int limit = 0) = 0;
 
     /// Replace text + metadata of an existing row. Re-embeds (or NULLs the
     /// embedding when `defer_embedding`); FTS5 sync triggers reindex the row.

@@ -1,7 +1,10 @@
 # TLS / HTTPS Setup
 
-Ragger's web UI transmits passwords and session tokens. **Use TLS for any
-access beyond localhost.**
+If you expose the Ragger daemon beyond localhost, terminate TLS in
+front of it. Bearer tokens travel in the `Authorization` header on
+every request — plaintext HTTP across a network leaks them. Local-only
+use (unix socket, `127.0.0.1`) doesn't need TLS; loopback and the
+socket are pre-authenticated.
 
 Three options below — pick whichever fits your setup.
 

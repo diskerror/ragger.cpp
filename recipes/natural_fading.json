@@ -1,0 +1,13 @@
+{
+    "name": "natural_fading",
+    "description": "Default. Walks back from the latest prompt: 2 verbatim turns, then 5 turn-summaries, then the session summary, the project summary, and recent decisions. Mimics how a person remembers a conversation — sharp at the top, fading into gist as it gets older — while keeping total recall reachable through the L3/L4 layers.",
+    "layers": [
+        { "kind": "raw_turn",        "count": 2 },
+        { "kind": "turn_summary",    "count": 5 },
+        { "kind": "session_summary", "count": 1 },
+        { "kind": "project_summary", "count": 1 },
+        { "kind": "decisions",       "limit": 3 }
+    ],
+    "max_tokens": 8000,
+    "chars_per_token": 4.0
+}

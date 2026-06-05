@@ -11,6 +11,7 @@
 #     ~/.ragger/activity.log      logs
 #     ~/.ragger/models/           embedding models
 #     ~/.ragger/formats/          inference format definitions
+#     ~/.ragger/recipes/          build_context recipes (layered assembly)
 #     ~/.ragger/www/              web UI assets
 #     ~/.ragger/memories.db       SQLite database
 #     ~/.ragger/ragger.sock       unix socket (runtime)
@@ -45,6 +46,7 @@ BIN_DIR="$HOME/.local/bin"          # XDG user executables
 LOG_DIR="$RAGGER_HOME"
 MODEL_DIR="$RAGGER_HOME/models"
 FORMATS_DIR="$RAGGER_HOME/formats"
+RECIPES_DIR="$RAGGER_HOME/recipes"
 WEB_DIR="$RAGGER_HOME/www"
 CONF_FILE="$RAGGER_HOME/settings.ini"
 DEST="$BIN_DIR/ragger"
@@ -53,7 +55,7 @@ DEST="$BIN_DIR/ragger"
 # PHASE 1: Directory layout
 # ============================================================
 
-for d in "$RAGGER_HOME" "$BIN_DIR" "$LOG_DIR" "$MODEL_DIR" "$FORMATS_DIR" "$WEB_DIR"; do
+for d in "$RAGGER_HOME" "$BIN_DIR" "$LOG_DIR" "$MODEL_DIR" "$FORMATS_DIR" "$RECIPES_DIR" "$WEB_DIR"; do
     if [ ! -d "$d" ]; then
         info "Creating $d"
         mkdir -p "$d"
@@ -108,6 +110,15 @@ fi
 if [ -d "$SRC/formats" ]; then
     info "Installing inference formats to $FORMATS_DIR"
     cp -R "$SRC/formats/." "$FORMATS_DIR/"
+fi
+
+# build_context recipes (shipped JSON files). Same pattern as formats/:
+# refresh on every install so the shipped catalog tracks the binary.
+# User-added recipes in this directory are preserved; user edits to a
+# shipped recipe are overwritten (copy a renamed variant to keep changes).
+if [ -d "$SRC/recipes" ]; then
+    info "Installing recipes to $RECIPES_DIR"
+    cp -R "$SRC/recipes/." "$RECIPES_DIR/"
 fi
 
 # ============================================================

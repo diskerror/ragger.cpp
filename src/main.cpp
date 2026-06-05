@@ -36,6 +36,7 @@
 #include "diskerror/logger.h"
 #include "ragger/mcp.h"
 #include "ragger/memory.h"
+#include "ragger/recipe_cli.h"
 #include "ragger/embed_executor.h"
 #include "ragger/sqlite_backend.h"
 #include "ragger/server.h"
@@ -467,6 +468,12 @@ int main(int argc, char **argv) {
             auto mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path, model_dir);
             ragger::run_mcp(*mem_ptr);
 
+        }
+        else if (command == "recipe") {
+            // `ragger recipe [name]` — pick / inspect; writes the choice
+            // to DB `settings.recipe`. Sentinel "default" tracks the INI.
+            auto recipe_args = opts.getParams("args");
+            return ragger::run_recipe_cli(recipe_args, db_path);
         }
         else if (command == "rebuild-embeddings") {
 

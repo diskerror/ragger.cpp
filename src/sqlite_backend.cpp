@@ -732,7 +732,8 @@ struct SqliteBackend::Impl {
                 s.column_text(1),
                 s.column_text(2),
                 s.column_text(3),
-                s.column_text(4)
+                s.column_text(4),
+                session_guid
             });
         }
         return out;
@@ -769,9 +770,15 @@ struct SqliteBackend::Impl {
     // ---- summaries (L2/L3) pipeline primitives (issue #22) ------------
     // Insert a summary row. level: 'turn' (L2) | 'session' (L3) | 'project'.
     // status: 'current' (running L3) | 'complete'. Embeds text, records model.
+    // source_timestamp (non-empty) overrides the row's timestamp: L2 turn
+    // summaries inherit the source turn's timestamp so the (session_id,
+    // timestamp) pair links a turn to its summary (no FK column needed) and
+    // stays stable across embedding-model changes.
     int store_summary(const std::string& text, const std::string& level,
                       const std::string& status, const std::string& model_name,
-                      const std::string& session_guid) {
+                      const std::string& session_guid,
+                      const std::string& source_timestamp,
+                      const std::string& tags) {
         std::string t = normalize_path(text);
         int model_id   = get_or_create_model(model_name);
         int session_id = get_or_create_session(session_guid);
@@ -779,16 +786,186 @@ struct SqliteBackend::Impl {
 
         Stmt s(db,
             "INSERT INTO summaries (model_id, session_id, text, embedding, level, status, tags, timestamp) "
-            "VALUES (?,?,?,?,?,?,'',?)");
+            "VALUES (?,?,?,?,?,?,?,?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
         if (session_id) s.bind(2, session_id); else s.bind_null(2);
         s.bind(3, t);
         bind_embedding(s.raw(), 4, emb);
-        s.bind(5, level).bind(6, status).bind(7, local_timestamp());
+        s.bind(5, level).bind(6, status).bind(7, tags);
+        s.bind(8, source_timestamp.empty() ? local_timestamp() : source_timestamp);
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_cache();
         return static_cast<int>(sqlite3_last_insert_rowid(db));
+    }
+
+    // ---- catch-up / recipe helpers ------------------------------------
+    // Turns lacking an L2 summary, linked by (session_id, timestamp).
+    // LEFT JOIN keeps turns whose summary row doesn't exist; ordered
+    // oldest-first so the worker processes in capture order.
+    std::vector<TurnRecord> unsummarized_turns(int limit) {
+        std::vector<TurnRecord> out;
+        std::string sql =
+            "SELECT t.turn_id, t.user_text, t.assistant_text, m.name, "
+            "       t.timestamp, COALESCE(ss.guid, '') "
+            "FROM turns t "
+            "LEFT JOIN summaries s "
+            "  ON s.level = 'turn' "
+            " AND s.session_id IS t.session_id "
+            " AND s.timestamp = t.timestamp "
+            "LEFT JOIN models m ON t.model_id = m.model_id "
+            "LEFT JOIN sessions ss ON t.session_id = ss.session_id "
+            "WHERE s.summary_id IS NULL "
+            "  AND t.assistant_text IS NOT NULL "
+            "ORDER BY t.timestamp ASC, t.turn_id ASC";
+        if (limit > 0) sql += " LIMIT ?";
+        Stmt s(db, sql);
+        if (limit > 0) s.bind(1, limit);
+        while (s.step()) {
+            out.push_back({
+                s.column_int(0),
+                s.column_text(1),
+                s.column_text(2),
+                s.column_text(3),
+                s.column_text(4),
+                s.column_text(5)
+            });
+        }
+        return out;
+    }
+
+    // Draft-tagged summary rows for re-summarization (housekeeping retry).
+    std::vector<StorageBackend::DraftSummary> draft_summaries(int limit) {
+        std::vector<StorageBackend::DraftSummary> out;
+        std::string sql =
+            "SELECT s.summary_id, s.level, COALESCE(ss.guid, ''), s.timestamp "
+            "FROM summaries s "
+            "LEFT JOIN sessions ss ON s.session_id = ss.session_id "
+            "WHERE s.tags LIKE '%draft%' "
+            "ORDER BY s.timestamp ASC, s.summary_id ASC";
+        if (limit > 0) sql += " LIMIT ?";
+        Stmt s(db, sql);
+        if (limit > 0) s.bind(1, limit);
+        while (s.step()) {
+            out.push_back({
+                s.column_int(0),
+                s.column_text(1),
+                s.column_text(2),
+                s.column_text(3)
+            });
+        }
+        return out;
+    }
+
+    // Sessions whose newest turn is older than (now - pause_minutes) AND
+    // that have no level='session' status='complete' summary yet. The
+    // summarizer's pause timer treats this set as "ready to finalize."
+    // Returns session GUIDs; anonymous (session_id NULL) turns are skipped.
+    std::vector<std::string> sessions_needing_close(int pause_minutes) {
+        std::vector<std::string> out;
+        if (pause_minutes <= 0) return out;
+        const std::string cutoff =
+            std::format("datetime('now','localtime','-{} minutes')", pause_minutes);
+        std::string sql =
+            "SELECT ss.guid "
+            "FROM sessions ss "
+            "WHERE EXISTS (SELECT 1 FROM turns t "
+            "               WHERE t.session_id = ss.session_id) "
+            "  AND (SELECT MAX(t.timestamp) FROM turns t "
+            "        WHERE t.session_id = ss.session_id) < " + cutoff + " "
+            "  AND NOT EXISTS (SELECT 1 FROM summaries s "
+            "                   WHERE s.session_id = ss.session_id "
+            "                     AND s.level = 'session' "
+            "                     AND s.status = 'complete') "
+            "ORDER BY ss.session_id ASC";
+        Stmt s(db, sql);
+        while (s.step()) {
+            const auto g = s.column_text(0);
+            if (!g.empty()) out.push_back(g);
+        }
+        return out;
+    }
+
+    // Session turns newest-first (recipe walk-back direction).
+    std::vector<TurnRecord> turns_by_session_desc(
+            const std::string& session_guid, int limit) {
+        std::vector<TurnRecord> out;
+        if (session_guid.empty()) return out;
+        std::string sql =
+            "SELECT t.turn_id, t.user_text, t.assistant_text, m.name, t.timestamp "
+            "FROM turns t "
+            "JOIN sessions ss ON t.session_id = ss.session_id "
+            "LEFT JOIN models m ON t.model_id = m.model_id "
+            "WHERE ss.guid = ? "
+            "ORDER BY t.timestamp DESC, t.turn_id DESC";
+        if (limit > 0) sql += " LIMIT ?";
+        Stmt s(db, sql);
+        s.bind(1, session_guid);
+        if (limit > 0) s.bind(2, limit);
+        while (s.step()) {
+            out.push_back({
+                s.column_int(0),
+                s.column_text(1),
+                s.column_text(2),
+                s.column_text(3),
+                s.column_text(4),
+                session_guid
+            });
+        }
+        return out;
+    }
+
+    // L2 (turn) summaries for a session, newest-first.
+    std::vector<StorageBackend::SummaryRecord> turn_summaries_by_session_desc(
+            const std::string& session_guid, int limit) {
+        std::vector<StorageBackend::SummaryRecord> out;
+        if (session_guid.empty()) return out;
+        std::string sql =
+            "SELECT s.summary_id, s.text, s.status, s.timestamp "
+            "FROM summaries s "
+            "JOIN sessions ss ON s.session_id = ss.session_id "
+            "WHERE ss.guid = ? AND s.level = 'turn' "
+            "ORDER BY s.timestamp DESC, s.summary_id DESC";
+        if (limit > 0) sql += " LIMIT ?";
+        Stmt s(db, sql);
+        s.bind(1, session_guid);
+        if (limit > 0) s.bind(2, limit);
+        while (s.step()) {
+            out.push_back({
+                s.column_int(0),
+                s.column_text(1),
+                s.column_text(2),
+                s.column_text(3)
+            });
+        }
+        return out;
+    }
+
+    // L3 (session) summary rows for a session, newest-first (covers both
+    // 'current' running and 'complete' closed; recipe filters as needed).
+    std::vector<StorageBackend::SummaryRecord> session_summaries_desc(
+            const std::string& session_guid, int limit) {
+        std::vector<StorageBackend::SummaryRecord> out;
+        if (session_guid.empty()) return out;
+        std::string sql =
+            "SELECT s.summary_id, s.text, s.status, s.timestamp "
+            "FROM summaries s "
+            "JOIN sessions ss ON s.session_id = ss.session_id "
+            "WHERE ss.guid = ? AND s.level = 'session' "
+            "ORDER BY s.timestamp DESC, s.summary_id DESC";
+        if (limit > 0) sql += " LIMIT ?";
+        Stmt s(db, sql);
+        s.bind(1, session_guid);
+        if (limit > 0) s.bind(2, limit);
+        while (s.step()) {
+            out.push_back({
+                s.column_int(0),
+                s.column_text(1),
+                s.column_text(2),
+                s.column_text(3)
+            });
+        }
+        return out;
     }
 
     // The current running L3 session summary, if any: (summary_id, text).
@@ -866,6 +1043,15 @@ struct SqliteBackend::Impl {
         Stmt s(db,
             "UPDATE summaries SET status = ? WHERE summary_id = ?");
         s.bind(1, status).bind(2, summary_id);
+        return s.exec() && sqlite3_changes(db) > 0;
+    }
+
+    // Replace a summary's tags column. Used by the summarizer to clear
+    // "draft" once a row has been rewritten with a real summary.
+    bool set_summary_tags(int summary_id, const std::string& tags) {
+        Stmt s(db,
+            "UPDATE summaries SET tags = ? WHERE summary_id = ?");
+        s.bind(1, tags).bind(2, summary_id);
         return s.exec() && sqlite3_changes(db) > 0;
     }
 
@@ -1371,8 +1557,11 @@ bool SqliteBackend::finalize_turn(int turn_id, const std::string& assistant_text
 
 int SqliteBackend::store_summary(const std::string& text, const std::string& level,
                                  const std::string& status, const std::string& model_name,
-                                 const std::string& session_guid) {
-    return pImpl->store_summary(text, level, status, model_name, session_guid);
+                                 const std::string& session_guid,
+                                 const std::string& source_timestamp,
+                                 const std::string& tags) {
+    return pImpl->store_summary(text, level, status, model_name, session_guid,
+                                source_timestamp, tags);
 }
 
 std::optional<std::pair<int, std::string>>
@@ -1389,6 +1578,10 @@ bool SqliteBackend::set_summary_status(int summary_id, const std::string& status
     return pImpl->set_summary_status(summary_id, status);
 }
 
+bool SqliteBackend::set_summary_tags(int summary_id, const std::string& tags) {
+    return pImpl->set_summary_tags(summary_id, tags);
+}
+
 std::vector<std::string> SqliteBackend::recent_summaries(const std::string& level,
                                                          int limit) {
     return pImpl->recent_summaries(level, limit);
@@ -1396,6 +1589,35 @@ std::vector<std::string> SqliteBackend::recent_summaries(const std::string& leve
 
 std::vector<std::string> SqliteBackend::current_decisions(int limit) {
     return pImpl->current_decisions(limit);
+}
+
+std::vector<TurnRecord> SqliteBackend::unsummarized_turns(int limit) {
+    return pImpl->unsummarized_turns(limit);
+}
+
+std::vector<StorageBackend::DraftSummary> SqliteBackend::draft_summaries(int limit) {
+    return pImpl->draft_summaries(limit);
+}
+
+std::vector<std::string> SqliteBackend::sessions_needing_close(int pause_minutes) {
+    return pImpl->sessions_needing_close(pause_minutes);
+}
+
+std::vector<TurnRecord> SqliteBackend::turns_by_session_desc(
+        const std::string& session_guid, int limit) {
+    return pImpl->turns_by_session_desc(session_guid, limit);
+}
+
+std::vector<StorageBackend::SummaryRecord>
+SqliteBackend::turn_summaries_by_session_desc(
+        const std::string& session_guid, int limit) {
+    return pImpl->turn_summaries_by_session_desc(session_guid, limit);
+}
+
+std::vector<StorageBackend::SummaryRecord>
+SqliteBackend::session_summaries_desc(
+        const std::string& session_guid, int limit) {
+    return pImpl->session_summaries_desc(session_guid, limit);
 }
 
 bool SqliteBackend::update_text(int memory_id, const std::string& text, json metadata, bool defer_embedding) {

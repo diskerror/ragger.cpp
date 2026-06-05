@@ -75,8 +75,10 @@ static std::string mcp_instructions() {
 }
 
 /// MCP tool definitions returned for tools/list.
+/// `capture_turn` and `build_context` are omitted when their respective
+/// features are disabled in settings, so agents don't see hooks they can't use.
 static nlohmann::json tools_list() {
-    return {{"tools", nlohmann::json::array({
+    nlohmann::json tools = nlohmann::json::array({
         {
             {"name", "store"},
             {"description", "Store a memory for later semantic retrieval."},
@@ -109,12 +111,14 @@ static nlohmann::json tools_list() {
                 }},
                 {"required", nlohmann::json::array({"query"})}
             }}
-        },
-        {
+        }
+    });
+    if (config().capture_turns) {
+        tools.push_back({
             {"name", "capture_turn"},
             {"description", "Push a completed conversation turn (user + assistant) "
                            "into memory for background summarization. Called from an "
-                           "agent's turn hook; no-op unless turn capture is enabled."},
+                           "agent's turn hook."},
             {"inputSchema", {
                 {"type", "object"},
                 {"properties", {
@@ -131,23 +135,29 @@ static nlohmann::json tools_list() {
                 }},
                 {"required", nlohmann::json::array({"user"})}
             }}
-        },
-        {
+        });
+    }
+    if (config().build_context) {
+        tools.push_back({
             {"name", "build_context"},
-            {"description", "Assemble a conversation/session's turns into a context "
-                           "payload (oldest first) for injection. Use a session_id from "
-                           "this or another thread to recall it. No-op unless turn "
-                           "capture and context building are both enabled."},
+            {"description", "Assemble a session's context as recipe-shaped chunks "
+                           "(oldest first). The default recipe walks back from the "
+                           "latest prompt: a few raw turns, then turn summaries, then "
+                           "the session and project summaries, then pertinent "
+                           "decisions."},
             {"inputSchema", {
                 {"type", "object"},
                 {"properties", {
                     {"session_id", {{"type", "string"},
-                                    {"description", "Conversation/session GUID to build context from."}}}
+                                    {"description", "Conversation/session GUID to build context from."}}},
+                    {"recipe",     {{"type", "string"},
+                                    {"description", "Optional recipe name (e.g. natural_fading, raw_only). Defaults to the server's default_recipe."}}}
                 }},
                 {"required", nlohmann::json::array({"session_id"})}
             }}
-        }
-    })}};
+        });
+    }
+    return {{"tools", tools}};
 }
 
 /// Dispatch a tools/call request and return the MCP result object.
@@ -213,23 +223,23 @@ static nlohmann::json tool_call(RaggerMemory& memory,
 
     } else if (tool_name == "build_context") {
         const auto session = arguments.value("session_id", "");
-        const auto ctx = build_context(memory, session);
+        const auto recipe  = arguments.value("recipe", "");
+        const auto ctx = build_context(memory, session, recipe);
         if (!ctx.enabled)
             return text_result(nlohmann::json({{"status", "disabled"}}).dump());
-        nlohmann::json turns = nlohmann::json::array();
-        for (const auto& t : ctx.turns) {
-            turns.push_back({
-                {"turn_id",   t.turn_id},
-                {"user",      t.user_text},
-                {"assistant", t.assistant_text},
-                {"model",     t.model_name},
-                {"timestamp", t.timestamp}
+        nlohmann::json chunks = nlohmann::json::array();
+        for (const auto& c : ctx.chunks) {
+            chunks.push_back({
+                {"kind",      c.kind},
+                {"text",      c.text},
+                {"timestamp", c.timestamp}
             });
         }
         return text_result(nlohmann::json({
             {"status",     "ok"},
             {"session_id", session},
-            {"turns",      turns}
+            {"recipe",     ctx.recipe_name},
+            {"chunks",     chunks}
         }).dump());
 
     } else {

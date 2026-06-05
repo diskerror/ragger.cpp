@@ -147,6 +147,17 @@ constexpr const char* WARN_EMBED_SUBPROCESS   = "Warning: embed subprocess faile
 constexpr const char* WARN_IMPORT_EMBED_SKIPPED = "Warning: {}/{} chunks left unembedded (embed subprocess failed or timed out); re-import to retry";
 constexpr const char* WARN_ORPHAN_CHECK       = "Warning: orphan check failed: {}";
 constexpr const char* WARN_SUMMARY            = "Warning: summary generation failed: {}";
+
+// --- Summarizer service (daemon-resident L2/L3 worker) -------------
+constexpr const char* MSG_SUMMARIZER_START    = "Summarizer started (catch-up queued: {} turn(s), {} draft(s), {} session(s) to close)";
+constexpr const char* MSG_SUMMARIZER_STOP     = "Summarizer stopped";
+constexpr const char* MSG_SUMMARIZER_L2       = "L2 turn summary written for session {} at {}";
+constexpr const char* MSG_SUMMARIZER_L3       = "L3 session summary finalized for session {}";
+constexpr const char* MSG_SUMMARIZER_DRAFT    = "Stored draft L2 (inference unreachable) for session {} at {}";
+constexpr const char* MSG_SUMMARIZER_REDRAFT  = "Rewrote draft L2 summary_id {} with real summary";
+constexpr const char* WARN_SUMMARIZER_L2      = "Summarizer L2 failed for turn_id {}: {}";
+constexpr const char* WARN_SUMMARIZER_L3      = "Summarizer L3 failed for session {}: {}";
+constexpr const char* WARN_SUMMARIZER_DRAFT   = "Summarizer draft retry failed for summary_id {}: {}";
 constexpr const char* ERR_NO_SYSTEM_PROMPT    = "Error: no system prompt files found. ";
 constexpr const char* MSG_NO_SYSTEM_PROMPT_HINT = "Create ~/.ragger/SYSTEM.md or add SOUL.md / USER.md / MEMORY.md.";
 constexpr const char* MSG_NO_PERSONA_FILES    = "No persona files found in {}. Chat will use an empty system prompt.";
@@ -261,6 +272,7 @@ Commands:
                        --output <file>   write to file instead of stdout
   chat               Interactive chat with memory context
   mcp                Start MCP server (JSON-RPC over stdin/stdout)
+  recipe [name]      List/inspect build_context recipes (interactive picker)
   useradd <name>     Create a user and issue a bearer token (printed once)
   usermod <name>     Rotate an existing user's bearer token (printed once)
   userdel <name>     Remove a user and revoke their token

@@ -12,7 +12,7 @@ to a minimum size, never split mid-sentence). Each chunk is:
 
 1. Embedded into a 384-dimensional vector using a local sentence-transformer
    model (`all-MiniLM-L6-v2`)
-2. Indexed for BM25 keyword search (pure Python, no external dependencies)
+2. Indexed for BM25 keyword search via SQLite's built-in FTS5 (no external services)
 3. Stored alongside the original text and metadata
 
 Imported document chunks include heading context prepended to the text
@@ -24,7 +24,7 @@ using `»` separators for deeper nesting.
 At query time, the query is embedded with the same model. Two scores are
 computed for each document:
 
-- **Vector score:** Cosine similarity via NumPy (semantic meaning)
+- **Vector score:** Cosine similarity computed with Eigen3 (semantic meaning)
 - **BM25 score:** Okapi BM25 keyword relevance (exact term matching)
 
 Both scores are min-max normalized to [0,1], then blended with configurable
@@ -196,17 +196,19 @@ ragger import myfile.md --collection docs
 
 **Scaling:**
 
-- **50K docs:** Fast, no index needed (brute-force NumPy cosine is sufficient)
+- **50K docs:** Fast, no index needed (brute-force Eigen cosine is sufficient)
 - **100K docs:** Still usable, but slower (~100ms per query)
-- **500K+ docs:** Consider a vector database (Qdrant, Pinecone, etc.) or
-  HNSW index for sub-linear search time
+- **500K+ docs:** Consider an HNSW index or external vector store
+  (Qdrant, Pinecone, etc.) for sub-linear search time
 
-The current implementation uses brute-force cosine similarity (all embeddings
-loaded into memory, NumPy matrix multiplication). This is simple, fast for
-moderate datasets, and requires no external dependencies.
+The current implementation uses brute-force cosine similarity (all
+embeddings loaded into an Eigen matrix and matched in one matmul).
+Simple, fast for moderate datasets, no external dependencies.
 
-For larger deployments, the pluggable backend architecture makes it
-straightforward to swap in a vector database — see [Python API](python-api.md).
+For larger deployments, the pluggable `StorageBackend` interface
+(`include/ragger/storage_backend.h`) makes it straightforward to swap
+in a vector database — `SqliteBackend` is the only concrete
+implementation today.
 
 ## Query Logging
 
@@ -250,6 +252,6 @@ Logging failures are caught silently — they never break search operations.
 
 ## Related
 
-- [Collections](collections.md) — Organizing memories for better search
 - [Configuration](configuration.md) — Tuning search parameters
-- [Python API](python-api.md) — Custom backends and vector databases
+- [HTTP API](http-api.md) — `/search` endpoint, MCP `search` tool
+- [Agent integration](agent-integration.md) — When agents should call `search`

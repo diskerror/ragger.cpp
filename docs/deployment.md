@@ -11,7 +11,10 @@ Ragger installs per-user. The executable lives on `PATH` under
 ~/.ragger/ragger.sock       # unix socket (daemon)
 ~/.ragger/logs/             # daemon logs
 ~/.ragger/models/           # embedding models
-~/.ragger/formats/          # inference format definitions
+~/.ragger/formats/          # inference API format definitions
+~/.ragger/recipes/          # build_context recipes (JSON)
+~/.ragger/token             # bearer token for remote HTTP
+~/.ragger/SOUL.md           # persona file injected into chats
 ```
 
 No `sudo`, no system user, no `/etc/` or `/var/` paths. The daemon
@@ -48,8 +51,11 @@ ragger start         # bring the daemon up
 
 `install.sh`:
 
-- Creates `~/.local/bin` and `~/.ragger/{logs,models,formats,www}` if missing
+- Creates `~/.local/bin` and `~/.ragger/{logs,models,formats,recipes,www}` if missing
 - Copies `example-settings.ini` → `~/.ragger/settings.ini` on first run
+- Refreshes `~/.ragger/formats/` and `~/.ragger/recipes/` from the source
+  tree (user-added files are preserved; user edits to shipped files are
+  overwritten — copy a renamed variant to keep customizations)
 - Copies the built binary to `~/.local/bin/ragger` (codesigns on macOS)
 - Ensures `~/.local/bin` is on `PATH` — only edits your shell rc if it isn't
   already there (most modern shells include it by default)

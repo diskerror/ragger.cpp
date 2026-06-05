@@ -1,0 +1,13 @@
+{
+    "name": "deep_recall",
+    "description": "Heavy cross-session context for starting work on a long-running project. Combines a couple of project summaries, several recent session summaries, a handful of turn summaries, one fresh raw turn for anchoring, and a long list of decisions. Big token budget — reach for it when you need history, not when you need speed.",
+    "layers": [
+        { "kind": "raw_turn",        "count": 1 },
+        { "kind": "turn_summary",    "count": 3 },
+        { "kind": "session_summary", "count": 3 },
+        { "kind": "project_summary", "count": 2 },
+        { "kind": "decisions",       "limit": 10 }
+    ],
+    "max_tokens": 12000,
+    "chars_per_token": 4.0
+}

@@ -57,9 +57,15 @@ public:
     bool update_document_embedding(int document_id, const std::vector<float>& emb);
 
     // --- summaries (L2/L3) pipeline (issue #22) ---
+    /// `source_timestamp` (non-empty) overrides the row's timestamp — L2
+    /// inherits the source turn's timestamp so the (session_id, timestamp)
+    /// pair links a turn to its summary (no FK column). `tags`="draft" marks
+    /// a heuristic-fallback summary that should be re-summarized later.
     int store_summary(const std::string& text, const std::string& level,
                       const std::string& status, const std::string& model_name = "",
-                      const std::string& session_guid = "");
+                      const std::string& session_guid = "",
+                      const std::string& source_timestamp = "",
+                      const std::string& tags = "");
     std::optional<std::pair<int, std::string>>
         current_session_summary(const std::string& session_guid = "");
     bool update_summary_text(int summary_id, const std::string& text,
@@ -134,19 +140,39 @@ CaptureResult capture_turn(RaggerMemory& memory,
                            const std::string& model,
                            const std::string& session_id);
 
+/// One assembled chunk in a recipe-built context, ordered oldest-first
+/// (chronological) when emitted so an agent can inject them as-is. `kind`
+/// echoes the recipe layer name (raw_turn / turn_summary / session_summary
+/// / project_summary / decision). `timestamp` is the source-turn/source-row
+/// timestamp where available (empty for cross-session items).
+struct ContextChunk {
+    std::string kind;
+    std::string text;
+    std::string timestamp;
+};
+
 /// Result of build_context(). `enabled` is false when the read side is off
-/// (config [server] build_context, which requires capture_turns); `turns` are
-/// the session's raw turns, oldest first, when enabled.
+/// (config [server] build_context, which requires capture_turns). When
+/// enabled, `chunks` carries the recipe-assembled payload (oldest first);
+/// `recipe_name` reports which recipe was applied (default or caller-named).
 struct SessionContext {
-    bool                    enabled;
-    std::vector<TurnRecord> turns;
+    bool                       enabled;
+    std::string                recipe_name;
+    std::vector<ContextChunk>  chunks;
 };
 
 /// Shared entry point behind the `build_context` MCP tool and HTTP
-/// GET /session/<id>: assemble a session's turns into a context payload for
-/// the agent to inject. No-op (enabled=false) unless BOTH capture_turns and
-/// build_context are on. Currently returns the session's raw turns; the
-/// recipe-based assembly (budgeting, summaries) is the future read layer.
-SessionContext build_context(RaggerMemory& memory, const std::string& session_id);
+/// GET /session/<id>: assemble a session's turns + summaries + decisions
+/// into a recipe-shaped payload. Walks back from the latest turn in the
+/// active session; each layer consumes a slice (raw_turn / turn_summary
+/// pop turns chronologically; session/project/decisions pull recent
+/// rows). max_tokens is enforced as a ceiling.
+///
+/// No-op (enabled=false) unless BOTH capture_turns and build_context are
+/// on. `recipe_name` empty falls back to `[server] default_recipe`. If
+/// that recipe doesn't exist, the first built-in is used.
+SessionContext build_context(RaggerMemory& memory,
+                             const std::string& session_id,
+                             const std::string& recipe_name = "");
 
 } // namespace ragger

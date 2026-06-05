@@ -1,151 +1,140 @@
-# ragger.cpp
+# Ragger
 
-**C++ port of [Ragger Memory](https://github.com/diskerror/ragger) — local-first semantic memory for AI agents and humans.**
+> **Natural memory with super-natural powers.**
+> 
+> **Human-like memory with in-human skills.**
+> 
+> **Continuous context summaries as you work.**
+> 
+> **Forgets gracefully. Recalls perfectly.**
 
-This project has diverged from the original [Ragger Memory](https://github.com/diskerror/ragger) 
-at version 0.9.4. All focus with now be on this C++ version.
+Ragger is local-first semantic memory for AI agents — and for the humans
+working with them. Every turn your agent has gets captured, summarized in
+the background while it stays warm, and served back as a layered "what
+just happened?" payload that fades the way a person's memory fades while
+keeping the verbatim transcript a single query away. All embeddings are
+local. The whole database is one SQLite file you own.
 
-## Features
+C++ port of the original Python [Ragger Memory](https://github.com/diskerror/ragger),
+diverged at v0.9.4 — now the sole focus.
 
-- **Local embeddings** — all-MiniLM-L6-v2 via ONNX Runtime (384-dim)
-- **Hybrid search** — BM25 keyword + vector cosine similarity (Eigen3, configurable blend)
-- **HTTP & MCP servers** — cpp-httplib REST API and JSON-RPC over stdin/stdout
-- **Collection filtering** — Organize memories into searchable collections
-- **Chat with memory** — REPL with turn persistence, summarization, dynamic context sizing
-- **Token auth** — Bearer token authentication with SHA-256 hashing
-- **Structured logging** — Four log files (query/http/mcp/error), config-toggleable, thread-safe
-- **File import/export** — Heading-aware paragraph chunking, doc reassembly
-- **Conversation import** — Ingest Claude Code JSONL / claude.ai export with original timestamps preserved
-- **i18n ready** — All user-facing strings in compiled-in language file
+## What you get
 
-## Quick Start
+- **Captured turns, summarized live.** Turns land in the DB as they
+  happen; an in-daemon worker writes per-turn summaries immediately and
+  closes session summaries on idle, all without blocking the agent. If
+  the summarizer model is unreachable, a draft is stored and rewritten
+  later — the agent never waits on inference it didn't ask for.
+- **Recipes for the recall payload.** Instead of dumping a raw
+  transcript, `build_context` walks back from the latest prompt and
+  assembles a token-budgeted mix of raw turns, turn-summaries, session
+  summaries, project summaries, and decisions. Five recipes ship; users
+  can drop more JSON into `~/.ragger/recipes/`.
+- **Hybrid search.** BM25/FTS5 keyword search blended with dense vector
+  cosine via Eigen3. Configurable weights; both signals normalized
+  before blending.
+- **Local embeddings.** `all-MiniLM-L6-v2` via ONNX Runtime (384-dim).
+  Stored as IEEE half (f16) by default to halve disk; in-memory math
+  stays f32. Re-encode any time with `ragger rebuild-embeddings`.
+- **HTTP and MCP, same data.** Daemon serves a REST API; `ragger mcp`
+  speaks JSON-RPC over stdio. Bearer-token auth on remote requests,
+  unix-socket and loopback are pre-authenticated.
+- **Markdown-aware import.** Heading-aware chunking; Claude Code and
+  claude.ai conversation archives import with original timestamps.
 
-**Install** (per-user, no sudo — binary goes in `~/.local/bin`, data in `~/.ragger/`):
+Single binary. Single-user out of the box. No external services, no
+network calls once the embedding model is on disk.
+
+## Quick start
+
+Per-user, no sudo (binary → `~/.local/bin`, data → `~/.ragger/`):
+
 ```bash
-cd /path/to/ragger.cpp
-./scripts/build.sh        # Check dependencies, build binary
-./scripts/install.sh      # Install to ~/.local/bin/ragger, write user LaunchAgent / systemd-user unit
-ragger start              # Bring the daemon up
+./scripts/build.sh        # check deps, build
+./scripts/install.sh      # install binary + user service unit + recipes
+ragger start              # start the daemon
 ```
 
-`install.sh` is idempotent — re-run it after a rebuild to update the
-binary and daemon unit without touching your config or database. If
-`~/.local/bin` isn't already on your `PATH`, the installer adds it to
-your shell rc; open a new terminal (or source your rc file) to pick it up.
+`install.sh` is idempotent — re-run after a rebuild to refresh the
+binary, the service unit, and the shipped recipes. Your config, database,
+and any custom recipe files are preserved.
 
-**Development build** (manual cmake):
 ```bash
-cmake -B build -DBOOST_ROOT=/opt/local/libexec/boost/1.88
-cmake --build build -j8
-
-# Test the build
-./build/ragger version
-```
-
-**Usage:**
-```bash
-# Store a memory
-ragger store "The deploy script requires Node 18+"
-
-# Search
+ragger store "The deploy script needs Node 18+"
 ragger search "deployment requirements"
+ragger import notes.md
 
-# Import a document
-ragger import notes.md --collection docs
+ragger recipe                # interactive picker over available recipes
+ragger recipe reconnect      # set the active recipe (persisted in the DB)
 
-# Import past Claude conversations (preserves original timestamps)
-./scripts/import-claude-conversations.py --format code \
-    --path ~/.claude/projects/<slug> --import
-
-# Daemon lifecycle
 ragger start | stop | restart | status
 ```
 
-## Build Dependencies
+Dev build (manual cmake):
 
-| Library | Purpose | Source |
-|---------|---------|--------|
-| **SQLite3** | Storage backend | System (MacPorts/apt) |
-| **Eigen3** | Vector math (cosine similarity) | System (MacPorts/apt) |
-| **Boost** | ProgramOptions | System (MacPorts/apt) |
-| **OpenSSL** | SHA-256 hashing (token auth) | System (MacPorts/apt) |
-| **libcurl** | HTTP client (inference proxy) | System (MacPorts/apt) |
-| **Rust** | Required by tokenizers-cpp | System (MacPorts/apt) |
-| **cpp-httplib** | HTTP server + routing | Vendored (`httplib.h`) |
-| **ONNX Runtime** | Embedding inference | Vendored (pre-built) |
-| **tokenizers-cpp** | HuggingFace tokenizer | Vendored |
-| **nlohmann/json** | JSON serialization | Vendored (header-only) |
+```bash
+cmake -B build -DBOOST_ROOT=/opt/local/libexec/boost/1.88 \
+  && cmake --build build -j8
+./build/ragger version
+```
+
+## Layout
+
+| What | Where |
+|---|---|
+| Binary | `~/.local/bin/ragger` |
+| Config | `~/.ragger/settings.ini` |
+| Database | `~/.ragger/memories.db` |
+| Embedding model | `~/.ragger/models/` |
+| Recipes | `~/.ragger/recipes/` |
+| Inference formats | `~/.ragger/formats/` |
+| Logs | `~/.ragger/logs/` |
+| Persona | `~/.ragger/SOUL.md` |
+| Bearer token | `~/.ragger/token` |
+| Unix socket | `~/.ragger/ragger.sock` |
+
+## Build dependencies
+
+- **System:** SQLite3, Eigen3, Boost (program_options), OpenSSL, libcurl,
+  Rust (for tokenizers-cpp).
+- **Vendored** (already in the repo): cpp-httplib, ONNX Runtime,
+  tokenizers-cpp, nlohmann/json.
 
 ```bash
 # macOS (MacPorts)
 sudo port install boost eigen3 sqlite3 rust openssl
 
 # Linux (apt)
-sudo apt install libboost-all-dev libeigen3-dev libsqlite3-dev rustc cargo libssl-dev libcurl4-openssl-dev
+sudo apt install libboost-all-dev libeigen3-dev libsqlite3-dev \
+                 rustc cargo libssl-dev libcurl4-openssl-dev
 ```
 
-**Platforms:** macOS and Linux are tested and supported. Windows should work (all libraries cross-compile) but needs porting:
-- Replace `fork()` in background summarization with threads or `CreateProcess()`
-- Build with MSVC or MinGW (CMake generates Visual Studio projects)
-- Create PowerShell install script (current script uses bash, dscl, launchctl)
-
-Contributions welcome.
+macOS and Linux are supported. Windows needs porting (`fork()`, the
+bash/launchctl install scripts).
 
 ## Documentation
 
-All documentation is shared between the Python and C++ versions.
-
-| Guide | Description |
-|-------|-------------|
-| [Getting Started](docs/getting-started.md) | Setup, first run, install locations |
-| [Configuration](docs/configuration.md) | Config files, settings reference |
-| [Collections](docs/collections.md) | Organizing memories into collections |
+| Guide | |
+|-------|--|
+| [Getting started](docs/getting-started.md) | Setup and first run |
+| [Configuration](docs/configuration.md) | `settings.ini` reference, including the new turn-capture, summarizer, and recipe keys |
 | [Search & RAG](docs/search-and-rag.md) | How hybrid search works |
-| [HTTP API](docs/http-api.md) | REST endpoints, MCP server, auth |
-| [Chat Persistence](docs/chat-persistence.md) | Turn storage, summaries, cleanup |
-| [Importing Conversations](docs/importing-conversations.md) | Ingest Claude Code / claude.ai history with original timestamps |
-| [Deployment](docs/deployment.md) | Per-user install, LaunchAgent / systemd-user, provisioning sub-users |
-| [Project Structure](docs/project-structure.md) | Code layout, database schema |
-| [OpenClaw Integration](docs/openclaw.md) | Plugin setup for OpenClaw |
-| [Agent Guide](docs/agent-integration.md) | Best practices for AI agents |
-| [Testing Your Install](docs/testing-your-install.md) | Verify with your own data |
-| [Design Decisions](docs/design-decisions.md) | Why things are the way they are |
+| [HTTP API](docs/http-api.md) | REST endpoints, MCP, auth, the new `/turn` and `/session/<id>?recipe=` paths |
+| [Importing conversations](docs/importing-conversations.md) | Claude Code / claude.ai history |
+| [Deployment](docs/deployment.md) | Daemon lifecycle, sub-users, reverse proxy |
+| [TLS setup](docs/tls-setup.md) | HTTPS via reverse proxy |
+| [Agent integration](docs/agent-integration.md) | MCP and Claude Desktop |
+| [Agent memory instructions](docs/agent-memory-instructions.md) | Guidance served to agents over MCP |
+| [OpenClaw](docs/openclaw.md) | OpenClaw plugin setup |
+| [Testing your install](docs/testing-your-install.md) | End-to-end smoke check |
 
-## Test Coverage
-
-6 test suites, all passing:
-
-| Suite | Coverage | What's tested |
-|-------|----------|---------------|
-| `test_config` | INI parsing, defaults, ceilings |
-| `test_bm25` | Indexing, scoring, tokenization |
-| `test_sqlite_backend` | CRUD, search, metadata, delete, keep tag, user mgmt |
-| `test_import` | Chunking, heading detection, edge cases |
-| `test_auth` | SHA-256 hashing, token generation, file I/O |
-| `test_server` | Server instantiation, pImpl validation |
+## Tests
 
 ```bash
-cd build && ctest --output-on-failure
+cd build && ctest --output-on-failure   # 12 suites
 ```
-
-## Status
-
-**v0.9.x (in progress)** — Per-user install (`~/.ragger/`), no sudo,
-user-level service units. Single `settings.ini`, no config layering.
-`ragger start/stop/restart/status` control verbs around the `serve`
-foreground entry. MCP transport extracted into its own module.
-
-Features: bearer-token authentication (OpenSSL SHA-256) with automatic
-token rotation, additional-user provisioning via `ragger useradd` for
-daemon-sharing, per-endpoint inference model selection, rebuild-embeddings
-verb with backup and confirmation, schema-driven API formats, chat
-persistence with background summarization, and idempotent install /
-deploy scripts.
 
 ## License
 
-GPL v3 — same as the Python version.
-
-**Commercial licensing:** If you'd like to use Ragger in a proprietary
-product without GPL obligations, commercial licenses are available.
-Contact reid@diskerror.com.
+GPL v3. Commercial (non-GPL) licenses available — contact
+[reid@diskerror.com](mailto:reid@diskerror.com).

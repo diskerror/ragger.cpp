@@ -93,9 +93,9 @@ Each imported memory lands with:
 - `session_id`: the original conversation UUID
 - `timestamp`: the original turn time (replaces "now" at the DB layer)
 
-This matches the metadata pattern used by Ragger Chat's own turn capture,
-so imported history and new chat turns are interchangeable from a search
-perspective.
+This mirrors the metadata pattern used by Ragger's own `capture_turn`
+pipeline, so imported history and live-captured turns are
+interchangeable from a search perspective.
 
 ## Caveats
 

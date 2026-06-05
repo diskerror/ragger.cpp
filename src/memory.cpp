@@ -8,7 +8,10 @@
 #include "ragger/config.h"
 #include "diskerror/logger.h"
 #include "ragger/lang.h"
+#include "ragger/recipe.h"
+#include <algorithm>
 #include <format>
+#include <mutex>
 
 namespace ragger {
 
@@ -112,8 +115,11 @@ bool RaggerMemory::update_document_embedding(int document_id,
 
 int RaggerMemory::store_summary(const std::string& text, const std::string& level,
                                 const std::string& status, const std::string& model_name,
-                                const std::string& session_guid) {
-    return backend_->store_summary(text, level, status, model_name, session_guid);
+                                const std::string& session_guid,
+                                const std::string& source_timestamp,
+                                const std::string& tags) {
+    return backend_->store_summary(text, level, status, model_name, session_guid,
+                                   source_timestamp, tags);
 }
 
 std::optional<std::pair<int, std::string>>
@@ -203,12 +209,195 @@ CaptureResult capture_turn(RaggerMemory& memory,
     return {true, turn_id};
 }
 
-SessionContext build_context(RaggerMemory& memory, const std::string& session_id) {
+namespace {
+
+// Process-local cache of loaded recipes. Loaded lazily on first call;
+// re-loaded when the config's recipes_dir changes (covers SIGHUP).
+struct RecipeCache {
+    std::mutex          mu;
+    std::vector<Recipe> recipes;
+    std::string         loaded_dir;   // path the cache was built from
+    bool                loaded = false;
+};
+
+RecipeCache& recipe_cache() {
+    static RecipeCache c;
+    return c;
+}
+
+const std::vector<Recipe>& cached_recipes() {
+    auto& c = recipe_cache();
+    std::lock_guard<std::mutex> lk(c.mu);
+    const std::string dir = config().recipes_dir.empty()
+        ? expand_path("~/.ragger/recipes")
+        : expand_path(config().recipes_dir);
+    if (!c.loaded || c.loaded_dir != dir) {
+        c.recipes = load_recipes_from_dir(dir);
+        if (c.recipes.empty()) c.recipes = builtin_recipes();
+        c.loaded_dir = dir;
+        c.loaded = true;
+    }
+    return c.recipes;
+}
+
+// Format a raw turn into "User: ...\n\nAssistant: ..." for the chunk text.
+std::string format_raw_turn(const TurnRecord& t) {
+    return "User: " + t.user_text + "\n\nAssistant: " + t.assistant_text;
+}
+
+// Approximate token cost using the recipe's chars_per_token. Cheap and
+// good enough for ceiling enforcement; precise tokenization would tie
+// us to a specific model's tokenizer.
+int approx_tokens(const std::string& s, float chars_per_token) {
+    if (chars_per_token <= 0) chars_per_token = 4.0f;
+    return static_cast<int>(static_cast<float>(s.size()) / chars_per_token);
+}
+
+} // namespace
+
+SessionContext build_context(RaggerMemory& memory,
+                             const std::string& session_id,
+                             const std::string& recipe_name) {
     // Gate: the read side requires both capture (something to read) and the
-    // build-context toggle. Off → enabled=false, no turns.
-    if (!config().capture_turns || !config().build_context) return {false, {}};
-    if (session_id.empty()) return {true, {}};
-    return {true, memory.backend()->turns_by_session(session_id)};
+    // build-context toggle. Off → enabled=false, no chunks.
+    if (!config().capture_turns || !config().build_context) {
+        return {false, "", {}};
+    }
+
+    const auto& recipes = cached_recipes();
+    // Resolve the effective default:
+    //   1. DB `settings.recipe` (set by `ragger recipe`). The sentinel
+    //      value "default" means "track settings.ini" — equivalent to
+    //      having no row.
+    //   2. settings.ini `[server] default_recipe` (system default).
+    //   3. First built-in (last-resort fallback).
+    // One keyed read per build_context call — cheap, and the user's
+    // choice takes effect without a daemon restart.
+    auto* backend_for_lookup = memory.backend();
+    std::string effective_default = config().default_recipe;
+    if (backend_for_lookup) {
+        if (auto stored = backend_for_lookup->get_setting("recipe");
+            stored && !stored->empty() && *stored != "default") {
+            effective_default = *stored;
+        }
+    }
+    // Resolve recipe: explicit > effective default > first built-in.
+    const Recipe* recipe = find_recipe(recipes, recipe_name);
+    if (!recipe) recipe = find_recipe(recipes, effective_default);
+    if (!recipe && !recipes.empty()) recipe = &recipes.front();
+    if (!recipe) return {true, "", {}};
+
+    SessionContext out{true, recipe->name, {}};
+    if (session_id.empty()) return out;
+
+    auto* backend = memory.backend();
+    if (!backend) return out;
+
+    // The walk: turns + L2 summaries newest-first. raw_turn / turn_summary
+    // layers consume from these in chronological order (newest popped
+    // first). Other layers (session/project/decisions) pull recent rows
+    // independent of the walk.
+    auto turns_desc        = backend->turns_by_session_desc(session_id, 0);
+    auto turn_summaries    = backend->turn_summaries_by_session_desc(session_id, 0);
+    auto session_summaries = backend->session_summaries_desc(session_id, 0);
+
+    // Walk pointers — index into the newest-first arrays. Turn summaries
+    // for raw turns already consumed are skipped via the timestamp
+    // overlap check (the chronology link).
+    size_t walk_turn = 0;
+    size_t walk_summary = 0;
+
+    // Collect chunks newest-first; we reverse at the end so the agent
+    // reads chronologically.
+    std::vector<ContextChunk> rev;
+    auto consumed_turn_ts = std::vector<std::string>{};  // for overlap skip
+
+    for (const auto& layer : recipe->layers) {
+        switch (layer.kind) {
+            case LayerKind::RawTurn: {
+                int taken = 0;
+                while (walk_turn < turns_desc.size() &&
+                       (layer.count == 0 || taken < layer.count)) {
+                    const auto& t = turns_desc[walk_turn++];
+                    rev.push_back({"raw_turn", format_raw_turn(t), t.timestamp});
+                    consumed_turn_ts.push_back(t.timestamp);
+                    ++taken;
+                }
+                break;
+            }
+            case LayerKind::TurnSummary: {
+                int taken = 0;
+                while (walk_summary < turn_summaries.size() &&
+                       (layer.count == 0 || taken < layer.count)) {
+                    const auto& s = turn_summaries[walk_summary++];
+                    // Skip a summary whose source turn was already
+                    // emitted raw — chronology link by timestamp.
+                    if (std::find(consumed_turn_ts.begin(),
+                                  consumed_turn_ts.end(),
+                                  s.timestamp) != consumed_turn_ts.end()) {
+                        continue;
+                    }
+                    rev.push_back({"turn_summary", s.text, s.timestamp});
+                    // Also advance the raw-turn walk past this turn's
+                    // timestamp so a later RawTurn layer doesn't re-emit
+                    // it. (Layers can appear in any order; preserve the
+                    // chronological exclusion in both directions.)
+                    while (walk_turn < turns_desc.size() &&
+                           turns_desc[walk_turn].timestamp >= s.timestamp) {
+                        consumed_turn_ts.push_back(
+                            turns_desc[walk_turn].timestamp);
+                        ++walk_turn;
+                    }
+                    ++taken;
+                }
+                break;
+            }
+            case LayerKind::SessionSummary: {
+                int wanted = layer.count > 0 ? layer.count : 1;
+                int taken = 0;
+                for (const auto& s : session_summaries) {
+                    if (taken >= wanted) break;
+                    rev.push_back({"session_summary", s.text, s.timestamp});
+                    ++taken;
+                }
+                break;
+            }
+            case LayerKind::ProjectSummary: {
+                int wanted = layer.count > 0 ? layer.count : 1;
+                for (const auto& text : backend->recent_summaries("project", wanted)) {
+                    rev.push_back({"project_summary", text, ""});
+                }
+                break;
+            }
+            case LayerKind::Decisions: {
+                int wanted = layer.count > 0 ? layer.count : 3;
+                for (const auto& text : backend->current_decisions(wanted)) {
+                    rev.push_back({"decision", text, ""});
+                }
+                break;
+            }
+        }
+    }
+
+    // Apply max_tokens by dropping from the *oldest* end (the back of
+    // rev, since rev is newest-first). This keeps the most recent
+    // context when we have to trim.
+    if (recipe->max_tokens > 0) {
+        int total = 0;
+        size_t kept = 0;
+        for (; kept < rev.size(); ++kept) {
+            total += approx_tokens(rev[kept].text, recipe->chars_per_token);
+            if (total > recipe->max_tokens) break;
+        }
+        if (kept < rev.size()) rev.resize(kept);
+    }
+
+    // Reverse to chronological (oldest-first) for the prompt-friendly
+    // output. Within a layer the order matches the newest-first walk
+    // and gets reversed; across layers the recipe author's intended
+    // ordering is preserved (because earlier layers pushed first).
+    out.chunks.assign(rev.rbegin(), rev.rend());
+    return out;
 }
 
 } // namespace ragger

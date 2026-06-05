@@ -2,41 +2,45 @@
 
 ## Requirements
 
-- **macOS or Linux** (Windows support planned, not yet implemented)
+- **macOS or Linux** (Windows not yet supported)
 - **C++23 toolchain** (recent clang or gcc)
-- **~1 GB disk space** for the embedding model + dependencies
+- **~1 GB disk** for the embedding model and build dependencies
 
 First run downloads the embedding model (~90 MB) into
-`~/.ragger/models/`. After that, all memory operations are offline.
+`~/.ragger/models/`. Everything else is offline after that.
 
-## Build & Install
+## Build and install
 
 ```bash
 cd /path/to/ragger.cpp
-./build.sh           # check dependencies + cmake build
-./install.sh         # copy binary to ~/.local/bin, write user service unit, ensure PATH
+./scripts/build.sh        # check deps, build
+./scripts/install.sh      # copy binary, write user service unit, install recipes
 ```
 
-No `sudo`. The binary goes in `~/.local/bin` (the XDG user-binary location,
-already on `PATH` in most modern shells). Everything else lives under `~/.ragger/`:
+No `sudo`. The binary lands in `~/.local/bin` (already on `PATH` in
+most modern shells); everything else under `~/.ragger/`:
 
-| What        | Where                      |
-|-------------|----------------------------|
-| Executable  | `~/.local/bin/ragger`      |
-| Config      | `~/.ragger/settings.ini`   |
-| Database    | `~/.ragger/memories.db`    |
-| Logs        | `~/.ragger/logs/`          |
-| Models      | `~/.ragger/models/`        |
-| Persona     | `~/.ragger/SOUL.md`        |
+| What                 | Where                       |
+|----------------------|-----------------------------|
+| Executable           | `~/.local/bin/ragger`       |
+| Config               | `~/.ragger/settings.ini`    |
+| Database             | `~/.ragger/memories.db`     |
+| Embedding model      | `~/.ragger/models/`         |
+| Recipes              | `~/.ragger/recipes/`        |
+| Inference formats    | `~/.ragger/formats/`        |
+| Logs                 | `~/.ragger/logs/`           |
+| Persona              | `~/.ragger/SOUL.md`         |
+| Bearer token         | `~/.ragger/token`           |
 
-If `~/.local/bin` isn't already on your `PATH`, the installer adds it to
-your shell rc — open a new terminal (or `source ~/.zshrc` / `~/.bashrc`)
-to pick up the change.
+`install.sh` is idempotent — re-run it after any rebuild to refresh the
+binary, service unit, and shipped recipes. Your config, database, and
+custom recipe files are preserved.
 
-See [Deployment](deployment.md) for full details on the install
-script, service unit, and daemon lifecycle.
+If `~/.local/bin` isn't on your `PATH`, the installer adds it to your
+shell rc. Open a new shell (or `source ~/.zshrc` / `~/.bashrc`) to
+pick the change up.
 
-## Build Dependencies
+## Build dependencies
 
 Installed once via your package manager:
 
@@ -52,64 +56,69 @@ sudo apt install libboost-all-dev libeigen3-dev libsqlite3-dev \
 Vendored (already in the repo): cpp-httplib, ONNX Runtime,
 tokenizers-cpp, nlohmann/json.
 
-## First Run
+## First run
 
 ```bash
-# Store a test memory
-ragger store "Test memory"
-
-# Search for it
-ragger search "test"
-
-# Check count
+# Store and recall by hand to confirm the round trip works.
+ragger store "Test memory: deploy needs Node 18+"
+ragger search "deployment requirements"
 ragger count
 ```
 
-If these run without errors, you're ready.
-
-Start the HTTP daemon whenever you want it available to tools:
+Bring up the daemon if you want HTTP / MCP integrations or background
+summarization:
 
 ```bash
 ragger start
 ragger status
 ```
 
-## Downloading the Model
+## Recipes
 
-The embedding model downloads automatically on first use. To pull it
-explicitly (useful for offline prep):
+`build_context` returns a recipe-shaped payload; five recipes ship out
+of the box (`natural_fading`, `reconnect`, `deep_recall`, `tldr`,
+`raw_only`). Browse them with:
+
+```bash
+ragger recipe              # interactive picker (↑/↓, Enter to set, q to quit)
+ragger recipe reconnect    # set non-interactively
+ragger recipe default      # revert to whatever settings.ini says
+```
+
+The picker stores your choice in the DB so it survives daemon
+restarts. Add your own JSON files under `~/.ragger/recipes/` to
+extend the menu — see [Configuration → Recipes](configuration.md#recipes).
+
+## Turn capture (opt-in)
+
+Both sides of the turn pipeline are off by default. Enable them in
+`~/.ragger/settings.ini`:
+
+```ini
+[server]
+capture_turns = true     # write: ingest agent-pushed turns
+build_context = true     # read: assemble recipe payloads from those turns
+```
+
+`ragger reload` (or `ragger restart`) picks up the change. With
+capture on, every turn an agent hands Ragger gets summarized in the
+background by the daemon-resident worker — no manual work for the
+agent.
+
+## Embedding model
+
+The model is downloaded on first use. To pull it explicitly:
 
 ```bash
 ragger update-model
 ```
 
-The files land in `~/.ragger/models/all-MiniLM-L6-v2/`.
+Files land in `~/.ragger/models/all-MiniLM-L6-v2/`.
 
-## Upgrading from Earlier Layouts
+## Next steps
 
-If you have an older install at `~/.local/share/ragger/memories.db`
-or `/var/ragger/memories.db`:
-
-```bash
-mkdir -p ~/.ragger
-mv ~/.local/share/ragger/memories.db ~/.ragger/memories.db     # or
-sudo mv /var/ragger/memories.db ~/.ragger/memories.db && \
-  sudo chown $USER ~/.ragger/memories.db
-```
-
-The DB format is backwards-compatible through v0.9.3; Ragger migrates
-forward automatically on open.
-
-If you used `ragger.ini`, rename it:
-
-```bash
-mv ~/.ragger/ragger.ini ~/.ragger/settings.ini
-```
-
-## Next Steps
-
-- [Configuration](configuration.md) — Tune `settings.ini`
-- [Collections](collections.md) — Organize your memories
+- [Configuration](configuration.md) — Full `settings.ini` reference
 - [Search & RAG](search-and-rag.md) — How hybrid search works
 - [HTTP API](http-api.md) — Run the daemon for tool integration
-- [Deployment](deployment.md) — Service units, sub-users, and deploy.sh
+- [Agent integration](agent-integration.md) — `capture_turn`, recipes, MCP
+- [Deployment](deployment.md) — Service units and the daemon lifecycle

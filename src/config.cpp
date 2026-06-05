@@ -70,8 +70,19 @@ static constexpr const char* DEFAULT_CONFIG = R"(# settings.ini — Ragger Memor
 # First file found wins. Created automatically on first run.
 
 [server]
+# Listeners — both can run at the same time. Comment out or empty-out either
+# one to disable that listener; if both are empty the daemon falls back to
+# bind = 127.0.0.1 so there's always at least one.
 socket = ~/.ragger/ragger.sock
+# bind = 127.0.0.1
 port = 8432
+# Turn handling (both default off — agent-driven search/store are unaffected):
+#   capture_turns: ingest agent-pushed turns into the `turns` table.
+#   build_context: assemble session context from turns + summaries by recipe.
+capture_turns  = false
+build_context  = false
+default_recipe = natural_fading
+# recipes_dir  = ~/.ragger/recipes   # JSON recipes; built-ins used if absent
 
 [storage]
 db_path = ~/.ragger/memories.db
@@ -96,12 +107,17 @@ bm25_weight = 3
 vector_weight = 7
 
 [inference]
-# Default model for chat
+# Default model used for summarization (L2 turn + L3 session). Empty leaves
+# the daemon-resident summarizer routing-only — set this to something your
+# api_url serves (e.g. a small local Gemma/Qwen quant).
 model =
 max_tokens = 4096
 
-# Single endpoint (simple setup):
-# api_url = http://localhost:1234/v1
+# Default points at LM Studio's localhost; change or comment out to use a
+# different provider. The summarizer treats an unreachable endpoint as a
+# transient failure: turns get a tagged "draft" L2 row and are rewritten
+# by a housekeeping pass once the endpoint comes back.
+api_url = http://localhost:1234/v1
 # api_key = lmstudio-local
 
 # Multiple endpoints (advanced setup):
@@ -326,14 +342,28 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             }
         }
 
+        // Surrounding quotes around a value are stripped so that
+        //   socket = ''        (or "")
+        // reads as an empty string — same as a missing/commented line.
+        auto strip_quotes = [](std::string s) -> std::string {
+            if (s.size() >= 2 &&
+                ((s.front() == '"'  && s.back() == '"') ||
+                 (s.front() == '\'' && s.back() == '\''))) {
+                return s.substr(1, s.size() - 2);
+            }
+            return s;
+        };
+
         // Map to config fields
         if (section == "server") {
-            if      (key == "socket") cfg.socket_path = val;
-            else if (key == "bind") cfg.bind_address = val;
+            if      (key == "socket") cfg.socket_path = strip_quotes(val);
+            else if (key == "bind") cfg.bind_address = strip_quotes(val);
             else if (key == "port") cfg.port = std::stoi(val);
             else if (key == "server_name" || key == "hostname") cfg.server_name = val;
             else if (key == "capture_turns") cfg.capture_turns = parse_bool(val);
             else if (key == "build_context") cfg.build_context = parse_bool(val);
+            else if (key == "default_recipe") cfg.default_recipe = val;
+            else if (key == "recipes_dir")    cfg.recipes_dir = val;
         }
         else if (section == "storage") {
             if      (key == "db_path") cfg.db_path = val;
@@ -427,10 +457,12 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
         cfg.inference_endpoints.push_back(ep);
     }
 
-    // Validate: at least one of socket_path or bind_address must be set
+    // Fallback: if neither listener is configured, bring up TCP on loopback
+    // so the daemon always has at least one listener. Both can be set at
+    // once — the server runs each in its own thread.
     std::string expanded_socket = expand_path(cfg.socket_path);
     if (expanded_socket.empty() && cfg.bind_address.empty()) {
-        throw std::runtime_error(lang::ERR_CONFIG_SOCKET_OR_BIND);
+        cfg.bind_address = "127.0.0.1";
     }
 
     // Expand socket_path and bind_address if they start with ~
@@ -628,6 +660,8 @@ int reload_config() {
     RELOAD(summary_pause_minutes);
     RELOAD(capture_turns);
     RELOAD(build_context);
+    RELOAD(default_recipe);
+    RELOAD(recipes_dir);
 
     // System ceilings
     RELOAD(max_search_limit);

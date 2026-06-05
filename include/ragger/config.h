@@ -23,7 +23,11 @@ enum class ConfigError {
 
 struct Config {
     // --- Server ---
-    std::string socket_path     = "~/.ragger/ragger.sock";
+    // Listener selection: each listener is enabled only when its field is
+    // non-empty after config load. Both may be set simultaneously (dual
+    // listener). If both are empty after load, load_config() falls bind back
+    // to "127.0.0.1" so the daemon always has at least one listener.
+    std::string socket_path    = "";  // empty = no AF_UNIX listener
     std::string bind_address   = "";  // empty = no TCP listener
     int         port           = 8432;  // only meaningful when bind_address is set
     std::string server_name;   // hostname for cpp-httplib (e.g. "ragger.local")
@@ -67,7 +71,9 @@ struct Config {
     };
     std::string inference_model = "";
     std::string inference_default = "";
-    std::string inference_api_url = "";
+    // Default to the LM Studio convention. Setting it lets the daemon's
+    // summarizer find a local model out of the box; override per user.
+    std::string inference_api_url = "http://localhost:1234/v1";
     std::string inference_api_key = "";
     int inference_max_tokens = 4096;
     std::vector<InferenceEndpointConfig> inference_endpoints;
@@ -107,6 +113,11 @@ struct Config {
     // capture_turns is also true — there's nothing to build from otherwise.
     // Agent-driven search/store tools are unaffected by either flag.
     bool build_context = false;
+    // Recipe name applied when the caller doesn't specify one. Recipes are
+    // loaded from `recipes_dir` (JSON files); built-ins cover the case where
+    // the directory is missing or empty.
+    std::string default_recipe = "natural_fading";
+    std::string recipes_dir;   // empty = ~/.ragger/recipes
 
     // --- Model aliases ---
     std::map<std::string, std::string> model_aliases;  // short name → full name or .gguf filename

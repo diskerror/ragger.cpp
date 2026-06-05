@@ -11,6 +11,7 @@
 #include "ragger/config.h"
 #include "ragger/inference.h"
 #include "ragger/summarizer.h"
+#include "ragger/summarizer_service.h"
 #include "nlohmann_json.hpp"
 
 #include "httplib.h"
@@ -53,13 +54,19 @@ static void sighup_handler(int) {
 }
 
 struct Server::Impl {
-    httplib::Server svr;
+    // Two listener instances so we can bind AF_UNIX and AF_INET at the same
+    // time. cpp-httplib::Server::listen() blocks the calling thread and binds
+    // exactly one socket, so each listener gets its own Server and its own
+    // thread. Routes are registered on both via setup_routes(httplib::Server&).
+    httplib::Server unix_svr;
+    httplib::Server tcp_svr;
     RaggerMemory&   memory;
     std::string     host;
     int             port;
     std::string     server_token_;
     std::optional<UserInfo> default_user_;
-    std::unique_ptr<InferenceClient> inference_;
+    std::unique_ptr<InferenceClient>    inference_;
+    std::unique_ptr<SummarizerService>  summarizer_;
 
     // Per-user memory cache (username → RaggerMemory)
     std::unordered_map<std::string, std::unique_ptr<RaggerMemory>> user_memories_;
@@ -75,7 +82,8 @@ struct Server::Impl {
     {
         bootstrap_auth();
         init_inference();
-        setup_routes();
+        setup_routes(unix_svr);
+        setup_routes(tcp_svr);
         warmup();
     }
 
@@ -307,7 +315,7 @@ struct Server::Impl {
     }
 
 
-    void setup_routes() {
+    void setup_routes(httplib::Server& svr) {
         // GET /health
         svr.Get("/health", [this](const httplib::Request&, httplib::Response& res) {
             json response = {
@@ -443,6 +451,19 @@ struct Server::Impl {
             }
             auto& mem = _get_memory(user.username);
             auto result = capture_turn(mem, user_text, assistant, model, session_id);
+            // Hand the L2 job to the summarizer worker. It will inherit
+            // this turn's timestamp via store_summary; no-op if summarizer
+            // isn't running. Reads the timestamp back from the row so the
+            // queued job carries exactly what landed on disk.
+            if (result.captured && summarizer_ && result.turn_id > 0) {
+                auto turns = mem.backend()->turns_by_session_desc(session_id, 1);
+                std::string ts;
+                if (!turns.empty() && turns.front().turn_id == result.turn_id) {
+                    ts = turns.front().timestamp;
+                }
+                summarizer_->enqueue_turn(result.turn_id, user_text, assistant,
+                                          model, session_id, ts);
+            }
             json response = {
                 {"status",  result.captured ? "captured" : "disabled"},
                 {"turn_id", result.turn_id}
@@ -451,30 +472,34 @@ struct Server::Impl {
             res.set_content(response.dump(), "application/json");
         }));
 
-        // GET /session/<guid> — build a context payload from a session's turns.
-        // Read-side counterpart to /turn; same gate via ragger::build_context()
-        // (requires [server] capture_turns + build_context). Same data is
-        // returned by the `build_context` MCP tool.
+        // GET /session/<guid>[?recipe=name] — assemble a recipe-shaped
+        // context payload for the session. Read-side counterpart to /turn;
+        // gated by [server] capture_turns + build_context. The MCP
+        // build_context tool returns the same shape.
         svr.Get(R"(/session/([^/]+))", guarded([this](const UserInfo& user,
                                                       const httplib::Request& req, httplib::Response& res) {
             std::string sid = req.matches[1];
+            std::string recipe_name = req.get_param_value("recipe");
             auto& mem = _get_memory(user.username);
-            auto ctx = build_context(mem, sid);
+            auto ctx = build_context(mem, sid, recipe_name);
             if (!ctx.enabled) {
                 res.set_content(json{{"status", "disabled"}}.dump(), "application/json");
                 return;
             }
-            json turns = json::array();
-            for (const auto& t : ctx.turns) {
-                turns.push_back({
-                    {"turn_id",   t.turn_id},
-                    {"user",      t.user_text},
-                    {"assistant", t.assistant_text},
-                    {"model",     t.model_name},
-                    {"timestamp", t.timestamp}
+            json chunks = json::array();
+            for (const auto& c : ctx.chunks) {
+                chunks.push_back({
+                    {"kind",      c.kind},
+                    {"text",      c.text},
+                    {"timestamp", c.timestamp}
                 });
             }
-            json response = {{"status", "ok"}, {"session_id", sid}, {"turns", turns}};
+            json response = {
+                {"status",     "ok"},
+                {"session_id", sid},
+                {"recipe",     ctx.recipe_name},
+                {"chunks",     chunks}
+            };
             Diskerror::logger::debug(std::format(lang::DBG_HTTP, "GET", "/session", "200"));
             res.set_content(response.dump(), "application/json");
         }));
@@ -586,21 +611,29 @@ static bool is_port_available(const std::string& host, int port) {
 
 void Server::run() {
     const auto& cfg = config();
-    const bool use_unix = !cfg.socket_path.empty();
+    const bool want_unix = !cfg.socket_path.empty();
+    const bool want_tcp  = !pImpl->host.empty();
 
-    if (!use_unix && !is_port_available(pImpl->host, pImpl->port)) {
+    if (want_tcp && !is_port_available(pImpl->host, pImpl->port)) {
         Diskerror::logger::critical(std::format(lang::ERR_PORT_IN_USE, pImpl->port));
         std::exit(1);
     }
 
-    std::string addr = use_unix
-        ? expand_path(cfg.socket_path)
-        : (pImpl->host + ":" + std::to_string(pImpl->port));
-    Diskerror::logger::info(std::format(lang::MSG_SERVER_STARTING, addr));
-    if (!use_unix) {
-        Diskerror::logger::info(std::format(lang::MSG_HEALTH_CHECK_TCP, addr));
+    std::string addr;
+    if (want_unix && want_tcp) {
+        addr = expand_path(cfg.socket_path) + " + " + pImpl->host + ":" + std::to_string(pImpl->port);
+    } else if (want_unix) {
+        addr = expand_path(cfg.socket_path);
     } else {
-        Diskerror::logger::info(std::format(lang::MSG_HEALTH_CHECK_UNIX, addr));
+        addr = pImpl->host + ":" + std::to_string(pImpl->port);
+    }
+    Diskerror::logger::info(std::format(lang::MSG_SERVER_STARTING, addr));
+    if (want_tcp) {
+        Diskerror::logger::info(std::format(lang::MSG_HEALTH_CHECK_TCP,
+                                            pImpl->host + ":" + std::to_string(pImpl->port)));
+    }
+    if (want_unix) {
+        Diskerror::logger::info(std::format(lang::MSG_HEALTH_CHECK_UNIX, expand_path(cfg.socket_path)));
     }
 
     // TLS support — if certs configured, create SSLServer instead
@@ -637,11 +670,32 @@ void Server::run() {
     // Start housekeeping timer (runs every 60s + on SIGUSR1)
     pImpl->start_housekeeping_timer();
 
-    if (use_unix) {
+    // Start the daemon-resident summarizer (L2 per-turn + L3 on idle pause).
+    // Only the HTTP daemon runs this: it keeps the inference + embedder warm
+    // and catches up any turns that were captured via MCP while the daemon
+    // was down. See SummarizerService doc for the timestamp-linkage rule.
+    pImpl->summarizer_ = std::make_unique<SummarizerService>(
+        pImpl->memory, pImpl->inference_.get());
+    pImpl->summarizer_->start();
+
+    // Launch each enabled listener on its own thread. listen() blocks until
+    // the corresponding Server::stop() is called, so the main thread blocks
+    // on whichever listener it runs last (kept on the main thread when only
+    // one is enabled). When both run, the TCP listener is moved to a worker
+    // and main blocks on the unix listener.
+    std::thread tcp_thread;
+    auto run_tcp = [this]() {
+        Diskerror::logger::info(std::format(ragger::lang::MSG_BIND_TCP, pImpl->host, std::to_string(pImpl->port)));
+        bool ok = pImpl->tcp_svr.listen(pImpl->host, pImpl->port);
+        if (!ok) {
+            Diskerror::logger::error(std::format(ragger::lang::ERR_LISTEN_TCP, std::to_string(errno)));
+        }
+    };
+    auto run_unix = [this, &cfg]() {
         std::string sock_path = expand_path(cfg.socket_path);
         fs::create_directories(fs::path(sock_path).parent_path());
         std::filesystem::remove(sock_path);  // clear stale socket
-        pImpl->svr.set_address_family(AF_UNIX);
+        pImpl->unix_svr.set_address_family(AF_UNIX);
 
         // Chmod the socket 0600 once it appears. httplib::listen blocks,
         // so do this from a short-lived helper thread.
@@ -662,26 +716,38 @@ void Server::run() {
         // only calls getsockname() when port==0, and that path only handles
         // AF_INET/AF_INET6 — for AF_UNIX it returns UnsupportedAddressFamily
         // AFTER a successful bind, causing listen() to fail silently.
-        bool ok = pImpl->svr.listen(sock_path, 80);  // port value ignored for AF_UNIX
+        bool ok = pImpl->unix_svr.listen(sock_path, 80);  // port value ignored for AF_UNIX
         if (!ok) {
             Diskerror::logger::error(std::format(ragger::lang::ERR_LISTEN_UNIX, sock_path, std::to_string(errno)));
         }
+    };
+
+    if (want_unix && want_tcp) {
+        tcp_thread = std::thread(run_tcp);
+        run_unix();
+    } else if (want_unix) {
+        run_unix();
     } else {
-        Diskerror::logger::info(std::format(ragger::lang::MSG_BIND_TCP, pImpl->host, std::to_string(pImpl->port)));
-        bool ok = pImpl->svr.listen(pImpl->host, pImpl->port);
-        if (!ok) {
-            Diskerror::logger::error(std::format(ragger::lang::ERR_LISTEN_TCP, std::to_string(errno)));
-        }
+        run_tcp();
+    }
+
+    // If TCP was on its own thread, stop it and join before returning.
+    if (tcp_thread.joinable()) {
+        pImpl->tcp_svr.stop();
+        tcp_thread.join();
     }
 
     // Cleanup
+    if (pImpl->summarizer_) pImpl->summarizer_->stop();
     pImpl->stop_housekeeping_timer();
     if (!pImpl->pid_file_.empty()) std::remove(pImpl->pid_file_.c_str());
 }
 
 void Server::stop() {
+    if (pImpl->summarizer_) pImpl->summarizer_->stop();
     pImpl->stop_housekeeping_timer();
-    pImpl->svr.stop();
+    pImpl->unix_svr.stop();
+    pImpl->tcp_svr.stop();
 }
 
 } // namespace ragger

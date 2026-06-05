@@ -60,14 +60,26 @@ public:
     int store_summary(const std::string& text, const std::string& level,
                       const std::string& status,
                       const std::string& model_name = "",
-                      const std::string& session_guid = "") override;
+                      const std::string& session_guid = "",
+                      const std::string& source_timestamp = "",
+                      const std::string& tags = "") override;
     std::optional<std::pair<int, std::string>>
         current_session_summary(const std::string& session_guid = "") override;
     bool update_summary_text(int summary_id, const std::string& text,
                              const std::string& model_name = "") override;
     bool set_summary_status(int summary_id, const std::string& status) override;
+    bool set_summary_tags(int summary_id, const std::string& tags) override;
     std::vector<std::string> recent_summaries(const std::string& level, int limit) override;
     std::vector<std::string> current_decisions(int limit) override;
+    std::vector<TurnRecord> unsummarized_turns(int limit = 0) override;
+    std::vector<DraftSummary> draft_summaries(int limit = 0) override;
+    std::vector<std::string> sessions_needing_close(int pause_minutes) override;
+    std::vector<TurnRecord> turns_by_session_desc(
+        const std::string& session_guid, int limit = 0) override;
+    std::vector<SummaryRecord> turn_summaries_by_session_desc(
+        const std::string& session_guid, int limit = 0) override;
+    std::vector<SummaryRecord> session_summaries_desc(
+        const std::string& session_guid, int limit = 0) override;
 
     /// Replace text + metadata of an existing row.
     bool update_text(int memory_id,

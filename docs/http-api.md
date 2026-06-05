@@ -231,17 +231,46 @@ curl -X POST http://localhost:8432/turn \
 
 ---
 
-**GET** `/session/<session_id>`
+**GET** `/session/<session_id>[?recipe=<name>]`
 
-Build a context payload from a session's captured turns (oldest first) — the
-read-side counterpart to `/turn`, and the same data returned by the
+Assemble a session's context as recipe-shaped chunks (oldest first) — the
+read-side counterpart to `/turn`, and the same payload returned by the
 `build_context` MCP tool. Requires `[server] capture_turns` **and**
 `build_context`; otherwise returns `{ "status": "disabled" }`.
 
-Response: `{ "status": "ok", "session_id": "...", "turns": [ { turn_id, user, assistant, model, timestamp }, ... ] }`.
+`recipe` is optional. Resolution: explicit query arg → DB
+`settings.recipe` (set by `ragger recipe`) → `[server] default_recipe`
+in `settings.ini` → first built-in.
+
+Response shape:
+
+```json
+{
+  "status":     "ok",
+  "session_id": "sess-abc-123",
+  "recipe":     "natural_fading",
+  "chunks": [
+    {
+      "kind":      "session_summary",
+      "text":      "Discussed deployment pipeline; chose Node 18.",
+      "timestamp": "2026-03-15 14:02:11"
+    },
+    {
+      "kind":      "raw_turn",
+      "text":      "User: how do I rebuild?\n\nAssistant: run build.sh clean",
+      "timestamp": "2026-03-15 14:21:07"
+    }
+  ]
+}
+```
+
+`kind` is one of `raw_turn`, `turn_summary`, `session_summary`,
+`project_summary`, `decision`. `timestamp` is the source-row timestamp
+(empty for cross-session items like project summaries).
 
 ```bash
 curl http://localhost:8432/session/sess-abc-123
+curl http://localhost:8432/session/sess-abc-123?recipe=reconnect
 ```
 
 ---
@@ -274,14 +303,27 @@ standard MCP handshake and tool discovery:
 
 ### Tools
 
-| Tool | Description | Required Params |
-|------|-------------|-----------------|
-| `store` | Store a memory for later retrieval | `text` (string) |
-| `search` | Search memories by semantic similarity | `query` (string) |
+| Tool            | Description                                                                  | Required params       |
+|-----------------|------------------------------------------------------------------------------|-----------------------|
+| `store`         | Store a memory for later retrieval                                           | `text` (string)       |
+| `search`        | Hybrid semantic + keyword search                                             | `query` (string)      |
+| `capture_turn`  | Hand a completed user→assistant turn to the daemon for summarization         | `user` (string)       |
+| `build_context` | Return a recipe-shaped context payload for a session                         | `session_id` (string) |
 
-**Optional `store` params:** `metadata` (object — category, tags, source, collection)
+**Optional `store` params:** `metadata` (object — category, tags,
+source, collection).
 
-**Optional `search` params:** `limit` (integer), `min_score` (number), `collections` (string array)
+**Optional `search` params:** `limit` (integer), `min_score` (number),
+`collections` (string array).
+
+**Optional `capture_turn` params:** `assistant`, `model`, `session_id`,
+`metadata`. Requires `[server] capture_turns = true`; otherwise the
+call returns `{"status":"disabled"}`.
+
+**Optional `build_context` params:** `recipe` (string — name from
+`~/.ragger/recipes/`). Requires `[server] capture_turns` **and**
+`build_context`. Same response shape as the HTTP
+`GET /session/<id>` endpoint above.
 
 ### Example Session
 
@@ -353,6 +395,6 @@ curl -X POST http://localhost:8432/store \
 ## Related
 
 - [Getting Started](getting-started.md) — Running the server
-- [Configuration](configuration.md) — Setting host, port, auth_token
-- [Deployment](deployment.md) — Production setup with process managers
-- [Python API](python-api.md) — Using RaggerMemory as a library
+- [Configuration](configuration.md) — Setting host, port, capture/build flags, recipes
+- [Deployment](deployment.md) — Service units, sub-users, reverse proxy
+- [Agent integration](agent-integration.md) — When agents call which tool
