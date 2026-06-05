@@ -31,6 +31,10 @@ struct ApiFormat {
     std::map<std::string, std::string> auth_extra;  // e.g. {"anthropic-version": "2023-06-01"}
     std::string request_transform; // "openai" or "anthropic"
     std::string response_content;  // "choices[0].message.content"
+    // Fallback paths, tried in order when `response_content` resolves to an
+    // empty string. Lets us accept thinking-model responses that put the
+    // visible answer in a non-standard field (e.g. `reasoning_content`).
+    std::vector<std::string> response_content_fallbacks;
     std::string stream_content;    // "choices[0].delta.content"
     std::string stream_type_field; // "type" or empty
     std::string stream_type_value; // "content_block_delta" or empty

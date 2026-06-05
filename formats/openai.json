@@ -6,6 +6,9 @@
     "auth_extra": {},
     "request_transform": "openai",
     "response_content": "choices[0].message.content",
+    "response_content_fallbacks": [
+        "choices[0].message.reasoning_content"
+    ],
     "stream_content": "choices[0].delta.content",
     "stream_type_field": null,
     "stream_type_value": null,

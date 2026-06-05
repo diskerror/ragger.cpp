@@ -27,6 +27,10 @@ static const ApiFormat OPENAI_FORMAT = {
     {},                         // auth_extra
     "openai",                   // request_transform
     "choices[0].message.content", // response_content
+    // Thinking models (e.g. Gemma 4, DeepSeek R1 over OpenAI-compat shims)
+    // sometimes return the visible answer in `reasoning_content` with an
+    // empty `content`. Try that path as a fallback before giving up.
+    { "choices[0].message.reasoning_content" }, // response_content_fallbacks
     "choices[0].delta.content", // stream_content
     "",                         // stream_type_field
     "",                         // stream_type_value
@@ -97,6 +101,14 @@ static std::optional<ApiFormat> _load_format_file(const std::string& name) {
                 fmt.auth_prefix = json_string(j, "auth_prefix", OPENAI_FORMAT.auth_prefix);
                 fmt.request_transform = json_string(j, "request_transform", OPENAI_FORMAT.request_transform);
                 fmt.response_content = json_string(j, "response_content", OPENAI_FORMAT.response_content);
+                if (j.contains("response_content_fallbacks") &&
+                    j["response_content_fallbacks"].is_array()) {
+                    for (const auto& v : j["response_content_fallbacks"]) {
+                        if (v.is_string()) fmt.response_content_fallbacks.push_back(v.get<std::string>());
+                    }
+                } else {
+                    fmt.response_content_fallbacks = OPENAI_FORMAT.response_content_fallbacks;
+                }
                 fmt.stream_content = json_string(j, "stream_content", OPENAI_FORMAT.stream_content);
                 fmt.stream_type_field = json_string(j, "stream_type_field", "");
                 fmt.stream_type_value = json_string(j, "stream_type_value", "");
@@ -329,7 +341,15 @@ static std::optional<nlohmann::json> _extract_path(
 std::string extract_content(const ApiFormat& fmt, const nlohmann::json& response) {
     auto result = _extract_path(response, fmt.response_content);
     if (result && result->is_string()) {
-        return result->get<std::string>();
+        std::string s = result->get<std::string>();
+        if (!s.empty()) return s;
+    }
+    for (const auto& path : fmt.response_content_fallbacks) {
+        auto alt = _extract_path(response, path);
+        if (alt && alt->is_string()) {
+            std::string s = alt->get<std::string>();
+            if (!s.empty()) return s;
+        }
     }
     return "";
 }
