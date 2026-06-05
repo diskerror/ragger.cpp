@@ -234,6 +234,18 @@ int main(int argc, char **argv) {
             ("title", Diskerror::po::value<std::string>()->default_value(""), CLI_TITLE)
             ("year", Diskerror::po::value<int>()->default_value(0), CLI_YEAR)
             ("tags", Diskerror::po::value<std::string>()->default_value(""), CLI_TAGS)
+            // `import conversations` filters & inputs
+            ("format", Diskerror::po::value<std::string>()->default_value(""),
+                "Conversation source format: code | web")
+            ("since", Diskerror::po::value<std::string>()->default_value(""),
+                "Only turns on/after this date (YYYY-MM-DD)")
+            ("until", Diskerror::po::value<std::string>()->default_value(""),
+                "Only turns before this date (YYYY-MM-DD)")
+            ("session", Diskerror::po::value<std::string>()->default_value(""),
+                "Restrict to one session id")
+            // `import summaries` input
+            ("jsonl", Diskerror::po::value<std::string>()->default_value(""),
+                "JSONL file ({text, tags?, timestamp?} per line)")
             // admin flags removed — sudo is the admin gate
             ("yes,y", CLI_YES)
             ("embeddings,e", CLI_EMBEDDINGS)
@@ -407,6 +419,112 @@ int main(int argc, char **argv) {
                 Diskerror::logger::error(ragger::lang::CLI_USAGE_IMPORT);
                 return 1;
             }
+
+            // ISO-8601 (or already-db) timestamp → "YYYY-MM-DD HH:MM:SS".
+            // Tolerant: keeps the first 10 chars of a date and the time
+            // portion if present; drops fractional seconds and zone.
+            auto to_db_ts = [](std::string s) -> std::string {
+                if (s.empty()) return s;
+                // 'T' separator → space
+                for (auto& c : s) if (c == 'T') c = ' ';
+                // Cut at fractional / zone marker
+                auto cut = s.find_first_of(".Z+");
+                if (cut != std::string::npos) s.erase(cut);
+                // Date-only input: pad with midnight
+                if (s.size() == 10) s += " 00:00:00";
+                return s;
+            };
+
+            // Subcommand: "conversations" or "summaries" — anything else is
+            // the legacy document import.
+            const std::string& sub = args[0];
+
+            if (sub == "conversations") {
+                const std::string fmt = opts["format"].as<std::string>();
+                if (fmt != "code" && fmt != "web") {
+                    Diskerror::logger::error(
+                        "import conversations: --format=code|web is required");
+                    return 1;
+                }
+                if (args.size() < 2) {
+                    Diskerror::logger::error(
+                        "import conversations: path to JSONL file or directory required");
+                    return 1;
+                }
+                std::string src = ragger::expand_path(args[1]);
+
+                ragger::TurnFilter f;
+                f.session = opts["session"].as<std::string>();
+                f.since   = opts["since"].as<std::string>();
+                f.until   = opts["until"].as<std::string>();
+
+                auto turns = (fmt == "code") ? ragger::parse_claude_code(src)
+                                              : ragger::parse_claude_web(src);
+                turns = ragger::filter_turns(turns, f);
+                if (turns.empty()) {
+                    std::println("No turns matched.");
+                    return 0;
+                }
+
+                ragger::RaggerMemory memory(db_path, model_dir);
+                int n = 0;
+                for (const auto& t : turns) {
+                    std::string text = "User: " + t.user_text;
+                    if (!t.assistant_text.empty())
+                        text += "\n\nAssistant: " + t.assistant_text;
+                    // Land at level="turn" so imports cluster with L2 turn
+                    // summaries rather than polluting the session-summary
+                    // bucket. tags carry provenance (source + session id).
+                    std::string tags = t.source;
+                    if (!t.session_id.empty()) tags += "," + t.session_id;
+                    nlohmann::json meta = {
+                        {"level", "turn"},
+                        {"tags",  tags},
+                    };
+                    std::string ts = to_db_ts(t.timestamp);
+                    if (!ts.empty()) meta["timestamp"] = ts;
+                    memory.store(text, meta);
+                    if (++n % 25 == 0) {
+                        std::println(std::cerr, "  imported {} turns...", n);
+                    }
+                }
+                std::println("Imported {} conversation turns.", n);
+                return 0;
+            }
+
+            if (sub == "summaries") {
+                std::vector<ragger::SummaryImport> items;
+                const std::string jsonl = opts["jsonl"].as<std::string>();
+                if (!jsonl.empty()) {
+                    items = ragger::load_summary_jsonl(ragger::expand_path(jsonl));
+                } else if (args.size() >= 2) {
+                    std::vector<std::string> files(args.begin() + 1, args.end());
+                    for (auto& p : files) p = ragger::expand_path(p);
+                    items = ragger::load_summary_files(files);
+                } else {
+                    Diskerror::logger::error(
+                        "import summaries: provide files or --jsonl=FILE");
+                    return 1;
+                }
+                if (items.empty()) {
+                    std::println("Nothing to import.");
+                    return 0;
+                }
+                ragger::RaggerMemory memory(db_path, model_dir);
+                int n = 0;
+                for (const auto& s : items) {
+                    memory.store_summary(s.text, "project", "complete",
+                                         /*model_name=*/"",
+                                         /*session_guid=*/"",
+                                         /*source_timestamp=*/to_db_ts(s.timestamp),
+                                         /*tags=*/s.tags);
+                    ++n;
+                }
+                std::println("Imported {} L4 summaries.", n);
+                return 0;
+            }
+
+            // Legacy: ragger import <file> [file...] — markdown/text chunks
             std::string imp_title = opts["title"].as<std::string>();
             int         imp_year  = opts["year"].as<int>();
             std::string imp_tags  = opts["tags"].as<std::string>();

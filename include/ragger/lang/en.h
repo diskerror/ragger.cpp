@@ -25,7 +25,14 @@ constexpr const char* CLI_USAGE_USERADD       = "Usage: ragger useradd <username
 constexpr const char* CLI_USAGE_USERMOD       = "Usage: ragger usermod <username>";
 constexpr const char* CLI_USAGE_USERDEL       = "Usage: ragger userdel <username>";
 constexpr const char* CLI_USAGE_PASSWD        = "Usage: ragger passwd <username>";
-constexpr const char* CLI_USAGE_IMPORT        = "Usage: ragger import <file> [file...] [--title T] [--year YYYY] [--tags a,b,c] [--collection name]";
+constexpr const char* CLI_USAGE_IMPORT        =
+    "Usage:\n"
+    "  ragger import <file> [file...]                  # markdown/text → L5 documents\n"
+    "  ragger import conversations --format=code|web PATH\n"
+    "                                                  # Claude Code JSONL or claude.ai export\n"
+    "                                                  # [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--session ID]\n"
+    "  ragger import summaries <file> [file...]        # one L4 project summary per file\n"
+    "  ragger import summaries --jsonl=FILE            # {text, tags?, timestamp?} per line";
 constexpr const char* CLI_USAGE_EXPORT        = "Usage: ragger export <all|table> [-e|--embeddings] [--output file]";
 constexpr const char* CLI_USAGE_EMBED           = "Usage: ragger embed";
 constexpr const char* CLI_UNKNOWN_COMMAND     = "Unknown command: {}";
