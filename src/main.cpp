@@ -36,6 +36,7 @@
 #include "diskerror/logger.h"
 #include "ragger/mcp.h"
 #include "ragger/memory.h"
+#include "ragger/onboard.h"
 #include "ragger/recipe_cli.h"
 #include "ragger/embed_executor.h"
 #include "ragger/sqlite_backend.h"
@@ -592,6 +593,12 @@ int main(int argc, char **argv) {
             // to DB `settings.recipe`. Sentinel "default" tracks the INI.
             auto recipe_args = opts.getParams("args");
             return ragger::run_recipe_cli(recipe_args, db_path);
+        }
+        else if (command == "onboard") {
+            // Guided first-run setup — capture/build, recipe, inference,
+            // memory model, daemon start. Idempotent.
+            auto ob_args = opts.getParams("args");
+            return ragger::run_onboard(ob_args, db_path);
         }
         else if (command == "rebuild-embeddings") {
 
