@@ -105,15 +105,17 @@ The picker stores your choice in the DB so it survives daemon
 restarts. Add your own JSON files under `~/.ragger/recipes/` to
 extend the menu — see [Configuration → Recipes](configuration.md#recipes).
 
-## Turn capture (opt-in)
+## Turn capture
 
-Both sides of the turn pipeline are off by default. Enable them in
+Both sides of the turn pipeline ship enabled — agents that POST turns
+get them ingested and summarized, and they can ask for a recipe-shaped
+context payload to inject. To turn either off, edit
 `~/.ragger/settings.ini`:
 
 ```ini
 [server]
-capture_turns = true     # write: ingest agent-pushed turns
-build_context = true     # read: assemble recipe payloads from those turns
+capture_turns = false    # write: stop ingesting agent-pushed turns
+build_context = false    # read: stop serving recipe context payloads
 ```
 
 `ragger reload` (or `ragger restart`) picks up the change. With

@@ -106,13 +106,13 @@ struct Config {
     // capture_turns (write side): when true, the capture_turn entry point
     // (MCP tool + HTTP POST /turn) ingests agent-pushed raw turns into the
     // `turns` table. When false, capture_turn is a no-op.
-    bool capture_turns = false;
+    bool capture_turns = true;
     // build_context (read side): when true, the build_context entry point
     // (MCP tool + HTTP GET /session/<id>) assembles a session's turns into a
     // context payload for the agent to inject. Only meaningful when
     // capture_turns is also true — there's nothing to build from otherwise.
     // Agent-driven search/store tools are unaffected by either flag.
-    bool build_context = false;
+    bool build_context = true;
     // Recipe name applied when the caller doesn't specify one. Recipes are
     // loaded from `recipes_dir` (JSON files); built-ins cover the case where
     // the directory is missing or empty.
