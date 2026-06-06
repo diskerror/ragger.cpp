@@ -9,6 +9,11 @@ set -euo pipefail
 RED='\033[0;31m'
 NC='\033[0m'
 
+# rustup installs cargo under ~/.cargo/bin and writes an env file to source.
+# Pull it in early so the cargo/rustc check below sees it without forcing
+# the user to open a new shell after `rustup-init`.
+[ -r "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+
 missing=()
 check() { command -v "$1" &>/dev/null || missing+=("$1"); }
 
@@ -16,10 +21,24 @@ check cmake
 check make
 check c++
 check pkg-config
+# Rust toolchain — required by vendor/tokenizers-cpp. Cargo invokes
+# rustc, so checking one would do, but naming both makes the fix
+# obvious in the error message.
+check cargo
+check rustc
 
 if [ ${#missing[@]} -gt 0 ]; then
     echo -e "${RED}[!] Missing required tools:${NC} ${missing[*]}"
-    echo "    Install them before building."
+    echo ""
+    case " ${missing[*]} " in
+        *" cargo "*|*" rustc "*)
+            echo "    Install Rust with rustup (recommended):"
+            echo "      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+            echo "    Then open a new shell, or run:  . \$HOME/.cargo/env"
+            echo "" ;;
+    esac
+    echo "    System packages on macOS: sudo port install cmake pkg-config rust"
+    echo "    System packages on Debian/Ubuntu: sudo apt install build-essential cmake pkg-config"
     exit 1
 fi
 
