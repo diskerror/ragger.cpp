@@ -266,8 +266,8 @@ constexpr const char* HELP_SCREEN             = R"(
 Usage: ragger <command> [options] [args]
 Commands:
   onboard            Guided first-run setup — capture/build flags, recipe,
-                     inference endpoint + model, optional memory model, daemon
-                     start. Re-run any time to change one section. Start here.
+                     inference endpoint + model, daemon start. Re-run any
+                     time to change one section. Start here.
   start              Start the background daemon (user LaunchAgent / systemd --user)
   stop               Stop the background daemon
   restart            Restart the background daemon

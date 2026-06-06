@@ -3,7 +3,7 @@
  *
  * Walks the user through the choices that don't have a single safe default
  * for everyone: capture / build_context, default recipe, inference endpoint
- * + model, separate memory model, embedding model download, daemon start.
+ * + model, embedding model download, daemon start.
  *
  * Idempotent — re-runs surface the current state and let you change one
  * section without disturbing the rest. Plugin (Claude Code / Claude

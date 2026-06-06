@@ -291,36 +291,7 @@ int run_onboard(const std::vector<std::string>& /*args*/,
     set_ini_value(body, "api_url", new_url);
     set_ini_value(body, "model",   new_model);
 
-    // -------- 5. Memory model (separate, optional) --------
-    if (!new_url.empty() && !new_model.empty()) {
-        section("Memory-tier model (optional)");
-        std::println("By default the summarizer uses the model above. Pick a");
-        std::println("separate (smaller/cheaper) model just for summaries to cut");
-        std::println("cost without slowing live chat. Most users keep it the same.");
-        std::println("");
-        // [inference.memory] section may not exist yet. We only honor it if
-        // the section + a `model = ...` line are present; otherwise inference
-        // falls back to the [inference] model. Keep this simple: just prompt
-        // and write a key into the same body. The user can move it later.
-        if (prompt_yn("Use a separate model for summarization?", false)) {
-            auto ids = probe_models(new_url);
-            std::string mem;
-            if (ids.empty()) {
-                mem = prompt("Memory model name", new_model);
-            } else {
-                mem = pick_from_list(ids, "Pick the memory/summarization model");
-            }
-            // We append a minimal [inference.memory] block if the key
-            // doesn't already exist anywhere in the file.
-            if (!set_ini_value(body, "memory_model", mem)) {
-                // Append at end so we don't disturb the existing layout.
-                if (!body.empty() && body.back() != '\n') body += "\n";
-                body += "\n[inference.memory]\nmodel = " + mem + "\n";
-            }
-        }
-    }
-
-    // -------- 6. Write settings --------
+    // -------- 5. Write settings --------
     section("Saving settings");
     if (!write_file(ini_path, body)) {
         std::println(stderr, "Failed to write {}", ini_path);
@@ -328,7 +299,7 @@ int run_onboard(const std::vector<std::string>& /*args*/,
     }
     std::println("Wrote {}", ini_path);
 
-    // -------- 7. Embedding model --------
+    // -------- 6. Embedding model --------
     section("Embedding model");
     if (embedding_model_present()) {
         std::println("✓ all-MiniLM-L6-v2 already present at ~/.ragger/models/");
@@ -341,7 +312,7 @@ int run_onboard(const std::vector<std::string>& /*args*/,
         std::println("(Re-running install.sh is safe — it skips anything already done.)");
     }
 
-    // -------- 8. Daemon --------
+    // -------- 7. Daemon --------
     section("Daemon");
     std::println("The daemon owns the summarizer worker, the HTTP/MCP listeners,");
     std::println("and the housekeeping loop. It runs under your user account.");
