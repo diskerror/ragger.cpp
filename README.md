@@ -7,11 +7,14 @@
 > **Continuous context summaries as you work.**
 > 
 > **Forgets gracefully. Recalls perfectly.**
+> 
+> **Compaction that doesn't forget.**
 
 Ragger is local-first semantic memory for AI agents — and for the humans
-working with them. Every turn your agent has gets captured, summarized in
-the background while it stays warm, and served back as a layered "what
-just happened?" payload that fades the way a person's memory fades while
+working with them. Think of it as **running compaction with tiered
+recall**: every turn your agent has gets captured and summarized in the
+background while it stays warm, then served back as a layered "what just
+happened?" payload that fades the way a person's memory fades — while
 keeping the verbatim transcript a single query away. All embeddings are
 local. The whole database is one SQLite file you own.
 
