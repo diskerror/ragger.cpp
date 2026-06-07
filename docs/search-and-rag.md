@@ -175,17 +175,17 @@ than a page or two, use `--min-chunk-size`.
 
 ```bash
 # Import a Markdown file with default chunking (300 chars)
-ragger import notes.md --collection docs
+ragger import notes.md --tags docs
 
 # Import with custom chunk size
 ragger import large-doc.md --min-chunk-size 500
 
-# Import multiple files
-ragger import doc1.md doc2.md doc3.md --collection reference
+# Import multiple files with a shared tag
+ragger import doc1.md doc2.md doc3.md --tags reference
 
 # Import a converted PDF
 docling myfile.pdf -o myfile.md
-ragger import myfile.md --collection docs
+ragger import myfile.md --tags docs
 ```
 
 ## Performance Characteristics

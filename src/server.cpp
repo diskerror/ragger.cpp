@@ -328,25 +328,161 @@ struct Server::Impl {
     }
 
 
+    // ---- Route handlers (named for navigability) ---------------------------
+
+    void handle_store(const UserInfo& user, const httplib::Request& req,
+                      httplib::Response& res) {
+        auto body = json::parse(req.body);
+        std::string text = body.value("text", "");
+        json metadata = body.value("metadata", json::object());
+        if (text.empty()) {
+            Diskerror::logger::debug("POST /store 400");
+            res.status = 400;
+            res.set_content(lang::HTTP_MISSING_TEXT, "text/plain");
+            return;
+        }
+        if (!metadata.contains("collection") || metadata["collection"].get<std::string>().empty())
+            metadata["collection"] = "memory";
+        if (!metadata.contains("source") || metadata["source"].get<std::string>().empty())
+            metadata["source"] = user.username;
+        auto& mem = _get_memory(user.username);
+        std::string id = mem.store(text, metadata);
+        Diskerror::logger::debug("POST /store 200");
+        res.set_content(json{{"id", id}, {"status", "stored"}}.dump(), "application/json");
+    }
+
+    void handle_search(const UserInfo& user, const httplib::Request& req,
+                       httplib::Response& res) {
+        auto body = json::parse(req.body);
+        std::string query = body.value("query", "");
+        if (query.empty()) {
+            Diskerror::logger::debug("POST /search 400");
+            res.status = 400; res.set_content(lang::HTTP_MISSING_QUERY, "text/plain"); return;
+        }
+        int limit       = body.value("limit", config().default_search_limit);
+        float min_score = body.value("min_score", config().default_min_score);
+        auto collections = body.value("collections", std::vector<std::string>{});
+        auto t0 = std::chrono::high_resolution_clock::now();
+        auto& mem = _get_memory(user.username);
+        auto sr = mem.search(query, limit, min_score, collections);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::high_resolution_clock::now() - t0).count();
+        json timing = sr.timing;
+        timing["total_ms"] = ms;
+        Diskerror::logger::trace(std::format(lang::DBG_QUERY_LOG, query, sr.results.size(), ms));
+        Diskerror::logger::debug(std::format(lang::DBG_HTTP, "POST", "/search", "200"));
+        res.set_content(json{{"results", search_results_to_json(sr.results)},
+                             {"timing",  timing}}.dump(), "application/json");
+    }
+
+    // POST /turn: ingest one agent-pushed conversation turn for background
+    // summarization. No-op unless [server] capture_turns is true.
+    void handle_turn(const UserInfo& user, const httplib::Request& req,
+                     httplib::Response& res) {
+        auto body = json::parse(req.body);
+        std::string user_text  = body.value("user", "");
+        std::string assistant  = body.value("assistant", "");
+        std::string model      = body.value("model", "");
+        std::string session_id = body.value("session_id", "");
+        if (user_text.empty()) {
+            Diskerror::logger::debug("POST /turn 400");
+            res.status = 400;
+            res.set_content(json{{"error", "missing required field: user"}}.dump(),
+                            "application/json");
+            return;
+        }
+        auto& mem = _get_memory(user.username);
+        auto result = capture_turn(mem, user_text, assistant, model, session_id);
+        if (result.captured && summarizer_ && result.turn_id > 0) {
+            auto turns = mem.turns_by_session_desc(session_id, 1);
+            std::string ts;
+            if (!turns.empty() && turns.front().turn_id == result.turn_id)
+                ts = turns.front().timestamp;
+            summarizer_->enqueue_turn(result.turn_id, user_text, assistant,
+                                      model, session_id, ts);
+        }
+        Diskerror::logger::debug(std::format(lang::DBG_HTTP, "POST", "/turn", "200"));
+        res.set_content(json{{"status",  result.captured ? "captured" : "disabled"},
+                             {"turn_id", result.turn_id}}.dump(), "application/json");
+    }
+
+    // GET /session/<guid>[?recipe=name]: assemble a recipe-shaped context payload.
+    void handle_session(const UserInfo& user, const httplib::Request& req,
+                        httplib::Response& res) {
+        std::string sid = req.matches[1];
+        std::string recipe_name = req.get_param_value("recipe");
+        auto& mem = _get_memory(user.username);
+        auto ctx = build_context(mem, sid, recipe_name);
+        if (!ctx.enabled) {
+            res.set_content(json{{"status", "disabled"}}.dump(), "application/json");
+            return;
+        }
+        json chunks = json::array();
+        for (const auto& c : ctx.chunks)
+            chunks.push_back({{"kind", c.kind}, {"text", c.text}, {"timestamp", c.timestamp}});
+        Diskerror::logger::debug(std::format(lang::DBG_HTTP, "GET", "/session", "200"));
+        res.set_content(json{{"status",     "ok"},
+                             {"session_id", sid},
+                             {"recipe",     ctx.recipe_name},
+                             {"chunks",     chunks}}.dump(), "application/json");
+    }
+
+    void handle_delete_memory(const UserInfo& user, const httplib::Request& req,
+                               httplib::Response& res) {
+        int id = std::stoi(req.matches[1]);
+        auto& mem = _get_memory(user.username);
+        if (mem.delete_memory(id)) {
+            Diskerror::logger::debug("DELETE /memory 200");
+            res.set_content(json{{"id", id}, {"status", "deleted"}}.dump(), "application/json");
+        } else {
+            Diskerror::logger::debug("DELETE /memory 404");
+            res.status = 404; res.set_content(lang::HTTP_MEMORY_NOT_FOUND, "text/plain");
+        }
+    }
+
+    void handle_delete_batch(const UserInfo& user, const httplib::Request& req,
+                              httplib::Response& res) {
+        auto body = json::parse(req.body);
+        if (!body.contains("ids") || !body["ids"].is_array()) {
+            Diskerror::logger::debug("POST /delete_batch 400");
+            res.status = 400; res.set_content(lang::HTTP_MISSING_IDS, "text/plain"); return;
+        }
+        auto ids = body["ids"].get<std::vector<int>>();
+        auto& mem = _get_memory(user.username);
+        int deleted = mem.delete_batch(ids);
+        Diskerror::logger::debug("POST /delete_batch 200");
+        res.set_content(json{{"deleted", deleted}}.dump(), "application/json");
+    }
+
+    void handle_search_by_metadata(const UserInfo& user, const httplib::Request& req,
+                                    httplib::Response& res) {
+        auto body = json::parse(req.body);
+        if (!body.contains("metadata") || !body["metadata"].is_object()) {
+            Diskerror::logger::debug("POST /search_by_metadata 400");
+            res.status = 400; res.set_content(lang::HTTP_MISSING_METADATA, "text/plain"); return;
+        }
+        auto results = _get_memory(user.username).search_by_metadata(
+            body["metadata"], body.value("limit", 0),
+            body.value("after", ""), body.value("before", ""));
+        Diskerror::logger::debug("POST /search_by_metadata 200");
+        res.set_content(json{{"results", search_results_to_json(results)},
+                             {"count",   results.size()}}.dump(), "application/json");
+    }
+
+    // ---- Route registration -----------------------------------------------
+
     void setup_routes(httplib::Server& svr) {
-        // GET /health
+        // GET /health — no auth required
         svr.Get("/health", [this](const httplib::Request&, httplib::Response& res) {
-            json response = {
-                {"status", "ok"},
-                {"version", RAGGER_VERSION},
-                {"commit", RAGGER_COMMIT},
-                {"built", RAGGER_BUILD_DATE},
-                {"memories", memory.count()}
-            };
+            res.set_content(json{{"status",   "ok"},
+                                 {"version",  RAGGER_VERSION},
+                                 {"commit",   RAGGER_COMMIT},
+                                 {"built",    RAGGER_BUILD_DATE},
+                                 {"memories", memory.count()}}.dump(), "application/json");
             Diskerror::logger::debug("GET /health 200");
-            res.set_content(response.dump(), "application/json");
         });
 
-        // Wrap a handler with bearer auth + uniform error handling: 401 when the
-        // request isn't authenticated; a json::exception becomes 400 and any
-        // other std::exception 500 (both plain text), so every endpoint reports
-        // errors identically. The inner handler receives the authenticated user
-        // and may still set its own status (400/404/...) for request errors.
+        // Wrap a handler with bearer auth + uniform error handling.
         auto guarded = [this](auto handler) {
             return [this, handler](const httplib::Request& req, httplib::Response& res) {
                 auto user = _check_auth(req);
@@ -370,202 +506,23 @@ struct Server::Impl {
             };
         };
 
-        // GET /count
-        svr.Get("/count", guarded([this](const UserInfo& user,
-                                         const httplib::Request&, httplib::Response& res) {
-            auto& mem = _get_memory(user.username);
-            json response = {{"count", mem.count()}};
+        svr.Get("/count", guarded([this](const UserInfo& user, const httplib::Request&,
+                                         httplib::Response& res) {
+            res.set_content(json{{"count", _get_memory(user.username).count()}}.dump(),
+                            "application/json");
             Diskerror::logger::debug("GET /count 200");
-            res.set_content(response.dump(), "application/json");
         }));
 
-        // POST /store
-        svr.Post("/store", guarded([this](const UserInfo& user,
-                                          const httplib::Request& req, httplib::Response& res) {
-            auto body = json::parse(req.body);
+        svr.Post("/store",              guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_store(u, req, res); }));
+        svr.Post("/search",             guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_search(u, req, res); }));
+        svr.Post("/turn",               guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_turn(u, req, res); }));
+        svr.Get(R"(/session/([^/]+))",  guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_session(u, req, res); }));
+        svr.Delete(R"(/memory/(\d+))",  guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_delete_memory(u, req, res); }));
+        svr.Post("/delete_batch",       guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_delete_batch(u, req, res); }));
+        svr.Post("/search_by_metadata", guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_search_by_metadata(u, req, res); }));
 
-            std::string text = body.value("text", "");
-            json metadata = body.value("metadata", json::object());
-
-            if (text.empty()) {
-                Diskerror::logger::debug("POST /store 400");
-                res.status = 400;
-                res.set_content(lang::HTTP_MISSING_TEXT, "text/plain");
-                return;
-            }
-
-            // Ensure required metadata defaults
-            if (!metadata.contains("collection") || metadata["collection"].get<std::string>().empty()) {
-                metadata["collection"] = "memory";
-            }
-            if (!metadata.contains("source") || metadata["source"].get<std::string>().empty()) {
-                metadata["source"] = user.username;
-            }
-
-            auto& mem = _get_memory(user.username);
-            std::string id = mem.store(text, metadata);
-
-            json response = {
-                {"id", id},
-                {"status", "stored"}
-            };
-            Diskerror::logger::debug("POST /store 200");
-            res.set_content(response.dump(), "application/json");
-        }));
-
-        // POST /search
-        svr.Post("/search", guarded([this](const UserInfo& user,
-                                           const httplib::Request& req, httplib::Response& res) {
-            auto body = json::parse(req.body);
-            std::string query = body.value("query", "");
-            int limit = body.value("limit", config().default_search_limit);
-            float min_score = body.value("min_score", config().default_min_score);
-            std::vector<std::string> collections =
-                body.value("collections", std::vector<std::string>{});
-            if (query.empty()) {
-                Diskerror::logger::debug("POST /search 400");
-                res.status = 400; res.set_content(lang::HTTP_MISSING_QUERY, "text/plain"); return;
-            }
-            auto start_time = std::chrono::high_resolution_clock::now();
-            auto& mem = _get_memory(user.username);
-            SearchResponse search_response = mem.search(query, limit, min_score, collections);
-            auto end_time = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-            json results = search_results_to_json(search_response.results);
-            json timing = search_response.timing;
-            timing["total_ms"] = duration.count();
-            json response = {{"results", results}, {"timing", timing}};
-            Diskerror::logger::trace(std::format(lang::DBG_QUERY_LOG, query, search_response.results.size(), duration.count()));
-            Diskerror::logger::debug(std::format(lang::DBG_HTTP, "POST", "/search", "200"));
-            res.set_content(response.dump(), "application/json");
-        }));
-
-        // POST /turn — ingest one agent-pushed conversation turn for background
-        // summarization. Same five-field payload as the capture_turn MCP tool;
-        // both call ragger::capture_turn(). No-op unless [server] capture_turns.
-        svr.Post("/turn", guarded([this](const UserInfo& user,
-                                         const httplib::Request& req, httplib::Response& res) {
-            auto body = json::parse(req.body);
-            std::string user_text  = body.value("user", "");
-            std::string assistant  = body.value("assistant", "");
-            std::string model      = body.value("model", "");
-            std::string session_id = body.value("session_id", "");
-            if (user_text.empty()) {
-                Diskerror::logger::debug("POST /turn 400");
-                res.status = 400;
-                res.set_content(json{{"error", "missing required field: user"}}.dump(),
-                                "application/json");
-                return;
-            }
-            auto& mem = _get_memory(user.username);
-            auto result = capture_turn(mem, user_text, assistant, model, session_id);
-            // Hand the L2 job to the summarizer worker. It will inherit
-            // this turn's timestamp via store_summary; no-op if summarizer
-            // isn't running. Reads the timestamp back from the row so the
-            // queued job carries exactly what landed on disk.
-            if (result.captured && summarizer_ && result.turn_id > 0) {
-                auto turns = mem.turns_by_session_desc(session_id, 1);
-                std::string ts;
-                if (!turns.empty() && turns.front().turn_id == result.turn_id) {
-                    ts = turns.front().timestamp;
-                }
-                summarizer_->enqueue_turn(result.turn_id, user_text, assistant,
-                                          model, session_id, ts);
-            }
-            json response = {
-                {"status",  result.captured ? "captured" : "disabled"},
-                {"turn_id", result.turn_id}
-            };
-            Diskerror::logger::debug(std::format(lang::DBG_HTTP, "POST", "/turn", "200"));
-            res.set_content(response.dump(), "application/json");
-        }));
-
-        // GET /session/<guid>[?recipe=name] — assemble a recipe-shaped
-        // context payload for the session. Read-side counterpart to /turn;
-        // gated by [server] capture_turns + build_context. The MCP
-        // build_context tool returns the same shape.
-        svr.Get(R"(/session/([^/]+))", guarded([this](const UserInfo& user,
-                                                      const httplib::Request& req, httplib::Response& res) {
-            std::string sid = req.matches[1];
-            std::string recipe_name = req.get_param_value("recipe");
-            auto& mem = _get_memory(user.username);
-            auto ctx = build_context(mem, sid, recipe_name);
-            if (!ctx.enabled) {
-                res.set_content(json{{"status", "disabled"}}.dump(), "application/json");
-                return;
-            }
-            json chunks = json::array();
-            for (const auto& c : ctx.chunks) {
-                chunks.push_back({
-                    {"kind",      c.kind},
-                    {"text",      c.text},
-                    {"timestamp", c.timestamp}
-                });
-            }
-            json response = {
-                {"status",     "ok"},
-                {"session_id", sid},
-                {"recipe",     ctx.recipe_name},
-                {"chunks",     chunks}
-            };
-            Diskerror::logger::debug(std::format(lang::DBG_HTTP, "GET", "/session", "200"));
-            res.set_content(response.dump(), "application/json");
-        }));
-
-        // DELETE /memory/:id
-        svr.Delete(R"(/memory/(\d+))", guarded([this](const UserInfo& user,
-                                                      const httplib::Request& req, httplib::Response& res) {
-            int id = std::stoi(req.matches[1]);
-            auto& mem = _get_memory(user.username);
-            bool deleted = mem.delete_memory(id);
-            if (deleted) {
-                json response = {{"id", id}, {"status", "deleted"}};
-                Diskerror::logger::debug("DELETE /memory 200");
-                res.set_content(response.dump(), "application/json");
-            } else {
-                Diskerror::logger::debug("DELETE /memory 404");
-                res.status = 404; res.set_content(lang::HTTP_MEMORY_NOT_FOUND, "text/plain");
-            }
-        }));
-
-        // POST /delete_batch
-        svr.Post("/delete_batch", guarded([this](const UserInfo& user,
-                                                 const httplib::Request& req, httplib::Response& res) {
-            auto body = json::parse(req.body);
-            if (!body.contains("ids") || !body["ids"].is_array()) {
-                Diskerror::logger::debug("POST /delete_batch 400");
-                res.status = 400; res.set_content(lang::HTTP_MISSING_IDS, "text/plain"); return;
-            }
-            std::vector<int> ids = body["ids"].get<std::vector<int>>();
-            auto& mem = _get_memory(user.username);
-            int deleted = mem.delete_batch(ids);
-            json response = {{"deleted", deleted}};
-            Diskerror::logger::debug("POST /delete_batch 200");
-            res.set_content(response.dump(), "application/json");
-        }));
-
-        // POST /search_by_metadata
-        svr.Post("/search_by_metadata", guarded([this](const UserInfo& user,
-                                                       const httplib::Request& req, httplib::Response& res) {
-            auto body = json::parse(req.body);
-            if (!body.contains("metadata") || !body["metadata"].is_object()) {
-                Diskerror::logger::debug("POST /search_by_metadata 400");
-                res.status = 400; res.set_content(lang::HTTP_MISSING_METADATA, "text/plain"); return;
-            }
-            json metadata_filter = body["metadata"];
-            int limit = body.value("limit", 0);
-            std::string after = body.value("after", "");
-            std::string before = body.value("before", "");
-            auto& mem = _get_memory(user.username);
-            auto results = mem.search_by_metadata(metadata_filter, limit, after, before);
-            json response = {{"results", search_results_to_json(results)}, {"count", results.size()}};
-            Diskerror::logger::debug("POST /search_by_metadata 200");
-            res.set_content(response.dump(), "application/json");
-        }));
-
-        // GET /user/token
-        svr.Get("/user/token", guarded([this](const UserInfo& user,
-                                              const httplib::Request&, httplib::Response& res) {
+        svr.Get("/user/token", guarded([this](const UserInfo& user, const httplib::Request&,
+                                              httplib::Response& res) {
             struct passwd* pw = getpwnam(user.username.c_str());
             if (!pw) { res.status = 404; res.set_content(R"({"error":"system user not found"})", "application/json"); return; }
             std::string token_file = std::string(pw->pw_dir) + "/.ragger/token";
@@ -576,11 +533,10 @@ struct Server::Impl {
             size_t s = token.find_first_not_of(" \t\r\n");
             size_t e = token.find_last_not_of(" \t\r\n");
             if (s != std::string::npos) token = token.substr(s, e - s + 1);
-            json response = {{"token", token}, {"username", user.username}};
             Diskerror::logger::debug("GET /user/token 200");
-            res.set_content(response.dump(), "application/json");
+            res.set_content(json{{"token", token}, {"username", user.username}}.dump(),
+                            "application/json");
         }));
-
     }
 };
 

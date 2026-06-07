@@ -30,22 +30,25 @@ See [Deployment](deployment.md) for the full lifecycle.
 
 ## Authentication
 
-Bearer token authentication is optional. Set via config:
-
-```ini
-[server]
-auth_token = your-secret-token-here
-```
-
-Include the token in the `Authorization` header:
+On first start, the daemon auto-generates a random token and writes it to
+`~/.ragger/token`. Run `ragger add-self` once to register that token with
+the database, then include it in the `Authorization` header:
 
 ```bash
-curl -H "Authorization: Bearer your-secret-token-here" \
+# Register your token (one-time, after first daemon start)
+ragger add-self
+
+# Read the token
+cat ~/.ragger/token
+
+# Use it in requests
+curl -H "Authorization: Bearer $(cat ~/.ragger/token)" \
   http://localhost:8432/health
 ```
 
-If no `auth_token` is set, the server allows unauthenticated access
-(suitable for localhost-only deployments).
+Requests arriving on the unix socket (`~/.ragger/ragger.sock`) or from
+localhost (`127.0.0.1` / `::1`) are pre-authenticated as the default user,
+so token headers are not required from the local machine.
 
 ## Endpoints
 
