@@ -234,12 +234,22 @@ int run_onboard(const std::vector<std::string>& /*args*/,
     // -------- 2. Capture & context --------
     section("Turn capture & context");
     bool cur_cap = ini_bool(get_ini_value(body, "capture_turns"), true);
-    bool cur_bld = ini_bool(get_ini_value(body, "build_context"), true);
-    std::println("Both flags ship enabled — agents can push turns and ask for");
-    std::println("recipe-shaped context payloads out of the box.");
+    bool cur_bld = ini_bool(get_ini_value(body, "build_context"), false);
+    std::println("capture_turns — write side");
+    std::println("  When on, every conversation turn the agent pushes via");
+    std::println("  POST /turn or the capture_turn MCP tool is saved to memory.");
+    std::println("  Default: on (recommended — this is what builds your memory).");
     std::println("");
-    bool new_cap = prompt_yn("Capture agent-pushed turns?", cur_cap);
-    bool new_bld = prompt_yn("Serve recipe-shaped build_context payloads?",
+    bool new_cap = prompt_yn("Enable turn capture?", cur_cap);
+    std::println("");
+    std::println("build_context — read side");
+    std::println("  When on, GET /session/<id> and the build_context MCP tool");
+    std::println("  assemble a recipe-shaped summary payload for the agent to");
+    std::println("  inject as context. Only meaningful when capture_turns is on.");
+    std::println("  Default: off — most agents request context explicitly rather");
+    std::println("  than having it injected automatically every turn.");
+    std::println("");
+    bool new_bld = prompt_yn("Enable automatic context assembly?",
                              cur_bld && new_cap);
     if (new_bld && !new_cap) {
         std::println("  (build_context needs capture_turns on — turning it off.)");
