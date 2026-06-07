@@ -31,12 +31,12 @@
 
 namespace ragger {
 
-class RaggerMemory;
+class StorageBackend;
 class InferenceClient;
 
 class SummarizerService {
 public:
-    SummarizerService(RaggerMemory& memory, InferenceClient* inference);
+    SummarizerService(StorageBackend& backend, InferenceClient* inference);
     ~SummarizerService();
 
     /// Start worker + pause-timer threads. Enqueues the catch-up scan
@@ -91,7 +91,7 @@ private:
     static std::string heuristic_draft(const std::string& user_text,
                                        const std::string& assistant_text);
 
-    RaggerMemory&    memory_;
+    StorageBackend&  backend_;
     InferenceClient* inference_;  // borrowed; lifetime owned by Server
 
     std::deque<Job>            queue_;

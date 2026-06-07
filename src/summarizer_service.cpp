@@ -7,7 +7,6 @@
 #include "ragger/config.h"
 #include "ragger/inference.h"
 #include "ragger/lang.h"
-#include "ragger/memory.h"
 #include "ragger/storage_backend.h"
 #include "ragger/summarizer.h"
 #include "diskerror/logger.h"
@@ -31,9 +30,9 @@ std::string trim_to(const std::string& s, size_t cap) {
 
 } // namespace
 
-SummarizerService::SummarizerService(RaggerMemory& memory,
+SummarizerService::SummarizerService(StorageBackend& backend,
                                      InferenceClient* inference)
-    : memory_(memory), inference_(inference) {}
+    : backend_(backend), inference_(inference) {}
 
 SummarizerService::~SummarizerService() {
     stop();
@@ -76,8 +75,7 @@ void SummarizerService::enqueue_turn(int turn_id,
 }
 
 void SummarizerService::enqueue_catch_up() {
-    auto* backend = memory_.backend();
-    if (!backend) return;
+    auto* backend = &backend_;
 
     size_t turn_n = 0, draft_n = 0, sess_n = 0;
 
@@ -138,9 +136,12 @@ void SummarizerService::worker_loop() {
                 case JobKind::DraftRetry:    handle_draft(job); break;
             }
         } catch (const std::exception& e) {
-            // Never let a single bad job kill the worker.
-            Diskerror::logger::warn(std::format(
-                lang::WARN_SUMMARIZER_L2, job.turn_id, e.what()));
+            if (job.kind == JobKind::DraftRetry)
+                Diskerror::logger::warn(std::format(
+                    lang::WARN_SUMMARIZER_DRAFT, job.summary_id, e.what()));
+            else
+                Diskerror::logger::warn(std::format(
+                    lang::WARN_SUMMARIZER_L2, job.turn_id, e.what()));
         }
     }
 }
@@ -196,14 +197,14 @@ bool SummarizerService::handle_l2(const Job& j) {
     if (summary.empty()) {
         // Fallback: heuristic draft, tagged for later rewrite.
         const auto draft = heuristic_draft(j.user_text, j.assistant_text);
-        memory_.store_summary(draft, "turn", "complete",
+        backend_.store_summary(draft, "turn", "complete",
                               j.model_name, guid, ts, "draft");
         Diskerror::logger::info(std::format(
             lang::MSG_SUMMARIZER_DRAFT, display_guid, ts));
         return false;
     }
 
-    memory_.store_summary(summary, "turn", "complete",
+    backend_.store_summary(summary, "turn", "complete",
                           j.model_name, guid, ts, "");
     Diskerror::logger::info(std::format(
         lang::MSG_SUMMARIZER_L2, display_guid, ts));
@@ -219,7 +220,7 @@ bool SummarizerService::handle_l2(const Job& j) {
 // --------------------------------------------------------------------
 bool SummarizerService::handle_l3(const Job& j) {
     if (j.session_guid.empty()) return true;
-    auto* backend = memory_.backend();
+    auto* backend = &backend_;
     if (!backend) return false;
 
     auto turns = backend->turns_by_session_desc(j.session_guid, /*limit=*/0);
@@ -248,13 +249,15 @@ bool SummarizerService::handle_l3(const Job& j) {
         // Inference down — leave the session open; next pause-timer pass
         // will retry. (We don't write a draft L3 because a coherent
         // session summary really does need the model.)
+        Diskerror::logger::warn(std::format(
+            lang::ERR_SESSION_SUMMARY_FAIL, j.session_guid));
         return false;
     }
 
-    memory_.store_summary(summary, "session", "complete",
+    backend_.store_summary(summary, "session", "complete",
                           summarizer_model, j.session_guid, latest_ts, "");
     Diskerror::logger::info(std::format(
-        lang::MSG_SUMMARIZER_L3, j.session_guid));
+        lang::MSG_SUMMARIZED_SESSION, j.session_guid, turns.size()));
     return true;
 }
 
@@ -266,7 +269,7 @@ bool SummarizerService::handle_l3(const Job& j) {
 // --------------------------------------------------------------------
 bool SummarizerService::handle_draft(const Job& j) {
     if (j.summary_id <= 0 || !inference_) return false;
-    auto* backend = memory_.backend();
+    auto* backend = &backend_;
     if (!backend) return false;
 
     // To re-summarize, we need the source turn. The draft row's

@@ -110,11 +110,15 @@ public:
                                                  const std::string& after = "",
                                                  const std::string& before = "");
 
+    /// Session turns newest-first (recipe walk-back direction).
+    std::vector<TurnRecord> turns_by_session_desc(const std::string& session_guid,
+                                                   int limit = 0);
+
     /// Settings access (user_store).
     std::optional<std::string> get_setting(const std::string& key);
     void set_setting(const std::string& key, const std::string& value);
 
-    /// Access primary backend (for storage operations — internal use only).
+    /// Access primary backend (internal — prefer RaggerMemory methods where possible).
     StorageBackend* backend() { return backend_.get(); }
 
     void close();

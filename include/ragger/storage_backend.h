@@ -129,14 +129,7 @@ public:
 
     /// Summary rows tagged 'draft' (heuristic fallback writes that the
     /// summarizer should rewrite when inference is back). Returned
-    /// oldest-first, capped at `limit` (0 = unbounded). Each entry's
-    /// `turn_id` carries the summary_id (re-using TurnRecord as a transport).
-    struct DraftSummary {
-        int         summary_id;
-        std::string level;
-        std::string session_guid;   // empty when session_id is NULL
-        std::string timestamp;      // source-turn timestamp for L2
-    };
+    /// oldest-first, capped at `limit` (0 = unbounded).
     virtual std::vector<DraftSummary> draft_summaries(int limit = 0) = 0;
 
     /// Sessions whose most recent turn is older than `pause_minutes` AND
@@ -155,12 +148,6 @@ public:
     /// Turn-level (L2) summaries for a session, newest-first up to `limit`.
     /// Returned with the summary row's timestamp (= the source turn's
     /// timestamp) so recipes can align them against raw turns.
-    struct SummaryRecord {
-        int         summary_id;
-        std::string text;
-        std::string status;
-        std::string timestamp;
-    };
     virtual std::vector<SummaryRecord> turn_summaries_by_session_desc(
         const std::string& session_guid, int limit = 0) = 0;
 

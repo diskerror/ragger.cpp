@@ -856,8 +856,8 @@ struct SqliteBackend::Impl {
     }
 
     // Draft-tagged summary rows for re-summarization (housekeeping retry).
-    std::vector<StorageBackend::DraftSummary> draft_summaries(int limit) {
-        std::vector<StorageBackend::DraftSummary> out;
+    std::vector<DraftSummary> draft_summaries(int limit) {
+        std::vector<DraftSummary> out;
         std::string sql =
             "SELECT s.summary_id, s.level, COALESCE(ss.guid, ''), s.timestamp "
             "FROM summaries s "
@@ -914,9 +914,9 @@ struct SqliteBackend::Impl {
     }
 
     // Shared query: summaries for a session filtered by level, newest-first.
-    std::vector<StorageBackend::SummaryRecord> summaries_by_level_desc(
+    std::vector<SummaryRecord> summaries_by_level_desc(
             const std::string& session_guid, const std::string& level, int limit) {
-        std::vector<StorageBackend::SummaryRecord> out;
+        std::vector<SummaryRecord> out;
         if (session_guid.empty()) return out;
         std::string sql =
             "SELECT s.summary_id, s.text, s.status, s.timestamp "
@@ -936,13 +936,13 @@ struct SqliteBackend::Impl {
     }
 
     // L2 (turn) summaries for a session, newest-first.
-    std::vector<StorageBackend::SummaryRecord> turn_summaries_by_session_desc(
+    std::vector<SummaryRecord> turn_summaries_by_session_desc(
             const std::string& session_guid, int limit) {
         return summaries_by_level_desc(session_guid, "turn", limit);
     }
 
     // L3 (session) summaries for a session, newest-first.
-    std::vector<StorageBackend::SummaryRecord> session_summaries_desc(
+    std::vector<SummaryRecord> session_summaries_desc(
             const std::string& session_guid, int limit) {
         return summaries_by_level_desc(session_guid, "session", limit);
     }
@@ -1281,21 +1281,46 @@ struct SqliteBackend::Impl {
     }
 
     int backfill_embeddings(Embedder& emb_ref) {
-        Stmt select_stmt(db,
-            "SELECT summary_id AS id, text FROM summaries WHERE embedding IS NULL");
+        // Cover all four embedded tables (not just summaries).
+        // Same TableSpec structure as rebuild_embeddings, but filters to
+        // WHERE embedding IS NULL so only unembedded rows are touched.
+        struct TableSpec {
+            const char* table;
+            const char* id_col;
+            const char* text_col;
+            const char* extra_col;
+        };
+        static constexpr TableSpec tables[] = {
+            { "turns",     "turn_id",     "user_text", "assistant_text" },
+            { "summaries", "summary_id",  "text",      nullptr          },
+            { "decisions", "decision_id", "text",      nullptr          },
+            { "documents", "document_id", "text",      nullptr          },
+        };
 
         int updated = 0;
-        while (select_stmt.step()) {
-            int id = select_stmt.column_int(0);
-            auto text = select_stmt.column_text(1);
-            if (text.empty()) continue;
-
-            auto emb = emb_ref.encode(text);
-            Stmt update(db, "UPDATE summaries SET embedding = ? WHERE summary_id = ?");
-            bind_embedding(update.raw(), 1, emb);
-            update.bind(2, id);
-            update.step();
-            ++updated;
+        for (auto& t : tables) {
+            std::string sel = t.extra_col
+                ? std::format("SELECT {} AS id, {}, {} FROM {} WHERE embedding IS NULL",
+                              t.id_col, t.text_col, t.extra_col, t.table)
+                : std::format("SELECT {} AS id, {} AS text FROM {} WHERE embedding IS NULL",
+                              t.id_col, t.text_col, t.table);
+            std::string upd = std::format("UPDATE {} SET embedding = ? WHERE {} = ?",
+                                          t.table, t.id_col);
+            Stmt select_stmt(db, sel);
+            while (select_stmt.step()) {
+                int id = select_stmt.column_int(0);
+                auto col1 = select_stmt.column_text(1);
+                if (col1.empty()) continue;
+                std::string embed_text = t.extra_col
+                    ? turn_embed_text(col1, select_stmt.column_text(2))
+                    : std::move(col1);
+                auto emb = emb_ref.encode(embed_text);
+                Stmt update(db, upd);
+                bind_embedding(update.raw(), 1, emb);
+                update.bind(2, id);
+                update.step();
+                ++updated;
+            }
         }
 
         if (updated > 0) invalidate_cache();
@@ -1513,7 +1538,7 @@ std::vector<TurnRecord> SqliteBackend::unsummarized_turns(int limit) {
     return pImpl->unsummarized_turns(limit);
 }
 
-std::vector<StorageBackend::DraftSummary> SqliteBackend::draft_summaries(int limit) {
+std::vector<DraftSummary> SqliteBackend::draft_summaries(int limit) {
     return pImpl->draft_summaries(limit);
 }
 
@@ -1526,13 +1551,13 @@ std::vector<TurnRecord> SqliteBackend::turns_by_session_desc(
     return pImpl->turns_by_session_desc(session_guid, limit);
 }
 
-std::vector<StorageBackend::SummaryRecord>
+std::vector<SummaryRecord>
 SqliteBackend::turn_summaries_by_session_desc(
         const std::string& session_guid, int limit) {
     return pImpl->turn_summaries_by_session_desc(session_guid, limit);
 }
 
-std::vector<StorageBackend::SummaryRecord>
+std::vector<SummaryRecord>
 SqliteBackend::session_summaries_desc(
         const std::string& session_guid, int limit) {
     return pImpl->session_summaries_desc(session_guid, limit);

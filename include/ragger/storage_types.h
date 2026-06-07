@@ -1,8 +1,8 @@
 /**
- * Data types for storage operations (SearchResult, SearchResponse, AllEmbeddings, UserInfo)
+ * Data types for storage operations.
  *
- * These types are logically tied to storage but separated from SqliteBackend
- * to reduce header dependencies for files that only need the data structures.
+ * Separated from SqliteBackend/StorageBackend to reduce header dependencies
+ * for files that only need the data structures.
  */
 #pragma once
 
@@ -52,6 +52,23 @@ struct UserInfo {
     std::string username;
     // is_admin removed — sudo is the admin gate
     std::string token_hash;
+};
+
+/// A summary row that was written as a heuristic fallback ('draft') while
+/// inference was unavailable. The summarizer rewrites these when it comes back.
+struct DraftSummary {
+    int         summary_id;
+    std::string level;
+    std::string session_guid;   // empty when session_id is NULL
+    std::string timestamp;      // source-turn timestamp for L2
+};
+
+/// A summary row returned by session-level queries (turn or session summaries).
+struct SummaryRecord {
+    int         summary_id;
+    std::string text;
+    std::string status;
+    std::string timestamp;
 };
 
 

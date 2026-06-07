@@ -150,7 +150,8 @@ struct Server::Impl {
                 ragger::SqliteBackend temp_backend(config().resolved_db_path());
                 int deleted = temp_backend.cleanup_old_conversations(max_age_hours);
                 if (deleted > 0) {
-                    Diskerror::logger::info(std::format(lang::MSG_CLEANED, deleted));
+                    Diskerror::logger::info(std::format(
+                        lang::MSG_HOUSEKEEPING_EXPIRED, 0, deleted));
                 }
             } catch (const std::exception& e) {
                 Diskerror::logger::critical(std::format(lang::ERR_CLEANUP_DB, e.what()));
@@ -463,7 +464,7 @@ struct Server::Impl {
             // isn't running. Reads the timestamp back from the row so the
             // queued job carries exactly what landed on disk.
             if (result.captured && summarizer_ && result.turn_id > 0) {
-                auto turns = mem.backend()->turns_by_session_desc(session_id, 1);
+                auto turns = mem.turns_by_session_desc(session_id, 1);
                 std::string ts;
                 if (!turns.empty() && turns.front().turn_id == result.turn_id) {
                     ts = turns.front().timestamp;
@@ -677,7 +678,7 @@ void Server::run() {
     // and catches up any turns that were captured via MCP while the daemon
     // was down. See SummarizerService doc for the timestamp-linkage rule.
     pImpl->summarizer_ = std::make_unique<SummarizerService>(
-        pImpl->memory, pImpl->inference_.get());
+        *pImpl->memory.backend(), pImpl->inference_.get());
     pImpl->summarizer_->start();
 
     // Launch each enabled listener on its own thread. listen() blocks until

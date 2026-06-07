@@ -88,6 +88,11 @@ RaggerMemory::~RaggerMemory() {
     close();
 }
 
+std::vector<TurnRecord> RaggerMemory::turns_by_session_desc(
+        const std::string& session_guid, int limit) {
+    return backend_->turns_by_session_desc(session_guid, limit);
+}
+
 std::optional<std::string> RaggerMemory::get_setting(const std::string& key) {
     return user_store_->get_setting(key);
 }
