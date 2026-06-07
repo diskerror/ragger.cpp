@@ -96,6 +96,24 @@ surface.
 | `api_key`    | *(empty)*                     | Bearer key for the endpoint, if it needs one.   |
 | `max_tokens` | `4096`                        | Cap for a single summarization call.            |
 
+**Choosing a model.** Summarization is a short, low-complexity task —
+model quality matters far less than model speed.
+
+- **Best choice: a small non-thinking MLX model** (e.g. `qwen3-4b`,
+  `gemma-4-e2b-it-mlx`). MLX models run on Apple Silicon's Neural
+  Engine / GPU, load instantly, and average **~1 second per summary**
+  with no context-window issues.
+- **Avoid thinking/reasoning models** (DeepSeek-R1, Gemma-4-E4B, Qwen3
+  with reasoning enabled, etc.). They spend 200–300 tokens on internal
+  chain-of-thought before writing a single output token — summaries
+  take 30–60× longer for no quality gain on this task.
+- **Keep `max_tokens` at 600 or below.** The summarizer targets ¼ of
+  the source length and caps at the source length. 600 tokens is
+  generous. Requesting more wastes KV cache and will crash GGUF models
+  loaded in LM Studio with `parallel > 1` (each slot's budget is
+  `context_length / parallel`; requesting more than that causes LM
+  Studio to drop the connection with no error body).
+
 **Fallback behaviour.** When the endpoint is unreachable, the worker
 writes a heuristic *draft* L2 (a trimmed `User: … | Assistant: …`
 concatenation, tagged `draft`) so the chronology stays intact. A

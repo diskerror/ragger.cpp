@@ -277,6 +277,18 @@ int run_onboard(const std::vector<std::string>& /*args*/,
     std::println("Ragger summarizes turns with an OpenAI-compatible endpoint.");
     std::println("LM Studio's default is http://localhost:1234/v1.");
     std::println("");
+    std::println("Model choice matters for speed and reliability:");
+    std::println("  • Best:  a small non-thinking MLX model, e.g. Qwen3-4B or Gemma-4-E2B.");
+    std::println("    These run on Apple Silicon's GPU, average ~1s per summary, and");
+    std::println("    never overflow the KV cache.");
+    std::println("  • Avoid: thinking/reasoning models (DeepSeek-R1, Gemma-4-E4B, etc.).");
+    std::println("    They spend 200-300 tokens on internal reasoning before writing a");
+    std::println("    single output token, making summaries 10-30x slower with no quality");
+    std::println("    benefit for this task.");
+    std::println("  • Also:  keep max_tokens at 600 or below. The summarizer targets");
+    std::println("    ~1/4 of the source length; 600 is plenty. Larger values waste KV");
+    std::println("    cache and can crash GGUF models loaded with parallel > 1.");
+    std::println("");
     std::string new_url = prompt("Endpoint URL (blank to skip)", cur_url);
     std::string new_model = cur_model;
     if (!new_url.empty()) {
