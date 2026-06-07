@@ -109,9 +109,8 @@ Store a new memory with optional metadata.
 {
   "text": "The deploy script requires Node 18+",
   "metadata": {
-    "category": "fact",
-    "source": "deployment-notes.md",
-    "collection": "memory"
+    "tags": "docs,deployment",
+    "source": "deployment-notes.md"
   }
 }
 ```
@@ -123,10 +122,9 @@ Store a new memory with optional metadata.
 
 **Common metadata fields:**
 
-- `collection` — Collection name (defaults to `memory`)
-- `category` — Memory type (fact, decision, preference, lesson, session-summary)
+- `tags` — Comma-separated labels (e.g. `"docs,deployment"`). Use `keep` to exempt from turn expiration.
 - `source` — Where this memory came from
-- `keep` — Boolean, exempt from turn expiration (chat persistence)
+- `keep` — Boolean shorthand; equivalent to including `"keep"` in tags
 
 **Response:**
 
@@ -159,11 +157,7 @@ Search memories using hybrid vector + BM25 search.
 {
   "query": "deployment requirements",
   "limit": 5,
-  "min_score": 0.4,
-  "collections": [
-    "memory",
-    "docs"
-  ]
+  "min_score": 0.4
 }
 ```
 
@@ -172,13 +166,8 @@ Search memories using hybrid vector + BM25 search.
 - `query` (required) — Search query
 - `limit` (optional) — Maximum results (default: from config, usually 5)
 - `min_score` (optional) — Minimum cosine similarity score (default: from config, usually 0.4)
-- `collections` (optional) — Collections to search (default: all collections)
 
-**Collections:**
-
-- Omit `collections` to search all collections
-- Pass `["*"]` to explicitly search everything
-- Pass specific names to filter: `["memory", "docs"]`
+> **Note:** The `collections` parameter is accepted by the API but has no effect in the current schema — there is no collection column. Use `tags` when storing to group memories; filter by `tags` via `/search_by_metadata`.
 
 **Response:**
 
@@ -190,9 +179,8 @@ Search memories using hybrid vector + BM25 search.
       "text": "The deploy script requires Node 18+",
       "score": 0.823,
       "metadata": {
-        "category": "fact",
-        "source": "deployment-notes.md",
-        "collection": "memory"
+        "tags": "docs,deployment",
+        "source": "deployment-notes.md"
       },
       "timestamp": "2024-03-20T15:23:45"
     }
@@ -211,7 +199,7 @@ Search memories using hybrid vector + BM25 search.
 ```bash
 curl -X POST http://localhost:8432/search \
   -H "Content-Type: application/json" \
-  -d '{"query": "API authentication", "limit": 3, "collections": ["docs"]}'
+  -d '{"query": "API authentication", "limit": 3}'
 ```
 
 ---
@@ -313,11 +301,10 @@ standard MCP handshake and tool discovery:
 | `capture_turn`  | Hand a completed user→assistant turn to the daemon for summarization         | `user` (string)       |
 | `build_context` | Return a recipe-shaped context payload for a session                         | `session_id` (string) |
 
-**Optional `store` params:** `metadata` (object — category, tags,
-source, collection).
+**Optional `store` params:** `metadata` (object — tags, source).
 
-**Optional `search` params:** `limit` (integer), `min_score` (number),
-`collections` (string array).
+**Optional `search` params:** `limit` (integer), `min_score` (number).
+The `collections` parameter is accepted but is a no-op in the current schema.
 
 **Optional `capture_turn` params:** `assistant`, `model`, `session_id`,
 `metadata`. Requires `[server] capture_turns = true`; otherwise the

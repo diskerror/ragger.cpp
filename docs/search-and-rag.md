@@ -188,6 +188,13 @@ docling myfile.pdf -o myfile.md
 ragger import myfile.md --tags docs
 ```
 
+> **Important:** Imported document chunks (L5) are **not** returned by
+> `ragger search` or the `/search` HTTP endpoint. The `search()` method
+> queries the `summaries` table only; the `documents` table has its own
+> FTS5 index but is not yet merged into general search. Document search
+> via a recipe layer is planned for a future release. Use `store` (not
+> `import`) if you need your content to appear in regular `search` results.
+
 ## Performance Characteristics
 
 - **Vector search:** ~10-50ms for 50K documents on Apple Silicon
