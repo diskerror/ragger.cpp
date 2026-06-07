@@ -54,7 +54,7 @@ logger::logger(const std::string &logFileName, const std::string &level) {
     std::string lower_str = level;
     std::transform(lower_str.begin(), lower_str.end(), lower_str.begin(), ::tolower);
 
-    if (lower_str == "trace") {} /* goto trace; */
+    if (lower_str == "trace") { goto trace; }
     else if (lower_str == "debug") { goto debug; }
     else if (lower_str == "info") { goto info; }
     else if (lower_str == "warn") { goto warn; }
@@ -62,7 +62,7 @@ logger::logger(const std::string &logFileName, const std::string &level) {
     else if (lower_str == "critical") { goto critical; }
     else { goto warn; }
 
-    // trace:
+trace:
     trace = [](std::string const &message) {
         const std::lock_guard<std::mutex> lock(logMutex);
         logger::get_file() << logger::get_timestamp() << " [TRACE] " << message << std::endl;

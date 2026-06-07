@@ -75,7 +75,7 @@ bool Endpoint::matches(const std::string& model) const {
 InferenceClient::InferenceClient(const std::vector<Endpoint>& endpoints,
                                  const std::string& model_,
                                  int max_tokens_)
-    : model(model_), max_tokens(max_tokens_), _endpoints(endpoints) {}
+    : model(model_), max_tokens(max_tokens_), endpoints(endpoints) {}
 
 InferenceClient InferenceClient::from_config(const Config& cfg) {
     std::vector<Endpoint> endpoints;
@@ -228,7 +228,7 @@ void InferenceClient::set_forced_endpoint(const std::string& name) {
         forced_endpoint_.clear();
         return;
     }
-    for (auto& ep : _endpoints) {
+    for (auto& ep : endpoints) {
         if (ep.name == name) {
             forced_endpoint_ = name;
             return;
@@ -240,18 +240,18 @@ void InferenceClient::set_forced_endpoint(const std::string& name) {
 Endpoint& InferenceClient::resolve_endpoint(const std::string& model_name) {
     // If forced, use that endpoint
     if (!forced_endpoint_.empty()) {
-        for (auto& ep : _endpoints) {
+        for (auto& ep : endpoints) {
             if (ep.name == forced_endpoint_) return ep;
         }
     }
-    for (auto& ep : _endpoints) {
+    for (auto& ep : endpoints) {
         if (ep.matches(model_name)) {
             return ep;
         }
     }
     // Fallback to last endpoint if no match
-    if (!_endpoints.empty()) {
-        return _endpoints.back();
+    if (!endpoints.empty()) {
+        return endpoints.back();
     }
     throw std::runtime_error(lang::ERR_NO_ENDPOINTS);
 }

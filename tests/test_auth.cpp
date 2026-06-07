@@ -4,7 +4,7 @@
  * Tests token generation, hashing, and persistence.
  */
 #include "ragger/auth.h"
-#include "ragger/sqlite_backend.h"
+#include "ragger/user_store.h"
 #include <cassert>
 #include <cstdlib>
 #include <filesystem>
@@ -19,7 +19,7 @@ namespace fs = std::filesystem;
 // ragger::useradd() API was retired when account creation and password
 // setting became distinct verbs; tests still need the combined action.
 static void seed_user_with_password(
-        ragger::SqliteBackend& db,
+        ragger::UserStore& db,
         const std::string& user,
         const std::string& pw) {
     std::string pwhash = ragger::hash_password(pw);
@@ -126,7 +126,7 @@ void test_useradd_and_verify_password() {
     std::string db_path = "/tmp/ragger_test_auth_useradd.db";
     fs::remove(db_path);
     {
-        ragger::SqliteBackend db(db_path);
+        ragger::UserStore db(db_path);
         seed_user_with_password(db, "alice", "correct-horse");
         assert(ragger::verify_password(db, "alice", "correct-horse"));
         assert(!ragger::verify_password(db, "alice", "wrong-password"));
@@ -142,7 +142,7 @@ void test_useradd_update_existing() {
     std::string db_path = "/tmp/ragger_test_auth_update.db";
     fs::remove(db_path);
     {
-        ragger::SqliteBackend db(db_path);
+        ragger::UserStore db(db_path);
         seed_user_with_password(db, "alice", "pw1");
         seed_user_with_password(db, "alice", "pw2"); // same user, new password — should update
         assert(ragger::verify_password(db, "alice", "pw2"));
@@ -158,7 +158,7 @@ void test_userdel() {
     std::string db_path = "/tmp/ragger_test_auth_del.db";
     fs::remove(db_path);
     {
-        ragger::SqliteBackend db(db_path);
+        ragger::UserStore db(db_path);
         seed_user_with_password(db, "alice", "pw");
         ragger::userdel(db, "alice");
         assert(!ragger::verify_password(db, "alice", "pw"));
@@ -175,7 +175,7 @@ void test_token_roundtrip() {
     std::string db_path = "/tmp/ragger_test_auth_tokens.db";
     fs::remove(db_path);
     {
-        ragger::SqliteBackend db(db_path);
+        ragger::UserStore db(db_path);
         seed_user_with_password(db, "alice", "pw");
         auto token = ragger::issue_token(db, "alice");
         assert(!token.empty());

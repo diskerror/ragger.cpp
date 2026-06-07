@@ -244,7 +244,7 @@ entries with timing, result scores, and quality metrics.
 **Enable/disable:**
 
 ```ini
-[search]
+[logging]
 query_log = true
 ```
 

@@ -4,6 +4,7 @@
 
 #include "ragger/server.h"
 #include "ragger/memory.h"
+#include "ragger/user_store.h"
 #include "ragger/sqlite_backend.h"
 #include "ragger/lang.h"
 #include "diskerror/logger.h"
@@ -53,6 +54,16 @@ static void sighup_handler(int) {
     g_config_reload_requested.store(true, std::memory_order_relaxed);
 }
 
+// Serialise a vector of SearchResults to a JSON array.
+// score is always included (0.0 for metadata-only searches).
+static json search_results_to_json(const std::vector<SearchResult>& results) {
+    json arr = json::array();
+    for (const auto& r : results)
+        arr.push_back({{"id", r.id}, {"text", r.text}, {"score", r.score},
+                       {"metadata", r.metadata}, {"timestamp", r.timestamp}});
+    return arr;
+}
+
 struct Server::Impl {
     // Two listener instances so we can bind AF_UNIX and AF_INET at the same
     // time. cpp-httplib::Server::listen() blocks the calling thread and binds
@@ -61,6 +72,7 @@ struct Server::Impl {
     httplib::Server unix_svr;
     httplib::Server tcp_svr;
     RaggerMemory&   memory;
+    UserStore       users_;
     std::string     host;
     int             port;
     std::string     server_token_;
@@ -78,7 +90,7 @@ struct Server::Impl {
     std::string pid_file_;
 
     Impl(RaggerMemory& mem, const std::string& h, int p)
-        : memory(mem), host(h), port(p)
+        : memory(mem), users_(config().resolved_db_path()), host(h), port(p)
     {
         bootstrap_auth();
         init_inference();
@@ -135,7 +147,7 @@ struct Server::Impl {
         // stored turn timestamps) — see ragger/util/time.h.
         if (max_age_hours > 0) {
             try {
-                ragger::SqliteBackend temp_backend(memory.backend()->db_path());
+                ragger::SqliteBackend temp_backend(config().resolved_db_path());
                 int deleted = temp_backend.cleanup_old_conversations(max_age_hours);
                 if (deleted > 0) {
                     Diskerror::logger::info(std::format(lang::MSG_CLEANED, deleted));
@@ -236,9 +248,9 @@ struct Server::Impl {
     void init_inference() {
         const auto& cfg = config();
         auto client = InferenceClient::from_config(cfg);
-        if (!client._endpoints.empty()) {
+        if (!client.endpoints.empty()) {
             inference_ = std::make_unique<InferenceClient>(std::move(client));
-            Diskerror::logger::info(std::format(lang::MSG_INFERENCE_ENABLED, inference_->_endpoints.size()));
+            Diskerror::logger::info(std::format(lang::MSG_INFERENCE_ENABLED, inference_->endpoints.size()));
         }
     }
 
@@ -248,15 +260,15 @@ struct Server::Impl {
         
         if (!server_token_.empty()) {
             std::string token_hash = hash_token(server_token_);
-            auto user = memory.backend()->get_user_by_token_hash(token_hash);
-            
+            auto user = users_.get_user_by_token_hash(token_hash);
+
             if (!user) {
                 // Auto-create the single user
                 std::string username = "default";
                 struct passwd* pw = getpwuid(getuid());
                 if (pw) username = pw->pw_name;
-                
-                int user_id = memory.backend()->create_user(username, token_hash);
+
+                int user_id = users_.create_user(username, token_hash);
                 user = UserInfo{user_id, username, token_hash};
                 Diskerror::logger::info(std::format(lang::MSG_CREATED_USER, username, user_id));
             }
@@ -294,7 +306,7 @@ struct Server::Impl {
 
         // Hash and lookup in database
         std::string token_hash = hash_token(token);
-        auto user = memory.backend()->get_user_by_token_hash(token_hash);
+        auto user = users_.get_user_by_token_hash(token_hash);
         if (user) {
             return user;
         }
@@ -389,9 +401,8 @@ struct Server::Impl {
                 metadata["source"] = user.username;
             }
 
-            bool common = body.value("common", false);
             auto& mem = _get_memory(user.username);
-            std::string id = mem.store(text, metadata, common);
+            std::string id = mem.store(text, metadata);
 
             json response = {
                 {"id", id},
@@ -406,8 +417,8 @@ struct Server::Impl {
                                            const httplib::Request& req, httplib::Response& res) {
             auto body = json::parse(req.body);
             std::string query = body.value("query", "");
-            int limit = body.value("limit", 5);
-            float min_score = body.value("min_score", 0.0f);
+            int limit = body.value("limit", config().default_search_limit);
+            float min_score = body.value("min_score", config().default_min_score);
             std::vector<std::string> collections =
                 body.value("collections", std::vector<std::string>{});
             if (query.empty()) {
@@ -419,11 +430,7 @@ struct Server::Impl {
             SearchResponse search_response = mem.search(query, limit, min_score, collections);
             auto end_time = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-            json results = json::array();
-            for (const auto& r : search_response.results) {
-                results.push_back({{"id", r.id}, {"text", r.text}, {"score", r.score},
-                                   {"metadata", r.metadata}, {"timestamp", r.timestamp}});
-            }
+            json results = search_results_to_json(search_response.results);
             json timing = search_response.timing;
             timing["total_ms"] = duration.count();
             json response = {{"results", results}, {"timing", timing}};
@@ -550,12 +557,7 @@ struct Server::Impl {
             std::string before = body.value("before", "");
             auto& mem = _get_memory(user.username);
             auto results = mem.search_by_metadata(metadata_filter, limit, after, before);
-            json results_json = json::array();
-            for (const auto& r : results) {
-                results_json.push_back({{"id", r.id}, {"text", r.text},
-                                        {"metadata", r.metadata}, {"timestamp", r.timestamp}});
-            }
-            json response = {{"results", results_json}, {"count", results.size()}};
+            json response = {{"results", search_results_to_json(results)}, {"count", results.size()}};
             Diskerror::logger::debug("POST /search_by_metadata 200");
             res.set_content(response.dump(), "application/json");
         }));

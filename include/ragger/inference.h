@@ -54,7 +54,7 @@ public:
     std::string model;
     std::string memory_model;   // [inference.memory] model, or = model
     int max_tokens;
-    std::vector<Endpoint> _endpoints;
+    std::vector<Endpoint> endpoints;
 
     InferenceClient(const std::vector<Endpoint>& endpoints,
                     const std::string& model = "",

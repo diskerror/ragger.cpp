@@ -2,7 +2,7 @@
  * Configuration for Ragger Memory (C++ port)
  *
  * Loaded from settings.ini at runtime.
- * Search order: --config= → /etc/ragger.ini → ~/.ragger/settings.ini
+ * 
  */
 #pragma once
 
@@ -33,8 +33,6 @@ struct Config {
     std::string server_name;   // hostname for cpp-httplib (e.g. "ragger.local")
 
     // --- Storage ---
-    std::string db_path;  // empty = resolved at runtime (user home dir)
-
     std::string formats_dir    = "/var/ragger/formats";
 
     // --- Embedding ---
@@ -55,9 +53,9 @@ struct Config {
     float vector_weight        = 7.0f;
 
     // --- Embed (subprocess) ---
-    int embed_timeout_ms  = 5000;
+    int embed_timeout_ms  = 10000;
     int embed_retries     = 1;
-    int embed_max_workers = 4;   // cap concurrent `ragger embed` subprocesses
+    int embed_max_workers = 8;   // cap concurrent `ragger embed` subprocesses
 
     // --- Inference ---
     struct InferenceEndpointConfig {
@@ -112,7 +110,7 @@ struct Config {
     // context payload for the agent to inject. Only meaningful when
     // capture_turns is also true — there's nothing to build from otherwise.
     // Agent-driven search/store tools are unaffected by either flag.
-    bool build_context = true;
+    bool build_context = false;
     // Recipe name applied when the caller doesn't specify one. Recipes are
     // loaded from `recipes_dir` (JSON files); built-ins cover the case where
     // the directory is missing or empty.

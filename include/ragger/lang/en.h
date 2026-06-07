@@ -15,7 +15,6 @@ constexpr const char* CLI_VERSION             = "Show version";
 constexpr const char* CLI_CONFIG_FILE         = "Path to config file";
 constexpr const char* CLI_HOST                = "Server bind address (overrides config)";
 constexpr const char* CLI_PORT                = "Server port (overrides config)";
-constexpr const char* CLI_DB                  = "SQLite database path (overrides config)";
 constexpr const char* CLI_MODEL_DIR           = "Model directory path (overrides config)";
 constexpr const char* CLI_COMMAND             = "Command";
 constexpr const char* CLI_ARGS                = "Command arguments";
@@ -374,6 +373,7 @@ constexpr const char* ERR_TURN_STORAGE_FAIL     = "Turn storage failed: {}";
 
 // --- MCP ---
 constexpr const char* ERR_MCP_TEXT_REQUIRED     = "Error: text parameter required";
+constexpr const char* ERR_MCP_USER_REQUIRED     = "Error: user parameter required";
 constexpr const char* ERR_MCP_QUERY_REQUIRED    = "Error: query parameter required";
 constexpr const char* MSG_MCP_NO_RESULTS        = "No results found.";
 constexpr const char* MSG_MCP_HOUSEKEEPING      = "MCP housekeeping: cleaned {} expired conversations";
@@ -428,7 +428,6 @@ constexpr const char* ERR_USER_NOT_FOUND      = "User not found: {}";
 constexpr const char* ERR_LOG_OPEN            = "failed to open log file: \"{}\"";
 
 // --- CLI option descriptions ---
-constexpr const char* CLI_COLLECTION          = "Collection name";
 constexpr const char* CLI_MIN_CHUNK_SIZE      = "Min chunk size for import";
 constexpr const char* CLI_TITLE               = "Document title (import; default: filename)";
 constexpr const char* CLI_YEAR                = "Document publish year (import)";

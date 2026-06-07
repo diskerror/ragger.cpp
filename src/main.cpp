@@ -40,13 +40,13 @@
 #include "ragger/recipe_cli.h"
 #include "ragger/embed_executor.h"
 #include "ragger/sqlite_backend.h"
+#include "ragger/user_store.h"
 #include "ragger/server.h"
 #include "ragger/embedder.h"
 #include "ragger/daemon_control.h"
 #include "ragger/util/fs.h"
 #include "ragger/util/time.h"
 #include "ragger/storage_types.h"
-#include "ragger/sqlite_backend.h"
 #include "nlohmann_json.hpp"
 
 using namespace ragger::lang;
@@ -57,7 +57,6 @@ namespace fs = std::filesystem;
 // -----------------------------------------------------------------------
 static void do_import(ragger::RaggerMemory &memory,
                       const std::string &filepath,
-                      const std::string &collection,
                       int min_chunk_size,
                       const std::string &title,
                       int year,
@@ -80,8 +79,7 @@ static void do_import(ragger::RaggerMemory &memory,
 
     // Title/year/tags group and prioritise documents (issue #23 search).
     // `--title` overrides the default (filename stem); `--year`/`--tags`
-    // come from the caller. All chunks of one file share these. (The lean v2
-    // documents schema has no collection column, so `collection` isn't stored.)
+    // come from the caller. All chunks of one file share these.
     const std::string doc_title = title.empty()
                                       ? fs::path(filepath).stem().string()
                                       : title;
@@ -228,9 +226,7 @@ int main(int argc, char **argv) {
             ("config", Diskerror::po::value<std::string>()->default_value(""), CLI_CONFIG_FILE)
             ("host", Diskerror::po::value<std::string>(), CLI_HOST)
             ("port,p", Diskerror::po::value<int>(), CLI_PORT)
-            ("db", Diskerror::po::value<std::string>(), CLI_DB)
             ("model-dir", Diskerror::po::value<std::string>(), CLI_MODEL_DIR)
-            ("collection", Diskerror::po::value<std::string>()->default_value(""), CLI_COLLECTION)
             ("min-chunk-size", Diskerror::po::value<int>(), CLI_MIN_CHUNK_SIZE)
             ("title", Diskerror::po::value<std::string>()->default_value(""), CLI_TITLE)
             ("year", Diskerror::po::value<int>()->default_value(0), CLI_YEAR)
@@ -299,9 +295,8 @@ int main(int argc, char **argv) {
     // CLI overrides
     std::string host = opts.count("host") ? opts["host"].as<std::string>() : cfg.bind_address;
     int port = opts.count("port") ? opts["port"].as<int>() : cfg.port;
-    std::string db_path = opts.count("db") ? opts["db"].as<std::string>() : "";
+    std::string db_path = cfg.resolved_db_path();
     std::string model_dir = opts.count("model-dir") ? opts["model-dir"].as<std::string>() : "";
-    std::string collection = opts["collection"].as<std::string>();
     int min_chunk_size = opts.count("min-chunk-size")
                              ? opts["min-chunk-size"].as<int>()
                              : cfg.minimum_chunk_size;
@@ -337,7 +332,6 @@ int main(int argc, char **argv) {
             }
 
             std::vector<std::string> colls;
-            if (!collection.empty()) colls.push_back(collection);
 
             // Try daemon first (thin client — no model loading)
             auto token = ragger::load_token();
@@ -378,7 +372,6 @@ int main(int argc, char **argv) {
             }
 
             nlohmann::json meta = {};
-            if (!collection.empty()) meta["collection"] = collection;
 
             // Try daemon first (thin client — no model loading)
             auto token = ragger::load_token();
@@ -531,7 +524,7 @@ int main(int argc, char **argv) {
             std::string imp_tags  = opts["tags"].as<std::string>();
             ragger::RaggerMemory memory(db_path, model_dir);
             for (auto &filepath: args) {
-                do_import(memory, filepath, collection, min_chunk_size,
+                do_import(memory, filepath, min_chunk_size,
                           imp_title, imp_year, imp_tags);
             }
 
@@ -606,7 +599,7 @@ int main(int argc, char **argv) {
             // a pending model/dtype/dims change doesn't block the count/confirm.
             // Count across all four embedded tables — what the rebuild touches,
             // not just summaries (count()).
-            ragger::RaggerMemory memory_temp(db_path, model_dir, "",
+            ragger::RaggerMemory memory_temp(db_path, model_dir,
                                              /*skip_embedding_guard=*/true);
             int total_count = memory_temp.backend()->count_embeddable_rows();
             memory_temp.close();
@@ -647,14 +640,15 @@ int main(int argc, char **argv) {
             // identity so the new model/dtype/dimensions "take". Doing this
             // *after* the re-encode means an aborted/failed rebuild leaves
             // settings≠config, so the guard still catches it next startup.
-            ragger::RaggerMemory memory(db_path, model_dir, "",
+            ragger::RaggerMemory memory(db_path, model_dir,
                                         /*skip_embedding_guard=*/true);
             int count = memory.rebuild_embeddings();
-            memory.backend()->set_setting(
+            ragger::UserStore settings_store(db_path);
+            settings_store.set_setting(
                 "embedding_model", cfg.resolve_model(cfg.embedding_model));
-            memory.backend()->set_setting(
+            settings_store.set_setting(
                 "vector_type", cfg.embedding_vector_type == "f32" ? "f32" : "f16");
-            memory.backend()->set_setting(
+            settings_store.set_setting(
                 "dimensions", std::to_string(cfg.embedding_dimensions));
             std::cout << std::format(ragger::lang::MSG_EMBEDDINGS_REBUILT, count) << "\n";
 
@@ -697,7 +691,7 @@ int main(int argc, char **argv) {
             std::string username = args[0];
 
             try {
-                ragger::SqliteBackend storage(cfg.resolved_db_path());
+                ragger::UserStore storage(cfg.resolved_db_path());
                 if (storage.get_user_by_username(username)) {
                     Diskerror::logger::error(std::format(ragger::lang::ERR_USERADD_EXISTS, username) + "\n"
                                           + std::format(ragger::lang::ERR_USERADD_EXISTS_HINT, username));
@@ -729,7 +723,7 @@ int main(int argc, char **argv) {
             std::string username = args[0];
 
             try {
-                ragger::SqliteBackend storage(cfg.resolved_db_path());
+                ragger::UserStore storage(cfg.resolved_db_path());
                 if (!storage.get_user_by_username(username)) {
                     Diskerror::logger::error(std::format(ragger::lang::ERR_USERMOD_MISSING, username) + "\n"
                                           + std::format(ragger::lang::ERR_USERMOD_MISSING_HINT, username));
@@ -759,7 +753,7 @@ int main(int argc, char **argv) {
             std::string username = args[0];
 
             try {
-                ragger::SqliteBackend storage(cfg.resolved_db_path());
+                ragger::UserStore storage(cfg.resolved_db_path());
                 ragger::userdel(storage, username);
                 std::println(ragger::lang::MSG_USER_REMOVED, username);
             }
@@ -790,7 +784,7 @@ int main(int argc, char **argv) {
             // Note: Multi-user mode removed. These user management commands are deprecated.
             try {
                 std::string reg_db = cfg.resolved_db_path();
-                ragger::SqliteBackend backend(reg_db);
+                ragger::UserStore backend(reg_db);
                 std::string token_hash = ragger::hash_token(token);
                 auto existing = backend.get_user_by_username(username);
                 if (existing) {
@@ -837,7 +831,7 @@ int main(int argc, char **argv) {
                 }
             // Register in DB
             std::string reg_db = cfg.resolved_db_path();
-            ragger::SqliteBackend umgr(reg_db);
+            ragger::UserStore umgr(reg_db);
             std::string token_hash = ragger::hash_token(token);
             auto existing = umgr.get_user_by_username(username);
             if (existing) {
@@ -875,7 +869,7 @@ int main(int argc, char **argv) {
             };
             // Open DB directly for registration
             std::string reg_db = cfg.resolved_db_path();
-            ragger::SqliteBackend umgr(reg_db);
+            ragger::UserStore umgr(reg_db);
 
             int count = 0;
             bool auto_yes = opts.count("yes") > 0;
@@ -977,7 +971,7 @@ int main(int argc, char **argv) {
             // 2. Remove from common database
             try {
                 std::string reg_db = cfg.resolved_db_path();
-                ragger::SqliteBackend umgr(reg_db);
+                ragger::UserStore umgr(reg_db);
                 auto existing = umgr.get_user_by_username(username);
                 if (existing) {
                     umgr.delete_user(username);
@@ -1023,7 +1017,7 @@ int main(int argc, char **argv) {
             std::string target_user = args[0];
 
             try {
-                ragger::SqliteBackend umgr(cfg.resolved_db_path());
+                ragger::UserStore umgr(cfg.resolved_db_path());
                 auto user_info = umgr.get_user_by_username(target_user);
                 if (!user_info) {
                     Diskerror::logger::error(std::format(ragger::lang::ERR_USERMOD_MISSING, target_user) + "\n"

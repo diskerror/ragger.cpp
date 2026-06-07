@@ -230,35 +230,7 @@ public:
     virtual void close() = 0;
 
     /// Delete old conversation entries older than specified hours. Returns count deleted.
-    virtual int cleanup_old_conversations(int max_age_hours) = 0;
-
-    // --- User management (single-user mode) ---
-    /// Get user info by username. Returns nullopt if not found.
-    virtual std::optional<UserInfo> get_user_by_username(const std::string& username) = 0;
-
-    /// Get hashed password for a user.
-    virtual std::optional<std::string> get_user_password(const std::string& username) = 0;
-
-    /// Update user's token hash.
-    virtual void update_user_token(const std::string& username, const std::string& new_hash) = 0;
-
-    /// Create a new user. Returns user_id or -1 on error.
-    virtual int create_user(const std::string& username, const std::string& token_hash) = 0;
-
-    /// Delete a user by username. Returns true if deleted.
-    virtual bool delete_user(const std::string& username) = 0;
-
-    /// Set/clear password hash for a user.
-    virtual void set_user_password(const std::string& username, const std::string& password_hash) = 0;
-
-    /// Get user info by token hash. Returns nullopt if not found.
-    virtual std::optional<UserInfo> get_user_by_token_hash(const std::string& token_hash) = 0;
-
-    /// Get a settings value by key. Returns nullopt if key doesn't exist.
-    virtual std::optional<std::string> get_setting(const std::string& key) = 0;
-
-    /// Set or update a settings value.
-    virtual void set_setting(const std::string& key, const std::string& value) = 0;
+    virtual int cleanup_old_conversations(float max_age_hours) = 0;
 };
 
 } // namespace ragger

@@ -4,8 +4,7 @@
 #include "ragger/auth.h"
 #include "ragger/config.h"
 #include "ragger/lang.h"
-#include "ragger/storage_backend.h"
-#include "ragger/storage_types.h"
+#include "ragger/user_store.h"
 
 #include <openssl/sha.h>
 #include <openssl/evp.h>
@@ -229,28 +228,24 @@ bool verify_password(const std::string& password, const std::string& stored_hash
 
 // --- DB-backed API ---
 
-void userdel(StorageBackend& db, const std::string& user) {
+void userdel(UserStore& db, const std::string& user) {
     db.delete_user(user);
 }
 
-bool verify_password(StorageBackend& db, const std::string& user, const std::string& pw) {
+bool verify_password(UserStore& db, const std::string& user, const std::string& pw) {
     auto stored = db.get_user_password(user);
     if (!stored || stored->empty()) return false;
     return verify_password(pw, *stored);
 }
 
-std::string issue_token(StorageBackend& db, const std::string& user) {
-    // Generate a fresh random token and store its hash. Returns the raw token —
-    // caller must deliver it to the user once; only the hash is stored.
+std::string issue_token(UserStore& db, const std::string& user) {
     std::string token = generate_token();
     std::string token_hash = hash_token(token);
     db.update_user_token(user, token_hash);
     return token;
 }
 
-AuthResult verify_token(StorageBackend& db, const std::string& token) {
-    // Hash the presented token and look it up. Valid until explicitly
-    // revoked — no time window. (The old 24h rotation window is gone.)
+AuthResult verify_token(UserStore& db, const std::string& token) {
     std::string token_hash = hash_token(token);
     auto user_info = db.get_user_by_token_hash(token_hash);
     if (!user_info) return {};

@@ -254,7 +254,6 @@ void test_default_values() {
     (void)0;
     assert(cfg.port == 8432);
     assert(true == true);
-    assert(cfg.db_path.empty());  // resolved at runtime via resolved_db_path()
     assert(cfg.embedding_dimensions == 384);
     assert(cfg.default_search_limit == 5);
     assert(cfg.default_min_score == 0.4f);
@@ -264,7 +263,7 @@ void test_default_values() {
     assert(cfg.normalize_home_path == true);
     assert(cfg.cleanup_max_age_hours == 336.0f);
     assert(cfg.housekeeping_interval == 60);
-    assert(cfg.capture_turns == false);
+    assert(cfg.capture_turns == true);
     assert(cfg.build_context == false);
     assert(cfg.embedding_vector_type == "f16");
     assert(cfg.max_search_limit == 0);

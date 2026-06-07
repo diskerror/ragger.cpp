@@ -32,10 +32,7 @@ std::string expand_path(const std::string& path) {
 }
 
 std::string Config::resolved_db_path() const {
-    if (db_path.empty()) {
-        return expand_path("~/.ragger/memories.db");
-    }
-    return expand_path(db_path);
+    return expand_path("~/.ragger/memories.db");
 }
 
 std::string Config::resolved_log_dir() const {
@@ -79,13 +76,12 @@ port = 8432
 # Turn handling (both default off — agent-driven search/store are unaffected):
 #   capture_turns: ingest agent-pushed turns into the `turns` table.
 #   build_context: assemble session context from turns + summaries by recipe.
-capture_turns  = false
+capture_turns  = true
 build_context  = false
 default_recipe = natural_fading
 # recipes_dir  = ~/.ragger/recipes   # JSON recipes; built-ins used if absent
 
 [storage]
-db_path = ~/.ragger/memories.db
 formats_dir = ~/.ragger/formats
 
 [embedding]
@@ -154,9 +150,9 @@ normalize_home = true
 minimum_chunk_size = 300
 
 [embed]
-timeout_ms = 5000
+timeout_ms = 10000
 retries = 1
-max_workers = 4
+max_workers = 8
 )";
 
 // -----------------------------------------------------------------------
@@ -226,7 +222,6 @@ struct ServerLockedKey {
 
 static const ServerLockedKey SERVER_LOCKED[] = {
     {"server", "port"},
-    {"storage", "db_path"},
     {"storage", "formats_dir"},
     {"logging", "log_dir"},
     {"embedding", "model"},
@@ -255,7 +250,7 @@ void apply_user_overrides(Config& cfg, const Config& user) {
     
     // User can override everything except SERVER_LOCKED:
     // ✗ server.host, server.port
-    // ✗ storage.db_path, storage.formats_dir
+    // ✗ storage.formats_dir
     // ✗ logging.log_dir (always locked — one server, one log location)
     // ✗ embedding.model, embedding.dimensions, embedding.model_dir
     // ✓ Everything else
@@ -366,8 +361,7 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "recipes_dir")    cfg.recipes_dir = val;
         }
         else if (section == "storage") {
-            if      (key == "db_path") cfg.db_path = val;
-            else if (key == "formats_dir")        cfg.formats_dir = val;
+            if (key == "formats_dir") cfg.formats_dir = val;
         }
         else if (section == "embedding") {
             if      (key == "model")      cfg.embedding_model = val;
@@ -583,7 +577,6 @@ int reload_config() {
         }
     };
     warn_restart("port", fresh.port != cfg.port);
-    warn_restart("db_path", fresh.db_path != cfg.db_path);
     warn_restart("tls_cert", fresh.tls_cert != cfg.tls_cert);
     warn_restart("tls_key", fresh.tls_key != cfg.tls_key);
     warn_restart("embedding_model", fresh.embedding_model != cfg.embedding_model);

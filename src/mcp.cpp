@@ -190,8 +190,8 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         const auto query = arguments.value("query", "");
         if (query.empty())
             return error_result(ragger::lang::ERR_MCP_QUERY_REQUIRED);
-        const int   limit     = arguments.value("limit", 5);
-        const float min_score = arguments.value("min_score", 0.0f);
+        const int   limit     = arguments.value("limit", config().default_search_limit);
+        const float min_score = arguments.value("min_score", config().default_min_score);
         const auto  colls     = arguments.value("collections",
                                                 std::vector<std::string>{});
         const auto  response  = memory.search(query, limit, min_score, colls);
@@ -211,7 +211,7 @@ static nlohmann::json tool_call(RaggerMemory& memory,
     } else if (tool_name == "capture_turn") {
         const auto user = arguments.value("user", "");
         if (user.empty())
-            return error_result(ragger::lang::ERR_MCP_TEXT_REQUIRED);
+            return error_result(ragger::lang::ERR_MCP_USER_REQUIRED);
         const auto assistant = arguments.value("assistant", "");
         const auto model     = arguments.value("model", "");
         const auto session   = arguments.value("session_id", "");
@@ -262,7 +262,7 @@ static void housekeeping_thread(RaggerMemory& memory,
         if (max_age_hours <= 0) continue;
 
         try {
-            SqliteBackend tmp(memory.backend()->db_path());
+            SqliteBackend tmp(config().resolved_db_path());
             const int deleted = tmp.cleanup_old_conversations(max_age_hours);
             if (deleted > 0) {
                 std::string msg(ragger::lang::MSG_MCP_HOUSEKEEPING);

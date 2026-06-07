@@ -17,7 +17,6 @@ namespace ragger {
 
 RaggerMemory::RaggerMemory(const std::string& db_path,
                            const std::string& model_dir,
-                           const std::string& user_db_path,
                            bool skip_embedding_guard)
 {
     // Resolve model directory from config or override
@@ -25,11 +24,15 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
         ? config().resolved_model_dir()
         : expand_path(model_dir);
 
-    // Create embedder (shared across backends)
+    // Create embedder
     embedder_ = std::make_unique<Embedder>(resolved_model_dir);
 
-    // Create primary backend - single user DB only now
-    backend_ = std::make_unique<SqliteBackend>(*embedder_, db_path);
+    // The resolved path — used for both the storage backend and the user store.
+    const std::string resolved_db = db_path.empty() ? config().resolved_db_path()
+                                                     : expand_path(db_path);
+
+    backend_    = std::make_unique<SqliteBackend>(*embedder_, resolved_db);
+    user_store_ = std::make_unique<UserStore>(resolved_db);
     
     // --- Embedding identity drift guard (model + dtype + dimensions) -------
     // The settings table records what built this DB. On startup we compare it
@@ -53,23 +56,23 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
         const bool has_data = backend_->has_embeddings();
         auto guard = [&](const char* key, const std::string& current,
                          const std::string& err) {
-            auto stored = backend_->get_setting(key);
+            auto stored = user_store_->get_setting(key);
             if (!stored.has_value() || *stored == current) {
-                if (!stored.has_value()) backend_->set_setting(key, current);
+                if (!stored.has_value()) user_store_->set_setting(key, current);
                 return;
             }
             if (has_data) throw std::runtime_error(err);
-            backend_->set_setting(key, current);  // empty DB: re-adopt
+            user_store_->set_setting(key, current);  // empty DB: re-adopt
         };
         guard("embedding_model", current_model,
               std::format(lang::ERR_EMBEDDING_MISMATCH,
-                          backend_->get_setting("embedding_model").value_or(""), current_model));
+                          user_store_->get_setting("embedding_model").value_or(""), current_model));
         guard("vector_type", current_vtype,
               std::format(lang::ERR_VECTOR_TYPE_MISMATCH,
-                          backend_->get_setting("vector_type").value_or(""), current_vtype));
+                          user_store_->get_setting("vector_type").value_or(""), current_vtype));
         guard("dimensions", current_dims,
               std::format(lang::ERR_DIMENSIONS_MISMATCH,
-                          backend_->get_setting("dimensions").value_or(""), current_dims));
+                          user_store_->get_setting("dimensions").value_or(""), current_dims));
     }
 
     // Backfill any rows left without embeddings (deferred-embedding writes
@@ -85,9 +88,15 @@ RaggerMemory::~RaggerMemory() {
     close();
 }
 
+std::optional<std::string> RaggerMemory::get_setting(const std::string& key) {
+    return user_store_->get_setting(key);
+}
+void RaggerMemory::set_setting(const std::string& key, const std::string& value) {
+    user_store_->set_setting(key, value);
+}
+
 std::string RaggerMemory::store(const std::string& text, json metadata,
-                                 bool common, bool defer_embedding) {
-    // common flag is now ignored - single-user mode only
+                                 bool defer_embedding) {
     return backend_->store(text, std::move(metadata), defer_embedding);
 }
 
@@ -273,13 +282,10 @@ SessionContext build_context(RaggerMemory& memory,
     //   3. First built-in (last-resort fallback).
     // One keyed read per build_context call — cheap, and the user's
     // choice takes effect without a daemon restart.
-    auto* backend_for_lookup = memory.backend();
     std::string effective_default = config().default_recipe;
-    if (backend_for_lookup) {
-        if (auto stored = backend_for_lookup->get_setting("recipe");
-            stored && !stored->empty() && *stored != "default") {
-            effective_default = *stored;
-        }
+    if (auto stored = memory.get_setting("recipe");
+        stored && !stored->empty() && *stored != "default") {
+        effective_default = *stored;
     }
     // Resolve recipe: explicit > effective default > first built-in.
     const Recipe* recipe = find_recipe(recipes, recipe_name);

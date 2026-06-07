@@ -55,6 +55,35 @@ static inline float f16_to_f32(uint16_t bits) {
 //  immediately, so the temporary buffer is safe.)
 
 // -----------------------------------------------------------------------
+// Free helpers (no db access needed)
+// -----------------------------------------------------------------------
+
+// Build the tags string from a metadata JSON object. Accepts metadata["tags"]
+// as a comma-separated string or a JSON array. `keep`/`bad` flag fields are
+// folded in (they protect a row from deletion / mark it as low-quality).
+static std::string tags_from_metadata(const json& metadata) {
+    std::string tags_str;
+    if (metadata.contains("tags")) {
+        const auto& tv = metadata["tags"];
+        if (tv.is_array()) {
+            for (size_t i = 0; i < tv.size(); ++i) {
+                if (i > 0) tags_str += ",";
+                tags_str += tv[i].get<std::string>();
+            }
+        } else if (tv.is_string()) {
+            tags_str = tv.get<std::string>();
+        }
+    }
+    if (metadata.value("keep", false) &&
+        tags_str.find("keep") == std::string::npos)
+        tags_str += (tags_str.empty() ? "" : ",") + std::string("keep");
+    if (metadata.value("bad", false) &&
+        tags_str.find("bad") == std::string::npos)
+        tags_str += (tags_str.empty() ? "" : ",") + std::string("bad");
+    return tags_str;
+}
+
+// -----------------------------------------------------------------------
 // Impl
 // -----------------------------------------------------------------------
 struct SqliteBackend::Impl {
@@ -428,10 +457,7 @@ struct SqliteBackend::Impl {
         const int expected_dims = config().embedding_dimensions;
 
         while (s.step()) {
-            auto col_text = [&](int i) -> std::string {
-                const char* p = reinterpret_cast<const char*>(sqlite3_column_text(s.raw(), i));
-                return p ? p : "";
-            };
+            auto col_text = [&](int i) -> std::string { return s.column_text(i); };
             cached_ids.push_back(s.column_int(0));
             cached_texts.push_back(col_text(1));
 
@@ -542,24 +568,7 @@ struct SqliteBackend::Impl {
         // tags: accept a JSON array or a plain string. `keep`/`bad` are
         // flag-tags folded into the tags column — a row tagged "keep" is
         // protected from delete/update (see delete_memory / update_text).
-        std::string tags_str;
-        if (metadata.contains("tags")) {
-            auto& tv = metadata["tags"];
-            if (tv.is_array()) {
-                for (size_t i = 0; i < tv.size(); ++i) {
-                    if (i > 0) tags_str += ",";
-                    tags_str += tv[i].get<std::string>();
-                }
-            } else if (tv.is_string()) {
-                tags_str = tv.get<std::string>();
-            }
-        }
-        if (metadata.value("keep", false) &&
-            tags_str.find("keep") == std::string::npos)
-            tags_str += (tags_str.empty() ? "" : ",") + std::string("keep");
-        if (metadata.value("bad", false) &&
-            tags_str.find("bad") == std::string::npos)
-            tags_str += (tags_str.empty() ? "" : ",") + std::string("bad");
+        std::string tags_str = tags_from_metadata(metadata);
 
         std::string text = normalize_path(raw_text);
 
@@ -714,18 +723,25 @@ struct SqliteBackend::Impl {
         return static_cast<int>(sqlite3_last_insert_rowid(db));
     }
 
-    /// All turns belonging to a session GUID, oldest first. Empty if the
-    /// session is unknown. Powers session-scoped summarization/recipes.
-    std::vector<TurnRecord> turns_by_session(const std::string& session_guid) {
+    // Shared implementation for turn queries over a session GUID.
+    // asc=true → oldest-first (ORDER BY turn_id ASC, no limit).
+    // asc=false → newest-first (ORDER BY timestamp DESC, turn_id DESC) with optional limit.
+    std::vector<TurnRecord> turns_by_session_impl(
+            const std::string& session_guid, bool asc, int limit = 0) {
         std::vector<TurnRecord> out;
         if (session_guid.empty()) return out;
-        Stmt s(db,
+        std::string sql =
             "SELECT t.turn_id, t.user_text, t.assistant_text, m.name, t.timestamp "
             "FROM turns t "
             "JOIN sessions ss ON t.session_id = ss.session_id "
             "LEFT JOIN models m ON t.model_id = m.model_id "
-            "WHERE ss.guid = ? ORDER BY t.turn_id ASC");
+            "WHERE ss.guid = ? ";
+        sql += asc ? "ORDER BY t.turn_id ASC"
+                   : "ORDER BY t.timestamp DESC, t.turn_id DESC";
+        if (limit > 0) sql += " LIMIT ?";
+        Stmt s(db, sql);
         s.bind(1, session_guid);
+        if (limit > 0) s.bind(2, limit);
         while (s.step()) {
             out.push_back({
                 s.column_int(0),
@@ -737,6 +753,11 @@ struct SqliteBackend::Impl {
             });
         }
         return out;
+    }
+
+    /// All turns belonging to a session GUID, oldest first.
+    std::vector<TurnRecord> turns_by_session(const std::string& session_guid) {
+        return turns_by_session_impl(session_guid, true);
     }
 
     // Finalize a partial turn: set assistant_text, (re)embed the exchange,
@@ -889,28 +910,27 @@ struct SqliteBackend::Impl {
     // Session turns newest-first (recipe walk-back direction).
     std::vector<TurnRecord> turns_by_session_desc(
             const std::string& session_guid, int limit) {
-        std::vector<TurnRecord> out;
+        return turns_by_session_impl(session_guid, false, limit);
+    }
+
+    // Shared query: summaries for a session filtered by level, newest-first.
+    std::vector<StorageBackend::SummaryRecord> summaries_by_level_desc(
+            const std::string& session_guid, const std::string& level, int limit) {
+        std::vector<StorageBackend::SummaryRecord> out;
         if (session_guid.empty()) return out;
         std::string sql =
-            "SELECT t.turn_id, t.user_text, t.assistant_text, m.name, t.timestamp "
-            "FROM turns t "
-            "JOIN sessions ss ON t.session_id = ss.session_id "
-            "LEFT JOIN models m ON t.model_id = m.model_id "
-            "WHERE ss.guid = ? "
-            "ORDER BY t.timestamp DESC, t.turn_id DESC";
+            "SELECT s.summary_id, s.text, s.status, s.timestamp "
+            "FROM summaries s "
+            "JOIN sessions ss ON s.session_id = ss.session_id "
+            "WHERE ss.guid = ? AND s.level = ? "
+            "ORDER BY s.timestamp DESC, s.summary_id DESC";
         if (limit > 0) sql += " LIMIT ?";
         Stmt s(db, sql);
-        s.bind(1, session_guid);
-        if (limit > 0) s.bind(2, limit);
+        s.bind(1, session_guid).bind(2, level);
+        if (limit > 0) s.bind(3, limit);
         while (s.step()) {
-            out.push_back({
-                s.column_int(0),
-                s.column_text(1),
-                s.column_text(2),
-                s.column_text(3),
-                s.column_text(4),
-                session_guid
-            });
+            out.push_back({s.column_int(0), s.column_text(1),
+                           s.column_text(2), s.column_text(3)});
         }
         return out;
     }
@@ -918,54 +938,13 @@ struct SqliteBackend::Impl {
     // L2 (turn) summaries for a session, newest-first.
     std::vector<StorageBackend::SummaryRecord> turn_summaries_by_session_desc(
             const std::string& session_guid, int limit) {
-        std::vector<StorageBackend::SummaryRecord> out;
-        if (session_guid.empty()) return out;
-        std::string sql =
-            "SELECT s.summary_id, s.text, s.status, s.timestamp "
-            "FROM summaries s "
-            "JOIN sessions ss ON s.session_id = ss.session_id "
-            "WHERE ss.guid = ? AND s.level = 'turn' "
-            "ORDER BY s.timestamp DESC, s.summary_id DESC";
-        if (limit > 0) sql += " LIMIT ?";
-        Stmt s(db, sql);
-        s.bind(1, session_guid);
-        if (limit > 0) s.bind(2, limit);
-        while (s.step()) {
-            out.push_back({
-                s.column_int(0),
-                s.column_text(1),
-                s.column_text(2),
-                s.column_text(3)
-            });
-        }
-        return out;
+        return summaries_by_level_desc(session_guid, "turn", limit);
     }
 
-    // L3 (session) summary rows for a session, newest-first (covers both
-    // 'current' running and 'complete' closed; recipe filters as needed).
+    // L3 (session) summaries for a session, newest-first.
     std::vector<StorageBackend::SummaryRecord> session_summaries_desc(
             const std::string& session_guid, int limit) {
-        std::vector<StorageBackend::SummaryRecord> out;
-        if (session_guid.empty()) return out;
-        std::string sql =
-            "SELECT s.summary_id, s.text, s.status, s.timestamp "
-            "FROM summaries s "
-            "JOIN sessions ss ON s.session_id = ss.session_id "
-            "WHERE ss.guid = ? AND s.level = 'session' "
-            "ORDER BY s.timestamp DESC, s.summary_id DESC";
-        if (limit > 0) sql += " LIMIT ?";
-        Stmt s(db, sql);
-        s.bind(1, session_guid);
-        if (limit > 0) s.bind(2, limit);
-        while (s.step()) {
-            out.push_back({
-                s.column_int(0),
-                s.column_text(1),
-                s.column_text(2),
-                s.column_text(3)
-            });
-        }
-        return out;
+        return summaries_by_level_desc(session_guid, "session", limit);
     }
 
     // The current running L3 session summary, if any: (summary_id, text).
@@ -999,8 +978,8 @@ struct SqliteBackend::Impl {
             "ORDER BY timestamp DESC, summary_id DESC LIMIT ?");
         s.bind(1, level).bind(2, limit);
         while (s.step()) {
-            const char* p = reinterpret_cast<const char*>(sqlite3_column_text(s.raw(), 0));
-            if (p) out.emplace_back(p);
+            auto text = s.column_text(0);
+            if (!text.empty()) out.push_back(std::move(text));
         }
         return out;
     }
@@ -1013,8 +992,8 @@ struct SqliteBackend::Impl {
             "ORDER BY timestamp DESC, decision_id DESC LIMIT ?");
         s.bind(1, limit);
         while (s.step()) {
-            const char* p = reinterpret_cast<const char*>(sqlite3_column_text(s.raw(), 0));
-            if (p) out.emplace_back(p);
+            auto text = s.column_text(0);
+            if (!text.empty()) out.push_back(std::move(text));
         }
         return out;
     }
@@ -1061,37 +1040,12 @@ struct SqliteBackend::Impl {
         // Refuse to mutate protected rows for parity with delete_memory.
         Stmt check_stmt(db, "SELECT tags FROM summaries WHERE summary_id = ?");
         check_stmt.bind(1, memory_id);
-        bool exists = false;
-        bool protected_row = false;
-        if (check_stmt.step()) {
-            exists = true;
-            const char* tags = reinterpret_cast<const char*>(sqlite3_column_text(check_stmt.raw(), 0));
-            if (tags && std::string(tags).find("keep") != std::string::npos) {
-                protected_row = true;
-            }
-        }
-        if (!exists || protected_row) return false;
+        if (!check_stmt.step()) return false;  // row not found
+        if (check_stmt.column_text(0).find("keep") != std::string::npos) return false;
 
         // Lean v2 summaries: only text/embedding/tags are mutable here.
         // keep/bad flags fold into tags (parity with store()).
-        std::string tags_str;
-        if (metadata.contains("tags")) {
-            auto& tv = metadata["tags"];
-            if (tv.is_array()) {
-                for (size_t i = 0; i < tv.size(); ++i) {
-                    if (i > 0) tags_str += ",";
-                    tags_str += tv[i].get<std::string>();
-                }
-            } else if (tv.is_string()) {
-                tags_str = tv.get<std::string>();
-            }
-        }
-        if (metadata.value("keep", false) &&
-            tags_str.find("keep") == std::string::npos)
-            tags_str += (tags_str.empty() ? "" : ",") + std::string("keep");
-        if (metadata.value("bad", false) &&
-            tags_str.find("bad") == std::string::npos)
-            tags_str += (tags_str.empty() ? "" : ",") + std::string("bad");
+        std::string tags_str = tags_from_metadata(metadata);
 
         std::string text = normalize_path(raw_text);
         std::vector<float> emb;
@@ -1249,23 +1203,19 @@ struct SqliteBackend::Impl {
             "FROM summaries ORDER BY summary_id");
 
         while (s.step()) {
-            auto col = [&](int i) -> const char* {
-                return reinterpret_cast<const char*>(sqlite3_column_text(s.raw(), i));
-            };
-            int id = s.column_int(0);
-            const char* text = col(1);
-            const char* lvl  = col(2);
-            const char* st   = col(3);
-            const char* tag  = col(4);
-            const char* ts   = col(5);
+            int id        = s.column_int(0);
+            auto text     = s.column_text(1);
+            auto lvl      = s.column_text(2);
+            auto st       = s.column_text(3);
+            auto tag      = s.column_text(4);
+            auto ts       = s.column_text(5);
 
             json meta = json::object();
-            if (lvl && lvl[0]) meta["level"]  = lvl;
-            if (st  && st[0])  meta["status"] = st;
-            if (tag && tag[0]) meta["tags"]   = tag;
+            if (!lvl.empty()) meta["level"]  = lvl;
+            if (!st.empty())  meta["status"] = st;
+            if (!tag.empty()) meta["tags"]   = tag;
 
-            results.push_back({id, text ? text : "", 0.0f, std::move(meta),
-                               ts ? ts : ""});
+            results.push_back({id, std::move(text), 0.0f, std::move(meta), std::move(ts)});
         }
         return results;
     }
@@ -1302,15 +1252,14 @@ struct SqliteBackend::Impl {
 
             while (select_stmt.step()) {
                 int id = select_stmt.column_int(0);
-                const char* col1 = reinterpret_cast<const char*>(sqlite3_column_text(select_stmt.raw(), 1));
-                if (!col1) continue;
+                auto col1 = select_stmt.column_text(1);
+                if (col1.empty()) continue;
 
                 std::string embed_text;
                 if (t.extra_col) {
-                    const char* col2 = reinterpret_cast<const char*>(sqlite3_column_text(select_stmt.raw(), 2));
-                    embed_text = turn_embed_text(col1, col2 ? col2 : "");
+                    embed_text = turn_embed_text(col1, select_stmt.column_text(2));
                 } else {
-                    embed_text = col1;
+                    embed_text = std::move(col1);
                 }
 
                 auto emb = emb_ref.encode(embed_text);
@@ -1338,8 +1287,8 @@ struct SqliteBackend::Impl {
         int updated = 0;
         while (select_stmt.step()) {
             int id = select_stmt.column_int(0);
-            const char* text = reinterpret_cast<const char*>(sqlite3_column_text(select_stmt.raw(), 1));
-            if (!text) continue;
+            auto text = select_stmt.column_text(1);
+            if (text.empty()) continue;
 
             auto emb = emb_ref.encode(text);
             Stmt update(db, "UPDATE summaries SET embedding = ? WHERE summary_id = ?");
@@ -1374,23 +1323,20 @@ struct SqliteBackend::Impl {
         return result;
     }
 
-    bool delete_memory(int memory_id) {
-        // Check if memory has keep tag in dedicated column
-        Stmt check_stmt(db, "SELECT tags FROM summaries WHERE summary_id = ?");
-        check_stmt.bind(1, memory_id);
-        if (check_stmt.step()) {
-            const char* tags = reinterpret_cast<const char*>(sqlite3_column_text(check_stmt.raw(), 0));
-            if (tags && std::string(tags).find("keep") != std::string::npos) {
-                return false;  // protected
-            }
-        }
+    // Returns true if the summaries row exists and has a "keep" tag.
+    bool has_keep_tag(int summary_id) {
+        Stmt s(db, "SELECT tags FROM summaries WHERE summary_id = ?");
+        s.bind(1, summary_id);
+        if (!s.step()) return false;
+        return s.column_text(0).find("keep") != std::string::npos;
+    }
 
-        // Not protected, proceed with deletion
+    bool delete_memory(int memory_id) {
+        if (has_keep_tag(memory_id)) return false;
         Stmt stmt(db, "DELETE FROM summaries WHERE summary_id = ?");
         stmt.bind(1, memory_id);
         stmt.step();
         int changes = sqlite3_changes(db);
-
         if (changes > 0) {
             invalidate_cache();
             return true;
@@ -1400,45 +1346,21 @@ struct SqliteBackend::Impl {
 
     int delete_batch(const std::vector<int>& memory_ids) {
         if (memory_ids.empty()) return 0;
-
-        // Filter out IDs with keep tag
-        std::vector<int> deletable_ids;
-        for (int memory_id : memory_ids) {
-            Stmt check_stmt(db, "SELECT tags FROM summaries WHERE summary_id = ?");
-            check_stmt.bind(1, memory_id);
-            bool has_keep = false;
-            if (check_stmt.step()) {
-                const char* tags = reinterpret_cast<const char*>(sqlite3_column_text(check_stmt.raw(), 0));
-                if (tags && std::string(tags).find("keep") != std::string::npos) {
-                    has_keep = true;
-                }
-            }
-
-            if (!has_keep) {
-                deletable_ids.push_back(memory_id);
-            }
-        }
-
-        if (deletable_ids.empty()) return 0;
-
-        // Build SQL: DELETE FROM summaries WHERE summary_id IN (?,?,...)
+        // Single atomic DELETE filtered by keep-tag, entirely in SQL.
         std::string sql = "DELETE FROM summaries WHERE summary_id IN (";
-        for (size_t i = 0; i < deletable_ids.size(); ++i) {
+        for (size_t i = 0; i < memory_ids.size(); ++i) {
             if (i > 0) sql += ",";
             sql += "?";
         }
-        sql += ")";
-
+        sql += ") AND (tags IS NULL OR tags NOT LIKE '%keep%')";
+        Stmt(db, "BEGIN").exec();
         Stmt stmt(db, sql);
-        for (size_t i = 0; i < deletable_ids.size(); ++i) {
-            stmt.bind(static_cast<int>(i + 1), deletable_ids[i]);
-        }
+        for (size_t i = 0; i < memory_ids.size(); ++i)
+            stmt.bind(static_cast<int>(i + 1), memory_ids[i]);
         stmt.step();
         int changes = sqlite3_changes(db);
-
-        if (changes > 0) {
-            invalidate_cache();
-        }
+        Stmt(db, "COMMIT").exec();
+        if (changes > 0) invalidate_cache();
         return changes;
     }
 
@@ -1487,23 +1409,19 @@ struct SqliteBackend::Impl {
         }
 
         while (stmt.step()) {
-            auto col = [&](int i) -> const char* {
-                return reinterpret_cast<const char*>(sqlite3_column_text(stmt.raw(), i));
-            };
-            int id = stmt.column_int(0);
-            const char* text = col(1);
-            const char* lvl  = col(2);
-            const char* st   = col(3);
-            const char* tag  = col(4);
-            const char* ts   = col(5);
+            int id        = stmt.column_int(0);
+            auto text     = stmt.column_text(1);
+            auto lvl      = stmt.column_text(2);
+            auto st       = stmt.column_text(3);
+            auto tag      = stmt.column_text(4);
+            auto ts       = stmt.column_text(5);
 
             json metadata = json::object();
-            if (lvl && lvl[0]) metadata["level"]  = lvl;
-            if (st  && st[0])  metadata["status"] = st;
-            if (tag && tag[0]) metadata["tags"]   = tag;
+            if (!lvl.empty()) metadata["level"]  = lvl;
+            if (!st.empty())  metadata["status"] = st;
+            if (!tag.empty()) metadata["tags"]   = tag;
 
-            results.push_back({id, text ? text : "", 0.0f, std::move(metadata),
-                               ts ? ts : ""});
+            results.push_back({id, std::move(text), 0.0f, std::move(metadata), std::move(ts)});
         }
         return results;
     }
@@ -1673,7 +1591,7 @@ std::vector<SearchResult> SqliteBackend::search_by_metadata(const json& metadata
     return pImpl->search_by_metadata(metadata_filter, limit, after, before);
 }
 
-int SqliteBackend::cleanup_old_conversations(int max_age_hours) {
+int SqliteBackend::cleanup_old_conversations(float max_age_hours) {
     auto cutoff = std::chrono::system_clock::now() -
         std::chrono::duration_cast<std::chrono::system_clock::duration>(
             std::chrono::duration<double, std::ratio<3600>>(max_age_hours));
@@ -1693,88 +1611,6 @@ int SqliteBackend::cleanup_old_conversations(int max_age_hours) {
         deleted = static_cast<int>(sqlite3_changes(pImpl->db));
     }
     return deleted;
-}
-
-// --- User management methods (single-user mode) ---
-std::optional<UserInfo> SqliteBackend::get_user_by_username(const std::string& username) {
-    Stmt stmt(pImpl->db, "SELECT id, username, token_hash FROM users WHERE username = ?");
-    stmt.bind(1, username);
-
-    if (stmt.step()) {
-        UserInfo user;
-        user.id = stmt.column_int(0);
-        user.username = stmt.column_text(1);
-        user.token_hash = stmt.column_text(2);
-        return user;
-    }
-    return std::nullopt;
-}
-
-std::optional<std::string> SqliteBackend::get_user_password(const std::string& username) {
-    Stmt stmt(pImpl->db, "SELECT password_hash FROM users WHERE username = ?");
-    stmt.bind(1, username);
-
-    if (stmt.step()) {
-        std::string result = stmt.column_text(0);
-        return !result.empty() ? std::make_optional(result) : std::nullopt;
-    }
-    return std::nullopt;
-}
-
-void SqliteBackend::update_user_token(const std::string& username, const std::string& new_hash) {
-    Stmt stmt(pImpl->db, "UPDATE users SET token_hash = ? WHERE username = ?");
-    stmt.bind(1, new_hash).bind(2, username);
-    stmt.step();
-}
-
-int SqliteBackend::create_user(const std::string& username, const std::string& token_hash) {
-    std::string timestamp = pImpl->local_timestamp();
-    Stmt s(pImpl->db,
-           "INSERT INTO users (username, token_hash, created, modified) VALUES (?,?,?,?)");
-    s.bind(1, username).bind(2, token_hash).bind(3, timestamp).bind(4, timestamp);
-    s.step();
-    // changes()==0 means the INSERT failed (e.g. duplicate username) — keep
-    // the original -1 contract rather than returning a stale rowid.
-    return sqlite3_changes(pImpl->db) > 0
-        ? static_cast<int>(sqlite3_last_insert_rowid(pImpl->db))
-        : -1;
-}
-
-bool SqliteBackend::delete_user(const std::string& username) {
-    Stmt s(pImpl->db, "DELETE FROM users WHERE username = ?");
-    s.bind(1, username);
-    s.step();
-    return sqlite3_changes(pImpl->db) > 0;
-}
-
-void SqliteBackend::set_user_password(const std::string& username, const std::string& password_hash) {
-    Stmt s(pImpl->db, "UPDATE users SET password_hash = ? WHERE username = ?");
-    s.bind(1, password_hash).bind(2, username).step();
-}
-
-std::optional<std::string> SqliteBackend::get_setting(const std::string& key) {
-    Stmt s(pImpl->db, "SELECT value FROM settings WHERE key = ?");
-    s.bind(1, key);
-    if (s.step()) return s.column_text_opt(0);
-    return std::nullopt;
-}
-
-void SqliteBackend::set_setting(const std::string& key, const std::string& value) {
-    Stmt s(pImpl->db, "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
-    s.bind(1, key).bind(2, value).step();
-}
-
-std::optional<UserInfo> SqliteBackend::get_user_by_token_hash(const std::string& token_hash) {
-    Stmt s(pImpl->db, "SELECT id, username, token_hash FROM users WHERE token_hash = ?");
-    s.bind(1, token_hash);
-    if (s.step()) {
-        UserInfo user;
-        user.id = s.column_int(0);
-        user.username = s.column_text(1);
-        user.token_hash = s.column_text(2);
-        return user;
-    }
-    return std::nullopt;
 }
 
 } // namespace ragger

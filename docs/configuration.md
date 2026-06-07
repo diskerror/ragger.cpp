@@ -44,7 +44,7 @@ touch.
 | `port`           | `8432`          | TCP port (only meaningful when `bind` is set). |
 | `server_name`    | `(empty)`       | Hostname used by cpp-httplib (e.g. `ragger.local`). |
 | `capture_turns`  | `true`          | **Write side.** When `true`, `capture_turn` (MCP) / `POST /turn` ingests agent-pushed turns into the `turns` table. Set `false` to make the call a no-op. |
-| `build_context`  | `true`          | **Read side.** When `true`, `build_context` / `GET /session/<id>` assembles a recipe-shaped payload. Only meaningful when `capture_turns` is also on. Agent-driven `search`/`store` work either way. |
+| `build_context`  | `false`         | **Read side.** When `true`, `build_context` / `GET /session/<id>` assembles a recipe-shaped payload. Only meaningful when `capture_turns` is also on. Agent-driven `search`/`store` work either way. |
 | `default_recipe` | `natural_fading` | Recipe used when the caller doesn't name one. See [Recipes](#recipes) below. |
 | `recipes_dir`    | `~/.ragger/recipes` | Where the daemon loads recipe JSON from. Built-ins kick in only if this directory is missing or empty. |
 

@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "storage_backend.h"
+#include "user_store.h"
 
 namespace ragger {
 
@@ -25,14 +26,12 @@ public:
     /// the new config and rewrites the settings afterward).
     explicit RaggerMemory(const std::string& db_path = "",
                           const std::string& model_dir = "",
-                          const std::string& user_db_path = "",
                           bool skip_embedding_guard = false);
     ~RaggerMemory();
 
     /// Store a memory. Stores to the configured DB.
     /// `defer_embedding`: write embedding=NULL; caller (or startup) backfills.
     std::string    store(const std::string& text, json metadata = {},
-                         bool common = false,
                          bool defer_embedding = false);
 
     /// Store a Level 5 RAG document chunk. Pass the same `chunk.imported_at`
@@ -111,14 +110,19 @@ public:
                                                  const std::string& after = "",
                                                  const std::string& before = "");
 
-    /// Access primary backend (for storage operations).
+    /// Settings access (user_store).
+    std::optional<std::string> get_setting(const std::string& key);
+    void set_setting(const std::string& key, const std::string& value);
+
+    /// Access primary backend (for storage operations — internal use only).
     StorageBackend* backend() { return backend_.get(); }
 
     void close();
 
 private:
     std::unique_ptr<Embedder>      embedder_;
-    std::unique_ptr<StorageBackend> backend_;      // single user DB
+    std::unique_ptr<StorageBackend> backend_;
+    std::unique_ptr<UserStore>      user_store_;   // settings and user management
 };
 
 /// Outcome of capture_turn(). `captured` is false when turn capture is

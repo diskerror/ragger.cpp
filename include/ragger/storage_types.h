@@ -46,14 +46,6 @@ struct SearchResponse {
     json                      timing;
 };
 
-struct AllEmbeddings {
-    std::vector<int>                ids;
-    std::vector<std::string>        texts;
-    std::vector<std::vector<float>> embeddings;
-    std::vector<json>               metadata;
-    std::vector<std::string>        timestamps;
-};
-
 /// User information (extracted from SqliteBackend for modularity)
 struct UserInfo {
     int         id;

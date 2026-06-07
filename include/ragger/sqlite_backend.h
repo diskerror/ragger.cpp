@@ -128,35 +128,8 @@ public:
     void close() override;
 
     /// Delete old conversation entries older than specified hours. Returns count deleted.
-    int cleanup_old_conversations(int max_age_hours) override;
+    int cleanup_old_conversations(float max_age_hours) override;
 
-    // --- User management ---
-    /// Get user info by username. Returns nullopt if not found.
-    std::optional<UserInfo> get_user_by_username(const std::string& username) override;
-
-    /// Get hashed password for a user.
-    std::optional<std::string> get_user_password(const std::string& username) override;
-
-    /// Update user's token hash.
-    void update_user_token(const std::string& username, const std::string& new_hash) override;
-
-    /// Create a new user. Returns user_id or -1 on error.
-    int create_user(const std::string& username, const std::string& token_hash) override;
-
-    /// Delete a user by username. Returns true if deleted.
-    bool delete_user(const std::string& username) override;
-
-    /// Set/clear password hash for a user.
-    void set_user_password(const std::string& username, const std::string& password_hash) override;
-
-    /// Get user info by token hash. Returns nullopt if not found.
-    std::optional<UserInfo> get_user_by_token_hash(const std::string& token_hash) override;
-
-    /// Get a settings value by key. Returns nullopt if key doesn't exist.
-    std::optional<std::string> get_setting(const std::string& key) override;
-
-    /// Set or update a settings value.
-    void set_setting(const std::string& key, const std::string& value) override;
 
 private:
     struct Impl;

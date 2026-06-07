@@ -7,6 +7,7 @@
 #include "ragger/config.h"
 #include "ragger/embedder.h"
 #include "ragger/sqlite_backend.h"
+#include "ragger/user_store.h"
 #include "ragger/auth.h"
 #include <sqlite3.h>
 #include <cassert>
@@ -334,7 +335,7 @@ void test_search_by_metadata(ragger::Embedder& emb) {
 void test_user_management(ragger::Embedder& emb) {
     cleanup();
     // User management now uses SqliteBackend (separate from storage backend)
-    ragger::SqliteBackend umgr(TEMP_DB);
+    ragger::UserStore umgr(TEMP_DB);
 
     // create_user → returns valid ID
     int user_id = umgr.create_user("testuser", "abc123hash");

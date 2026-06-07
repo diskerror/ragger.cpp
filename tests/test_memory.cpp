@@ -62,44 +62,6 @@ void test_store_with_tags() {
     std::println(" OK");
 }
 
-void test_search_merging_dual_db() {
-    std::println("  test_search_merging_dual_db...");
-    cleanup_all();
-
-    // user_db_path is 3rd param — TEMP_DB1 = common, TEMP_DB2 = user
-    ragger::RaggerMemory mem(TEMP_DB1, "", TEMP_DB2);
-    (void)0;
-
-    // Store to common DB
-    mem.store("The speed of light is 299792458 meters per second.", {}, true);
-    // Store to user DB
-    mem.store("My favorite color is blue.");
-
-    // Count should include both
-    assert(mem.count() == 2);
-
-    // Search should find results from both DBs
-    auto resp = mem.search("speed of light meters per second", 5, 0.0f);
-    assert(!resp.results.empty());
-    // At least one result should mention speed of light
-    bool found_light = false;
-    for (auto& r : resp.results) {
-        if (r.text.find("speed of light") != std::string::npos) found_light = true;
-    }
-    assert(found_light);
-
-    resp = mem.search("my favorite color is blue", 5, 0.0f);
-    assert(!resp.results.empty());
-    bool found_color = false;
-    for (auto& r : resp.results) {
-        if (r.text.find("favorite color") != std::string::npos) found_color = true;
-    }
-    assert(found_color);
-
-    mem.close();
-    cleanup_all();
-    std::println(" OK");
-}
 
 void test_count() {
     std::println("  test_count...");
@@ -151,7 +113,6 @@ int main() {
 
     test_store_and_search();
     test_store_with_tags();
-    test_search_merging_dual_db();
     test_count();
     test_delete();
 

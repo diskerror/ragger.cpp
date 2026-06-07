@@ -6,7 +6,7 @@
 
 #include "ragger/config.h"
 #include "ragger/recipe.h"
-#include "ragger/sqlite_backend.h"
+#include "ragger/user_store.h"
 
 #include <iostream>
 #include <print>
@@ -57,7 +57,7 @@ Recipe make_synthetic_default(const std::string& ini_default) {
 // Resolve "what's the active recipe right now?" the same way build_context
 // does, so the picker can mark it. Returns the *name* (the sentinel
 // "default" if the DB row matches the ini default or is unset).
-std::string current_choice(SqliteBackend& backend,
+std::string current_choice(UserStore& backend,
                            const std::string& ini_default) {
     if (auto stored = backend.get_setting("recipe");
         stored && !stored->empty()) {
@@ -209,7 +209,7 @@ int run_picker(const std::vector<Recipe>& recipes,
     return -1 - static_cast<int>(sel);
 }
 
-void persist_choice(SqliteBackend& backend, const std::string& name) {
+void persist_choice(UserStore& backend, const std::string& name) {
     backend.set_setting("recipe", name);
 }
 
@@ -238,7 +238,7 @@ int run_recipe_cli(const std::vector<std::string>& args,
     const std::string resolved_db = db_path.empty()
         ? config().resolved_db_path()
         : db_path;
-    SqliteBackend backend(resolved_db);
+    UserStore backend(resolved_db);
 
     const std::string current = current_choice(backend, ini_default);
 
