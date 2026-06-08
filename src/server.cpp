@@ -137,14 +137,13 @@ struct Server::Impl {
         }).detach();
     }
 
-    /// Run one housekeeping pass: purge old conversation turns.
+    /// Run one housekeeping pass: purge old turns, catch up missing
+    /// summaries, and backfill any NULL embeddings.
     void run_housekeeping() {
         const auto& cfg = config();
         float max_age_hours = cfg.cleanup_max_age_hours;
 
-        // Purge old conversation entries. The retention cutoff is computed
-        // inside cleanup_old_conversations() (local-time, matching the
-        // stored turn timestamps) — see ragger/util/time.h.
+        // 1. Purge old conversation entries.
         if (max_age_hours > 0) {
             try {
                 ragger::SqliteBackend temp_backend(config().resolved_db_path());
@@ -156,6 +155,22 @@ struct Server::Impl {
             } catch (const std::exception& e) {
                 Diskerror::logger::critical(std::format(lang::ERR_CLEANUP_DB, e.what()));
             }
+        }
+
+        // 2. Catch up unsummarized turns and draft summaries.
+        if (summarizer_) {
+            summarizer_->enqueue_catch_up();
+        }
+
+        // 3. Backfill NULL embeddings (deferred stores, partial rebuilds).
+        try {
+            int filled = memory.backfill_embeddings();
+            if (filled > 0) {
+                Diskerror::logger::info(std::format(
+                    lang::MSG_BACKFILLED_EMBEDDINGS, filled));
+            }
+        } catch (const std::exception& e) {
+            Diskerror::logger::warn(std::format(lang::ERR_CLEANUP_DB, e.what()));
         }
     }
 

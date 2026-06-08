@@ -58,6 +58,11 @@ public:
                       const std::string& session_guid,
                       const std::string& source_timestamp);
 
+    /// One-shot scan: enqueue every un-summarized turn (oldest first),
+    /// every draft row, and any session ready to close. Called by start(),
+    /// by the pause timer, and by the housekeeping pass (SIGUSR1).
+    void enqueue_catch_up();
+
 private:
     enum class JobKind { L2Turn, L3CloseSession, DraftRetry };
 
@@ -74,11 +79,6 @@ private:
 
     void worker_loop();
     void pause_timer_loop();
-
-    /// One-shot scan: enqueue every un-summarized turn (oldest first),
-    /// every draft row, and any session ready to close. Called by start()
-    /// and again by the pause timer to mop up anything missed.
-    void enqueue_catch_up();
 
     /// Handlers — each returns true on success, false on retryable error.
     bool handle_l2(const Job& j);
