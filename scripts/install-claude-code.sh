@@ -158,7 +158,7 @@ cat > "$HOOK_SCRIPT" <<'HOOKEOF'
 # claude-code-capture-turn.sh — Claude Code "Stop" hook → ragger POST /turn.
 #
 # Stdin is the hook payload from Claude Code (JSON with `transcript_path`
-# and `session_id`). We lift the most recent user prompt and the
+# and `session_id`). We lift the most recent human user prompt and the
 # assistant reply that just landed and hand them to Ragger. Anything
 # that fails here is silently swallowed so a broken capture never breaks
 # the user's session.
@@ -181,9 +181,22 @@ def text_of(content):
     if isinstance(content, list):
         return "\n\n".join(
             b.get("text","").strip() for b in content
-            if isinstance(b, dict) and b.get("type")=="text"
+            if isinstance(b, dict) and b.get("type") == "text"
         ).strip()
     return ""
+
+def is_tool_result(content):
+    """True if this user message is a tool result, not a human prompt."""
+    if isinstance(content, list):
+        return any(
+            isinstance(b, dict) and b.get("type") == "tool_result"
+            for b in content
+        )
+    return False
+
+def is_synthetic(txt):
+    """True for injected non-human messages (task notifications, local command output)."""
+    return txt.startswith(("<task-notification>", "<local-command-stdout>"))
 
 try:
     inp = json.loads(os.environ.get("HOOK_JSON","") or "{}")
@@ -194,8 +207,6 @@ sid = inp.get("session_id", "")
 if not tp or not os.path.exists(tp):
     sys.exit(0)
 
-# Single backward walk: take the last assistant text, then the first
-# user text that precedes it. Tool/thinking blocks are skipped.
 events = []
 with open(tp, "r", encoding="utf-8") as f:
     for line in f:
@@ -207,17 +218,30 @@ with open(tp, "r", encoding="utf-8") as f:
 assistant_text, assistant_model, user_text = "", "", ""
 seen_assistant = False
 for ev in reversed(events):
-    t = ev.get("type")
+    t   = ev.get("type")
     msg = ev.get("message", {}) or {}
-    txt = text_of(msg.get("content"))
-    if not txt: continue
-    if not seen_assistant and t == "assistant":
-        assistant_text  = txt
-        assistant_model = msg.get("model", "")
-        seen_assistant  = True
-    elif seen_assistant and t == "user":
-        user_text = txt
-        break
+    content = msg.get("content")
+
+    if not seen_assistant:
+        if t == "assistant":
+            txt = text_of(content)
+            if txt:
+                assistant_text  = txt
+                assistant_model = msg.get("model", "")
+                seen_assistant  = True
+    else:
+        if t == "user":
+            # Skip tool-result messages — keep walking back to the
+            # human prompt (text content, not tool_result blocks).
+            if is_tool_result(content):
+                continue
+            txt = text_of(content)
+            # Skip synthetic injected messages (task notifications etc.)
+            if txt and is_synthetic(txt):
+                continue
+            if txt:
+                user_text = txt
+                break
 
 if not assistant_text:
     sys.exit(0)
@@ -236,7 +260,7 @@ PYEOF
 curl -sS --max-time 5 \
      --unix-socket "$SOCKET" \
      -H "Content-Type: application/json" \
-     ${TOKEN:+-H "Authorization: Bearer $TOKEN"} \
+     ${TOKEN:+-H "Authorization: Bearer *** \
      -X POST "http://localhost/turn" \
      -d "$PAYLOAD" >/dev/null 2>&1 || true
 HOOKEOF
