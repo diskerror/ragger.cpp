@@ -107,12 +107,15 @@ model quality matters far less than model speed.
   with reasoning enabled, etc.). They spend 200–300 tokens on internal
   chain-of-thought before writing a single output token — summaries
   take 30–60× longer for no quality gain on this task.
-- **Keep `max_tokens` at 600 or below.** The summarizer targets ¼ of
-  the source length and caps at the source length. 600 tokens is
-  generous. Requesting more wastes KV cache and will crash GGUF models
-  loaded in LM Studio with `parallel > 1` (each slot's budget is
-  `context_length / parallel`; requesting more than that causes LM
-  Studio to drop the connection with no error body).
+- **Keep `max_tokens` at 1024 or below.** The summarizer targets ¼ of
+  the source length and caps at the source length. 1024 tokens is
+  generous for any single turn. Requesting more wastes KV cache and
+  will crash GGUF models loaded in LM Studio with `parallel > 1`
+  (each slot's budget is `context_length / parallel`; requesting more
+  than that causes LM Studio to drop the connection with no error body).
+- **If using a GGUF model, set `parallel = 1` in LM Studio.** Ragger's
+  summarizer never runs concurrent requests, so there is no benefit to
+  parallel slots — and each slot you add divides the KV budget.
 
 **Fallback behaviour.** When the endpoint is unreachable, the worker
 writes a heuristic *draft* L2 (a trimmed `User: … | Assistant: …`

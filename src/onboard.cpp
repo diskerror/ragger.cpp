@@ -285,9 +285,10 @@ int run_onboard(const std::vector<std::string>& /*args*/,
     std::println("    They spend 200-300 tokens on internal reasoning before writing a");
     std::println("    single output token, making summaries 10-30x slower with no quality");
     std::println("    benefit for this task.");
-    std::println("  • Also:  keep max_tokens at 600 or below. The summarizer targets");
-    std::println("    ~1/4 of the source length; 600 is plenty. Larger values waste KV");
-    std::println("    cache and can crash GGUF models loaded with parallel > 1.");
+    std::println("  • Also:  keep max_tokens at 1024 or below. The summarizer targets");
+    std::println("    ~1/4 of the source length; 1024 is plenty. Larger values waste KV");
+    std::println("    cache and can crash GGUF models. If using GGUF in LM Studio,");
+    std::println("    set parallel = 1 — Ragger never sends concurrent requests.");
     std::println("");
     std::string new_url = prompt("Endpoint URL (blank to skip)", cur_url);
     std::string new_model = cur_model;
