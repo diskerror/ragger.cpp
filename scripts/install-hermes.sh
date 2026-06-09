@@ -31,7 +31,7 @@ warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 fail() { echo -e "${RED}[!]${NC} $*" >&2; exit 1; }
 
 HERMES_HOME="$HOME/.hermes"
-PLUGIN_DST="$HERMES_HOME/plugins/ragger-memory"
+PLUGIN_DST="$HERMES_HOME/plugins/ragger"
 HERMES_CFG="$HERMES_HOME/config.yaml"
 
 # ============================================================
