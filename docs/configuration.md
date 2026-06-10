@@ -175,10 +175,10 @@ from the latest turn:
   "name": "natural_fading",
   "description": "Default: recent raw → turn summaries → session → project → decisions",
   "layers": [
-    { "kind": "raw_turn",        "count": 2 },
-    { "kind": "turn_summary",    "count": 5 },
-    { "kind": "session_summary", "count": 1 },
-    { "kind": "project_summary", "count": 1 },
+    { "kind": "raw_turn",        "limit": 2 },
+    { "kind": "turn_summary",    "limit": 5 },
+    { "kind": "session_summary", "limit": 1 },
+    { "kind": "project_summary", "limit": 1 },
     { "kind": "decisions",       "limit": 3 }
   ],
   "max_tokens": 8000,
@@ -187,8 +187,10 @@ from the latest turn:
 ```
 
 Available layer kinds: `raw_turn`, `turn_summary`, `session_summary`,
-`project_summary`, `decisions`. `count` is per-layer (`0` = unlimited
-for that layer). `max_tokens` is a ceiling; assembly trims from the
+`project_summary`, `decisions`. `limit` is per-layer (`0` = unlimited
+for that layer). The legacy field name `"count"` is still accepted for
+backward compatibility but deprecated — use `"limit"` in new recipes.
+`max_tokens` is a ceiling; assembly trims from the
 oldest end if it would be exceeded. See `recipes/natural_fading.json`
 in the source tree for the canonical example, and the four others
 (`reconnect`, `deep_recall`, `tldr`, `raw_only`) for different
