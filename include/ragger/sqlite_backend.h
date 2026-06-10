@@ -72,6 +72,8 @@ public:
     std::vector<std::string> recent_summaries(const std::string& level, int limit) override;
     std::vector<std::string> current_decisions(int limit) override;
     std::vector<TurnRecord> unsummarized_turns(int limit = 0) override;
+    bool turn_summary_exists(const std::string& session_guid,
+                             const std::string& source_timestamp) override;
     std::vector<DraftSummary> draft_summaries(int limit = 0) override;
     std::vector<std::string> sessions_needing_close(int pause_minutes) override;
     std::vector<TurnRecord> turns_by_session_desc(

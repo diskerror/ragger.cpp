@@ -127,6 +127,15 @@ public:
     /// summarizer's startup catch-up and housekeeping retry pass.
     virtual std::vector<TurnRecord> unsummarized_turns(int limit = 0) = 0;
 
+    /// True if a level='turn' summary already exists for the (session,
+    /// timestamp) pair — the same linkage unsummarized_turns() joins on.
+    /// Lets the summarizer skip a turn that was already summarized, making
+    /// L2 writes idempotent when the live enqueue path and the catch-up
+    /// scan both queue the same turn (the worker is single-threaded, so a
+    /// check here is race-free against a concurrent duplicate job).
+    virtual bool turn_summary_exists(const std::string& session_guid,
+                                     const std::string& source_timestamp) = 0;
+
     /// Summary rows tagged 'draft' (heuristic fallback writes that the
     /// summarizer should rewrite when inference is back). Returned
     /// oldest-first, capped at `limit` (0 = unbounded).

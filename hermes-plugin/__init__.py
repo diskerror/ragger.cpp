@@ -128,6 +128,7 @@ class RaggerMemoryProvider(MemoryProvider):
         self._base_url = "http://127.0.0.1:8432"
         self._auth_token = ""
         self._prefetch_result = ""
+        self._model = ""
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
         # Circuit breaker
@@ -219,6 +220,18 @@ class RaggerMemoryProvider(MemoryProvider):
         self._base_url = f"http://{cfg['host']}:{cfg['port']}"
         self._auth_token = cfg["auth_token"]
 
+    def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
+        """Capture the live conversing model so sync_turn can record it.
+
+        Hermes switches models mid-session, so we refresh this each turn
+        rather than caching it at initialize(). The model name flows to
+        Ragger's /turn endpoint, which stores it on the turn + its L2
+        summary (the row that records *who the user was talking to*).
+        """
+        model = kwargs.get("model")
+        if model:
+            self._model = model
+
     def system_prompt_block(self) -> str:
         return (
             "# Ragger Memory\n"
@@ -273,7 +286,7 @@ class RaggerMemoryProvider(MemoryProvider):
         result = self._post("/turn", {
             "user": user_content,
             "assistant": assistant_content,
-            "model": "",
+            "model": self._model,
             "session_id": session_id,
         }, timeout=4.0)
         if result is None:

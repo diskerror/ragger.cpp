@@ -183,6 +183,37 @@ void SummarizerService::pause_timer_loop() {
 bool SummarizerService::handle_l2(const Job& j) {
     if (j.assistant_text.empty()) return true;  // partial turn
 
+    // Trivial-turn filter: skip inference (and skip writing any summary row)
+    // when the turn is too short to contain real information. "test | test",
+    // one-word pings, and similar noise don't belong in the summary store.
+    // The raw turn row is still kept for audit purposes; we just don't waste
+    // an inference call or pollute the search index with near-empty rows.
+    // Threshold: combined user+assistant text under 80 chars, OR assistant
+    // text alone under 20 chars. Both are tuned to catch single-word/phrase
+    // exchanges while keeping real single-sentence answers.
+    {
+        const size_t combined = j.user_text.size() + j.assistant_text.size();
+        if (combined < 80 || j.assistant_text.size() < 20) {
+            Diskerror::logger::info(std::format(
+                "[summarizer] skipping trivial turn (session={}, ts={}, "
+                "combined_chars={})",
+                j.session_guid.empty() ? "-" : j.session_guid,
+                j.source_timestamp, combined));
+            return true;
+        }
+    }
+
+    // Idempotency guard. The live enqueue (capture path) and the pause-timer
+    // catch-up scan can both queue the same turn: the scan reads
+    // unsummarized_turns() before the worker has written this turn's L2 row,
+    // so it re-queues it. Without this check that produced two summaries per
+    // turn (two inference calls, two rows at the same timestamp). The worker
+    // is single-threaded, so by the time the duplicate job runs the first has
+    // already committed — skip it. A pre-existing 'draft' row also counts:
+    // the DraftRetry path upgrades it in place rather than adding a fresh L2.
+    if (backend_.turn_summary_exists(j.session_guid, j.source_timestamp))
+        return true;
+
     std::string summary;
     if (inference_) {
         summary = summarize_transcript(

@@ -855,6 +855,25 @@ struct SqliteBackend::Impl {
         return out;
     }
 
+    // True if a 'turn' summary already exists for (session_id, timestamp).
+    // Mirrors the unsummarized_turns() join so the linkage matches exactly:
+    // anonymous turns (session_id NULL) carry an empty guid here too. Counts
+    // 'draft' rows as existing — a turn with a draft is upgraded in place via
+    // the DraftRetry path, never re-queued as a fresh L2.
+    bool turn_summary_exists(const std::string& session_guid,
+                             const std::string& source_timestamp) {
+        Stmt s(db,
+            "SELECT 1 FROM summaries s "
+            "LEFT JOIN sessions ss ON s.session_id = ss.session_id "
+            "WHERE s.level = 'turn' "
+            "  AND s.timestamp = ? "
+            "  AND COALESCE(ss.guid, '') = ? "
+            "LIMIT 1");
+        s.bind(1, source_timestamp);
+        s.bind(2, session_guid);
+        return s.step();
+    }
+
     // Draft-tagged summary rows for re-summarization (housekeeping retry).
     std::vector<DraftSummary> draft_summaries(int limit) {
         std::vector<DraftSummary> out;
@@ -1536,6 +1555,11 @@ std::vector<std::string> SqliteBackend::current_decisions(int limit) {
 
 std::vector<TurnRecord> SqliteBackend::unsummarized_turns(int limit) {
     return pImpl->unsummarized_turns(limit);
+}
+
+bool SqliteBackend::turn_summary_exists(const std::string& session_guid,
+                                        const std::string& source_timestamp) {
+    return pImpl->turn_summary_exists(session_guid, source_timestamp);
 }
 
 std::vector<DraftSummary> SqliteBackend::draft_summaries(int limit) {
