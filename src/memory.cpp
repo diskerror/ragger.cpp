@@ -328,7 +328,7 @@ SessionContext build_context(RaggerMemory& memory,
             case LayerKind::RawTurn: {
                 int taken = 0;
                 while (walk_turn < turns_desc.size() &&
-                       (layer.count == 0 || taken < layer.count)) {
+                       (layer.limit == 0 || taken < layer.limit)) {
                     const auto& t = turns_desc[walk_turn++];
                     rev.push_back({"raw_turn", format_raw_turn(t), t.timestamp});
                     consumed_turn_ts.push_back(t.timestamp);
@@ -339,7 +339,7 @@ SessionContext build_context(RaggerMemory& memory,
             case LayerKind::TurnSummary: {
                 int taken = 0;
                 while (walk_summary < turn_summaries.size() &&
-                       (layer.count == 0 || taken < layer.count)) {
+                       (layer.limit == 0 || taken < layer.limit)) {
                     const auto& s = turn_summaries[walk_summary++];
                     // Skip a summary whose source turn was already
                     // emitted raw — chronology link by timestamp.
@@ -364,7 +364,7 @@ SessionContext build_context(RaggerMemory& memory,
                 break;
             }
             case LayerKind::SessionSummary: {
-                int wanted = layer.count > 0 ? layer.count : 1;
+                int wanted = layer.limit > 0 ? layer.limit : 1;
                 int taken = 0;
                 for (const auto& s : session_summaries) {
                     if (taken >= wanted) break;
@@ -374,14 +374,14 @@ SessionContext build_context(RaggerMemory& memory,
                 break;
             }
             case LayerKind::ProjectSummary: {
-                int wanted = layer.count > 0 ? layer.count : 1;
+                int wanted = layer.limit > 0 ? layer.limit : 1;
                 for (const auto& text : backend->recent_summaries("project", wanted)) {
                     rev.push_back({"project_summary", text, ""});
                 }
                 break;
             }
             case LayerKind::Decisions: {
-                int wanted = layer.count > 0 ? layer.count : 3;
+                int wanted = layer.limit > 0 ? layer.limit : 3;
                 for (const auto& text : backend->current_decisions(wanted)) {
                     rev.push_back({"decision", text, ""});
                 }

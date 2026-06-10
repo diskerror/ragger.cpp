@@ -2,7 +2,7 @@
     "name": "raw_only",
     "description": "All raw turns of the active session, oldest first. No summaries, no decisions — just the verbatim transcript. Debugging baseline (what does this session look like before any fading?) and a useful pick for short sessions where summarization adds nothing.",
     "layers": [
-        { "kind": "raw_turn", "count": 0 }
+        { "kind": "raw_turn", "limit": 0 }
     ],
     "max_tokens": 16000,
     "chars_per_token": 4.0

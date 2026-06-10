@@ -2,8 +2,8 @@
     "name": "reconnect",
     "description": "Quick session resume after a restart or new agent. Pulls the latest session summary + the last two raw turns + a few standing decisions. Small token budget; intended for the moment an agent first wakes up in an existing session and just needs the gist of where things stand.",
     "layers": [
-        { "kind": "raw_turn",        "count": 2 },
-        { "kind": "session_summary", "count": 1 },
+        { "kind": "raw_turn",        "limit": 2 },
+        { "kind": "session_summary", "limit": 1 },
         { "kind": "decisions",       "limit": 3 }
     ],
     "max_tokens": 2000,

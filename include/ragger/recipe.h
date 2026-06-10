@@ -14,11 +14,11 @@
  *
  *   raw_turn         — N raw turns, newest-first (consumes the walk)
  *   turn_summary     — N L2 summaries, newest-first (consumes the walk)
- *   session_summary  — current session's L3 (latest), up to `count`
- *   project_summary  — recent L4 project summaries, up to `count`
+ *   session_summary  — current session's L3 (latest), up to `limit`
+ *   project_summary  — recent L4 project summaries, up to `limit`
  *   decisions        — current L6 decisions, up to `limit`
  *
- * `count` (or `limit` on decisions) is per-layer. `max_tokens` is a
+ * `limit` is per-layer. `max_tokens` is a
  * hard ceiling; assembly truncates from the oldest end once exceeded.
  */
 #pragma once
@@ -40,7 +40,7 @@ enum class LayerKind {
 
 struct RecipeLayer {
     LayerKind kind;
-    int       count = 0;  // 0 = unlimited for that layer
+    int       limit = 0;  // 0 = unlimited for that layer
 };
 
 struct Recipe {

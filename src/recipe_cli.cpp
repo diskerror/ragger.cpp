@@ -86,8 +86,8 @@ void print_recipe(const Recipe& r, const std::string& ini_default,
     for (const auto& layer : r.layers) {
         std::println("    - {:<16} count: {}",
                      layer_kind_name(layer.kind),
-                     layer.count == 0 ? std::string("unlimited")
-                                      : std::to_string(layer.count));
+                     layer.limit == 0 ? std::string("unlimited")
+                                      : std::to_string(layer.limit));
     }
     std::println("");
     std::println("  max_tokens:      {}", r.max_tokens);

@@ -38,10 +38,14 @@ void parse_layers_into(Recipe& recipe, const nlohmann::json& layers,
                 "', skipping");
             continue;
         }
-        int count = layer.value("count", 0);
-        // `decisions` historically used `limit`; accept both for ergonomics.
-        if (count == 0) count = layer.value("limit", 0);
-        recipe.layers.push_back({it->second, count});
+        int limit = layer.value("limit", 0);
+        // Accept legacy "count" field with a deprecation warning.
+        if (limit == 0 && layer.contains("count")) {
+            Diskerror::logger::warn(
+                "recipe '" + source + "': layer field \"count\" is deprecated; use \"limit\" instead");
+            limit = layer.value("count", 0);
+        }
+        recipe.layers.push_back({it->second, limit});
     }
 }
 
