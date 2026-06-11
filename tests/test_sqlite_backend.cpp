@@ -614,6 +614,74 @@ void test_store_turn(ragger::Embedder& emb) {
     cleanup();
 }
 
+// Retry/regeneration dedup: when the agent re-answers the SAME user prompt
+// without an intervening new prompt, store_turn must keep-latest (update the
+// prior row's assistant_text in place) instead of inserting a duplicate. The
+// match is cross-session by design — a session change between two identical
+// prompts is itself a breakage signal (TUI crash-restart minting fresh GUIDs).
+void test_store_turn_dedup(ragger::Embedder& emb) {
+    cleanup();
+    {
+        ragger::SqliteBackend db(emb, TEMP_DB);
+
+        // First answer to a prompt, in session A.
+        int t1 = db.store_turn("Explain the general_search recipe.",
+                               "It searches summaries.", "model-a",
+                               /*defer_embedding=*/false, "sessionA");
+        assert(t1 > 0);
+
+        // Same prompt re-answered — DIFFERENT session (sessionB), different
+        // assistant text. Must update t1 in place, not insert a new row.
+        int t2 = db.store_turn("Explain the general_search recipe.",
+                               "It searches summaries, documents, and decisions.",
+                               "model-b", /*defer_embedding=*/false, "sessionB");
+        assert(t2 == t1);  // same row id returned — keep-latest
+
+        // A genuinely different prompt still inserts a fresh row.
+        int t3 = db.store_turn("What about decisions?", "They are first-class.",
+                               "model-b", /*defer_embedding=*/false, "sessionB");
+        assert(t3 != t1);
+
+        db.close();
+    }
+
+    sqlite3* raw = nullptr;
+    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+
+    // Exactly two turn rows: the deduped pair collapsed to one, plus the
+    // distinct third prompt.
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM turns", -1, &st, nullptr);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int(st, 0) == 2);
+    sqlite3_finalize(st);
+
+    // The surviving deduped row carries the LATEST assistant_text and is not
+    // duplicated in the FTS index (one hit for the prompt's distinctive term).
+    sqlite3_prepare_v2(raw,
+        "SELECT assistant_text FROM turns "
+        "WHERE user_text = 'Explain the general_search recipe.'",
+        -1, &st, nullptr);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    {
+        const char* a = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+        assert(a && std::string(a).find("decisions") != std::string::npos);
+    }
+    // Only one such row (no duplicate).
+    assert(sqlite3_step(st) != SQLITE_ROW);
+    sqlite3_finalize(st);
+
+    // FTS index agrees: the prompt term resolves to exactly one rowid.
+    sqlite3_prepare_v2(raw,
+        "SELECT COUNT(*) FROM turns_fts WHERE turns_fts MATCH 'general_search'",
+        -1, &st, nullptr);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int(st, 0) == 1);
+    sqlite3_finalize(st);
+
+    sqlite3_close(raw);
+    cleanup();
+}
 // L2/L3 summary primitives (issue #22): store_summary, current_session_summary,
 // update_summary_text, set_summary_status — the deterministic backbone the
 // forked summarization pipeline drives.
@@ -798,6 +866,7 @@ int main() {
     test_store_document(emb);
     test_search_merges_three_corpora(emb);
     test_store_turn(emb);
+    test_store_turn_dedup(emb);
     test_summary_primitives(emb);
     test_path_normalization(emb);
 

@@ -880,6 +880,55 @@ struct SqliteBackend::Impl {
         int model_id   = get_or_create_model(model_name);
         int session_id = get_or_create_session(session_guid);
 
+        // Retry/regeneration dedup. When the agent re-answers the *same* user
+        // prompt without an intervening new prompt, we get a second turn whose
+        // user_text duplicates the immediately-preceding turn. In a healthy
+        // agent a regeneration stays in one session; a session change between
+        // two identical prompts is itself a breakage signal (observed when the
+        // TUI crash-restarted and minted a fresh session GUID per turn). So the
+        // match is intentionally cross-session: identical user_text in the most
+        // recent turn, within a short time window. We keep-latest — update that
+        // row's assistant_text (+ re-embed) in place rather than inserting a
+        // duplicate. The FTS au-trigger keeps the index consistent. Empty
+        // assistant_text (partial/prompt-arrival rows) never dedups.
+        if (!a.empty()) {
+            Stmt p(db,
+                "SELECT turn_id, user_text, timestamp FROM turns "
+                "ORDER BY turn_id DESC LIMIT 1");
+            if (p.step()) {
+                const int prev_id          = p.column_int(0);
+                const std::string prev_u   = p.column_text(1);
+                const std::string prev_ts  = p.column_text(2);
+                // 5-minute window: wide enough for a slow regeneration, narrow
+                // enough that a genuinely re-typed identical prompt much later
+                // is still recorded as its own turn.
+                bool within_window = false;
+                if (prev_u == u) {
+                    auto prev_tt = parse_db_timestamp(prev_ts);
+                    auto now_tt  = parse_db_timestamp(local_timestamp());
+                    if (prev_tt && now_tt)
+                        within_window = std::difftime(*now_tt, *prev_tt) <= 300.0;
+                }
+                if (within_window) {
+                    std::vector<float> emb2 = embedder->encode(turn_embed_text(u, a));
+                    Stmt up(db,
+                        "UPDATE turns SET assistant_text = ?, embedding = ?, "
+                        "model_id = COALESCE(?, model_id), "
+                        "session_id = COALESCE(?, session_id), timestamp = ? "
+                        "WHERE turn_id = ?");
+                    up.bind(1, a);
+                    bind_embedding(up.raw(), 2, emb2);
+                    if (model_id) up.bind(3, model_id); else up.bind_null(3);
+                    if (session_id) up.bind(4, session_id); else up.bind_null(4);
+                    up.bind(5, local_timestamp());
+                    up.bind(6, prev_id);
+                    if (!up.exec())
+                        throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+                    return prev_id;
+                }
+            }
+        }
+
         std::vector<float> emb;
         bool have_emb = false;
         if (!defer_embedding && !a.empty()) {
