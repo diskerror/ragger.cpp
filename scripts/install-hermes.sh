@@ -175,6 +175,9 @@ lines = cfg_path.read_text(encoding="utf-8").splitlines(keepends=True)
 in_memory = False
 found = False
 changed = False
+memory_header_idx = None   # index of the "memory:" line
+memory_indent = "  "        # indent used for keys inside memory: (default 2 spaces)
+insert_idx = None           # where to insert a new provider: line if missing
 
 for i, line in enumerate(lines):
     stripped = line.lstrip()
@@ -183,6 +186,8 @@ for i, line in enumerate(lines):
     # Detect the memory: section header (top-level key)
     if re.match(r'^memory:\s*(?:#.*)?$', line.rstrip()):
         in_memory = True
+        memory_header_idx = i
+        insert_idx = i + 1
         continue
 
     if in_memory:
@@ -190,6 +195,12 @@ for i, line in enumerate(lines):
         if stripped and not stripped.startswith("#") and not line[0].isspace():
             in_memory = False
             break
+
+        # Track the indent + the last line still inside the memory block,
+        # so we know where/how to insert a provider: key if it's missing.
+        if stripped and line[0].isspace():
+            memory_indent = indent
+            insert_idx = i + 1
 
         # Look for "  provider: <value>"
         m = re.match(r'^(\s+provider:\s*)(.*)$', line.rstrip())
@@ -208,11 +219,19 @@ for i, line in enumerate(lines):
             break
 
 if not found:
-    print("[!]   memory.provider line not found in config.yaml")
-    print("      Add manually under the memory: section:")
-    print("          memory:")
-    print("            provider: ragger")
-    sys.exit(0)
+    if memory_header_idx is not None:
+        # memory: block exists but has no provider key — insert one.
+        lines.insert(insert_idx, f"{memory_indent}provider: ragger\n")
+        changed = True
+        print("[+]   memory.provider key missing — inserted: ragger")
+    else:
+        # No memory: block at all — append a fresh one.
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append("memory:\n")
+        lines.append("  provider: ragger\n")
+        changed = True
+        print("[+]   memory: block missing — appended with provider: ragger")
 
 if changed:
     bak = cfg_path.with_suffix(f".yaml.bak-{datetime.date.today().isoformat()}")
