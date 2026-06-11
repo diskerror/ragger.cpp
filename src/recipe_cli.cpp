@@ -29,6 +29,7 @@ const char* layer_kind_name(LayerKind k) {
         case LayerKind::SessionSummary: return "session_summary";
         case LayerKind::ProjectSummary: return "project_summary";
         case LayerKind::Decisions:      return "decisions";
+        case LayerKind::GeneralSearch:  return "general_search";
     }
     return "?";
 }
@@ -84,7 +85,7 @@ void print_recipe(const Recipe& r, const std::string& ini_default,
     std::println("");
     std::println("  Layers (applied in order, oldest→newest in the output):");
     for (const auto& layer : r.layers) {
-        std::println("    - {:<16} count: {}",
+        std::println("    - {:<16} limit: {}",
                      layer_kind_name(layer.kind),
                      layer.limit == 0 ? std::string("unlimited")
                                       : std::to_string(layer.limit));

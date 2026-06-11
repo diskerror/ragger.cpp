@@ -22,6 +22,7 @@ const std::unordered_map<std::string, LayerKind>& layer_kind_map() {
         {"session_summary", LayerKind::SessionSummary},
         {"project_summary", LayerKind::ProjectSummary},
         {"decisions",       LayerKind::Decisions},
+        {"general_search",  LayerKind::GeneralSearch},
     };
     return m;
 }
@@ -111,6 +112,7 @@ std::vector<Recipe> builtin_recipes() {
         {LayerKind::SessionSummary, 1},
         {LayerKind::ProjectSummary, 1},
         {LayerKind::Decisions,      3},
+        {LayerKind::GeneralSearch,  5},
     };
     nf.max_tokens = 8000;
     out.push_back(std::move(nf));

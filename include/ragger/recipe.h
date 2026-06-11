@@ -17,6 +17,11 @@
  *   session_summary  — current session's L3 (latest), up to `limit`
  *   project_summary  — recent L4 project summaries, up to `limit`
  *   decisions        — current L6 decisions, up to `limit`
+ *   general_search   — up to `limit` relevance-ranked results from across
+ *                      ALL summaries+documents+decisions (session-agnostic),
+ *                      excluding anything earlier layers already emitted.
+ *                      Query = current session's latest user turn + up to 2
+ *                      most recent turn summaries.
  *
  * `limit` is per-layer. `max_tokens` is a
  * hard ceiling; assembly truncates from the oldest end once exceeded.
@@ -36,6 +41,7 @@ enum class LayerKind {
     SessionSummary,
     ProjectSummary,
     Decisions,
+    GeneralSearch,
 };
 
 struct RecipeLayer {

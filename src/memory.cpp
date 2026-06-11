@@ -387,6 +387,56 @@ SessionContext build_context(RaggerMemory& memory,
                 }
                 break;
             }
+            case LayerKind::GeneralSearch: {
+                // Session-AGNOSTIC relevance pass: surface the most relevant
+                // context from anywhere in the corpus (all summaries +
+                // documents) that earlier session-scoped layers did NOT
+                // already emit. "Insight by association."
+                int wanted = layer.limit > 0 ? layer.limit : 5;
+
+                // Query = current session's latest user turn + up to the 2
+                // most recent turn summaries, concatenated into one string.
+                std::string query;
+                if (!turns_desc.empty() && !turns_desc[0].user_text.empty()) {
+                    query += turns_desc[0].user_text;
+                }
+                for (size_t i = 0; i < turn_summaries.size() && i < 2; ++i) {
+                    if (turn_summaries[i].text.empty()) continue;
+                    if (!query.empty()) query += "\n";
+                    query += turn_summaries[i].text;
+                }
+                if (query.empty()) break;  // nothing to search with → skip
+
+                // Over-fetch so that after dedup we still have enough to emit
+                // `wanted` survivors. K is a small buffer.
+                const int K = 8;
+                auto resp = memory.search(query, wanted + K, 0.0f, {});
+
+                // Collect survivors best-first. Dedup against text already
+                // pushed by earlier layers into `rev`.
+                std::vector<SearchResult> survivors;
+                for (const auto& r : resp.results) {
+                    if (static_cast<int>(survivors.size()) >= wanted) break;
+                    bool dup = false;
+                    for (const auto& c : rev) {
+                        if (c.text == r.text) { dup = true; break; }
+                    }
+                    if (dup) continue;
+                    survivors.push_back(r);
+                }
+
+                // ORDERING: `rev` is built newest-first and the final step
+                // assigns out.chunks = rev.rbegin()..rev.rend(), i.e. the
+                // order within rev is FLIPPED. We want the general_search
+                // block to read best-first in the final output, so push its
+                // results worst-first into rev (the flip then yields
+                // best-first). survivors is best-first, so iterate it in
+                // reverse when pushing.
+                for (auto it = survivors.rbegin(); it != survivors.rend(); ++it) {
+                    rev.push_back({"general_search", it->text, it->timestamp});
+                }
+                break;
+            }
         }
     }
 

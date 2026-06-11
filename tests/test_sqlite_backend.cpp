@@ -702,10 +702,68 @@ void test_path_normalization(ragger::Embedder& emb) {
     cleanup();
 }
 
+// search() merges three corpora — summaries (L2/L3/L4), documents (L5), and
+// decisions (L6) — into one ranked result set, tagging each hit with a
+// metadata["source"]. This drives the general_search recipe layer. Decisions
+// and documents are embedded via backfill (they may be inserted without an
+// embedding), so this also exercises backfill_embeddings() invalidating the
+// document + decision caches.
+void test_search_merges_three_corpora(ragger::Embedder& emb) {
+    cleanup();
+    {
+        ragger::SqliteBackend db(emb, TEMP_DB);
+
+        // (1) Summary via the public store API (embedded immediately).
+        db.store("The Voyager probes left the solar system carrying golden records.");
+
+        // (2) Document via store_document (embedded immediately).
+        ragger::DocumentChunk doc;
+        doc.text  = "Photosynthesis converts sunlight into chemical energy in plants.";
+        doc.title = "Botany Notes";
+        db.store_document(doc);
+
+        // (3) Decision inserted directly into the L6 table with NO embedding,
+        // mirroring how the external summarizer writes decisions. backfill
+        // then embeds it and must invalidate the decision cache.
+        {
+            sqlite3* raw = nullptr;
+            assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+            const char* sql =
+                "INSERT INTO decisions (text, status, tags, timestamp) "
+                "VALUES ('We will migrate the database to PostgreSQL next quarter.', "
+                "'current', '', '2026-01-01T00:00:00Z')";
+            char* err = nullptr;
+            assert(sqlite3_exec(raw, sql, nullptr, nullptr, &err) == SQLITE_OK);
+            sqlite3_close(raw);
+        }
+
+        // Embed the unembedded decision row (and any other deferred rows).
+        int filled = db.backfill_embeddings(emb);
+        assert(filled >= 1);
+
+        // Each corpus should surface for its own topical query, tagged by source.
+        auto source_of = [&](const std::string& query) -> std::string {
+            auto resp = db.search(query, 5, 0.0f, {});
+            assert(!resp.results.empty());
+            return resp.results[0].metadata.value("source", std::string());
+        };
+
+        assert(source_of("interstellar spacecraft golden record") == "summary");
+        assert(source_of("how plants make energy from light")     == "document");
+        assert(source_of("plan to switch to PostgreSQL database")  == "decision");
+
+        // corpus_size in the timing payload reflects all three tables.
+        auto resp = db.search("database", 5, 0.0f, {});
+        assert(resp.timing.value("corpus_size", 0) == 3);
+
+        db.close();
+    }
+    cleanup();
+}
+
 // -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
-
 int main() {
     // Need config for model dir
     ragger::init_config("");
@@ -738,6 +796,7 @@ int main() {
     test_timestamp_format(emb);
     test_v2_summaries_backing(emb);
     test_store_document(emb);
+    test_search_merges_three_corpora(emb);
     test_store_turn(emb);
     test_summary_primitives(emb);
     test_path_normalization(emb);

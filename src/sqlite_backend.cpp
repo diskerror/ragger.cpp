@@ -121,6 +121,29 @@ struct SqliteBackend::Impl {
     std::vector<json>              cached_metadata;
     std::vector<std::string>       cached_timestamps;
 
+    // Parallel embedding cache for the documents (L5) table — invalidated on
+    // document writes. Mirrors the summaries cache above; vector scores come
+    // from here, keyword scores from FTS5 (documents_fts) at query time. Both
+    // corpora are merged into a single ranked top-k by search().
+    bool                           doc_cache_valid = false;
+    std::vector<int>               doc_ids;
+    std::vector<std::string>       doc_texts;
+    Eigen::MatrixXf                doc_embeddings;      // rows × dims
+    std::vector<json>              doc_metadata;
+    std::vector<std::string>       doc_timestamps;
+
+    // Parallel embedding cache for the decisions (L6) table — invalidated on
+    // decision writes. Mirrors the caches above; vector scores come from here,
+    // keyword scores from FTS5 (decisions_fts) at query time. All three corpora
+    // (summaries + documents + decisions) are merged into one ranked top-k by
+    // search().
+    bool                           dec_cache_valid = false;
+    std::vector<int>               dec_ids;
+    std::vector<std::string>       dec_texts;
+    Eigen::MatrixXf                dec_embeddings;      // rows × dims
+    std::vector<json>              dec_metadata;
+    std::vector<std::string>       dec_timestamps;
+
     Impl(Embedder& emb, const std::string& path)
         : embedder(&emb)
     {
@@ -438,6 +461,8 @@ struct SqliteBackend::Impl {
 
     // ---- cache --------------------------------------------------------
     void invalidate_cache() { cache_valid = false; }
+    void invalidate_doc_cache() { doc_cache_valid = false; }
+    void invalidate_dec_cache() { dec_cache_valid = false; }
 
     // Loads the summaries table into the vector cache. Keyword scores come
     // from FTS5 (summaries_fts) at query time — see keyword_scores().
@@ -485,6 +510,7 @@ struct SqliteBackend::Impl {
             // Lean v2 summaries: surface level/status/tags as metadata so the
             // generic API and keep-protection (via tags) have what they need.
             json meta = json::object();
+            meta["source"] = "summary";
             meta["level"]  = col_text(3);
             meta["status"] = col_text(4);
             std::string tags = col_text(5);
@@ -504,6 +530,127 @@ struct SqliteBackend::Impl {
         }
 
         cache_valid = true;
+    }
+
+    // Loads the documents (L5) table into the parallel vector cache. Mirrors
+    // ensure_cache(): vector scores come from here, keyword scores from FTS5
+    // (documents_fts) at query time. Metadata carries source="document" plus
+    // the title so search() consumers can distinguish documents from summaries.
+    void ensure_doc_cache() {
+        if (doc_cache_valid) return;
+
+        doc_ids.clear();
+        doc_texts.clear();
+        doc_metadata.clear();
+        doc_timestamps.clear();
+
+        Stmt s(db,
+            "SELECT document_id, text, embedding, title, tags, imported_at "
+            "FROM documents");
+
+        std::vector<std::vector<float>> emb_rows;
+        const int expected_dims = config().embedding_dimensions;
+
+        while (s.step()) {
+            auto col_text = [&](int i) -> std::string { return s.column_text(i); };
+            doc_ids.push_back(s.column_int(0));
+            doc_texts.push_back(col_text(1));
+
+            const void* blob = s.column_blob(2);
+            int blob_bytes   = s.column_bytes(2);
+            const int expected_bytes = expected_dims *
+                static_cast<int>(store_f16_ ? sizeof(uint16_t) : sizeof(float));
+            std::vector<float> emb(expected_dims, 0.0f);
+            if (blob != nullptr && blob_bytes == expected_bytes) {
+                if (store_f16_) {
+                    const uint16_t* h = static_cast<const uint16_t*>(blob);
+                    for (int i = 0; i < expected_dims; ++i) emb[i] = f16_to_f32(h[i]);
+                } else {
+                    const float* f = static_cast<const float*>(blob);
+                    for (int i = 0; i < expected_dims; ++i) emb[i] = f[i];
+                }
+            }
+            emb_rows.push_back(std::move(emb));
+
+            json meta = json::object();
+            meta["source"] = "document";
+            meta["title"]  = col_text(3);
+            std::string tags = col_text(4);
+            if (!tags.empty()) meta["tags"] = tags;
+            doc_metadata.push_back(std::move(meta));
+
+            doc_timestamps.push_back(col_text(5));
+        }
+
+        int n = static_cast<int>(emb_rows.size());
+        doc_embeddings.resize(n, expected_dims);
+        for (int i = 0; i < n; ++i) {
+            doc_embeddings.row(i) =
+                Eigen::Map<Eigen::RowVectorXf>(emb_rows[i].data(), expected_dims);
+        }
+
+        doc_cache_valid = true;
+    }
+
+    // Loads the decisions (L6) table into the parallel vector cache. Mirrors
+    // ensure_cache(): vector scores come from here, keyword scores from FTS5
+    // (decisions_fts) at query time. Metadata carries source="decision" plus
+    // the status so search() consumers can distinguish decisions from the
+    // other corpora.
+    void ensure_dec_cache() {
+        if (dec_cache_valid) return;
+
+        dec_ids.clear();
+        dec_texts.clear();
+        dec_metadata.clear();
+        dec_timestamps.clear();
+
+        Stmt s(db,
+            "SELECT decision_id, text, embedding, status, tags, timestamp "
+            "FROM decisions");
+
+        std::vector<std::vector<float>> emb_rows;
+        const int expected_dims = config().embedding_dimensions;
+
+        while (s.step()) {
+            auto col_text = [&](int i) -> std::string { return s.column_text(i); };
+            dec_ids.push_back(s.column_int(0));
+            dec_texts.push_back(col_text(1));
+
+            const void* blob = s.column_blob(2);
+            int blob_bytes   = s.column_bytes(2);
+            const int expected_bytes = expected_dims *
+                static_cast<int>(store_f16_ ? sizeof(uint16_t) : sizeof(float));
+            std::vector<float> emb(expected_dims, 0.0f);
+            if (blob != nullptr && blob_bytes == expected_bytes) {
+                if (store_f16_) {
+                    const uint16_t* h = static_cast<const uint16_t*>(blob);
+                    for (int i = 0; i < expected_dims; ++i) emb[i] = f16_to_f32(h[i]);
+                } else {
+                    const float* f = static_cast<const float*>(blob);
+                    for (int i = 0; i < expected_dims; ++i) emb[i] = f[i];
+                }
+            }
+            emb_rows.push_back(std::move(emb));
+
+            json meta = json::object();
+            meta["source"] = "decision";
+            meta["status"] = col_text(3);
+            std::string tags = col_text(4);
+            if (!tags.empty()) meta["tags"] = tags;
+            dec_metadata.push_back(std::move(meta));
+
+            dec_timestamps.push_back(col_text(5));
+        }
+
+        int n = static_cast<int>(emb_rows.size());
+        dec_embeddings.resize(n, expected_dims);
+        for (int i = 0; i < n; ++i) {
+            dec_embeddings.row(i) =
+                Eigen::Map<Eigen::RowVectorXf>(emb_rows[i].data(), expected_dims);
+        }
+
+        dec_cache_valid = true;
     }
 
     // ---- FTS5 keyword scoring -----------------------------------------
@@ -535,6 +682,40 @@ struct SqliteBackend::Impl {
         Stmt s(db,
                 "SELECT rowid, bm25(summaries_fts) FROM summaries_fts "
                 "WHERE summaries_fts MATCH ?");
+        s.bind(1, match_expr);
+        while (s.step()) {
+            int id   = s.column_int(0);
+            double val = s.column_double(1);
+            out[id]  = static_cast<float>(-val);
+        }
+        return out;
+    }
+
+    // bm25(documents_fts) over a MATCH expression → document_id → score.
+    // Analogous to keyword_scores() but against the documents FTS5 index.
+    std::unordered_map<int, float> doc_keyword_scores(const std::string& match_expr) {
+        std::unordered_map<int, float> out;
+        if (match_expr.empty()) return out;
+        Stmt s(db,
+                "SELECT rowid, bm25(documents_fts) FROM documents_fts "
+                "WHERE documents_fts MATCH ?");
+        s.bind(1, match_expr);
+        while (s.step()) {
+            int id   = s.column_int(0);
+            double val = s.column_double(1);
+            out[id]  = static_cast<float>(-val);
+        }
+        return out;
+    }
+
+    // bm25(decisions_fts) over a MATCH expression → decision_id → score.
+    // Analogous to keyword_scores() but against the decisions FTS5 index.
+    std::unordered_map<int, float> dec_keyword_scores(const std::string& match_expr) {
+        std::unordered_map<int, float> out;
+        if (match_expr.empty()) return out;
+        Stmt s(db,
+                "SELECT rowid, bm25(decisions_fts) FROM decisions_fts "
+                "WHERE decisions_fts MATCH ?");
         s.bind(1, match_expr);
         while (s.step()) {
             int id   = s.column_int(0);
@@ -646,6 +827,7 @@ struct SqliteBackend::Impl {
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         }
 
+        invalidate_doc_cache();
         return static_cast<int>(sqlite3_last_insert_rowid(db));
     }
 
@@ -1099,9 +1281,11 @@ struct SqliteBackend::Impl {
     //
     // NOTE: the lean v2 summaries table has no collection column, so the
     // `collections` filter is currently a no-op (kept for API/source compat).
-    // Documents (L5) are not yet merged into general search — that returns
-    // with the documents-search recipe work; this function is structured so
-    // adding a documents pass is a localized change.
+    // Documents (L5) and decisions (L6) ARE merged into search: parallel passes
+    // (ensure_doc_cache / ensure_dec_cache + their FTS scorers) are scored
+    // identically and merged with the summaries results into the single ranked
+    // top-k returned here. Each SearchResult's metadata["source"] is "summary",
+    // "document", or "decision" so callers can tell the corpora apart.
     SearchResponse search(const std::string& query, int limit,
                           float min_score,
                           std::vector<std::string> /*collections*/) {
@@ -1109,33 +1293,55 @@ struct SqliteBackend::Impl {
         auto t_start = clock::now();
 
         ensure_cache();
-        int n = static_cast<int>(cached_ids.size());
-        if (n == 0) return {{}, {{"corpus_size", 0}}};
+        ensure_doc_cache();
+        ensure_dec_cache();
+        int n_sum = static_cast<int>(cached_ids.size());
+        int n_doc = static_cast<int>(doc_ids.size());
+        int n_dec = static_cast<int>(dec_ids.size());
+        if (n_sum == 0 && n_doc == 0 && n_dec == 0) return {{}, {{"corpus_size", 0}}};
 
         // ---- query embedding ------------------------------------------
         auto t_embed_start = clock::now();
         auto q_vec = embedder->encode(query);
         auto t_embed_end = clock::now();
 
-        // ---- vector cosine --------------------------------------------
         auto t_search_start = clock::now();
         Eigen::Map<Eigen::VectorXf> q(q_vec.data(), static_cast<int>(q_vec.size()));
         Eigen::VectorXf q_norm = q.normalized();
 
-        Eigen::MatrixXf emb = cached_embeddings;
-        Eigen::VectorXf norms = emb.rowwise().norm();
-        for (int i = 0; i < n; ++i)
-            if (norms(i) > 1e-12f) emb.row(i) /= norms(i);
-        Eigen::VectorXf similarities = emb * q_norm;   // raw cosine, reported
+        // A scored candidate: raw cosine is reported as the score, the blended
+        // value drives ranking. Both corpora produce these and are merged.
+        struct Candidate {
+            float        blended;
+            SearchResult result;
+        };
+        std::vector<Candidate> candidates;
+        candidates.reserve(static_cast<size_t>(n_sum + n_doc + n_dec));
 
-        // ---- FTS5 keyword + hybrid blend ------------------------------
-        Eigen::VectorXf combined = similarities;
-        if (config().bm25_enabled) {
-            auto kw = keyword_scores(fts_match_expr(query));
-            if (!kw.empty()) {
+        // Score one corpus (vector cosine blended with FTS5 bm25), pushing its
+        // rows as Candidates. Shared by the summaries and documents passes so
+        // the blend logic stays in exactly one place.
+        auto score_corpus =
+            [&](const std::vector<int>& ids,
+                const std::vector<std::string>& texts,
+                const Eigen::MatrixXf& cache_emb,
+                const std::vector<json>& meta,
+                const std::vector<std::string>& ts,
+                const std::unordered_map<int, float>& kw) {
+            int n = static_cast<int>(ids.size());
+            if (n == 0) return;
+
+            Eigen::MatrixXf emb = cache_emb;
+            Eigen::VectorXf norms = emb.rowwise().norm();
+            for (int i = 0; i < n; ++i)
+                if (norms(i) > 1e-12f) emb.row(i) /= norms(i);
+            Eigen::VectorXf similarities = emb * q_norm;   // raw cosine, reported
+
+            Eigen::VectorXf combined = similarities;
+            if (config().bm25_enabled && !kw.empty()) {
                 Eigen::VectorXf kw_vec(n);
                 for (int i = 0; i < n; ++i) {
-                    auto it = kw.find(cached_ids[i]);
+                    auto it = kw.find(ids[i]);
                     kw_vec(i) = (it == kw.end()) ? 0.0f : it->second;
                 }
                 auto norm_minmax = [](Eigen::VectorXf& v) {
@@ -1148,23 +1354,48 @@ struct SqliteBackend::Impl {
                 combined = config().vector_weight * vec_norm +
                            config().bm25_weight   * kw_norm;
             }
-        }
+
+            for (int i = 0; i < n; ++i) {
+                candidates.push_back({combined(i),
+                    SearchResult{ids[i], texts[i], similarities(i),
+                                 meta[i], ts[i]}});
+            }
+        };
+
+        std::string match_expr = fts_match_expr(query);
+        score_corpus(cached_ids, cached_texts, cached_embeddings,
+                     cached_metadata, cached_timestamps,
+                     config().bm25_enabled ? keyword_scores(match_expr)
+                                           : std::unordered_map<int, float>{});
+        score_corpus(doc_ids, doc_texts, doc_embeddings,
+                     doc_metadata, doc_timestamps,
+                     config().bm25_enabled ? doc_keyword_scores(match_expr)
+                                           : std::unordered_map<int, float>{});
+        score_corpus(dec_ids, dec_texts, dec_embeddings,
+                     dec_metadata, dec_timestamps,
+                     config().bm25_enabled ? dec_keyword_scores(match_expr)
+                                           : std::unordered_map<int, float>{});
         auto t_search_end = clock::now();
 
-        // ---- top-k selection ------------------------------------------
-        int top_k = std::min(limit, n);
-        std::vector<int> ranking(n);
+        // ---- merged top-k selection -----------------------------------
+        // Rank the merged candidate pool by blended score, then emit up to
+        // `limit` whose reported raw cosine passes min_score.
+        int total = static_cast<int>(candidates.size());
+        int top_k = std::min(limit, total);
+        std::vector<int> ranking(total);
         std::iota(ranking.begin(), ranking.end(), 0);
-        std::partial_sort(ranking.begin(), ranking.begin() + top_k, ranking.end(),
-                          [&](int a, int b) { return combined(a) > combined(b); });
+        std::partial_sort(ranking.begin(),
+                          ranking.begin() + std::min(top_k, total),
+                          ranking.end(),
+                          [&](int a, int b) {
+                              return candidates[a].blended > candidates[b].blended;
+                          });
 
         std::vector<SearchResult> results;
         for (int k = 0; k < top_k; ++k) {
-            int i = ranking[k];
-            float score = similarities(i);   // report raw cosine
-            if (score < min_score) continue;
-            results.push_back({cached_ids[i], cached_texts[i], score,
-                               cached_metadata[i], cached_timestamps[i]});
+            const auto& c = candidates[ranking[k]];
+            if (c.result.score < min_score) continue;
+            results.push_back(c.result);
         }
 
         auto ms = [](auto a, auto b) {
@@ -1174,7 +1405,7 @@ struct SqliteBackend::Impl {
             {"embedding_ms", ms(t_embed_start, t_embed_end)},
             {"search_ms",    ms(t_search_start, t_search_end)},
             {"total_ms",     ms(t_start, clock::now())},
-            {"corpus_size",  n}
+            {"corpus_size",  n_sum + n_doc + n_dec}
         };
         return {std::move(results), std::move(timing)};
     }
@@ -1296,6 +1527,8 @@ struct SqliteBackend::Impl {
 
         std::cout << "\n";
         invalidate_cache();
+        invalidate_doc_cache();
+        invalidate_dec_cache();
         return doc_count;
     }
 
@@ -1342,7 +1575,11 @@ struct SqliteBackend::Impl {
             }
         }
 
-        if (updated > 0) invalidate_cache();
+        if (updated > 0) {
+            invalidate_cache();
+            invalidate_doc_cache();
+            invalidate_dec_cache();
+        }
         return updated;
     }
 
@@ -1354,7 +1591,7 @@ struct SqliteBackend::Impl {
         bind_embedding(s.raw(), 1, emb);
         s.bind(2, document_id);
         if (s.exec() && sqlite3_changes(db) > 0) {
-            invalidate_cache();
+            invalidate_doc_cache();
             return true;
         }
         return false;

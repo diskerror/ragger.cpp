@@ -1,11 +1,12 @@
 {
     "name": "tldr",
-    "description": "Summary-heavy, almost no verbatim text. Ten turn summaries plus session/project rollups plus a few decisions. For token-constrained contexts (small or cheap models, mobile, narrow context windows) that still need real history — the cost is loss of phrasing fidelity from the original turns.",
+    "description": "Summary-heavy, almost no verbatim text. Ten turn summaries plus session/project rollups plus a few decisions plus a small session-agnostic relevance sweep. For token-constrained contexts (small or cheap models, mobile, narrow context windows) that still need real history — the cost is loss of phrasing fidelity from the original turns.",
     "layers": [
         { "kind": "turn_summary",    "limit": 10 },
         { "kind": "session_summary", "limit": 1 },
         { "kind": "project_summary", "limit": 1 },
-        { "kind": "decisions",       "limit": 5 }
+        { "kind": "decisions",       "limit": 5 },
+        { "kind": "general_search",  "limit": 3 }
     ],
     "max_tokens": 4000,
     "chars_per_token": 4.0
