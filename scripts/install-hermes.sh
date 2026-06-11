@@ -223,6 +223,55 @@ if changed:
     print(f"[+]   updated {cfg_path}")
 PYEOF
 
+# --- Patch Hermes core to pass the live model name to memory providers ---
+#
+# Hermes core calls MemoryProvider.on_turn_start() from agent/turn_context.py
+# WITHOUT the model name, so the plugin can't record which model is conversing
+# (no model_id). We add model=agent.model to that call. Idempotent; a `hermes`
+# update overwrites turn_context.py and reverts this, so re-run after updates.
+# Tracking upstream fix: pass model= to on_turn_start in core.
+
+if command -v python3 >/dev/null 2>&1; then
+    python3 - << 'PYEOF'
+import pathlib, sys
+
+# Locate the installed Hermes agent/turn_context.py
+candidates = [
+    pathlib.Path.home() / ".hermes" / "hermes-agent" / "agent" / "turn_context.py",
+]
+try:
+    import importlib.util
+    spec = importlib.util.find_spec("agent.turn_context")
+    if spec and spec.origin:
+        candidates.insert(0, pathlib.Path(spec.origin))
+except Exception:
+    pass
+
+path = next((p for p in candidates if p.exists()), None)
+if path is None:
+    print("[!]   Hermes agent/turn_context.py not found — skipping core patch")
+    print("      (model name won't be recorded until this is patched by hand)")
+    sys.exit(0)
+
+src = path.read_text(encoding="utf-8")
+good = "on_turn_start(agent._user_turn_count, _turn_msg, model=agent.model)"
+bad = "on_turn_start(agent._user_turn_count, _turn_msg)"
+
+if good in src:
+    print("[+]   core model patch already present — no change needed")
+elif bad in src:
+    path.write_text(src.replace(bad, good), encoding="utf-8")
+    print(f"[+]   patched {path} (pass model=agent.model to on_turn_start)")
+else:
+    print(f"[!]   on_turn_start call site not found in {path}")
+    print("      Hermes internals may have changed — patch model= by hand")
+PYEOF
+else
+    warn "python3 not found — cannot apply Hermes core model patch."
+    warn "Manually add 'model=agent.model' to the on_turn_start call in"
+    warn "  ~/.hermes/hermes-agent/agent/turn_context.py"
+fi
+
 # --- Done ---
 
 echo ""
