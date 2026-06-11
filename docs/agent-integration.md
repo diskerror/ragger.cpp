@@ -172,6 +172,40 @@ does) pick the rule up automatically. See
 [`agent-memory-instructions.md`](agent-memory-instructions.md) for
 the full text.
 
+## Wiring Hermes (which setting wins)
+
+Hermes decides whether to route memory through Ragger via a single
+key: `memory.provider` in `~/.hermes/config.yaml`. Set it to `ragger`
+and the Ragger plugin takes over capture/recall; leave it blank and
+Hermes uses its built-in flat-file memory.
+
+Three things can touch that key, and they don't layer — **the file is
+the single source of truth.** Whoever writes `config.yaml` last wins:
+
+1. **`scripts/install-hermes.sh`** — the installer. On run it ensures
+   `memory.provider: ragger` exists: it rewrites an existing line,
+   inserts the key if the `memory:` block lacks it, or appends a whole
+   `memory:` block if absent. Idempotent — safe to re-run. This is the
+   recommended way to wire a fresh install.
+2. **`hermes config set memory.provider ragger`** — the CLI. Edits the
+   same file directly. Use this for a one-off flip without re-running
+   the installer.
+3. **Hand-editing `config.yaml`** — also valid; just match the
+   2-space indent under `memory:`.
+
+There is no precedence logic and no separate runtime override — Hermes
+reads the value from the file at startup. If Ragger ever seems
+unwired, check the live value:
+
+```bash
+grep -A1 '^memory:' ~/.hermes/config.yaml   # expect "provider: ragger"
+```
+
+A `hermes` core update can clobber the plugin's model-name capture
+(it patches `turn_context.py` to forward `model=` into
+`on_turn_start`); re-run `install-hermes.sh` after upgrading Hermes to
+restore it. Upstream PR #43208 fixes this permanently once merged.
+
 ## Related
 
 - [HTTP API](http-api.md) — `/turn`, `/session/<id>?recipe=`, auth
