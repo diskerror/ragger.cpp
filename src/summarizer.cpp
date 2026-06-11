@@ -8,8 +8,45 @@
 #include "diskerror/logger.h"
 
 #include <format>
+#include <string_view>
 
 namespace ragger {
+
+namespace {
+
+// Stable bracketed markers Hermes prepends to system-injected user turns.
+// Matched case-sensitively against the trimmed start of the user text. Kept
+// deliberately narrow: each is a phrase Hermes core controls, so a real human
+// message is extraordinarily unlikely to begin with one. Note the OUT-OF-BAND
+// USER MESSAGE marker is intentionally absent — that wraps a genuine human
+// message and should be summarized normally.
+constexpr std::string_view kSystemMarkers[] = {
+    "[System note:",
+    "[Note: model was just switched",
+    "[CONTEXT COMPACTION",
+    "[IMPORTANT: Background process",
+};
+
+std::string_view ltrim_view(std::string_view s) {
+    size_t i = 0;
+    while (i < s.size() &&
+           (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r'))
+        ++i;
+    return s.substr(i);
+}
+
+} // namespace
+
+bool is_system_injected_turn(const std::string& user_text) {
+    const std::string_view body = ltrim_view(user_text);
+    for (const auto marker : kSystemMarkers) {
+        if (body.size() >= marker.size() &&
+            body.compare(0, marker.size(), marker) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
 
 std::string summarize_transcript(
     InferenceClient& inference,

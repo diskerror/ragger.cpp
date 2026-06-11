@@ -22,4 +22,14 @@ std::string summarize_transcript(
     InferenceClient& inference,
     const std::vector<std::pair<std::string, std::string>>& turns);
 
+/// True when the user side of a turn is *entirely* a Hermes system-injected
+/// annotation rather than something the human typed — model-switch notes,
+/// context-compaction handoffs, interruption notices, background-process
+/// completion reports. These carry no conversational content worth indexing,
+/// so the summarizer skips them deterministically (no inference call, no L2
+/// summary row). The raw turn is still persisted upstream by capture_turn, so
+/// the system event remains auditable; only the searchable summary is omitted.
+/// Detection is prefix-based on the stable bracketed markers Hermes emits.
+bool is_system_injected_turn(const std::string& user_text);
+
 } // namespace ragger

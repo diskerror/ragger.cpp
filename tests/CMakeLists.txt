@@ -51,3 +51,7 @@ target_link_libraries(test_embed_executor PRIVATE ragger_core)
 # Point the test at the freshly-built ragger binary it spawns.
 target_compile_definitions(test_embed_executor PRIVATE RAGGER_BIN="$<TARGET_FILE:ragger>")
 add_test(NAME test_embed_executor COMMAND test_embed_executor)
+
+add_executable(test_summarizer test_summarizer.cpp)
+target_link_libraries(test_summarizer PRIVATE ragger_core)
+add_test(NAME test_summarizer COMMAND test_summarizer)

@@ -183,6 +183,19 @@ void SummarizerService::pause_timer_loop() {
 bool SummarizerService::handle_l2(const Job& j) {
     if (j.assistant_text.empty()) return true;  // partial turn
 
+    // System-injected turns carry no conversational content: model-switch
+    // notes, context-compaction handoffs, interruption notices, background-
+    // process completion reports. Skip them deterministically — no inference,
+    // no summary row. The raw turn stays in the `turns` table (capture path
+    // already wrote it), so the system event remains auditable.
+    if (is_system_injected_turn(j.user_text)) {
+        Diskerror::logger::info(std::format(
+            "[summarizer] skipping system-injected turn (session={}, ts={})",
+            j.session_guid.empty() ? "-" : j.session_guid,
+            j.source_timestamp));
+        return true;
+    }
+
     // Trivial-turn filter: skip inference (and skip writing any summary row)
     // when the turn is too short to contain real information. "test | test",
     // one-word pings, and similar noise don't belong in the summary store.
@@ -258,11 +271,15 @@ bool SummarizerService::handle_l3(const Job& j) {
     if (turns.empty()) return true;
 
     // turns_by_session_desc is newest-first; reverse for the transcript.
+    // Drop system-injected turns (model-switch notes, compaction handoffs,
+    // etc.) so they don't leak into the session summary.
     std::vector<std::pair<std::string, std::string>> pairs;
     pairs.reserve(turns.size());
     for (auto it = turns.rbegin(); it != turns.rend(); ++it) {
+        if (is_system_injected_turn(it->user_text)) continue;
         pairs.emplace_back(it->user_text, it->assistant_text);
     }
+    if (pairs.empty()) return true;  // nothing but system noise
     const std::string latest_ts = turns.front().timestamp;
     // L3 model_id = the memory/summarizer model, NOT the conversing model.
     // Rule: turns and L2-turn summaries record who the *user was talking
