@@ -183,18 +183,16 @@ void SummarizerService::pause_timer_loop() {
 bool SummarizerService::handle_l2(const Job& j) {
     if (j.assistant_text.empty()) return true;  // partial turn
 
-    // System-injected turns carry no conversational content: model-switch
-    // notes, context-compaction handoffs, interruption notices, background-
-    // process completion reports. Skip them deterministically — no inference,
-    // no summary row. The raw turn stays in the `turns` table (capture path
-    // already wrote it), so the system event remains auditable.
-    if (is_system_injected_turn(j.user_text)) {
-        Diskerror::logger::info(std::format(
-            "[summarizer] skipping system-injected turn (session={}, ts={})",
-            j.session_guid.empty() ? "-" : j.session_guid,
-            j.source_timestamp));
-        return true;
-    }
+    // System-injected turns (model-switch notes, compaction handoffs,
+    // interruption notices, background-process reports) carry no *user*
+    // content — but the assistant side may still be a real, substantive
+    // response (e.g. an interrupted turn the agent finished answering).
+    // Blank the user side and summarize the assistant alone, rather than
+    // skipping the turn: skipping would drop a good answer, and feeding the
+    // system note to the summarizer produced degenerate output like
+    // "The assistant " / "System". The raw turn row is untouched.
+    std::string eff_user = is_system_injected_turn(j.user_text)
+                               ? std::string{} : j.user_text;
 
     // Trivial-turn filter: skip inference (and skip writing any summary row)
     // when the turn is too short to contain real information. "test | test",
@@ -203,9 +201,11 @@ bool SummarizerService::handle_l2(const Job& j) {
     // an inference call or pollute the search index with near-empty rows.
     // Threshold: combined user+assistant text under 80 chars, OR assistant
     // text alone under 20 chars. Both are tuned to catch single-word/phrase
-    // exchanges while keeping real single-sentence answers.
+    // exchanges while keeping real single-sentence answers. Uses the
+    // effective (system-note-stripped) user text so an interrupted turn with
+    // a real answer still qualifies.
     {
-        const size_t combined = j.user_text.size() + j.assistant_text.size();
+        const size_t combined = eff_user.size() + j.assistant_text.size();
         if (combined < 80 || j.assistant_text.size() < 20) {
             Diskerror::logger::info(std::format(
                 "[summarizer] skipping trivial turn (session={}, ts={}, "
@@ -231,7 +231,7 @@ bool SummarizerService::handle_l2(const Job& j) {
     if (inference_) {
         summary = summarize_transcript(
             *inference_,
-            {{ j.user_text, j.assistant_text }});
+            {{ eff_user, j.assistant_text }});
     }
 
     const std::string& guid = j.session_guid;
@@ -240,7 +240,7 @@ bool SummarizerService::handle_l2(const Job& j) {
 
     if (summary.empty()) {
         // Fallback: heuristic draft, tagged for later rewrite.
-        const auto draft = heuristic_draft(j.user_text, j.assistant_text);
+        const auto draft = heuristic_draft(eff_user, j.assistant_text);
         backend_.store_summary(draft, "turn", "complete",
                               j.model_name, guid, ts, "draft");
         Diskerror::logger::info(std::format(
@@ -271,13 +271,19 @@ bool SummarizerService::handle_l3(const Job& j) {
     if (turns.empty()) return true;
 
     // turns_by_session_desc is newest-first; reverse for the transcript.
-    // Drop system-injected turns (model-switch notes, compaction handoffs,
-    // etc.) so they don't leak into the session summary.
+    // For system-injected turns, blank the user side but KEEP the assistant
+    // content — an interrupted turn the agent still answered carries real
+    // signal. A turn that's *only* a system note (no assistant content of its
+    // own) contributes nothing and is dropped.
     std::vector<std::pair<std::string, std::string>> pairs;
     pairs.reserve(turns.size());
     for (auto it = turns.rbegin(); it != turns.rend(); ++it) {
-        if (is_system_injected_turn(it->user_text)) continue;
-        pairs.emplace_back(it->user_text, it->assistant_text);
+        if (is_system_injected_turn(it->user_text)) {
+            if (it->assistant_text.empty()) continue;  // pure system noise
+            pairs.emplace_back(std::string{}, it->assistant_text);
+        } else {
+            pairs.emplace_back(it->user_text, it->assistant_text);
+        }
     }
     if (pairs.empty()) return true;  // nothing but system noise
     const std::string latest_ts = turns.front().timestamp;
@@ -344,6 +350,10 @@ bool SummarizerService::handle_draft(const Job& j) {
 
 std::string SummarizerService::heuristic_draft(const std::string& user_text,
                                                const std::string& assistant_text) {
+    // Assistant-only turns (system-injected user side stripped upstream) emit
+    // just the assistant half — no empty "User:" prefix.
+    if (user_text.empty())
+        return "Assistant: " + trim_to(assistant_text, kDraftSideCap);
     return "User: " + trim_to(user_text, kDraftSideCap) +
            " | Assistant: " + trim_to(assistant_text, kDraftSideCap);
 }

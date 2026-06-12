@@ -1,10 +1,12 @@
 #include "ragger/summarizer.h"
+#include "ragger/inference.h"
 
 #include <cassert>
 #include <print>
 #include <string>
 
 using ragger::is_system_injected_turn;
+using ragger::summarize_transcript;
 
 // System-injected user turns: should be detected (summarizer skips them).
 void test_detects_system_markers() {
@@ -43,10 +45,35 @@ void test_ignores_human_turns() {
     std::println(" ok");
 }
 
+// Assistant-only turns (system-injected user side blanked upstream): the
+// trivial-turn shortcut must return the assistant text cleanly, never a
+// degenerate "User: " prefix or empty-prompt artifact. This path returns
+// before any inference call, so an empty-endpoint client is safe.
+void test_assistant_only_trivial() {
+    std::print("  test_assistant_only_trivial...");
+
+    ragger::InferenceClient inf({}, "", 4096);  // no endpoints — never called
+
+    // Short assistant-only turn (<120 chars) → verbatim assistant text.
+    auto s = summarize_transcript(inf, {{ std::string{}, "Stopped." }});
+    assert(s == "Stopped.");
+
+    // Empty user + empty assistant → empty (nothing to summarize).
+    auto e = summarize_transcript(inf, {{ std::string{}, std::string{} }});
+    assert(e.empty());
+
+    // Normal short pair still joins user | assistant.
+    auto p = summarize_transcript(inf, {{ "hi", "hello there" }});
+    assert(p == "hi | hello there");
+
+    std::println(" ok");
+}
+
 int main() {
     std::println("test_summarizer:");
     test_detects_system_markers();
     test_ignores_human_turns();
+    test_assistant_only_trivial();
     std::println("All summarizer tests passed.");
     return 0;
 }

@@ -59,7 +59,12 @@ std::string summarize_transcript(
     std::string conversation;
     std::size_t source_chars = 0;
     for (const auto& [user_text, asst_text] : turns) {
-        conversation += "**User:** " + user_text + "\n\n";
+        // Omit an empty user side entirely (assistant-only turns, e.g. an
+        // interrupted turn whose system-note user side was stripped). Emitting
+        // a bare "**User:** " line made the model summarize the empty prompt
+        // and produce degenerate output like "The assistant ".
+        if (!user_text.empty())
+            conversation += "**User:** " + user_text + "\n\n";
         conversation += "**Assistant:** " + asst_text + "\n\n";
         source_chars += user_text.size() + asst_text.size();
     }
@@ -69,6 +74,7 @@ std::string summarize_transcript(
     if (turns.size() == 1 && source_chars < 120) {
         const auto& [u, a] = turns.front();
         if (a.empty()) return u;
+        if (u.empty()) return a;
         return u + " | " + a;
     }
 
