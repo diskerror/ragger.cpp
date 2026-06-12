@@ -105,21 +105,22 @@ InferenceClient InferenceClient::from_config(const Config& cfg) {
         endpoints.insert(endpoints.end(), named.begin(), named.end());
     }
 
-    // Memory-model endpoint (optional). When [inference.memory] gives its own
-    // api_url, prepend an endpoint so the memory model's glob is matched before
-    // the general endpoints (first match wins). When no api_url is given, the
-    // memory model is assumed served by one of the endpoints above.
-    if (!cfg.inference_memory_api_url.empty()) {
-        std::string mm = cfg.inference_memory_model.empty()
-                             ? std::string("*") : cfg.inference_memory_model;
+    // Summarizer endpoint (optional). When [summarizer] gives its own
+    // api_url, prepend an endpoint so the summarizer model's glob is matched
+    // before the general endpoints (first match wins). When no api_url is
+    // given, the summarizer model is assumed served by one of the endpoints above.
+    if (!cfg.summarizer_api_url.empty()) {
+        std::string mm = cfg.summarizer_model.empty()
+                             ? std::string("*") : cfg.summarizer_model;
         endpoints.insert(endpoints.begin(),
-                         Endpoint("memory", cfg.inference_memory_api_url,
-                                  cfg.inference_memory_api_key, mm, ""));
+                         Endpoint("memory", cfg.summarizer_api_url,
+                                  cfg.summarizer_api_key, mm, "",
+                                  cfg.summarizer_max_tokens));
     }
 
     InferenceClient client(endpoints, cfg.inference_model, cfg.inference_max_tokens);
-    client.memory_model = cfg.inference_memory_model.empty()
-                              ? client.model : cfg.resolve_model(cfg.inference_memory_model);
+    client.memory_model = cfg.summarizer_model.empty()
+                              ? client.model : cfg.resolve_model(cfg.summarizer_model);
     return client;
 }
 

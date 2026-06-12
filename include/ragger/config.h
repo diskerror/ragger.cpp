@@ -76,10 +76,11 @@ struct Config {
     int inference_max_tokens = 4096;
     std::vector<InferenceEndpointConfig> inference_endpoints;
 
-    // --- Memory model ([inference.memory]) — summarization/routing ---
-    std::string inference_memory_model   = "";
-    std::string inference_memory_api_url = "";
-    std::string inference_memory_api_key = "";
+    // --- [summarizer] section — model, endpoint, and prompt for L2/L3 ---
+    std::string summarizer_model   = "";
+    std::string summarizer_api_url = "";
+    std::string summarizer_api_key = "";
+    int         summarizer_max_tokens = 0;  // 0 = inherit from [inference] max_tokens
     // System-prompt sent to the summarizer model. Empty (or missing in the
     // INI) uses the built-in default. Any non-empty value is passed through
     // as-is — set to a single space " " to suppress the system prompt entirely.
