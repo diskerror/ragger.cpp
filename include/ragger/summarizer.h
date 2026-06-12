@@ -32,4 +32,14 @@ std::string summarize_transcript(
 /// Detection is prefix-based on the stable bracketed markers Hermes emits.
 bool is_system_injected_turn(const std::string& user_text);
 
+/// Strip any leading Hermes system-injected annotation block(s) from a user
+/// turn, returning only the real human message that follows (trimmed). Hermes
+/// prepends notes like "[System note: ...] \n\n stop" — the human typed only
+/// "stop". Returns "" when the text is nothing but system annotation. Applied
+/// at capture time so the raw `turns` row stores clean user content. Handles
+/// balanced-bracket markers (System note, model-switch Note, bg-process
+/// IMPORTANT) and the CONTEXT COMPACTION block (stripped through its
+/// END-OF-SUMMARY sentinel). Idempotent; leaves non-system text untouched.
+std::string strip_system_injected_prefix(const std::string& user_text);
+
 } // namespace ragger

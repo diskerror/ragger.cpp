@@ -9,6 +9,7 @@
 #include "diskerror/logger.h"
 #include "ragger/lang.h"
 #include "ragger/recipe.h"
+#include "ragger/summarizer.h"
 #include <algorithm>
 #include <format>
 #include <mutex>
@@ -216,9 +217,21 @@ CaptureResult capture_turn(RaggerMemory& memory,
                            const std::string& session_id) {
     // Gate: turn capture is opt-in. Agent-driven store/search are unaffected.
     if (!config().capture_turns) return {false, -1};
-    // A turn needs at least the user side; skip empty pushes.
-    if (user.empty()) return {false, -1};
-    int turn_id = memory.store_turn(user, assistant, model,
+
+    // Strip any leading Hermes system-injected annotation (interruption
+    // notices, model-switch notes, compaction handoffs, bg-process reports)
+    // from the user side at capture time, so the raw `turns` row stores only
+    // what the human actually typed. "[System note: ...]\n\nstop" → "stop";
+    // a note with no trailing message → "". This is the single capture entry
+    // point for both HTTP /turn and the MCP capture_turn tool.
+    const std::string clean_user = strip_system_injected_prefix(user);
+
+    // Skip empty pushes. A turn needs real content on at least one side: keep
+    // assistant-only turns (interrupted turn the agent still answered), but
+    // drop a turn that was nothing but a system note with no assistant output.
+    if (clean_user.empty() && assistant.empty()) return {false, -1};
+
+    int turn_id = memory.store_turn(clean_user, assistant, model,
                                     /*defer_embedding=*/false, session_id);
     return {true, turn_id};
 }

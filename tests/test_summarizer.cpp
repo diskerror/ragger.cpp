@@ -69,11 +69,56 @@ void test_assistant_only_trivial() {
     std::println(" ok");
 }
 
+// Stripping: capture-time removal of leading system annotations.
+void test_strip_system_prefix() {
+    std::print("  test_strip_system_prefix...");
+    using ragger::strip_system_injected_prefix;
+
+    // The reported case: system note + the real one-word message.
+    assert(strip_system_injected_prefix(
+        "[System note: Your previous turn was interrupted before you could "
+        "process the last tool result(s). The conversation history contains "
+        "tool outputs you haven't responded to yet.]\n\nstop") == "stop");
+
+    // Note with nothing after it → empty.
+    assert(strip_system_injected_prefix(
+        "[System note: interrupted, please continue.]\n\n").empty());
+
+    // Model-switch note + real message.
+    assert(strip_system_injected_prefix(
+        "[Note: model was just switched from a to b via X.]\n\nturn 154")
+        == "turn 154");
+
+    // Stacked notes strip in sequence.
+    assert(strip_system_injected_prefix(
+        "[Note: model was just switched from a to b via X.]\n"
+        "[System note: interrupted.]\n\ngo") == "go");
+
+    // Leading whitespace before the marker is tolerated.
+    assert(strip_system_injected_prefix("  \n[System note: x]\n\nhi") == "hi");
+
+    // A normal human message is returned untouched (trimmed).
+    assert(strip_system_injected_prefix("just a normal message")
+        == "just a normal message");
+
+    // Brackets inside the real message are preserved (only a LEADING marker
+    // block is stripped).
+    assert(strip_system_injected_prefix("use arr[0] not arr[1]")
+        == "use arr[0] not arr[1]");
+
+    // Unterminated note → nothing trustworthy follows → empty.
+    assert(strip_system_injected_prefix(
+        "[System note: truncated with no close").empty());
+
+    std::println(" ok");
+}
+
 int main() {
     std::println("test_summarizer:");
     test_detects_system_markers();
     test_ignores_human_turns();
     test_assistant_only_trivial();
+    test_strip_system_prefix();
     std::println("All summarizer tests passed.");
     return 0;
 }

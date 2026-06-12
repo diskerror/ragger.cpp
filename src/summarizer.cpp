@@ -48,6 +48,69 @@ bool is_system_injected_turn(const std::string& user_text) {
     return false;
 }
 
+namespace {
+
+// Sentinel that closes a CONTEXT COMPACTION block. Everything from the
+// "[CONTEXT COMPACTION" opener through the end of the line containing this
+// sentinel is one annotation block. Matching the bracket alone is unsafe —
+// the summary body is full of '[...]' lookalikes.
+constexpr std::string_view kCompactionEnd = "END OF CONTEXT SUMMARY";
+
+// Which marker (if any) does `body` start with? Returns index into
+// kSystemMarkers, or -1.
+int leading_marker(std::string_view body) {
+    for (size_t k = 0; k < std::size(kSystemMarkers); ++k) {
+        const auto m = kSystemMarkers[k];
+        if (body.size() >= m.size() && body.compare(0, m.size(), m) == 0)
+            return static_cast<int>(k);
+    }
+    return -1;
+}
+
+} // namespace
+
+std::string strip_system_injected_prefix(const std::string& user_text) {
+    std::string_view body = ltrim_view(user_text);
+
+    // Strip leading annotation blocks repeatedly — Hermes can stack several
+    // (e.g. a model-switch Note followed by a System note).
+    for (;;) {
+        const int idx = leading_marker(body);
+        if (idx < 0) break;
+
+        const std::string_view marker = kSystemMarkers[idx];
+        if (marker == "[CONTEXT COMPACTION") {
+            // Strip through the end of the line carrying the END sentinel.
+            const size_t e = body.find(kCompactionEnd);
+            if (e == std::string_view::npos) {
+                // Malformed/truncated block — nothing trustworthy follows.
+                return "";
+            }
+            size_t eol = body.find('\n', e);
+            body = (eol == std::string_view::npos)
+                       ? std::string_view{}
+                       : ltrim_view(body.substr(eol + 1));
+        } else {
+            // Balanced-bracket marker: strip through the matching ']'.
+            int depth = 0;
+            size_t close = std::string_view::npos;
+            for (size_t i = 0; i < body.size(); ++i) {
+                if (body[i] == '[') ++depth;
+                else if (body[i] == ']') {
+                    if (--depth == 0) { close = i; break; }
+                }
+            }
+            if (close == std::string_view::npos) {
+                // Unterminated note — nothing trustworthy follows.
+                return "";
+            }
+            body = ltrim_view(body.substr(close + 1));
+        }
+    }
+
+    return std::string(body);
+}
+
 std::string summarize_transcript(
     InferenceClient& inference,
     const std::vector<std::pair<std::string, std::string>>& turns) {
