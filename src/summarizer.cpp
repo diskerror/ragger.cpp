@@ -142,16 +142,24 @@ std::string summarize_transcript(
         return u + " | " + a;
     }
 
-    const std::size_t target_chars = [&]() -> std::size_t {
-        const int cfg_val = config().summarizer_target_chars;
-        if (cfg_val > 0) return static_cast<std::size_t>(cfg_val);
-        return std::max<std::size_t>(source_chars / 4, 40);
-    }();
-    const std::size_t hard_cap = [&]() -> std::size_t {
-        const int cfg_val = config().summarizer_max_chars;
-        if (cfg_val > 0) return static_cast<std::size_t>(cfg_val);
-        return source_chars;
-    }();
+    // Summary size contract: percentages of the raw-turn character count.
+    // Defaults: target = 30%, hard cap = 60%.  Both are floored at 40 chars
+    // so trivially short exchanges are never squeezed to nothing.
+    // hard_cap is clamped to >= target_chars so the constraint is never
+    // impossible (e.g. if the user sets target_pct > max_pct by accident).
+    constexpr int kDefaultTargetPct = 30;
+    constexpr int kDefaultMaxPct    = 60;
+    constexpr std::size_t kMinChars = 40;
+
+    const int tpct = (config().summarizer_target_pct > 0)
+                         ? config().summarizer_target_pct : kDefaultTargetPct;
+    const int mpct = (config().summarizer_max_pct > 0)
+                         ? config().summarizer_max_pct    : kDefaultMaxPct;
+
+    const std::size_t target_chars =
+        std::max(kMinChars, source_chars * static_cast<std::size_t>(tpct) / 100);
+    const std::size_t hard_cap =
+        std::max(target_chars, source_chars * static_cast<std::size_t>(mpct) / 100);
 
     // Resolve the system prompt: INI `prompt` key overrides the built-in
     // default. Empty (or missing) uses the default; any non-empty value is

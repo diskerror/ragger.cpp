@@ -81,14 +81,16 @@ struct Config {
     std::string summarizer_api_url = "";
     std::string summarizer_api_key = "";
     int         summarizer_max_tokens  = 0;  // 0 = inherit from [inference] max_tokens
-    // Target summary length in characters. 0 = source_chars / 4 (min 40).
-    int         summarizer_target_chars = 0;
-    // Hard cap in characters. 0 = same as source length (never shorter than source).
-    int         summarizer_max_chars   = 0;
+    // Target summary length as a percentage of the raw turn size (1-100).
+    // 0 = use built-in default of 30%.
+    int         summarizer_target_pct  = 0;
+    // Hard cap as a percentage of the raw turn size (1-100).
+    // 0 = use built-in default of 60%. Always >= target_pct after clamping.
+    int         summarizer_max_pct     = 0;
     // System-prompt sent to the summarizer model. Empty (or missing in the
     // INI) uses the built-in default. Any non-empty value is passed through
     // as-is — set to a single space " " to suppress the system prompt entirely.
-    // Two positional placeholders {} {} are required (target_chars, hard_cap)
+    // Two positional placeholders {} {} are required (target chars, hard cap)
     // when overriding; the default already contains them.
     static constexpr std::string_view kDefaultSummarizerPrompt =
         "Summarize this conversation into a concise memory entry. "

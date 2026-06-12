@@ -138,8 +138,8 @@ api_url = http://localhost:1234/v1
 # api_key      =
 # max_tokens   = 1024
 #
-# target_chars = 0    # target summary length in chars; 0 = source_chars/4 (min 40)
-# max_chars    = 0    # hard cap in chars; 0 = same as source length
+# target_pct   = 0    # target summary length as % of raw turn; 0 = 30%
+# max_pct       = 0    # hard cap as % of raw turn; 0 = 60%
 #
 # System prompt for the summarizer. Leave empty (or omit) to use the built-in
 # default. Any non-empty value is passed through as-is. Two {} placeholders
@@ -400,8 +400,8 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "api_url")      cfg.summarizer_api_url      = val;
             else if (key == "api_key")      cfg.summarizer_api_key      = val;
             else if (key == "max_tokens")   cfg.summarizer_max_tokens   = std::stoi(val);
-            else if (key == "target_chars") cfg.summarizer_target_chars = std::stoi(val);
-            else if (key == "max_chars")    cfg.summarizer_max_chars    = std::stoi(val);
+            else if (key == "target_pct")   cfg.summarizer_target_pct  = std::stoi(val);
+            else if (key == "max_pct")      cfg.summarizer_max_pct     = std::stoi(val);
             else if (key == "prompt")       cfg.summarizer_prompt       = val;
         }
         else if (section.substr(0, 10) == "inference.") {
@@ -620,8 +620,8 @@ int reload_config() {
     RELOAD(summarizer_api_url);
     RELOAD(summarizer_api_key);
     RELOAD(summarizer_max_tokens);
-    RELOAD(summarizer_target_chars);
-    RELOAD(summarizer_max_chars);
+    RELOAD(summarizer_target_pct);
+    RELOAD(summarizer_max_pct);
     RELOAD(summarizer_prompt);
     // Endpoints: replace entirely if different
     if (cfg.inference_endpoints.size() != fresh.inference_endpoints.size()) {
