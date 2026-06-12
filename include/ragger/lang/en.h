@@ -436,32 +436,12 @@ constexpr const char* CLI_YES                 = "Skip confirmation prompts (for 
 constexpr const char* CLI_DUMP_PAYLOADS       = "Write raw request JSON to this directory (one file per prompt)";
 
 // --- Main.cpp specific strings (useradd/userdel/add-self) ---
-constexpr const char* MSG_ADD_USER_PROMPT       = "ragger useradd <username>";
-constexpr const char* MSG_ADD_USER_USAGE        = "Usage: ragger add-self [--force]";
-constexpr const char* MSG_ADDED_TO_GROUP        = "✓ Added {} to ragger group";
 constexpr const char* MSG_EMBEDDING_DIMENSIONS  = "Dimensions: {}";
 constexpr const char* MSG_EMBEDDING_MODEL_NAME  = "Model name: {}";
 constexpr const char* MSG_EMBEDDING_PATH        = "Path: {}";
 constexpr const char* MSG_EMBEDDING_PATH_DEFAULT= "(default)";
-constexpr const char* MSG_GROUP_SKIPPED         = "{} was not in ragger group (skipped)";
 constexpr const char* MSG_HOUSEKEEPING_TRIGGERED= "Housekeeping triggered";
-constexpr const char* MSG_NOT_IN_DB             = "User '{}' not in database";
-constexpr const char* MSG_PROCESSED_USERS       = "Processed {} users";
-constexpr const char* MSG_REMOVED_FROM_DB       = "Removed user '{}' from database";
-constexpr const char* MSG_REMOVED_FROM_GROUP    = "✓ Removed {} from ragger group";
-constexpr const char* MSG_REMOVED_TOKEN_FILE    = "Removed token file for {}";
-constexpr const char* MSG_TOKEN_CREATED_FOR     = "✓ Created ~/.ragger/token for {}";
-constexpr const char* MSG_TOKEN_EXISTS_FOR      = "Token already exists for {}";
-constexpr const char* MSG_TOKEN_FILE_USER       = "Token file: ~/.ragger/users/{}/token";
-constexpr const char* MSG_TOKEN_SKIPPED         = "Skipped {} (no token)";
-constexpr const char* MSG_TOKEN_UPDATE_HINT     = "Use this in your client config.";
-constexpr const char* MSG_USER_ERROR            = "Error processing {}: {}";
-constexpr const char* MSG_USER_NOT_IN_PASSWD    = "User {} not found in system passwd (skipped token)";
-constexpr const char* MSG_USER_REMOVED_FINAL    = "✓ User {} removed (final)";
-constexpr const char* MSG_USER_SKIPPED          = "{}: skipped";
-constexpr const char* MSG_USER_STATUS           = "{}: {}";
 constexpr const char* MSG_WARNING               = "Warning";
-constexpr const char* MSG_WARNING_SUDO          = "[SUDO] {} requires elevated privileges";
 
 // --- Main.cpp specific (daemon control) ---
 constexpr const char* ERR_DAEMON_PID_NOT_RUNNING= "Daemon not running (pid {} not found)";
