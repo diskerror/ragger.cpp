@@ -132,16 +132,22 @@ api_url = http://localhost:1234/v1
 
 # Optional: route summarization to a separate cheaper/local model.
 # Falls back to the main [inference] model when unset.
-# [summarizer]
-# model      = qwen2.5:7b
-# api_url    = http://localhost:11434/v1
-# api_key    =
-# max_tokens = 1024
+[summarizer]
+# model        = qwen2.5:7b
+# api_url      = http://localhost:11434/v1
+# api_key      =
+# max_tokens   = 1024
+#
+# target_chars = 0    # target summary length in chars; 0 = source_chars/4 (min 40)
+# max_chars    = 0    # hard cap in chars; 0 = same as source length
+#
 # System prompt for the summarizer. Leave empty (or omit) to use the built-in
 # default. Any non-empty value is passed through as-is. Two {} placeholders
 # are required (target chars, hard cap) if you override it.
 # Set to a single space to suppress the system prompt entirely: prompt = " "
-# prompt = Summarize this conversation into a concise memory entry. ...
+# Quote the value to protect # characters from being treated as comments.
+#
+# prompt = "Summarize this conversation into a concise memory entry. Extract key facts, decisions, questions asked, topics discussed. Write in third person past tense. Target about {} characters; never exceed {}. If the exchange is trivial (a single command like /exit, a one-line greeting), respond with a short phrase, not a full sentence."
 
 [logging]
 log_file = ~/.ragger/activity.log
@@ -390,11 +396,13 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "default")    cfg.inference_default = val;
         }
         else if (section == "summarizer") {
-            if      (key == "model")      cfg.summarizer_model      = val;
-            else if (key == "api_url")    cfg.summarizer_api_url    = val;
-            else if (key == "api_key")    cfg.summarizer_api_key    = val;
-            else if (key == "max_tokens") cfg.summarizer_max_tokens = std::stoi(val);
-            else if (key == "prompt")     cfg.summarizer_prompt     = val;
+            if      (key == "model")        cfg.summarizer_model        = val;
+            else if (key == "api_url")      cfg.summarizer_api_url      = val;
+            else if (key == "api_key")      cfg.summarizer_api_key      = val;
+            else if (key == "max_tokens")   cfg.summarizer_max_tokens   = std::stoi(val);
+            else if (key == "target_chars") cfg.summarizer_target_chars = std::stoi(val);
+            else if (key == "max_chars")    cfg.summarizer_max_chars    = std::stoi(val);
+            else if (key == "prompt")       cfg.summarizer_prompt       = val;
         }
         else if (section.substr(0, 10) == "inference.") {
             // Named endpoint section: [inference.local], [inference.anthropic], etc.
@@ -612,6 +620,8 @@ int reload_config() {
     RELOAD(summarizer_api_url);
     RELOAD(summarizer_api_key);
     RELOAD(summarizer_max_tokens);
+    RELOAD(summarizer_target_chars);
+    RELOAD(summarizer_max_chars);
     RELOAD(summarizer_prompt);
     // Endpoints: replace entirely if different
     if (cfg.inference_endpoints.size() != fresh.inference_endpoints.size()) {

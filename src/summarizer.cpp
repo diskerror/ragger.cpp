@@ -142,8 +142,16 @@ std::string summarize_transcript(
         return u + " | " + a;
     }
 
-    const std::size_t target_chars = std::max<std::size_t>(source_chars / 4, 40);
-    const std::size_t hard_cap     = source_chars;
+    const std::size_t target_chars = [&]() -> std::size_t {
+        const int cfg_val = config().summarizer_target_chars;
+        if (cfg_val > 0) return static_cast<std::size_t>(cfg_val);
+        return std::max<std::size_t>(source_chars / 4, 40);
+    }();
+    const std::size_t hard_cap = [&]() -> std::size_t {
+        const int cfg_val = config().summarizer_max_chars;
+        if (cfg_val > 0) return static_cast<std::size_t>(cfg_val);
+        return source_chars;
+    }();
 
     // Resolve the system prompt: INI `prompt` key overrides the built-in
     // default. Empty (or missing) uses the default; any non-empty value is
