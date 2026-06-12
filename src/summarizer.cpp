@@ -199,4 +199,64 @@ std::string summarize_transcript(
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// summarize_texts — same contract as summarize_transcript but for a flat list
+// of pre-existing summary blobs (L2→L3, L3→L4).
+// ---------------------------------------------------------------------------
+std::string summarize_texts(
+    InferenceClient& inference,
+    const std::vector<std::string>& texts)
+{
+    if (texts.empty()) return "";
+
+    std::string combined;
+    std::size_t source_chars = 0;
+    for (const auto& t : texts) {
+        if (!combined.empty()) combined += "\n\n";
+        combined += t;
+        source_chars += t.size();
+    }
+
+    if (source_chars == 0) return "";
+
+    // Same size contract as summarize_transcript.
+    constexpr int kDefaultTargetPct = 30;
+    constexpr int kDefaultMaxPct    = 60;
+    constexpr std::size_t kMinChars = 40;
+
+    const int tpct = (config().summarizer_target_pct > 0)
+                         ? config().summarizer_target_pct : kDefaultTargetPct;
+    const int mpct = (config().summarizer_max_pct > 0)
+                         ? config().summarizer_max_pct    : kDefaultMaxPct;
+
+    const std::size_t target_chars =
+        std::max(kMinChars, source_chars * static_cast<std::size_t>(tpct) / 100);
+    const std::size_t hard_cap =
+        std::max(target_chars, source_chars * static_cast<std::size_t>(mpct) / 100);
+
+    const std::string& raw_prompt = config().summarizer_prompt;
+    const std::string system_text = std::vformat(
+        raw_prompt.empty()
+            ? Config::kDefaultSummarizerPrompt
+            : std::string_view(raw_prompt),
+        std::make_format_args(target_chars, hard_cap));
+
+    std::vector<Message> messages;
+    if (!system_text.empty())
+        messages.push_back({"system", system_text});
+    messages.push_back({"user", combined});
+
+    std::string result;
+    try {
+        result = inference.chat_memory(messages);
+    } catch (const std::exception& e) {
+        Diskerror::logger::warn(std::format(lang::WARN_SUMMARY, e.what()));
+        return "";
+    }
+
+    if (result.size() > hard_cap)
+        return result.substr(0, hard_cap);
+    return result;
+}
+
 } // namespace ragger

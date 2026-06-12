@@ -131,9 +131,11 @@ void SummarizerService::worker_loop() {
 
         try {
             switch (job.kind) {
-                case JobKind::L2Turn:        handle_l2(job);    break;
-                case JobKind::L3CloseSession: handle_l3(job);    break;
-                case JobKind::DraftRetry:    handle_draft(job); break;
+                case JobKind::L2Turn:           handle_l2(job);         break;
+                case JobKind::L3UpdateSession:  handle_l3_update(job);  break;
+                case JobKind::L3CloseSession:   handle_l3_close(job);   break;
+                case JobKind::L4UpdateProject:  handle_l4_update(job);  break;
+                case JobKind::DraftRetry:       handle_draft(job);      break;
             }
         } catch (const std::exception& e) {
             if (job.kind == JobKind::DraftRetry)
@@ -252,66 +254,104 @@ bool SummarizerService::handle_l2(const Job& j) {
                           j.model_name, guid, ts, "");
     Diskerror::logger::info(std::format(
         lang::MSG_SUMMARIZER_L2, display_guid, ts));
+
+    // After each successful L2, kick an L3 update for this session so
+    // the running session summary always reflects the latest turn.
+    if (!guid.empty()) {
+        Job l3j{JobKind::L3UpdateSession, -1, -1,
+                {}, {}, {}, guid, {}};
+        std::lock_guard<std::mutex> lk(mutex_);
+        queue_.push_back(std::move(l3j));
+        cv_.notify_one();
+    }
     return true;
 }
 
 // --------------------------------------------------------------------
-// L3: finalize a session. Read its turns (oldest first), summarize the
-// whole transcript, write a level='session' status='complete' row using
-// the *latest* turn's timestamp (the moment the session effectively
-// ended). Idempotent against sessions_needing_close() (it filters out
-// sessions that already have a complete L3).
+// L3 update: rebuild the running session summary from all L2 summaries.
+// Called after every successful L2 write. Upserts a single status='current'
+// row (create on first call, update in-place on subsequent ones).
 // --------------------------------------------------------------------
-bool SummarizerService::handle_l3(const Job& j) {
+bool SummarizerService::handle_l3_update(const Job& j) {
     if (j.session_guid.empty()) return true;
-    auto* backend = &backend_;
-    if (!backend) return false;
 
-    auto turns = backend->turns_by_session_desc(j.session_guid, /*limit=*/0);
-    if (turns.empty()) return true;
+    auto texts = backend_.l2_summary_texts(j.session_guid);
+    if (texts.empty()) return true;
 
-    // turns_by_session_desc is newest-first; reverse for the transcript.
-    // For system-injected turns, blank the user side but KEEP the assistant
-    // content — an interrupted turn the agent still answered carries real
-    // signal. A turn that's *only* a system note (no assistant content of its
-    // own) contributes nothing and is dropped.
-    std::vector<std::pair<std::string, std::string>> pairs;
-    pairs.reserve(turns.size());
-    for (auto it = turns.rbegin(); it != turns.rend(); ++it) {
-        if (is_system_injected_turn(it->user_text)) {
-            if (it->assistant_text.empty()) continue;  // pure system noise
-            pairs.emplace_back(std::string{}, it->assistant_text);
-        } else {
-            pairs.emplace_back(it->user_text, it->assistant_text);
-        }
-    }
-    if (pairs.empty()) return true;  // nothing but system noise
-    const std::string latest_ts = turns.front().timestamp;
-    // L3 model_id = the memory/summarizer model, NOT the conversing model.
-    // Rule: turns and L2-turn summaries record who the *user was talking
-    // to*; L3 session and L4 project summaries record who *produced the
-    // summary*. The conversing model is recoverable from the underlying
-    // turn rows for any session.
     const std::string summarizer_model =
         inference_ ? inference_->memory_model : "";
 
     std::string summary;
-    if (inference_) {
-        summary = summarize_transcript(*inference_, pairs);
+    if (inference_)
+        summary = summarize_texts(*inference_, texts);
+    if (summary.empty()) return false;  // retry next pass
+
+    auto existing = backend_.current_session_summary(j.session_guid);
+    if (existing) {
+        backend_.update_summary_text(existing->first, summary, summarizer_model);
+    } else {
+        backend_.store_summary(summary, "session", "current",
+                               summarizer_model, j.session_guid, "", "");
     }
-    if (summary.empty()) {
-        // Inference down — leave the session open; next pause-timer pass
-        // will retry. (We don't write a draft L3 because a coherent
-        // session summary really does need the model.)
-        Diskerror::logger::warn(std::format(
-            lang::ERR_SESSION_SUMMARY_FAIL, j.session_guid));
-        return false;
+    Diskerror::logger::debug(std::format(
+        "[summarizer] L3 updated for session {}", j.session_guid));
+    return true;
+}
+
+// --------------------------------------------------------------------
+// L3 close: finalize the session — mark its running 'current' L3
+// summary as 'complete', then trigger an L4 update.
+// Called by the pause timer when a session has been idle long enough.
+// --------------------------------------------------------------------
+bool SummarizerService::handle_l3_close(const Job& j) {
+    if (j.session_guid.empty()) return true;
+
+    auto existing = backend_.current_session_summary(j.session_guid);
+    if (!existing) {
+        // No current L3 yet — try an update first then close.
+        if (!handle_l3_update(j)) return false;
+        existing = backend_.current_session_summary(j.session_guid);
+        if (!existing) return false;
     }
 
-    backend_.store_summary(summary, "session", "complete",
-                          summarizer_model, j.session_guid, latest_ts, "");
+    backend_.set_summary_status(existing->first, "complete");
     Diskerror::logger::info(std::format(
-        lang::MSG_SUMMARIZED_SESSION, j.session_guid, turns.size()));
+        lang::MSG_SUMMARIZED_SESSION, j.session_guid, 0));
+
+    // Immediately update the L4 project summary.
+    Job l4j{JobKind::L4UpdateProject, -1, -1, {}, {}, {}, {}, {}};
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        queue_.push_back(std::move(l4j));
+        cv_.notify_one();
+    }
+    return true;
+}
+
+// --------------------------------------------------------------------
+// L4 update: rebuild the running project summary from all complete L3s.
+// Upserts a single status='current' project row (session-unscoped).
+// --------------------------------------------------------------------
+bool SummarizerService::handle_l4_update(const Job& /*j*/) {
+    auto texts = backend_.complete_l3_summary_texts();
+    if (texts.empty()) return true;
+
+    const std::string summarizer_model =
+        inference_ ? inference_->memory_model : "";
+
+    std::string summary;
+    if (inference_)
+        summary = summarize_texts(*inference_, texts);
+    if (summary.empty()) return false;
+
+    auto existing = backend_.current_project_summary();
+    if (existing) {
+        backend_.update_summary_text(existing->first, summary, summarizer_model);
+    } else {
+        backend_.store_summary(summary, "project", "current",
+                               summarizer_model, "", "", "");
+    }
+    Diskerror::logger::debug("[summarizer] L4 project summary updated");
     return true;
 }
 

@@ -22,6 +22,15 @@ std::string summarize_transcript(
     InferenceClient& inference,
     const std::vector<std::pair<std::string, std::string>>& turns);
 
+/// Summarize a flat list of text blobs (e.g. L2 summaries → L3, or L3
+/// summaries → L4). Each entry is treated as an equal-weight fragment;
+/// the same percentage-based size contract as summarize_transcript applies,
+/// measured against the total character count of all input texts.
+/// Returns "" for empty input or on error.
+std::string summarize_texts(
+    InferenceClient& inference,
+    const std::vector<std::string>& texts);
+
 /// True when the user side of a turn is *entirely* a Hermes system-injected
 /// annotation rather than something the human typed — model-switch notes,
 /// context-compaction handoffs, interruption notices, background-process

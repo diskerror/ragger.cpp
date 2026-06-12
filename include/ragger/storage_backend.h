@@ -106,6 +106,20 @@ public:
     /// Scoped to `session_guid` when given; legacy global when empty.
     virtual std::optional<std::pair<int, std::string>>
         current_session_summary(const std::string& session_guid = "") = 0;
+
+    /// The current running L4 project summary, if any: (summary_id, text).
+    virtual std::optional<std::pair<int, std::string>>
+        current_project_summary() = 0;
+
+    /// All non-draft L2 turn summary texts for a session, oldest-first.
+    /// Input corpus for L3 summarization.
+    virtual std::vector<std::string>
+        l2_summary_texts(const std::string& session_guid) = 0;
+
+    /// All complete L3 session summary texts, oldest-first.
+    /// Input corpus for L4 summarization.
+    virtual std::vector<std::string>
+        complete_l3_summary_texts() = 0;
     /// Replace a summary's text + embedding (and model). False if absent.
     virtual bool update_summary_text(int summary_id, const std::string& text,
                                      const std::string& model_name = "") = 0;

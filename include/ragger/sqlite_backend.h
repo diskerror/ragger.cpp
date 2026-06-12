@@ -65,6 +65,12 @@ public:
                       const std::string& tags = "") override;
     std::optional<std::pair<int, std::string>>
         current_session_summary(const std::string& session_guid = "") override;
+    std::optional<std::pair<int, std::string>>
+        current_project_summary() override;
+    std::vector<std::string>
+        l2_summary_texts(const std::string& session_guid) override;
+    std::vector<std::string>
+        complete_l3_summary_texts() override;
     bool update_summary_text(int summary_id, const std::string& text,
                              const std::string& model_name = "") override;
     bool set_summary_status(int summary_id, const std::string& status) override;

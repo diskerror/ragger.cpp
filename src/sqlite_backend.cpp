@@ -1129,8 +1129,8 @@ struct SqliteBackend::Impl {
     }
 
     // Sessions whose newest turn is older than (now - pause_minutes) AND
-    // that have no level='session' status='complete' summary yet. The
-    // summarizer's pause timer treats this set as "ready to finalize."
+    // that have at least one non-draft L2 summary but no complete L3 yet.
+    // The summarizer's pause timer treats this set as "ready to finalize."
     // Returns session GUIDs; anonymous (session_id NULL) turns are skipped.
     std::vector<std::string> sessions_needing_close(int pause_minutes) {
         std::vector<std::string> out;
@@ -1140,8 +1140,10 @@ struct SqliteBackend::Impl {
         std::string sql =
             "SELECT ss.guid "
             "FROM sessions ss "
-            "WHERE EXISTS (SELECT 1 FROM turns t "
-            "               WHERE t.session_id = ss.session_id) "
+            "WHERE EXISTS (SELECT 1 FROM summaries s2 "
+            "               JOIN sessions ss2 ON s2.session_id = ss2.session_id "
+            "               WHERE ss2.session_id = ss.session_id "
+            "                 AND s2.level = 'turn' AND s2.tags != 'draft') "
             "  AND (SELECT MAX(t.timestamp) FROM turns t "
             "        WHERE t.session_id = ss.session_id) < " + cutoff + " "
             "  AND NOT EXISTS (SELECT 1 FROM summaries s "
@@ -1213,6 +1215,52 @@ struct SqliteBackend::Impl {
         if (s.step()) {
             int id = s.column_int(0);
             out = std::make_pair(id, s.column_text(1));
+        }
+        return out;
+    }
+
+    // The current running L4 project summary, if any: (summary_id, text).
+    // Project summaries are session-unscoped (session_id NULL).
+    std::optional<std::pair<int, std::string>> current_project_summary() {
+        Stmt s(db,
+            "SELECT summary_id, text FROM summaries "
+            "WHERE level='project' AND status='current' "
+            "ORDER BY summary_id DESC LIMIT 1");
+        std::optional<std::pair<int, std::string>> out;
+        if (s.step())
+            out = std::make_pair(s.column_int(0), s.column_text(1));
+        return out;
+    }
+
+    // All L2 (turn) summary texts for a session, oldest-first.
+    // Used by handle_l3_update to build the input for L3.
+    std::vector<std::string> l2_summary_texts(const std::string& session_guid) {
+        std::vector<std::string> out;
+        if (session_guid.empty()) return out;
+        Stmt s(db,
+            "SELECT s.text FROM summaries s "
+            "JOIN sessions ss ON s.session_id = ss.session_id "
+            "WHERE ss.guid = ? AND s.level = 'turn' AND s.tags != 'draft' "
+            "ORDER BY s.timestamp ASC, s.summary_id ASC");
+        s.bind(1, session_guid);
+        while (s.step()) {
+            auto t = s.column_text(0);
+            if (!t.empty()) out.push_back(std::move(t));
+        }
+        return out;
+    }
+
+    // All complete L3 (session) summary texts, oldest-first.
+    // Used by handle_l4_update to build the input for L4.
+    std::vector<std::string> complete_l3_summary_texts() {
+        std::vector<std::string> out;
+        Stmt s(db,
+            "SELECT text FROM summaries "
+            "WHERE level='session' AND status='complete' "
+            "ORDER BY timestamp ASC, summary_id ASC");
+        while (s.step()) {
+            auto t = s.column_text(0);
+            if (!t.empty()) out.push_back(std::move(t));
         }
         return out;
     }
@@ -1815,6 +1863,21 @@ int SqliteBackend::store_summary(const std::string& text, const std::string& lev
 std::optional<std::pair<int, std::string>>
 SqliteBackend::current_session_summary(const std::string& session_guid) {
     return pImpl->current_session_summary(session_guid);
+}
+
+std::optional<std::pair<int, std::string>>
+SqliteBackend::current_project_summary() {
+    return pImpl->current_project_summary();
+}
+
+std::vector<std::string>
+SqliteBackend::l2_summary_texts(const std::string& session_guid) {
+    return pImpl->l2_summary_texts(session_guid);
+}
+
+std::vector<std::string>
+SqliteBackend::complete_l3_summary_texts() {
+    return pImpl->complete_l3_summary_texts();
 }
 
 bool SqliteBackend::update_summary_text(int summary_id, const std::string& text,
