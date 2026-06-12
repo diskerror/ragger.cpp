@@ -137,6 +137,11 @@ api_url = http://localhost:1234/v1
 # model   = qwen2.5:7b
 # api_url = http://localhost:11434/v1
 # api_key =
+# System prompt for the summarizer. Leave empty (or omit) to use the built-in
+# default. Any non-empty value is passed through as-is. Two {} placeholders
+# are required (target chars, hard cap) if you override it.
+# Set to a single space to suppress the system prompt entirely: prompt = " "
+# prompt = Summarize this conversation into a concise memory entry. ...
 
 [logging]
 log_file = ~/.ragger/activity.log
@@ -391,6 +396,7 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             if      (key == "model")   cfg.inference_memory_model   = val;
             else if (key == "api_url") cfg.inference_memory_api_url = val;
             else if (key == "api_key") cfg.inference_memory_api_key = val;
+            else if (key == "prompt")  cfg.summarizer_prompt        = val;
         }
         else if (section.substr(0, 10) == "inference.") {
             // Named endpoint section: [inference.local], [inference.anthropic], etc.
@@ -607,6 +613,7 @@ int reload_config() {
     RELOAD(inference_memory_model);
     RELOAD(inference_memory_api_url);
     RELOAD(inference_memory_api_key);
+    RELOAD(summarizer_prompt);
     // Endpoints: replace entirely if different
     if (cfg.inference_endpoints.size() != fresh.inference_endpoints.size()) {
         cfg.inference_endpoints = fresh.inference_endpoints;

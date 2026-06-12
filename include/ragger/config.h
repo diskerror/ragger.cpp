@@ -80,6 +80,19 @@ struct Config {
     std::string inference_memory_model   = "";
     std::string inference_memory_api_url = "";
     std::string inference_memory_api_key = "";
+    // System-prompt sent to the summarizer model. Empty (or missing in the
+    // INI) uses the built-in default. Any non-empty value is passed through
+    // as-is — set to a single space " " to suppress the system prompt entirely.
+    // Two positional placeholders {} {} are required (target_chars, hard_cap)
+    // when overriding; the default already contains them.
+    static constexpr std::string_view kDefaultSummarizerPrompt =
+        "Summarize this conversation into a concise memory entry. "
+        "Extract key facts, decisions, questions asked, topics discussed. "
+        "Write in third person past tense. Target about {} characters; "
+        "never exceed {}. If the exchange is trivial (a single command "
+        "like /exit, a one-line greeting), respond with a short phrase, "
+        "not a full sentence.";
+    std::string summarizer_prompt = "";
 
     // --- Logging ---
     std::string log_file;   //  ~/.ragger/activity.log

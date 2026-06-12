@@ -3,6 +3,7 @@
  */
 #include "ragger/summarizer.h"
 
+#include "ragger/config.h"
 #include "ragger/inference.h"
 #include "ragger/lang.h"
 #include "diskerror/logger.h"
@@ -144,17 +145,20 @@ std::string summarize_transcript(
     const std::size_t target_chars = std::max<std::size_t>(source_chars / 4, 40);
     const std::size_t hard_cap     = source_chars;
 
-    std::vector<Message> messages = {
-        {"system", std::format(
-            "Summarize this conversation into a concise memory entry. "
-            "Extract key facts, decisions, questions asked, topics discussed. "
-            "Write in third person past tense. Target about {} characters; "
-            "never exceed {}. If the exchange is trivial (a single command "
-            "like /exit, a one-line greeting), respond with a short phrase, "
-            "not a full sentence.",
-            target_chars, hard_cap)},
-        {"user", conversation}
-    };
+    // Resolve the system prompt: INI `prompt` key overrides the built-in
+    // default. Empty (or missing) uses the default; any non-empty value is
+    // passed to the model as-is, including a single space to suppress it.
+    const std::string& raw_prompt = config().summarizer_prompt;
+    const std::string system_text = std::vformat(
+        raw_prompt.empty()
+            ? Config::kDefaultSummarizerPrompt
+            : std::string_view(raw_prompt),
+        std::make_format_args(target_chars, hard_cap));
+
+    std::vector<Message> messages;
+    if (!system_text.empty())
+        messages.push_back({"system", system_text});
+    messages.push_back({"user", conversation});
 
     std::string result;
     try {
