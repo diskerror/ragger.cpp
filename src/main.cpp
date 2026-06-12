@@ -228,6 +228,8 @@ int main(int argc, char **argv) {
             ("port,p", Diskerror::po::value<int>(), CLI_PORT)
             ("model-dir", Diskerror::po::value<std::string>(), CLI_MODEL_DIR)
             ("min-chunk-size", Diskerror::po::value<int>(), CLI_MIN_CHUNK_SIZE)
+            ("num,n", Diskerror::po::value<int>(),
+                "search: number of results to return (default: 3)")
             ("title", Diskerror::po::value<std::string>()->default_value(""), CLI_TITLE)
             ("year", Diskerror::po::value<int>()->default_value(0), CLI_YEAR)
             ("tags", Diskerror::po::value<std::string>()->default_value(""), CLI_TAGS)
@@ -333,19 +335,25 @@ int main(int argc, char **argv) {
 
             std::vector<std::string> colls;
 
+            // CLI default is 3 results (overridable with -n/--num). This is the
+            // human-facing default and is intentionally independent of the
+            // daemon/MCP `default_search_limit` (which serves the agent API).
+            int limit = opts.count("num") ? opts["num"].as<int>() : 3;
+            if (limit < 1) limit = 1;
+
             // Try daemon first (thin client — no model loading)
             auto token = ragger::load_token();
             ragger::RaggerClient client(cfg.bind_address, cfg.port, token);
             ragger::SearchResponse response;
 
             if (client.is_available()) {
-                response = client.search(query, cfg.default_search_limit,
+                response = client.search(query, limit,
                                          cfg.default_min_score, colls);
             }
             else {
                 // Fall back to direct DB access
                 ragger::RaggerMemory memory(db_path, model_dir);
-                response = memory.search(query, cfg.default_search_limit,
+                response = memory.search(query, limit,
                                          cfg.default_min_score, colls);
             }
 
