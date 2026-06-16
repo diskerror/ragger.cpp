@@ -775,11 +775,17 @@ struct SqliteBackend::Impl {
 
         auto ts = ts_override.empty() ? local_timestamp() : ts_override;
 
+        // Every summary should record the model that produced it. Callers pass
+        // the live model via metadata["model"]; empty → 0 → NULL (the raw-turn
+        // sentinel), which a non-turn summary should never be. get_or_create_model
+        // interns the name in the models table.
+        std::string model_name = metadata.value("model", std::string(""));
+        int model_id = get_or_create_model(model_name);
+
         // FTS5 sync triggers index the row from text/tags — no manual step.
-        sqlite3_stmt* stmt = nullptr;
         Stmt s(db,
-            "INSERT INTO summaries (text, embedding, level, status, tags, timestamp) "
-            "VALUES (?,?,?,?,?,?)");
+            "INSERT INTO summaries (text, embedding, level, status, tags, timestamp, model_id) "
+            "VALUES (?,?,?,?,?,?,?)");
 
         s.bind(1, text);
         if (defer_embedding) {
@@ -788,6 +794,7 @@ struct SqliteBackend::Impl {
             bind_embedding(s.raw(), 2, emb);
         }
         s.bind(3, level).bind(4, status).bind(5, tags_str).bind(6, ts);
+        if (model_id) s.bind(7, model_id); else s.bind_null(7);
 
         if (!s.exec()) {
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
