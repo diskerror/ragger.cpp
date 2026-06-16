@@ -1606,14 +1606,20 @@ struct SqliteBackend::Impl {
         auto t_search_end = clock::now();
 
         // ---- merged top-k selection -----------------------------------
-        // Rank the merged candidate pool by blended score, then emit up to
-        // `limit` whose reported raw cosine passes min_score.
-        int total = static_cast<int>(candidates.size());
+        // Filter by min_score (raw cosine) FIRST, then rank survivors by
+        // blended score and emit up to `limit`. Filtering before top-k
+        // (rather than after) prevents under-filling: a high-blend candidate
+        // with sub-threshold cosine no longer steals a slot from a valid one.
+        std::vector<int> ranking;
+        ranking.reserve(candidates.size());
+        for (int i = 0; i < static_cast<int>(candidates.size()); ++i) {
+            if (candidates[i].result.score >= min_score)
+                ranking.push_back(i);
+        }
+        int total = static_cast<int>(ranking.size());
         int top_k = std::min(limit, total);
-        std::vector<int> ranking(total);
-        std::iota(ranking.begin(), ranking.end(), 0);
         std::partial_sort(ranking.begin(),
-                          ranking.begin() + std::min(top_k, total),
+                          ranking.begin() + top_k,
                           ranking.end(),
                           [&](int a, int b) {
                               return candidates[a].blended > candidates[b].blended;
@@ -1621,9 +1627,7 @@ struct SqliteBackend::Impl {
 
         std::vector<SearchResult> results;
         for (int k = 0; k < top_k; ++k) {
-            const auto& c = candidates[ranking[k]];
-            if (c.result.score < min_score) continue;
-            results.push_back(c.result);
+            results.push_back(candidates[ranking[k]].result);
         }
 
         auto ms = [](auto a, auto b) {

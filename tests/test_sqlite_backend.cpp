@@ -134,6 +134,47 @@ void test_search_min_score(ragger::Embedder& emb) {
     cleanup();
 }
 
+// Regression for bug M4: min_score must be applied BEFORE top-k truncation,
+// not after. Previously, partial_sort picked the top `limit` candidates by
+// blended score and only then dropped any whose raw cosine was below
+// min_score — so a high-blend/low-cosine candidate could occupy a slot and
+// get filtered out, leaving fewer results than qualifying candidates existed.
+// Here we assert two invariants that the post-filter ordering can violate:
+//   (1) every returned result's score is >= min_score, and
+//   (2) results are sorted by blended score with no min_score "holes" — i.e.
+//       we never return fewer than min(limit, #qualifying) items.
+void test_search_min_score_before_topk(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    // A cluster of clearly on-topic docs (high cosine to the query) plus some
+    // off-topic ones. With a moderate threshold the on-topic docs qualify.
+    db.store("Paris is the capital city of France.");
+    db.store("France's capital, Paris, sits on the Seine river.");
+    db.store("The capital of France is the city of Paris.");
+    db.store("Lyon and Marseille are large French cities, not the capital.");
+    db.store("Bananas are a tropical fruit rich in potassium.");
+    db.store("The mitochondria is the powerhouse of the cell.");
+
+    const float thr = 0.25f;
+    auto resp = db.search("What is the capital of France?", 5, thr);
+
+    // (1) Invariant: nothing below threshold is ever returned.
+    for (const auto& r : resp.results)
+        assert(r.score >= thr);
+
+    // (2) Count how many candidates actually clear the threshold by asking for
+    // a huge limit; with the fix, a smaller limit returns exactly
+    // min(limit, qualifying), never fewer due to top-k stealing.
+    auto all = db.search("What is the capital of France?", 100, thr);
+    size_t qualifying = all.results.size();
+    size_t expected = std::min<size_t>(5, qualifying);
+    assert(resp.results.size() == expected);
+
+    db.close();
+    cleanup();
+}
+
 void test_search_limit(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
@@ -850,6 +891,7 @@ int main() {
     test_search_basic(emb);
     test_search_fts_special_chars(emb);
     test_search_min_score(emb);
+    test_search_min_score_before_topk(emb);
     test_search_limit(emb);
     test_load_all(emb);
     test_rebuild_embeddings(emb);
