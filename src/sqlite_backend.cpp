@@ -552,6 +552,8 @@ struct SqliteBackend::Impl {
         for (int i = 0; i < n; ++i) {
             cached_embeddings.row(i) =
                 Eigen::Map<Eigen::RowVectorXf>(emb_rows[i].data(), expected_dims);
+            float nrm = cached_embeddings.row(i).norm();
+            if (nrm > 1e-12f) cached_embeddings.row(i) /= nrm;
         }
 
         cache_valid = true;
@@ -604,6 +606,8 @@ struct SqliteBackend::Impl {
         for (int i = 0; i < n; ++i) {
             doc_embeddings.row(i) =
                 Eigen::Map<Eigen::RowVectorXf>(emb_rows[i].data(), expected_dims);
+            float nrm = doc_embeddings.row(i).norm();
+            if (nrm > 1e-12f) doc_embeddings.row(i) /= nrm;
         }
 
         doc_cache_valid = true;
@@ -657,6 +661,8 @@ struct SqliteBackend::Impl {
         for (int i = 0; i < n; ++i) {
             dec_embeddings.row(i) =
                 Eigen::Map<Eigen::RowVectorXf>(emb_rows[i].data(), expected_dims);
+            float nrm = dec_embeddings.row(i).norm();
+            if (nrm > 1e-12f) dec_embeddings.row(i) /= nrm;
         }
 
         dec_cache_valid = true;
@@ -1560,11 +1566,9 @@ struct SqliteBackend::Impl {
             int n = static_cast<int>(ids.size());
             if (n == 0) return;
 
-            Eigen::MatrixXf emb = cache_emb;
-            Eigen::VectorXf norms = emb.rowwise().norm();
-            for (int i = 0; i < n; ++i)
-                if (norms(i) > 1e-12f) emb.row(i) /= norms(i);
-            Eigen::VectorXf similarities = emb * q_norm;   // raw cosine, reported
+            // cache_emb rows are L2-normalized at cache-build time, and q_norm
+            // is the normalized query vector, so this product is raw cosine.
+            Eigen::VectorXf similarities = cache_emb * q_norm;   // raw cosine, reported
 
             Eigen::VectorXf combined = similarities;
             if (config().bm25_enabled && !kw.empty()) {
