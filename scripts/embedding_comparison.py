@@ -28,6 +28,7 @@ def load_embedding(blob: bytes) -> list:
 
 
 def cosine_similarity(a: list, b: list) -> float:
+    """Raw cosine similarity in [-1, 1]."""
     if len(a) != len(b):
         return 0.0
     dot = sum(x * y for x, y in zip(a, b))
@@ -35,8 +36,7 @@ def cosine_similarity(a: list, b: list) -> float:
     mag_b = math.sqrt(sum(x * x for x in b))
     if mag_a == 0.0 or mag_b == 0.0:
         return 0.0
-    raw = dot / (mag_a * mag_b)
-    return max(0.0, min(1.0, (raw + 1.0) / 2.0))
+    return dot / (mag_a * mag_b)
 
 
 def main():

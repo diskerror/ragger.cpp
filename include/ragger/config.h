@@ -141,7 +141,7 @@ struct Config {
     std::map<std::string, std::string> model_aliases;  // short name → full name or .gguf filename
 
     // --- Housekeeping / retention ---
-    float cleanup_max_age_hours  = 336.0f;  // 2 weeks
+    float cleanup_max_age_hours  = 0.0f;  // 0 = keep forever (default)
     int   housekeeping_interval  = 60;      // seconds; 0 = disabled, <10 clamped to 10
     int   summary_pause_minutes  = 20;      // idle gap that closes a session's running (L3) summary
 

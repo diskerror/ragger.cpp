@@ -132,7 +132,7 @@ fnmatch globs in each section's `models` key. See
 
 | Key                     | Default | Description                                                                        |
 |-------------------------|---------|------------------------------------------------------------------------------------|
-| `cleanup_max_age_hours` | `336`   | Raw-turn lifetime (2 weeks). `0` = keep forever; useful when capture is audit-only. |
+| `cleanup_max_age_hours` | `0`     | Raw-turn lifetime. `0` = keep forever (default). Set to hours (e.g. `336` = 2 weeks) to auto-purge old turns. |
 | `housekeeping_interval` | `60`    | Seconds between background passes. `0` disables; values under 10 are clamped to 10.|
 | `summary_pause_minutes` | `20`    | Idle gap that closes a session's running L3 summary.                               |
 

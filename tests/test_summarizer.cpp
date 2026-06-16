@@ -7,6 +7,7 @@
 
 using ragger::is_system_injected_turn;
 using ragger::summarize_transcript;
+using ragger::strip_thinking;
 
 // System-injected user turns: should be detected (summarizer skips them).
 void test_detects_system_markers() {
@@ -113,12 +114,45 @@ void test_strip_system_prefix() {
     std::println(" ok");
 }
 
+void test_strip_thinking() {
+    std::print("  test_strip_thinking...");
+
+    // Basic <think>…</think> block stripped
+    assert(strip_thinking("<think>some reasoning</think>The actual answer.")
+        == "The actual answer.");
+
+    // Unterminated <think> — drop to end
+    assert(strip_thinking("<think>reasoning never closed").empty());
+
+    // Multiple blocks
+    assert(strip_thinking("<think>a</think>Answer<think>b</think> here.")
+        == "Answer here.");
+
+    // Bare "Thinking Process:\n…\n\n" preamble
+    assert(strip_thinking("Thinking Process:\n\n1. Do X\n2. Do Y\n\nThe real summary.")
+        == "The real summary.");
+
+    // Leading whitespace before preamble
+    assert(strip_thinking("\n\nThinking Process:\nstuff\n\nActual answer here.")
+        == "Actual answer here.");
+
+    // Normal summary untouched
+    assert(strip_thinking("Reid deployed the daemon successfully.")
+        == "Reid deployed the daemon successfully.");
+
+    // Empty input
+    assert(strip_thinking("").empty());
+
+    std::println(" ok");
+}
+
 int main() {
     std::println("test_summarizer:");
     test_detects_system_markers();
     test_ignores_human_turns();
     test_assistant_only_trivial();
     test_strip_system_prefix();
+    test_strip_thinking();
     std::println("All summarizer tests passed.");
     return 0;
 }

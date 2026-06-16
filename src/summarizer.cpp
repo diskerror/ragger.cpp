@@ -38,6 +38,48 @@ std::string_view ltrim_view(std::string_view s) {
 
 } // namespace
 
+// Strip <think>…</think> blocks and bare "Thinking Process:\n…\n\n" preambles
+// that reasoning models emit before their actual answer. Applied to all
+// summarizer output before storage so these never land in the DB.
+std::string strip_thinking(const std::string& s) {
+    std::string out = s;
+
+    // 1. Strip all <think>…</think> blocks (may be nested or malformed)
+    while (true) {
+        auto open  = out.find("<think>");
+        if (open == std::string::npos) break;
+        auto close = out.find("</think>", open);
+        if (close == std::string::npos) {
+            out.erase(open);  // unterminated — drop to end
+        } else {
+            out.erase(open, close - open + 8);  // +8 for "</think>"
+        }
+    }
+
+    // 2. Strip a leading "Thinking Process:\n…\n\n" preamble (no XML tags).
+    //    The thinking steps follow the marker; the real answer comes after the
+    //    LAST blank line (rfind) — the marker's own \n\n is the first, but the
+    //    answer is separated by the final \n\n.
+    {
+        constexpr std::string_view kTP = "Thinking Process:";
+        auto start = out.find_first_not_of(" \t\r\n");
+        if (start != std::string::npos && out.compare(start, kTP.size(), kTP) == 0) {
+            auto blank = out.rfind("\n\n");
+            if (blank != std::string::npos && blank > start)
+                out.erase(0, blank + 2);
+        }
+    }
+
+    // Left-trim any whitespace left behind
+    auto first = out.find_first_not_of(" \t\r\n");
+    if (first != std::string::npos && first > 0)
+        out.erase(0, first);
+    else if (first == std::string::npos)
+        out.clear();
+
+    return out;
+}
+
 bool is_system_injected_turn(const std::string& user_text) {
     const std::string_view body = ltrim_view(user_text);
     for (const auto marker : kSystemMarkers) {
@@ -178,7 +220,7 @@ std::string summarize_transcript(
 
     std::string result;
     try {
-        result = inference.chat_memory(messages);
+        result = strip_thinking(inference.chat_memory(messages));
     } catch (const std::exception& e) {
         Diskerror::logger::warn(std::format(lang::WARN_SUMMARY, e.what()));
         return "";
@@ -248,7 +290,7 @@ std::string summarize_texts(
 
     std::string result;
     try {
-        result = inference.chat_memory(messages);
+        result = strip_thinking(inference.chat_memory(messages));
     } catch (const std::exception& e) {
         Diskerror::logger::warn(std::format(lang::WARN_SUMMARY, e.what()));
         return "";

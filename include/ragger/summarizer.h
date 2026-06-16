@@ -51,4 +51,9 @@ bool is_system_injected_turn(const std::string& user_text);
 /// END-OF-SUMMARY sentinel). Idempotent; leaves non-system text untouched.
 std::string strip_system_injected_prefix(const std::string& user_text);
 
+/// Strip <think>…</think> blocks and bare "Thinking Process:\n…\n\n" preambles
+/// from summarizer model output. Applied before any result is stored so
+/// reasoning-model thinking traces never land in the DB.
+std::string strip_thinking(const std::string& result);
+
 } // namespace ragger
