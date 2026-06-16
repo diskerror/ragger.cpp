@@ -123,6 +123,20 @@ public:
     /// Replace a summary's text + embedding (and model). False if absent.
     virtual bool update_summary_text(int summary_id, const std::string& text,
                                      const std::string& model_name = "") = 0;
+    /// Summarizer write-back: replace a turn placeholder's raw text with the
+    /// real summary and stamp the summarizer model, matched by (guid, ts).
+    /// A NULL-model placeholder is the "raw, not yet summarized" sentinel;
+    /// this promotes it to a real summary. False if no such row exists.
+    virtual bool finalize_turn_summary(const std::string& session_guid,
+                                       const std::string& source_timestamp,
+                                       const std::string& text,
+                                       const std::string& model_name = "") = 0;
+    /// Mark a trivial turn's placeholder done by stamping its model_id
+    /// without rewriting the raw text — keeps it out of unsummarized_turns()
+    /// so it isn't re-enqueued forever. False if absent.
+    virtual bool mark_turn_summarized(const std::string& session_guid,
+                                      const std::string& source_timestamp,
+                                      const std::string& model_name) = 0;
     /// Set a summary's status (e.g. mark a session summary 'complete').
     virtual bool set_summary_status(int summary_id, const std::string& status) = 0;
     /// Replace a summary's `tags` column (used to clear "draft" once the

@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <numeric>
 #include <set>
+#include <mutex>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -143,6 +144,13 @@ struct SqliteBackend::Impl {
     Eigen::MatrixXf                dec_embeddings;      // rows × dims
     std::vector<json>              dec_metadata;
     std::vector<std::string>       dec_timestamps;
+
+    // Serializes all public-API access (H1): two httplib thread pools, the
+    // housekeeping timer, and the SummarizerService worker share one backend.
+    // The non-thread-safe Embedder and the three embedding caches are guarded
+    // by this. Locked once at the SqliteBackend:: public boundary; Impl methods
+    // never re-lock, so no recursive deadlock is possible.
+    mutable std::mutex mu;
 
     Impl(Embedder& emb, const std::string& path)
         : embedder(&emb)
@@ -868,6 +876,69 @@ struct SqliteBackend::Impl {
         return a.empty() ? u : (u + "\n\x1F\n" + a);
     }
 
+    // Read back a turn's committed session_id/timestamp (post-COALESCE/dedup)
+    // and (re)write its raw placeholder summary. Centralizes the read-back so
+    // both store_turn insert paths link the placeholder to the row's *actual*
+    // slot, even when dedup moved the timestamp.
+    void place_turn_placeholder(int turn_id, const std::string& u,
+                                const std::string& a) {
+        Stmt g(db, "SELECT session_id, timestamp FROM turns WHERE turn_id = ?");
+        g.bind(1, turn_id);
+        if (!g.step()) return;
+        bool sess_null = g.is_null(0);
+        int  session_id = sess_null ? 0 : g.column_int(0);
+        std::string ts  = g.column_text(1);
+        upsert_turn_placeholder(session_id, sess_null, ts, u, a);
+    }
+
+    // Write a raw-text placeholder L2 (level='turn') row for a freshly
+    // captured turn so a memory lookup surfaces it *immediately*, before the
+    // background summarizer runs (general search does not read the `turns`
+    // table). model_id stays NULL — that is the sentinel for "raw, not yet
+    // summarized"; handle_l2 later rewrites the text in place and stamps the
+    // summarizer model_id. Idempotent: removes any prior NULL-model placeholder
+    // for this (session_id, ts) first, then inserts — so a regeneration that
+    // moves the turn's timestamp does not strand an orphan placeholder.
+    // No-op when a *summarized* row (model_id NOT NULL) already exists.
+    void upsert_turn_placeholder(int session_id, bool sess_null,
+                                 const std::string& ts,
+                                 const std::string& u, const std::string& a) {
+        if (a.empty()) return;  // partial turn: nothing to surface yet
+
+        // Already summarized at this slot? leave it.
+        {
+            Stmt e(db,
+                "SELECT 1 FROM summaries WHERE level='turn' AND timestamp=? "
+                "AND session_id IS ? AND model_id IS NOT NULL LIMIT 1");
+            e.bind(1, ts);
+            if (sess_null) e.bind_null(2); else e.bind(2, session_id);
+            if (e.step()) return;
+        }
+        // Drop any stale NULL-model placeholder for this slot (re-capture).
+        {
+            Stmt d(db,
+                "DELETE FROM summaries WHERE level='turn' AND timestamp=? "
+                "AND session_id IS ? AND model_id IS NULL");
+            d.bind(1, ts);
+            if (sess_null) d.bind_null(2); else d.bind(2, session_id);
+            d.exec();
+        }
+
+        std::string text = normalize_path("User: " + u + "\n\nAssistant: " + a);
+        auto emb = embedder->encode(turn_embed_text(u, a));
+        Stmt s(db,
+            "INSERT INTO summaries "
+            "(model_id, session_id, text, embedding, level, status, tags, timestamp) "
+            "VALUES (NULL,?,?,?,'turn','complete','',?)");
+        if (sess_null) s.bind_null(1); else s.bind(1, session_id);
+        s.bind(2, text);
+        bind_embedding(s.raw(), 3, emb);
+        s.bind(4, ts);
+        if (!s.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+        invalidate_cache();
+    }
+
     // Store a raw L1 turn. An empty assistant_text writes a *partial* row
     // (assistant + embedding NULL) for the prompt-arrival/finalize flow;
     // otherwise the exchange is embedded unless defer_embedding. FTS5 sync
@@ -924,6 +995,7 @@ struct SqliteBackend::Impl {
                     up.bind(6, prev_id);
                     if (!up.exec())
                         throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+                    place_turn_placeholder(prev_id, u, a);
                     return prev_id;
                 }
             }
@@ -951,7 +1023,9 @@ struct SqliteBackend::Impl {
 
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-        return static_cast<int>(sqlite3_last_insert_rowid(db));
+        int new_id = static_cast<int>(sqlite3_last_insert_rowid(db));
+        place_turn_placeholder(new_id, u, a);
+        return new_id;
     }
 
     // Shared implementation for turn queries over a session GUID.
@@ -1065,6 +1139,7 @@ struct SqliteBackend::Impl {
             "  ON s.level = 'turn' "
             " AND s.session_id IS t.session_id "
             " AND s.timestamp = t.timestamp "
+            " AND s.model_id IS NOT NULL "
             "LEFT JOIN models m ON t.model_id = m.model_id "
             "LEFT JOIN sessions ss ON t.session_id = ss.session_id "
             "WHERE s.summary_id IS NULL "
@@ -1086,11 +1161,11 @@ struct SqliteBackend::Impl {
         return out;
     }
 
-    // True if a 'turn' summary already exists for (session_id, timestamp).
-    // Mirrors the unsummarized_turns() join so the linkage matches exactly:
-    // anonymous turns (session_id NULL) carry an empty guid here too. Counts
-    // 'draft' rows as existing — a turn with a draft is upgraded in place via
-    // the DraftRetry path, never re-queued as a fresh L2.
+    // True if a *summarized* 'turn' row exists for (session_id, timestamp) —
+    // i.e. model_id IS NOT NULL. A raw NULL-model placeholder does NOT count:
+    // the worker must still summarize it (rewrite in place). Mirrors the
+    // unsummarized_turns() join so the linkage matches exactly. Anonymous
+    // turns (session_id NULL) carry an empty guid here too.
     bool turn_summary_exists(const std::string& session_guid,
                              const std::string& source_timestamp) {
         Stmt s(db,
@@ -1099,6 +1174,7 @@ struct SqliteBackend::Impl {
             "WHERE s.level = 'turn' "
             "  AND s.timestamp = ? "
             "  AND COALESCE(ss.guid, '') = ? "
+            "  AND s.model_id IS NOT NULL "
             "LIMIT 1");
         s.bind(1, source_timestamp);
         s.bind(2, session_guid);
@@ -1310,6 +1386,61 @@ struct SqliteBackend::Impl {
         bind_embedding(s.raw(), 2, emb);
         if (model_id) s.bind(3, model_id); else s.bind_null(3);
         s.bind(4, summary_id);
+        bool ok = s.exec() && sqlite3_changes(db) > 0;
+        if (ok) invalidate_cache();
+        return ok;
+    }
+
+    // Summarizer write-back: replace a turn placeholder's raw text with the
+    // real summary and stamp the *summarizer* model. Matched by (guid, ts) on
+    // the level='turn' row. Updates the row regardless of its current model_id
+    // (so a re-summarization is allowed), but is normally called on a NULL-
+    // model placeholder. Returns false if no such row exists.
+    bool finalize_turn_summary(const std::string& session_guid,
+                               const std::string& source_timestamp,
+                               const std::string& text,
+                               const std::string& model_name) {
+        std::string t = normalize_path(text);
+        int model_id  = get_or_create_model(model_name);
+        auto emb = embedder->encode(t);
+        Stmt s(db,
+            "UPDATE summaries SET text = ?, embedding = ?, model_id = ?, tags = '' "
+            "WHERE summary_id = ("
+            "  SELECT s.summary_id FROM summaries s "
+            "  LEFT JOIN sessions ss ON s.session_id = ss.session_id "
+            "  WHERE s.level='turn' AND s.timestamp = ? "
+            "    AND COALESCE(ss.guid,'') = ? "
+            "  ORDER BY s.summary_id DESC LIMIT 1)");
+        s.bind(1, t);
+        bind_embedding(s.raw(), 2, emb);
+        if (model_id) s.bind(3, model_id); else s.bind_null(3);
+        s.bind(4, source_timestamp);
+        s.bind(5, session_guid);
+        bool ok = s.exec() && sqlite3_changes(db) > 0;
+        if (ok) invalidate_cache();
+        return ok;
+    }
+
+    // Trivial-turn done-marker: stamp a placeholder's model_id without
+    // touching its raw text. The "summary" of a 5-word turn is the turn
+    // itself; stamping the model removes it from unsummarized_turns() so it
+    // isn't re-enqueued forever (analysis M7). Returns false if absent.
+    bool mark_turn_summarized(const std::string& session_guid,
+                              const std::string& source_timestamp,
+                              const std::string& model_name) {
+        int model_id = get_or_create_model(model_name);
+        if (!model_id) return false;  // need a real model to stamp
+        Stmt s(db,
+            "UPDATE summaries SET model_id = ? "
+            "WHERE summary_id = ("
+            "  SELECT s.summary_id FROM summaries s "
+            "  LEFT JOIN sessions ss ON s.session_id = ss.session_id "
+            "  WHERE s.level='turn' AND s.timestamp = ? "
+            "    AND COALESCE(ss.guid,'') = ? AND s.model_id IS NULL "
+            "  ORDER BY s.summary_id DESC LIMIT 1)");
+        s.bind(1, model_id);
+        s.bind(2, source_timestamp);
+        s.bind(3, session_guid);
         bool ok = s.exec() && sqlite3_changes(db) > 0;
         if (ok) invalidate_cache();
         return ok;
@@ -1826,10 +1957,12 @@ SqliteBackend::~SqliteBackend() = default;
 std::string SqliteBackend::db_path() const { return pImpl->db_path; }
 
 std::string SqliteBackend::store(const std::string& text, json metadata, bool defer_embedding) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->store(text, std::move(metadata), defer_embedding);
 }
 
 int SqliteBackend::store_document(const DocumentChunk& chunk, bool defer_embedding) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->store_document(chunk, defer_embedding);
 }
 
@@ -1837,17 +1970,20 @@ int SqliteBackend::store_turn(const std::string& user_text,
                               const std::string& assistant_text,
                               const std::string& model_name, bool defer_embedding,
                               const std::string& session_guid) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->store_turn(user_text, assistant_text, model_name,
                              defer_embedding, session_guid);
 }
 
 std::vector<TurnRecord> SqliteBackend::turns_by_session(
         const std::string& session_guid) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->turns_by_session(session_guid);
 }
 
 bool SqliteBackend::finalize_turn(int turn_id, const std::string& assistant_text,
                                   const std::string& model_name) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->finalize_turn(turn_id, assistant_text, model_name);
 }
 
@@ -1856,140 +1992,184 @@ int SqliteBackend::store_summary(const std::string& text, const std::string& lev
                                  const std::string& session_guid,
                                  const std::string& source_timestamp,
                                  const std::string& tags) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->store_summary(text, level, status, model_name, session_guid,
                                 source_timestamp, tags);
 }
 
 std::optional<std::pair<int, std::string>>
 SqliteBackend::current_session_summary(const std::string& session_guid) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->current_session_summary(session_guid);
 }
 
 std::optional<std::pair<int, std::string>>
 SqliteBackend::current_project_summary() {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->current_project_summary();
 }
 
 std::vector<std::string>
 SqliteBackend::l2_summary_texts(const std::string& session_guid) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->l2_summary_texts(session_guid);
 }
 
 std::vector<std::string>
 SqliteBackend::complete_l3_summary_texts() {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->complete_l3_summary_texts();
 }
 
 bool SqliteBackend::update_summary_text(int summary_id, const std::string& text,
                                         const std::string& model_name) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->update_summary_text(summary_id, text, model_name);
 }
 
+bool SqliteBackend::finalize_turn_summary(const std::string& session_guid,
+                                          const std::string& source_timestamp,
+                                          const std::string& text,
+                                          const std::string& model_name) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->finalize_turn_summary(session_guid, source_timestamp,
+                                        text, model_name);
+}
+
+bool SqliteBackend::mark_turn_summarized(const std::string& session_guid,
+                                         const std::string& source_timestamp,
+                                         const std::string& model_name) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->mark_turn_summarized(session_guid, source_timestamp, model_name);
+}
+
 bool SqliteBackend::set_summary_status(int summary_id, const std::string& status) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->set_summary_status(summary_id, status);
 }
 
 bool SqliteBackend::set_summary_tags(int summary_id, const std::string& tags) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->set_summary_tags(summary_id, tags);
 }
 
 std::vector<std::string> SqliteBackend::recent_summaries(const std::string& level,
                                                          int limit) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->recent_summaries(level, limit);
 }
 
 std::vector<std::string> SqliteBackend::current_decisions(int limit) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->current_decisions(limit);
 }
 
 std::vector<TurnRecord> SqliteBackend::unsummarized_turns(int limit) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->unsummarized_turns(limit);
 }
 
 bool SqliteBackend::turn_summary_exists(const std::string& session_guid,
                                         const std::string& source_timestamp) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->turn_summary_exists(session_guid, source_timestamp);
 }
 
 std::vector<DraftSummary> SqliteBackend::draft_summaries(int limit) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->draft_summaries(limit);
 }
 
 std::vector<std::string> SqliteBackend::sessions_needing_close(int pause_minutes) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->sessions_needing_close(pause_minutes);
 }
 
 std::vector<TurnRecord> SqliteBackend::turns_by_session_desc(
         const std::string& session_guid, int limit) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->turns_by_session_desc(session_guid, limit);
 }
 
 std::vector<SummaryRecord>
 SqliteBackend::turn_summaries_by_session_desc(
         const std::string& session_guid, int limit) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->turn_summaries_by_session_desc(session_guid, limit);
 }
 
 std::vector<SummaryRecord>
 SqliteBackend::session_summaries_desc(
         const std::string& session_guid, int limit) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->session_summaries_desc(session_guid, limit);
 }
 
 bool SqliteBackend::update_text(int memory_id, const std::string& text, json metadata, bool defer_embedding) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->update_text(memory_id, text, std::move(metadata), defer_embedding);
 }
 
 SearchResponse SqliteBackend::search(const std::string& query, int limit,
                                      float min_score,
                                      std::vector<std::string> collections) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->search(query, limit, min_score, std::move(collections));
 }
 
-int SqliteBackend::count() const { return pImpl->count(); }
+int SqliteBackend::count() const { std::lock_guard<std::mutex> lk(pImpl->mu); return pImpl->count(); }
 
-bool SqliteBackend::has_embeddings() const { return pImpl->has_embeddings(); }
+bool SqliteBackend::has_embeddings() const { std::lock_guard<std::mutex> lk(pImpl->mu); return pImpl->has_embeddings(); }
 
-int SqliteBackend::count_embeddable_rows() const { return pImpl->count_embeddable_rows(); }
+int SqliteBackend::count_embeddable_rows() const { std::lock_guard<std::mutex> lk(pImpl->mu); return pImpl->count_embeddable_rows(); }
 
 std::vector<SearchResult> SqliteBackend::load_all(const std::string& collection) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->load_all(collection);
 }
 
 int SqliteBackend::rebuild_embeddings(Embedder& embedder) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->rebuild_embeddings(embedder);
 }
 
 int SqliteBackend::backfill_embeddings(Embedder& embedder) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->backfill_embeddings(embedder);
 }
 
 bool SqliteBackend::update_document_embedding(int document_id,
                                               const std::vector<float>& emb) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->update_document_embedding(document_id, emb);
 }
 
 std::vector<std::string> SqliteBackend::collections() const {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->collections();
 }
 
 void SqliteBackend::close() { pImpl->close(); }
 
 bool SqliteBackend::delete_memory(int memory_id) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->delete_memory(memory_id);
 }
 
 int SqliteBackend::delete_batch(const std::vector<int>& memory_ids) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->delete_batch(memory_ids);
 }
 
 std::vector<SearchResult> SqliteBackend::search_by_metadata(const json& metadata_filter, int limit,
                                                            const std::string& after,
                                                            const std::string& before) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->search_by_metadata(metadata_filter, limit, after, before);
 }
 
 int SqliteBackend::cleanup_old_conversations(float max_age_hours) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     auto cutoff = std::chrono::system_clock::now() -
         std::chrono::duration_cast<std::chrono::system_clock::duration>(
             std::chrono::duration<double, std::ratio<3600>>(max_age_hours));

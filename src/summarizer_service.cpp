@@ -209,6 +209,15 @@ bool SummarizerService::handle_l2(const Job& j) {
     {
         const size_t combined = eff_user.size() + j.assistant_text.size();
         if (combined < 80 || j.assistant_text.size() < 20) {
+            // Trivial turn: don't spend an inference call. The raw placeholder
+            // row (written at capture) IS the summary for a turn this short.
+            // Stamp it done with the summarizer model so it leaves the
+            // unsummarized queue instead of being re-enqueued every tick.
+            const std::string summarizer_model =
+                inference_ ? inference_->memory_model : "";
+            if (!summarizer_model.empty())
+                backend_.mark_turn_summarized(j.session_guid, j.source_timestamp,
+                                              summarizer_model);
             Diskerror::logger::info(std::format(
                 "[summarizer] skipping trivial turn (session={}, ts={}, "
                 "combined_chars={})",
@@ -219,15 +228,15 @@ bool SummarizerService::handle_l2(const Job& j) {
     }
 
     // Idempotency guard. The live enqueue (capture path) and the pause-timer
-    // catch-up scan can both queue the same turn: the scan reads
-    // unsummarized_turns() before the worker has written this turn's L2 row,
-    // so it re-queues it. Without this check that produced two summaries per
-    // turn (two inference calls, two rows at the same timestamp). The worker
-    // is single-threaded, so by the time the duplicate job runs the first has
-    // already committed — skip it. A pre-existing 'draft' row also counts:
-    // the DraftRetry path upgrades it in place rather than adding a fresh L2.
+    // catch-up scan can both queue the same turn. turn_summary_exists() now
+    // only counts *summarized* rows (model_id NOT NULL) — the raw placeholder
+    // does not block its own summarization. The worker is single-threaded, so
+    // by the time a duplicate job runs the first has already promoted the row.
     if (backend_.turn_summary_exists(j.session_guid, j.source_timestamp))
         return true;
+
+    const std::string summarizer_model =
+        inference_ ? inference_->memory_model : "";
 
     std::string summary;
     if (inference_) {
@@ -241,17 +250,16 @@ bool SummarizerService::handle_l2(const Job& j) {
     const std::string  display_guid = guid.empty() ? "-" : guid;
 
     if (summary.empty()) {
-        // Fallback: heuristic draft, tagged for later rewrite.
-        const auto draft = heuristic_draft(eff_user, j.assistant_text);
-        backend_.store_summary(draft, "turn", "complete",
-                              j.model_name, guid, ts, "draft");
+        // Inference unreachable. Leave the raw NULL-model placeholder in
+        // place — it already makes the turn searchable, and the next catch-up
+        // pass retries summarization. No draft row needed.
         Diskerror::logger::info(std::format(
             lang::MSG_SUMMARIZER_DRAFT, display_guid, ts));
         return false;
     }
 
-    backend_.store_summary(summary, "turn", "complete",
-                          j.model_name, guid, ts, "");
+    // Promote the placeholder in place: real summary text + summarizer model.
+    backend_.finalize_turn_summary(guid, ts, summary, summarizer_model);
     Diskerror::logger::info(std::format(
         lang::MSG_SUMMARIZER_L2, display_guid, ts));
 

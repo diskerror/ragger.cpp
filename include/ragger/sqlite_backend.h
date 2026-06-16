@@ -73,6 +73,13 @@ public:
         complete_l3_summary_texts() override;
     bool update_summary_text(int summary_id, const std::string& text,
                              const std::string& model_name = "") override;
+    bool finalize_turn_summary(const std::string& session_guid,
+                               const std::string& source_timestamp,
+                               const std::string& text,
+                               const std::string& model_name = "") override;
+    bool mark_turn_summarized(const std::string& session_guid,
+                              const std::string& source_timestamp,
+                              const std::string& model_name) override;
     bool set_summary_status(int summary_id, const std::string& status) override;
     bool set_summary_tags(int summary_id, const std::string& tags) override;
     std::vector<std::string> recent_summaries(const std::string& level, int limit) override;
