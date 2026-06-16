@@ -381,8 +381,11 @@ bool SummarizerService::handle_draft(const Job& j) {
         [&](const TurnRecord& t) { return t.timestamp == j.source_timestamp; });
     if (it == turns.end()) return false;  // turn vanished — drop the draft
 
+    // Apply the same strip as in handle_l2 to remove system-injected turns
+    std::string eff_user = is_system_injected_turn(it->user_text) ? std::string{} : it->user_text;
+
     auto fresh = summarize_transcript(
-        *inference_, {{ it->user_text, it->assistant_text }});
+        *inference_, {{ eff_user, it->assistant_text }});
     if (fresh.empty()) return false;
 
     // update_summary_text re-embeds + records the model. We then clear

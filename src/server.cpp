@@ -45,6 +45,7 @@ using json = nlohmann::json;
 // Global signal flags (async-signal-safe)
 static std::atomic<bool> g_housekeeping_requested{false};
 static std::atomic<bool> g_config_reload_requested{false};
+static std::atomic<bool> g_shutdown_requested{false};
 
 static void sigusr1_handler(int) {
     g_housekeeping_requested.store(true, std::memory_order_relaxed);
@@ -52,6 +53,10 @@ static void sigusr1_handler(int) {
 
 static void sighup_handler(int) {
     g_config_reload_requested.store(true, std::memory_order_relaxed);
+}
+
+static void sigterm_handler(int) {
+    g_shutdown_requested.store(true, std::memory_order_relaxed);
 }
 
 // Serialise a vector of SearchResults to a JSON array.
@@ -217,6 +222,14 @@ struct Server::Impl {
             while (timer_running_) {
                 for (int i = 0; i < interval && timer_running_; ++i) {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
+                    // Check for shutdown
+                    if (g_shutdown_requested.load(std::memory_order_relaxed)) {
+                        Diskerror::logger::info("Shutdown signal received; stopping listeners");
+                        timer_running_ = false;
+                        unix_svr.stop();
+                        tcp_svr.stop();
+                        break;
+                    }
                     // Check for signal-triggered housekeeping
                     if (g_housekeeping_requested.exchange(false)) {
                         Diskerror::logger::info(lang::MSG_HOUSEKEEPING_SIGNAL);
@@ -640,6 +653,10 @@ void Server::run() {
 
     sa.sa_handler = sighup_handler;
     sigaction(SIGHUP, &sa, nullptr);
+
+    sa.sa_handler = sigterm_handler;
+    sigaction(SIGTERM, &sa, nullptr);
+    sigaction(SIGINT,  &sa, nullptr);
 
     // Start housekeeping timer (runs every 60s + on SIGUSR1)
     pImpl->start_housekeeping_timer();
