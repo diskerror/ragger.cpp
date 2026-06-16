@@ -8,6 +8,7 @@
 #include "ragger/util/fs.h"
 #include "ragger/util/time.h"
 #include "ragger/util/sqlite.h"
+#include "diskerror/logger.h"
 #include <format>
 #include "nlohmann_json.hpp"
 
@@ -151,6 +152,35 @@ struct SqliteBackend::Impl {
     // by this. Locked once at the SqliteBackend:: public boundary; Impl methods
     // never re-lock, so no recursive deadlock is possible.
     mutable std::mutex mu;
+
+    // Decode an embedding BLOB into a float vector of `dims`, choosing f16 vs
+    // f32 by the blob's actual byte length (self-describing), NOT by the
+    // store_f16_ config flag. This makes a DB readable even if its stored dtype
+    // differs from the current config (e.g. dtype changed without a rebuild).
+    //   dims*2 bytes  -> f16   |   dims*4 bytes -> f32
+    // Anything else (NULL, deferred-but-unbackfilled row, corruption, or a
+    // dimension mismatch) yields a zero vector; the first such row per cache
+    // load is logged once as a warning (table + row id).
+    std::vector<float> decode_embedding_blob(const void* blob, int blob_bytes,
+                                             int dims, const char* table,
+                                             int row_id, bool& warned) {
+        std::vector<float> emb(dims, 0.0f);
+        if (blob == nullptr) return emb;  // deferred row; silent (expected)
+        if (blob_bytes == dims * static_cast<int>(sizeof(uint16_t))) {
+            const uint16_t* h = static_cast<const uint16_t*>(blob);
+            for (int i = 0; i < dims; ++i) emb[i] = f16_to_f32(h[i]);
+        } else if (blob_bytes == dims * static_cast<int>(sizeof(float))) {
+            const float* f = static_cast<const float*>(blob);
+            for (int i = 0; i < dims; ++i) emb[i] = f[i];
+        } else if (!warned) {
+            warned = true;
+            Diskerror::logger::warn(std::format(
+                "[cache] {} row {}: embedding blob is {} bytes, expected {} (f16) "
+                "or {} (f32); using zero vector",
+                table, row_id, blob_bytes, dims * 2, dims * 4));
+        }
+        return emb;
+    }
 
     Impl(Embedder& emb, const std::string& path)
         : embedder(&emb)
@@ -488,6 +518,7 @@ struct SqliteBackend::Impl {
 
         std::vector<std::vector<float>> emb_rows;
         const int expected_dims = config().embedding_dimensions;
+        bool blob_warned = false;
 
         while (s.step()) {
             auto col_text = [&](int i) -> std::string { return s.column_text(i); };
@@ -496,23 +527,9 @@ struct SqliteBackend::Impl {
 
             const void* blob = s.column_blob(2);
             int blob_bytes   = s.column_bytes(2);
-            // The DB's dtype/length are authoritative (validated against the
-            // settings table at startup), so decode per store_f16_. The byte
-            // count is only a sanity check: a NULL / wrong-sized blob (deferred
-            // row before backfill, or corruption) → zero vector (cosine 0; FTS5
-            // still matches text).
-            const int expected_bytes = expected_dims *
-                static_cast<int>(store_f16_ ? sizeof(uint16_t) : sizeof(float));
-            std::vector<float> emb(expected_dims, 0.0f);
-            if (blob != nullptr && blob_bytes == expected_bytes) {
-                if (store_f16_) {
-                    const uint16_t* h = static_cast<const uint16_t*>(blob);
-                    for (int i = 0; i < expected_dims; ++i) emb[i] = f16_to_f32(h[i]);
-                } else {
-                    const float* f = static_cast<const float*>(blob);
-                    for (int i = 0; i < expected_dims; ++i) emb[i] = f[i];
-                }
-            }
+            std::vector<float> emb = decode_embedding_blob(
+                blob, blob_bytes, expected_dims, "summaries",
+                cached_ids.back(), blob_warned);
             emb_rows.push_back(std::move(emb));
 
             // Lean v2 summaries: surface level/status/tags as metadata so the
@@ -558,6 +575,7 @@ struct SqliteBackend::Impl {
 
         std::vector<std::vector<float>> emb_rows;
         const int expected_dims = config().embedding_dimensions;
+        bool blob_warned = false;
 
         while (s.step()) {
             auto col_text = [&](int i) -> std::string { return s.column_text(i); };
@@ -566,18 +584,9 @@ struct SqliteBackend::Impl {
 
             const void* blob = s.column_blob(2);
             int blob_bytes   = s.column_bytes(2);
-            const int expected_bytes = expected_dims *
-                static_cast<int>(store_f16_ ? sizeof(uint16_t) : sizeof(float));
-            std::vector<float> emb(expected_dims, 0.0f);
-            if (blob != nullptr && blob_bytes == expected_bytes) {
-                if (store_f16_) {
-                    const uint16_t* h = static_cast<const uint16_t*>(blob);
-                    for (int i = 0; i < expected_dims; ++i) emb[i] = f16_to_f32(h[i]);
-                } else {
-                    const float* f = static_cast<const float*>(blob);
-                    for (int i = 0; i < expected_dims; ++i) emb[i] = f[i];
-                }
-            }
+            std::vector<float> emb = decode_embedding_blob(
+                blob, blob_bytes, expected_dims, "documents",
+                doc_ids.back(), blob_warned);
             emb_rows.push_back(std::move(emb));
 
             json meta = json::object();
@@ -619,6 +628,7 @@ struct SqliteBackend::Impl {
 
         std::vector<std::vector<float>> emb_rows;
         const int expected_dims = config().embedding_dimensions;
+        bool blob_warned = false;
 
         while (s.step()) {
             auto col_text = [&](int i) -> std::string { return s.column_text(i); };
@@ -627,18 +637,9 @@ struct SqliteBackend::Impl {
 
             const void* blob = s.column_blob(2);
             int blob_bytes   = s.column_bytes(2);
-            const int expected_bytes = expected_dims *
-                static_cast<int>(store_f16_ ? sizeof(uint16_t) : sizeof(float));
-            std::vector<float> emb(expected_dims, 0.0f);
-            if (blob != nullptr && blob_bytes == expected_bytes) {
-                if (store_f16_) {
-                    const uint16_t* h = static_cast<const uint16_t*>(blob);
-                    for (int i = 0; i < expected_dims; ++i) emb[i] = f16_to_f32(h[i]);
-                } else {
-                    const float* f = static_cast<const float*>(blob);
-                    for (int i = 0; i < expected_dims; ++i) emb[i] = f[i];
-                }
-            }
+            std::vector<float> emb = decode_embedding_blob(
+                blob, blob_bytes, expected_dims, "decisions",
+                dec_ids.back(), blob_warned);
             emb_rows.push_back(std::move(emb));
 
             json meta = json::object();
