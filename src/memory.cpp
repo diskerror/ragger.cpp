@@ -128,6 +128,29 @@ bool RaggerMemory::update_document_embedding(int document_id,
     return backend_->update_document_embedding(document_id, emb);
 }
 
+int RaggerMemory::store_decision(const std::string& text,
+                                 const std::string& status,
+                                 const std::string& tags,
+                                 const std::string& source_timestamp,
+                                 bool defer_embedding) {
+    return backend_->store_decision(text, status, tags, source_timestamp, defer_embedding);
+}
+
+bool RaggerMemory::update_decision_embedding(int decision_id,
+                                             const std::vector<float>& emb) {
+    return backend_->update_decision_embedding(decision_id, emb);
+}
+
+bool RaggerMemory::update_summary_embedding(int summary_id,
+                                            const std::vector<float>& emb) {
+    return backend_->update_summary_embedding(summary_id, emb);
+}
+
+bool RaggerMemory::update_turn_embedding(int turn_id,
+                                         const std::vector<float>& emb) {
+    return backend_->update_turn_embedding(turn_id, emb);
+}
+
 int RaggerMemory::store_summary(const std::string& text, const std::string& level,
                                 const std::string& status, const std::string& model_name,
                                 const std::string& session_guid,

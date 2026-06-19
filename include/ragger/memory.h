@@ -55,6 +55,18 @@ public:
     /// Write back a document's embedding (import path).
     bool update_document_embedding(int document_id, const std::vector<float>& emb);
 
+    /// Store a curated L6 decision/lesson. Embeds text unless deferred.
+    int store_decision(const std::string& text,
+                       const std::string& status = "active",
+                       const std::string& tags = "",
+                       const std::string& source_timestamp = "",
+                       bool defer_embedding = false);
+
+    /// Per-row embedding write-back for the remaining context tables.
+    bool update_decision_embedding(int decision_id, const std::vector<float>& emb);
+    bool update_summary_embedding(int summary_id, const std::vector<float>& emb);
+    bool update_turn_embedding(int turn_id, const std::vector<float>& emb);
+
     // --- summaries (L2/L3) pipeline (issue #22) ---
     /// `source_timestamp` (non-empty) overrides the row's timestamp — L2
     /// inherits the source turn's timestamp so the (session_id, timestamp)

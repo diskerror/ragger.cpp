@@ -1139,6 +1139,35 @@ struct SqliteBackend::Impl {
         return static_cast<int>(sqlite3_last_insert_rowid(db));
     }
 
+    // ---- store_decision: write Level 6 curated decision/lesson ----------
+    // Mirrors store_summary but the decisions table has no level/model/session
+    // columns — just text/embedding/status/tags/timestamp. defer_embedding
+    // leaves embedding NULL for a later backfill pass.
+    int store_decision(const std::string& text, const std::string& status,
+                       const std::string& tags,
+                       const std::string& source_timestamp,
+                       bool defer_embedding) {
+        std::string t = normalize_path(text);
+
+        Stmt s(db,
+            "INSERT INTO decisions (text, embedding, status, tags, timestamp) "
+            "VALUES (?,?,?,?,?)");
+        s.bind(1, t);
+        if (defer_embedding) {
+            s.bind_null(2);
+        } else {
+            auto emb = embedder->encode(t);
+            bind_embedding(s.raw(), 2, emb);
+        }
+        s.bind(3, status.empty() ? "active" : status);
+        s.bind(4, tags);
+        s.bind(5, source_timestamp.empty() ? local_timestamp() : source_timestamp);
+        if (!s.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+        invalidate_dec_cache();
+        return static_cast<int>(sqlite3_last_insert_rowid(db));
+    }
+
     // ---- catch-up / recipe helpers ------------------------------------
     // Turns lacking an L2 summary, linked by (session_id, timestamp).
     // LEFT JOIN keeps turns whose summary row doesn't exist; ordered
@@ -1714,7 +1743,15 @@ struct SqliteBackend::Impl {
         return results;
     }
 
-    int rebuild_embeddings(Embedder& emb_ref) {
+    // Re-encode embeddings across all four embedded tables (turns, summaries,
+    // decisions, documents). Two modes, selected by `only_missing`:
+    //   * false → re-encode every row (full rebuild; used by CLI
+    //             `ragger rebuild-embeddings` after a model/dtype change)
+    //   * true  → only rows WHERE embedding IS NULL (cheap backfill of
+    //             deferred-embed rows; used at server startup)
+    // When `progress` is set, prints a running "n/total" line to stdout
+    // (interactive CLI). Returns the number of rows (re-)embedded.
+    int embed_tables(Embedder& emb_ref, bool only_missing, bool progress) {
         struct TableSpec {
             const char* table;
             const char* id_col;
@@ -1728,103 +1765,72 @@ struct SqliteBackend::Impl {
             { "documents", "document_id", "text",      nullptr          },
         };
 
+        const char* where = only_missing ? " WHERE embedding IS NULL" : "";
+
+        // Total is only needed for the progress display.
         int total_count = 0;
-        for (auto& t : tables) {
-            Stmt s(db, std::format("SELECT COUNT(*) FROM {}", t.table));
-            if (s.step())
-                total_count += s.column_int(0);
-        }
-
-        int doc_count = 0;
-        for (auto& t : tables) {
-            std::string sel = t.extra_col
-                ? std::format("SELECT {} AS id, {}, {} FROM {}", t.id_col, t.text_col, t.extra_col, t.table)
-                : std::format("SELECT {} AS id, {} AS text FROM {}", t.id_col, t.text_col, t.table);
-            std::string upd = std::format("UPDATE {} SET embedding = ? WHERE {} = ?", t.table, t.id_col);
-
-            Stmt select_stmt(db, sel);
-
-            while (select_stmt.step()) {
-                int id = select_stmt.column_int(0);
-                auto col1 = select_stmt.column_text(1);
-                if (col1.empty()) continue;
-
-                std::string embed_text;
-                if (t.extra_col) {
-                    embed_text = turn_embed_text(col1, select_stmt.column_text(2));
-                } else {
-                    embed_text = std::move(col1);
-                }
-
-                auto emb = emb_ref.encode(embed_text);
-                Stmt update(db, upd);
-                bind_embedding(update.raw(), 1, emb);
-                update.bind(2, id);
-                update.step();
-
-                ++doc_count;
-                std::cout << std::format(ragger::lang::MSG_REBUILD_EMBEDDINGS_PROGRESS,
-                                         doc_count, total_count);
-                std::cout.flush();
+        if (progress) {
+            for (auto& t : tables) {
+                Stmt s(db, std::format("SELECT COUNT(*) FROM {}{}", t.table, where));
+                if (s.step())
+                    total_count += s.column_int(0);
             }
         }
 
-        std::cout << "\n";
-        invalidate_cache();
-        invalidate_doc_cache();
-        invalidate_dec_cache();
-        return doc_count;
-    }
-
-    int backfill_embeddings(Embedder& emb_ref) {
-        // Cover all four embedded tables (not just summaries).
-        // Same TableSpec structure as rebuild_embeddings, but filters to
-        // WHERE embedding IS NULL so only unembedded rows are touched.
-        struct TableSpec {
-            const char* table;
-            const char* id_col;
-            const char* text_col;
-            const char* extra_col;
-        };
-        static constexpr TableSpec tables[] = {
-            { "turns",     "turn_id",     "user_text", "assistant_text" },
-            { "summaries", "summary_id",  "text",      nullptr          },
-            { "decisions", "decision_id", "text",      nullptr          },
-            { "documents", "document_id", "text",      nullptr          },
-        };
-
-        int updated = 0;
+        int done = 0;
         for (auto& t : tables) {
             std::string sel = t.extra_col
-                ? std::format("SELECT {} AS id, {}, {} FROM {} WHERE embedding IS NULL",
-                              t.id_col, t.text_col, t.extra_col, t.table)
-                : std::format("SELECT {} AS id, {} AS text FROM {} WHERE embedding IS NULL",
-                              t.id_col, t.text_col, t.table);
+                ? std::format("SELECT {} AS id, {}, {} FROM {}{}",
+                              t.id_col, t.text_col, t.extra_col, t.table, where)
+                : std::format("SELECT {} AS id, {} AS text FROM {}{}",
+                              t.id_col, t.text_col, t.table, where);
             std::string upd = std::format("UPDATE {} SET embedding = ? WHERE {} = ?",
                                           t.table, t.id_col);
+
             Stmt select_stmt(db, sel);
             while (select_stmt.step()) {
                 int id = select_stmt.column_int(0);
                 auto col1 = select_stmt.column_text(1);
                 if (col1.empty()) continue;
+
                 std::string embed_text = t.extra_col
                     ? turn_embed_text(col1, select_stmt.column_text(2))
                     : std::move(col1);
+
                 auto emb = emb_ref.encode(embed_text);
                 Stmt update(db, upd);
                 bind_embedding(update.raw(), 1, emb);
                 update.bind(2, id);
                 update.step();
-                ++updated;
+
+                ++done;
+                if (progress) {
+                    std::cout << std::format(ragger::lang::MSG_REBUILD_EMBEDDINGS_PROGRESS,
+                                             done, total_count);
+                    std::cout.flush();
+                }
             }
         }
 
-        if (updated > 0) {
+        if (progress)
+            std::cout << "\n";
+
+        if (done > 0 || !only_missing) {
             invalidate_cache();
             invalidate_doc_cache();
             invalidate_dec_cache();
         }
-        return updated;
+        return done;
+    }
+
+    // Full re-encode of every embedded row (interactive, with progress).
+    int rebuild_embeddings(Embedder& emb_ref) {
+        return embed_tables(emb_ref, /*only_missing=*/false, /*progress=*/true);
+    }
+
+    // Cheap backfill: embed only rows left NULL by deferred-embed stores.
+    int backfill_embeddings(Embedder& emb_ref) {
+        return embed_tables(emb_ref, /*only_missing=*/true, /*progress=*/false);
     }
 
     // Set a document's embedding (used by the import path after embedding
@@ -1836,6 +1842,42 @@ struct SqliteBackend::Impl {
         s.bind(2, document_id);
         if (s.exec() && sqlite3_changes(db) > 0) {
             invalidate_doc_cache();
+            return true;
+        }
+        return false;
+    }
+
+    // Per-row embedding write-back for the other three context tables.
+    // Mirrors update_document_embedding; each invalidates the cache that
+    // backs its table's vector search.
+    bool update_decision_embedding(int decision_id, const std::vector<float>& emb) {
+        Stmt s(db, "UPDATE decisions SET embedding = ? WHERE decision_id = ?");
+        bind_embedding(s.raw(), 1, emb);
+        s.bind(2, decision_id);
+        if (s.exec() && sqlite3_changes(db) > 0) {
+            invalidate_dec_cache();
+            return true;
+        }
+        return false;
+    }
+
+    bool update_summary_embedding(int summary_id, const std::vector<float>& emb) {
+        Stmt s(db, "UPDATE summaries SET embedding = ? WHERE summary_id = ?");
+        bind_embedding(s.raw(), 1, emb);
+        s.bind(2, summary_id);
+        if (s.exec() && sqlite3_changes(db) > 0) {
+            invalidate_cache();
+            return true;
+        }
+        return false;
+    }
+
+    bool update_turn_embedding(int turn_id, const std::vector<float>& emb) {
+        Stmt s(db, "UPDATE turns SET embedding = ? WHERE turn_id = ?");
+        bind_embedding(s.raw(), 1, emb);
+        s.bind(2, turn_id);
+        if (s.exec() && sqlite3_changes(db) > 0) {
+            invalidate_cache();
             return true;
         }
         return false;
@@ -2158,6 +2200,33 @@ bool SqliteBackend::update_document_embedding(int document_id,
                                               const std::vector<float>& emb) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->update_document_embedding(document_id, emb);
+}
+
+int SqliteBackend::store_decision(const std::string& text,
+                                  const std::string& status,
+                                  const std::string& tags,
+                                  const std::string& source_timestamp,
+                                  bool defer_embedding) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->store_decision(text, status, tags, source_timestamp, defer_embedding);
+}
+
+bool SqliteBackend::update_decision_embedding(int decision_id,
+                                              const std::vector<float>& emb) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->update_decision_embedding(decision_id, emb);
+}
+
+bool SqliteBackend::update_summary_embedding(int summary_id,
+                                             const std::vector<float>& emb) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->update_summary_embedding(summary_id, emb);
+}
+
+bool SqliteBackend::update_turn_embedding(int turn_id,
+                                          const std::vector<float>& emb) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->update_turn_embedding(turn_id, emb);
 }
 
 std::vector<std::string> SqliteBackend::collections() const {

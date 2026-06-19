@@ -56,6 +56,21 @@ public:
     bool update_document_embedding(int document_id,
                                    const std::vector<float>& emb) override;
 
+    /// Store a curated L6 decision/lesson. Returns decision_id.
+    int store_decision(const std::string& text,
+                       const std::string& status = "active",
+                       const std::string& tags = "",
+                       const std::string& source_timestamp = "",
+                       bool defer_embedding = false) override;
+
+    /// Write back a single row's embedding for any embedded context table.
+    bool update_decision_embedding(int decision_id,
+                                   const std::vector<float>& emb) override;
+    bool update_summary_embedding(int summary_id,
+                                  const std::vector<float>& emb) override;
+    bool update_turn_embedding(int turn_id,
+                               const std::vector<float>& emb) override;
+
     // --- summaries (L2/L3) pipeline (issue #22) ---
     int store_summary(const std::string& text, const std::string& level,
                       const std::string& status,

@@ -87,6 +87,24 @@ public:
     virtual bool update_document_embedding(int document_id,
                                            const std::vector<float>& emb) = 0;
 
+    /// Store a curated L6 decision/lesson (decisions table). `status` defaults
+    /// to "active"; `tags` stored verbatim; `source_timestamp` overrides the
+    /// row timestamp when non-empty. Returns the new decision_id.
+    virtual int store_decision(const std::string& text,
+                               const std::string& status = "active",
+                               const std::string& tags = "",
+                               const std::string& source_timestamp = "",
+                               bool defer_embedding = false) = 0;
+
+    /// Write back a single row's embedding for the remaining context tables
+    /// (documents already covered above). Returns true if a row was updated.
+    virtual bool update_decision_embedding(int decision_id,
+                                           const std::vector<float>& emb) = 0;
+    virtual bool update_summary_embedding(int summary_id,
+                                          const std::vector<float>& emb) = 0;
+    virtual bool update_turn_embedding(int turn_id,
+                                       const std::vector<float>& emb) = 0;
+
     // --- summaries (L2/L3) pipeline (issue #22) ---
     /// Insert a summary (level 'turn'|'session'|'project', status
     /// 'current'|'complete'); embeds text, records model. Returns summary_id.

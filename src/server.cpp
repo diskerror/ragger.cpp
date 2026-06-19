@@ -374,6 +374,20 @@ struct Server::Impl {
         if (!metadata.contains("source") || metadata["source"].get<std::string>().empty())
             metadata["source"] = user.username;
         auto& mem = _get_memory(user.username);
+
+        // Route curated decisions to the L6 decisions table; everything else
+        // (fact/preference/lesson/unspecified) lands in summaries via store().
+        std::string category = metadata.value("category", "");
+        if (category == "decision") {
+            std::string tags = metadata.value("tags", "");
+            int did = mem.store_decision(text, /*status=*/"active", tags);
+            Diskerror::logger::debug("POST /store 200 (decision)");
+            res.set_content(json{{"id", std::to_string(did)},
+                                 {"status", "stored"},
+                                 {"table", "decisions"}}.dump(), "application/json");
+            return;
+        }
+
         std::string id = mem.store(text, metadata);
         Diskerror::logger::debug("POST /store 200");
         res.set_content(json{{"id", id}, {"status", "stored"}}.dump(), "application/json");

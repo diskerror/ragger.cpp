@@ -283,6 +283,46 @@ class RaggerMemoryProvider(MemoryProvider):
         """
         if self._breaker_open() or not user_content:
             return
+        self._post_turn(user_content, assistant_content, session_id=session_id)
+
+    def post_turn_finalized(self, turn_data: dict, **kwargs) -> None:
+        """Hook called after *every* turn finalization, including interrupted ones.
+        
+        This is the capture point that bypasses Hermes's skip-on-interrupt logic.
+        We POST to Ragger any turn with both user and assistant content,
+        even if interrupted. Empty turns are skipped (no substance to capture).
+        
+        turn_data format (from Hermes):
+            {
+                "user": str,
+                "assistant": str,
+                "model": str,
+                "session_id": str,
+                "interrupted": bool,
+            }
+        """
+        # Skip if either user or assistant is missing/empty — nothing to capture
+        if not turn_data or not turn_data.get("user") or not turn_data.get("assistant"):
+            return
+        
+        # Post asynchronously so we don't block turn finalization
+        def _post_async():
+            self._post_turn(
+                turn_data["user"],
+                turn_data["assistant"],
+                session_id=turn_data.get("session_id", ""),
+            )
+        
+        thread = threading.Thread(target=_post_async, daemon=True, name="ragger-post-turn")
+        thread.start()
+
+    def _post_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+        """Internal: POST a turn to Ragger's /turn endpoint.
+        
+        Called from both sync_turn (normal path) and post_turn_finalized (catch-all).
+        """
+        if self._breaker_open() or not user_content:
+            return
         result = self._post("/turn", {
             "user": user_content,
             "assistant": assistant_content,
@@ -367,4 +407,23 @@ class RaggerMemoryProvider(MemoryProvider):
 
 def register(ctx) -> None:
     """Register Ragger as a Hermes memory provider plugin."""
-    ctx.register_memory_provider(RaggerMemoryProvider())
+    provider = RaggerMemoryProvider()
+    ctx.register_memory_provider(provider)
+
+    @ctx.hook("post_tool_call")
+    def _forward_memory_to_ragger(tool_name: str, args: dict, result: str, **kwargs) -> None:
+        """Forward memory(action='add') calls to Ragger store."""
+        if tool_name != "memory":
+            return
+        action = args.get("action", "")
+        if action not in ("add", "replace"):
+            return
+        content = args.get("content", "").strip()
+        if not content:
+            return
+        target = args.get("target", "memory")
+        category = "preference" if target == "user" else "fact"
+        provider._post(
+            "/store",
+            {"text": content, "metadata": {"category": category, "source": "memory-tool"}},
+        )
