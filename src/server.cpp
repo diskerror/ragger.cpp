@@ -438,14 +438,10 @@ struct Server::Impl {
         }
         auto& mem = _get_memory(user.username);
         auto result = capture_turn(mem, user_text, assistant, model, session_id);
-        if (result.captured && summarizer_ && result.turn_id > 0) {
-            auto turns = mem.turns_by_session_desc(session_id, 1);
-            std::string ts;
-            if (!turns.empty() && turns.front().turn_id == result.turn_id)
-                ts = turns.front().timestamp;
-            summarizer_->enqueue_turn(result.turn_id, user_text, assistant,
-                                      model, session_id, ts);
-        }
+        // Raw text is written to both turns and summaries (as a NULL-model_id
+        // placeholder) by capture_turn. The summarizer picks it up on the next
+        // housekeeping tick (every 60s) via enqueue_catch_up — no immediate
+        // LLM call here.
         Diskerror::logger::debug(std::format(lang::DBG_HTTP, "POST", "/turn", "200"));
         res.set_content(json{{"status",  result.captured ? "captured" : "disabled"},
                              {"turn_id", result.turn_id}}.dump(), "application/json");
