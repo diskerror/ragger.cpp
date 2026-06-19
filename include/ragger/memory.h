@@ -67,6 +67,9 @@ public:
     bool update_summary_embedding(int summary_id, const std::vector<float>& emb);
     bool update_turn_embedding(int turn_id, const std::vector<float>& emb);
 
+    /// Purge conversation turns older than max_age_hours. Returns rows deleted.
+    int cleanup_old_conversations(float max_age_hours);
+
     // --- summaries (L2/L3) pipeline (issue #22) ---
     /// `source_timestamp` (non-empty) overrides the row's timestamp — L2
     /// inherits the source turn's timestamp so the (session_id, timestamp)

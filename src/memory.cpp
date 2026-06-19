@@ -151,6 +151,10 @@ bool RaggerMemory::update_turn_embedding(int turn_id,
     return backend_->update_turn_embedding(turn_id, emb);
 }
 
+int RaggerMemory::cleanup_old_conversations(float max_age_hours) {
+    return backend_->cleanup_old_conversations(max_age_hours);
+}
+
 int RaggerMemory::store_summary(const std::string& text, const std::string& level,
                                 const std::string& status, const std::string& model_name,
                                 const std::string& session_guid,

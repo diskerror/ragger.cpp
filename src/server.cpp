@@ -148,11 +148,14 @@ struct Server::Impl {
         const auto& cfg = config();
         float max_age_hours = cfg.cleanup_max_age_hours;
 
-        // 1. Purge old conversation entries.
+        // 1. Purge old conversation entries — use the main memory backend,
+        //    not a separate SqliteBackend. Opening a second connection to the
+        //    same file while the main backend holds it can produce SQLite
+        //    BUSY/LOCKED contention that silently prevents the backfill UPDATE
+        //    in step 3 from committing.
         if (max_age_hours > 0) {
             try {
-                ragger::SqliteBackend temp_backend(config().resolved_db_path());
-                int deleted = temp_backend.cleanup_old_conversations(max_age_hours);
+                int deleted = memory.cleanup_old_conversations(max_age_hours);
                 if (deleted > 0) {
                     Diskerror::logger::info(std::format(
                         lang::MSG_HOUSEKEEPING_EXPIRED, 0, deleted));
