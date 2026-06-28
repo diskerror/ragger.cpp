@@ -34,3 +34,4 @@ scripts/deploy.sh
 AI_reference/
 AGENT_MEMORY_TRIGGERS_REPORT.md
 CODE_REVIEW.md
+build-stats/

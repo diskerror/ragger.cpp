@@ -10,6 +10,9 @@
 #include "ragger/lang.h"
 #include "ragger/recipe.h"
 #include "ragger/summarizer.h"
+#ifdef RAGGER_STATS
+#include "ragger/stats_logger.h"
+#endif
 #include <algorithm>
 #include <format>
 #include <mutex>
@@ -83,6 +86,11 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     if (filled > 0) {
         Diskerror::logger::info(std::format(lang::MSG_BACKFILLED_EMBEDDINGS, filled));
     }
+#ifdef RAGGER_STATS
+    // Opt-in retrieval instrumentation. Construction never throws into the
+    // caller; if the stats DB can't be opened the logger disables itself.
+    stats_ = std::make_unique<StatsLogger>();
+#endif
 }
 
 RaggerMemory::~RaggerMemory() {
@@ -196,7 +204,18 @@ SearchResponse RaggerMemory::search(const std::string& query,
                                     int limit,
                                     float min_score,
                                     std::vector<std::string> collections) {
-    return backend_->search(query, limit, min_score, std::move(collections));
+    SearchResponse resp = backend_->search(query, limit, min_score, std::move(collections));
+#ifdef RAGGER_STATS
+    if (stats_ && stats_->enabled()) {
+        double elapsed = -1.0;
+        try {
+            if (resp.timing.contains("total_ms") && resp.timing["total_ms"].is_number())
+                elapsed = resp.timing["total_ms"].get<double>();
+        } catch (...) {}
+        stats_->log_lookup(query, limit, min_score, resp.results, elapsed);
+    }
+#endif
+    return resp;
 }
 
 int RaggerMemory::count() const {
