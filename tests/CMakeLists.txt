@@ -55,3 +55,13 @@ add_test(NAME test_embed_executor COMMAND test_embed_executor)
 add_executable(test_summarizer test_summarizer.cpp)
 target_link_libraries(test_summarizer PRIVATE ragger_core)
 add_test(NAME test_summarizer COMMAND test_summarizer)
+
+# Stats logger tests — only built/registered when RAGGER_STATS is ON.
+# (ragger_core carries the RAGGER_STATS compile definition transitively, so
+# the test body's #ifdef sees it; we still gate the target so a default build
+# doesn't compile or run it at all.)
+if(RAGGER_STATS)
+    add_executable(test_stats test_stats.cpp)
+    target_link_libraries(test_stats PRIVATE ragger_core)
+    add_test(NAME test_stats COMMAND test_stats)
+endif()

@@ -227,6 +227,53 @@ and applies hot-reloadable keys in place. Keys that require a restart
 log a warning instead of silently being ignored. The reload also
 re-scans `recipes_dir`.
 
+## Build-time instrumentation: retrieval stats (`RAGGER_STATS`)
+
+This one is **not** a settings.ini key — it's a *compile-time* flag, off by
+default. It exists for studying how retrieval behaves (focused vs. associative
+hits, how results shift as the corpus grows), not for normal operation.
+
+```bash
+# Normal build — flag off, zero overhead, byte-for-byte unaffected:
+cmake -S . -B build
+cmake --build build --target ragger -j4
+
+# Instrumented build — flag on:
+cmake -S . -B build-stats -DRAGGER_STATS=ON
+cmake --build build-stats --target ragger -j4
+```
+
+When **off** (the default) the logging code compiles to nothing; a normal
+binary has no stats behavior at all. When **on**, every search appends a row
+to a **separate, discardable** database at `~/.ragger/stats.db`. It is never
+touched by — and never touches — `memories.db`. Logging is best-effort: if the
+stats write fails for any reason, the search itself is unaffected. To stop
+collecting, rebuild without the flag and (optionally) delete `stats.db`; to
+start fresh, just delete it and it's recreated on the next run.
+
+### Reading the stats
+
+There is intentionally **no built-in viewer or report.** `stats.db` is a plain
+SQLite database with two tables — `lookups` (one row per search) and `hits`
+(the top-ranked results for each lookup, linked by `lookup_id`). Getting useful
+information out requires **basic SQL skills**; anyone comfortable with a
+`SELECT ... JOIN ... ORDER BY` can shape it however they like. A starting
+point:
+
+```sql
+-- The top hits for the most recent searches:
+SELECT l.id, l.ts, l.query, h.rank, h.score, h.collection, h.snippet
+FROM lookups l
+JOIN hits h ON h.lookup_id = l.id
+ORDER BY l.id DESC, h.rank
+LIMIT 30;
+```
+
+The schema is deliberately small and obvious — open it with `sqlite3
+~/.ragger/stats.db` and `.schema` to see every column, then slice it to answer
+whatever question you're chasing (which queries return weak top scores, how
+often a given collection surfaces, how the score spread changes, and so on).
+
 ## Related
 
 - [Getting Started](getting-started.md) — Install + first run

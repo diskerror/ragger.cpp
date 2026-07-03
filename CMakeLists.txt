@@ -46,6 +46,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Options
 # ---------------------------------------------------------------------------
 option(RAGGER_BUILD_TESTS "Build test suite" ON)
+option(RAGGER_STATS "Log retrieval stats to a discardable stats.db (instrumentation; default OFF)" OFF)
 
 # ---------------------------------------------------------------------------
 # Boost (for ProgramOptions via c_lib)
@@ -202,6 +203,7 @@ add_library(ragger_core STATIC
     src/import.cpp
     src/export.cpp
     src/memory.cpp
+    src/stats_logger.cpp
     src/server.cpp
     src/inference.cpp
     src/api_formats.cpp
@@ -217,6 +219,10 @@ target_compile_definitions(ragger_core PUBLIC
     RAGGER_COMMIT="${RAGGER_COMMIT}"
     RAGGER_BUILD_DATE="${RAGGER_BUILD_DATE}"
 )
+if(RAGGER_STATS)
+    target_compile_definitions(ragger_core PUBLIC RAGGER_STATS)
+    message(STATUS "RAGGER_STATS: ON — retrieval stats logged to ~/.ragger/stats.db")
+endif()
 target_link_libraries(ragger_core PUBLIC
     SQLite::SQLite3
     onnxruntime

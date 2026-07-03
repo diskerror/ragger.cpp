@@ -142,6 +142,9 @@ private:
     std::unique_ptr<Embedder>      embedder_;
     std::unique_ptr<StorageBackend> backend_;
     std::unique_ptr<UserStore>      user_store_;   // settings and user management
+#ifdef RAGGER_STATS
+    std::unique_ptr<class StatsLogger> stats_;      // opt-in retrieval instrumentation
+#endif
 };
 
 /// Outcome of capture_turn(). `captured` is false when turn capture is
