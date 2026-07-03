@@ -56,6 +56,10 @@ add_executable(test_summarizer test_summarizer.cpp)
 target_link_libraries(test_summarizer PRIVATE ragger_core)
 add_test(NAME test_summarizer COMMAND test_summarizer)
 
+add_executable(test_double_metaphone test_double_metaphone.cpp)
+target_link_libraries(test_double_metaphone PRIVATE ragger_core)
+add_test(NAME test_double_metaphone COMMAND test_double_metaphone)
+
 # Stats logger tests — only built/registered when RAGGER_STATS is ON.
 # (ragger_core carries the RAGGER_STATS compile definition transitively, so
 # the test body's #ifdef sees it; we still gate the target so a default build

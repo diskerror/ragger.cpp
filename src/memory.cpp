@@ -86,6 +86,16 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     if (filled > 0) {
         Diskerror::logger::info(std::format(lang::MSG_BACKFILLED_EMBEDDINGS, filled));
     }
+
+    // Backfill any NULL phon (dolphining sounds-like) rows — self-heals rows
+    // that predate the phon column after the one-time ADD COLUMN migration.
+    // Pure string work (no embedder); NULL-only so it's a no-op once populated.
+    // Runs here (single startup connection) to avoid the double-backend write
+    // contention that silently swallows UPDATEs when the daemon holds the DB.
+    int phoned = backend_->rebuild_phon(/*only_missing=*/true, /*progress=*/false);
+    if (phoned > 0) {
+        Diskerror::logger::info(std::format("Backfilled phonetic codes for {} row(s)", phoned));
+    }
 #ifdef RAGGER_STATS
     // Opt-in retrieval instrumentation. Construction never throws into the
     // caller; if the stats DB can't be opened the logger disables itself.
@@ -232,6 +242,10 @@ int RaggerMemory::rebuild_embeddings() {
 
 int RaggerMemory::backfill_embeddings() {
     return backend_->backfill_embeddings(*embedder_);
+}
+
+int RaggerMemory::rebuild_phon(bool only_missing, bool progress) {
+    return backend_->rebuild_phon(only_missing, progress);
 }
 
 std::vector<std::string> RaggerMemory::collections() const {

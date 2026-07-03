@@ -111,6 +111,10 @@ public:
     /// Embed only rows whose embedding column is NULL. Returns count.
     int backfill_embeddings();
 
+    /// (Re)compute the phon "sounds-like" column. only_missing=true backfills
+    /// only NULL-phon rows; false recomputes all. Returns rows rewritten.
+    int rebuild_phon(bool only_missing = false, bool progress = false);
+
     /// Get distinct collection names.
     std::vector<std::string> collections() const;
 

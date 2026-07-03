@@ -49,8 +49,11 @@ struct Config {
     int   default_search_limit = 5;
     float default_min_score    = 0.4f;
     bool  bm25_enabled         = true;
-    float bm25_weight          = 3.0f;
-    float vector_weight        = 7.0f;
+    float bm25_weight          = 4.0f;
+    float vector_weight        = 8.0f;
+    // Phonetic ("dolphining" sounds-like) blend weight. Default 1 (low) so the
+    // signal nudges rather than dominates; 0 disables it. See phon_scores().
+    float phon_weight          = 1.0f;
 
     // --- Embed (subprocess) ---
     int embed_timeout_ms  = 10000;

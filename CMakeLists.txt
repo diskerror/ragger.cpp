@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 if(APPLE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
 endif()
-project(ragger VERSION 0.9.11 LANGUAGES CXX)
+project(ragger VERSION 0.9.12 LANGUAGES CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -199,6 +199,7 @@ add_library(ragger_core STATIC
     src/embed_executor.cpp
     src/tokenizer_wrapper.cpp
     src/sqlite_backend.cpp
+    src/double_metaphone.cpp
     src/user_store.cpp
     src/import.cpp
     src/export.cpp

@@ -140,6 +140,7 @@ public:
     /// Rebuild embeddings for all stored documents. Returns doc count.
     int rebuild_embeddings(Embedder& embedder) override;
     int backfill_embeddings(Embedder& embedder) override;
+    int rebuild_phon(bool only_missing, bool progress) override;
 
     /// Get distinct collection names.
     std::vector<std::string> collections() const override;

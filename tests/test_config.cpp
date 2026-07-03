@@ -258,8 +258,9 @@ void test_default_values() {
     assert(cfg.default_search_limit == 5);
     assert(cfg.default_min_score == 0.4f);
     assert(cfg.bm25_enabled == true);
-    assert(cfg.bm25_weight == 3.0f);
-    assert(cfg.vector_weight == 7.0f);
+    assert(cfg.bm25_weight == 4.0f);
+    assert(cfg.vector_weight == 8.0f);
+    assert(cfg.phon_weight == 1.0f);
     assert(cfg.normalize_home_path == true);
     assert(cfg.cleanup_max_age_hours == 0.0f);  // 0 = keep forever (never delete raw conversations)
     assert(cfg.housekeeping_interval == 60);
@@ -323,7 +324,7 @@ int main() {
     assert(cfg.bm25_enabled == false);
     assert(cfg.default_min_score == 0.5f);
     // Defaults for unspecified values
-    assert(cfg.bm25_weight == 3.0f);
+    assert(cfg.bm25_weight == 4.0f);
     assert(cfg.normalize_home_path == true);
 
     std::filesystem::remove(tmp_conf);

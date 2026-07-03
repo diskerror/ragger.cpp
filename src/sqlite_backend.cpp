@@ -8,6 +8,7 @@
 #include "ragger/util/fs.h"
 #include "ragger/util/time.h"
 #include "ragger/util/sqlite.h"
+#include "ragger/double_metaphone.h"
 #include "diskerror/logger.h"
 #include <format>
 #include "nlohmann_json.hpp"
@@ -238,6 +239,7 @@ struct SqliteBackend::Impl {
             throw std::runtime_error(std::format(lang::ERR_SQL, err));
         }
     }
+    void exec(const std::string& sql) { exec(sql.c_str()); }
 
     /// True if `table` has a column named `col`. Used to guard one-time
     /// ADD COLUMN migrations (SQLite has no ADD COLUMN IF NOT EXISTS).
@@ -290,6 +292,7 @@ struct SqliteBackend::Impl {
                 user_text      TEXT NOT NULL,
                 assistant_text TEXT,
                 embedding      BLOB,
+                phon           TEXT,
                 model_id       INTEGER REFERENCES models(model_id) ON DELETE SET NULL,
                 session_id     INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                 timestamp      TEXT NOT NULL
@@ -306,6 +309,7 @@ struct SqliteBackend::Impl {
                 summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 text       TEXT NOT NULL,
                 embedding  BLOB,
+                phon       TEXT,
                 level      TEXT NOT NULL,
                 model_id   INTEGER REFERENCES models(model_id) ON DELETE SET NULL,
                 session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
@@ -337,6 +341,7 @@ struct SqliteBackend::Impl {
                 decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 text        TEXT NOT NULL,
                 embedding   BLOB,
+                phon        TEXT,
                 status      TEXT NOT NULL,
                 tags        TEXT NOT NULL DEFAULT '',
                 timestamp   TEXT NOT NULL
@@ -353,6 +358,7 @@ struct SqliteBackend::Impl {
                 document_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 text        TEXT NOT NULL,
                 embedding   BLOB,
+                phon        TEXT,
                 path        TEXT,
                 title       TEXT,
                 tags        TEXT NOT NULL DEFAULT '',
@@ -362,6 +368,20 @@ struct SqliteBackend::Impl {
             )
         )");
         exec("CREATE INDEX IF NOT EXISTS idx_documents_imported_at ON documents(imported_at)");
+
+        // In-place migration for pre-phon databases (dolphining sounds-like):
+        // add the `phon` column to each context table if an existing DB predates
+        // it. Placed after ALL four CREATE TABLEs so the ALTERs can't hit a
+        // not-yet-created table. Fresh DBs already have the column; existing
+        // rows get phon = NULL, backfilled at startup or via `ragger rebuild-phon`.
+        if (!column_exists("turns", "phon"))
+            exec("ALTER TABLE turns ADD COLUMN phon TEXT");
+        if (!column_exists("summaries", "phon"))
+            exec("ALTER TABLE summaries ADD COLUMN phon TEXT");
+        if (!column_exists("decisions", "phon"))
+            exec("ALTER TABLE decisions ADD COLUMN phon TEXT");
+        if (!column_exists("documents", "phon"))
+            exec("ALTER TABLE documents ADD COLUMN phon TEXT");
 
         // FTS5 — external-content virtual tables + sync triggers replace
         // the old hand-rolled bm25_* sidecars (issue #49).
@@ -443,6 +463,72 @@ struct SqliteBackend::Impl {
             INSERT INTO documents_fts(rowid, title, text, tags)
             VALUES (new.document_id, new.title, new.text, new.tags);
         END)");
+
+        create_phon_fts_schema();
+    }
+
+    /// Phonetic ("dolphining" sounds-like) FTS5 tables: one external-content
+    /// index over each context table's `phon` column, kept in sync by its own
+    /// triggers. Separate from the text FTS so phon produces an INDEPENDENT
+    /// bm25 score for the three-way search blend (vector + text + phon). Codes
+    /// are space-joined Double Metaphone keys (see phonize()); the default
+    /// unicode61 tokenizer splits them on spaces exactly like ordinary tokens.
+    /// Idempotent — safe on every open.
+    void create_phon_fts_schema() {
+        struct P { const char* fts; const char* base; const char* rowid; };
+        const P tables[] = {
+            {"turns_phon_fts",     "turns",     "turn_id"},
+            {"summaries_phon_fts", "summaries", "summary_id"},
+            {"decisions_phon_fts", "decisions", "decision_id"},
+            {"documents_phon_fts", "documents", "document_id"},
+        };
+        for (const auto& t : tables) {
+            exec(std::format(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS {} USING fts5("
+                "phon, content='{}', content_rowid='{}')",
+                t.fts, t.base, t.rowid));
+            exec(std::format(
+                "CREATE TRIGGER IF NOT EXISTS {0}_pai AFTER INSERT ON {1} BEGIN "
+                "INSERT INTO {2}(rowid, phon) VALUES (new.{3}, new.phon); END",
+                t.base, t.base, t.fts, t.rowid));
+            exec(std::format(
+                "CREATE TRIGGER IF NOT EXISTS {0}_pad AFTER DELETE ON {1} BEGIN "
+                "INSERT INTO {2}({2}, rowid, phon) "
+                "VALUES ('delete', old.{3}, old.phon); END",
+                t.base, t.base, t.fts, t.rowid));
+            exec(std::format(
+                "CREATE TRIGGER IF NOT EXISTS {0}_pau AFTER UPDATE ON {1} BEGIN "
+                "INSERT INTO {2}({2}, rowid, phon) "
+                "VALUES ('delete', old.{3}, old.phon); "
+                "INSERT INTO {2}(rowid, phon) VALUES (new.{3}, new.phon); END",
+                t.base, t.base, t.fts, t.rowid));
+
+            // External-content FTS built over a table that ALREADY has rows
+            // (the phon column was ADD COLUMN-migrated onto an existing DB)
+            // starts with an EMPTY index while the base holds content. The
+            // delete-triggers then try to remove postings that were never
+            // inserted → "database disk image is malformed" on the next UPDATE.
+            // 'rebuild' syncs the index to current base.phon content so the
+            // per-row delete/insert triggers stay valid.
+            //
+            // Detecting the desync: count(*) on an external-content FTS reads
+            // THROUGH to the base table, so it always "matches" even when the
+            // index is empty. The `<fts>_docsize` shadow table, however, holds
+            // exactly one row per *indexed* document — so comparing its count
+            // to the base row count is a reliable desync probe. If they differ
+            // (e.g. index empty after ADD COLUMN, or corrupted by a prior
+            // partial run), rebuild to resync. 'rebuild' is a no-op-safe resync.
+            long long indexed_rows = 0, base_rows = 0;
+            {
+                Stmt is(db, std::format("SELECT count(*) FROM {}_docsize", t.fts));
+                if (is.step()) indexed_rows = is.column_int(0);
+                Stmt bs(db, std::format("SELECT count(*) FROM {}", t.base));
+                if (bs.step()) base_rows = bs.column_int(0);
+            }
+            if (indexed_rows != base_rows) {
+                exec(std::format("INSERT INTO {0}({0}) VALUES('rebuild')", t.fts));
+            }
+        }
     }
 
     /// Users + settings tables — declarative, no in-place migration
@@ -740,6 +826,55 @@ struct SqliteBackend::Impl {
         return out;
     }
 
+    // ---- phonetic ("dolphining" sounds-like) scoring ------------------
+    // bm25 over a *_phon_fts index, keyed by the base rowid. `phon_expr` is an
+    // FTS5 MATCH expression built from the *phonized* query (Double Metaphone
+    // codes OR'd together) — see phon_match_expr(). Non-matching rows are absent
+    // (0 to the caller). Higher = better (bm25 sign flipped), mirroring
+    // keyword_scores(). One helper per corpus so the FTS table name is fixed.
+    std::unordered_map<int, float> phon_scores_for(const char* fts_table,
+                                                   const std::string& phon_expr) {
+        std::unordered_map<int, float> out;
+        if (phon_expr.empty()) return out;
+        Stmt s(db, std::format(
+            "SELECT rowid, bm25({0}) FROM {0} WHERE {0} MATCH ?", fts_table));
+        s.bind(1, phon_expr);
+        while (s.step()) {
+            int id   = s.column_int(0);
+            double val = s.column_double(1);
+            out[id]  = static_cast<float>(-val);
+        }
+        return out;
+    }
+    std::unordered_map<int, float> sum_phon_scores(const std::string& e) {
+        return phon_scores_for("summaries_phon_fts", e);
+    }
+    std::unordered_map<int, float> doc_phon_scores(const std::string& e) {
+        return phon_scores_for("documents_phon_fts", e);
+    }
+    std::unordered_map<int, float> dec_phon_scores(const std::string& e) {
+        return phon_scores_for("decisions_phon_fts", e);
+    }
+
+    // Build a phon MATCH expression: phonize the query, then OR the Double
+    // Metaphone codes as quoted terms (same shape as fts_match_expr). Empty
+    // when the query yields no codes (caller skips the phon pass).
+    static std::string phon_match_expr(const std::string& query) {
+        std::string phon = phonize(query);   // space-joined DM codes
+        std::string expr, tok;
+        auto flush = [&]() {
+            if (tok.empty()) return;
+            if (!expr.empty()) expr += " OR ";
+            expr += "\"" + tok + "\"";
+            tok.clear();
+        };
+        for (char c : phon) {
+            if (c == ' ') flush(); else tok += c;
+        }
+        flush();
+        return expr;
+    }
+
     // ---- public API ---------------------------------------------------
 
     // v2: the generic store API writes a summary (L2/L3/L4). A memory-only
@@ -783,9 +918,12 @@ struct SqliteBackend::Impl {
         int model_id = get_or_create_model(model_name);
 
         // FTS5 sync triggers index the row from text/tags — no manual step.
+        // phon = Double Metaphone of the body (dolphining sounds-like); the
+        // *_phon_fts triggers index it. Always computed (cheap), even when the
+        // embedding is deferred.
         Stmt s(db,
-            "INSERT INTO summaries (text, embedding, level, status, tags, timestamp, model_id) "
-            "VALUES (?,?,?,?,?,?,?)");
+            "INSERT INTO summaries (text, embedding, phon, level, status, tags, timestamp, model_id) "
+            "VALUES (?,?,?,?,?,?,?,?)");
 
         s.bind(1, text);
         if (defer_embedding) {
@@ -793,8 +931,9 @@ struct SqliteBackend::Impl {
         } else {
             bind_embedding(s.raw(), 2, emb);
         }
-        s.bind(3, level).bind(4, status).bind(5, tags_str).bind(6, ts);
-        if (model_id) s.bind(7, model_id); else s.bind_null(7);
+        s.bind(3, phonize(text));
+        s.bind(4, level).bind(5, status).bind(6, tags_str).bind(7, ts);
+        if (model_id) s.bind(8, model_id); else s.bind_null(8);
 
         if (!s.exec()) {
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
@@ -822,8 +961,8 @@ struct SqliteBackend::Impl {
         // index title/text/tags — no manual keyword step.
         Stmt s(db,
             "INSERT INTO documents "
-            "(text, embedding, path, title, tags, year, chunk_index, imported_at) "
-            "VALUES (?,?,?,?,?,?,?,?)");
+            "(text, embedding, phon, path, title, tags, year, chunk_index, imported_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)");
 
         auto bind_opt = [&](int idx, const std::string& v) {
             if (v.empty()) s.bind_null(idx);
@@ -836,14 +975,15 @@ struct SqliteBackend::Impl {
         } else {
             bind_embedding(s.raw(), 2, emb);
         }
-        bind_opt(3, chunk.path);
-        bind_opt(4, chunk.title);
-        s.bind(5, chunk.tags);
-        if (chunk.year <= 0) s.bind_null(6);
-        else s.bind(6, chunk.year);
-        if (chunk.chunk_index <= 0) s.bind_null(7);
-        else s.bind(7, chunk.chunk_index);
-        s.bind(8, imported_at);
+        s.bind(3, phonize(text));
+        bind_opt(4, chunk.path);
+        bind_opt(5, chunk.title);
+        s.bind(6, chunk.tags);
+        if (chunk.year <= 0) s.bind_null(7);
+        else s.bind(7, chunk.year);
+        if (chunk.chunk_index <= 0) s.bind_null(8);
+        else s.bind(8, chunk.chunk_index);
+        s.bind(9, imported_at);
 
         if (!s.exec()) {
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
@@ -942,12 +1082,13 @@ struct SqliteBackend::Impl {
         auto emb = embedder->encode(turn_embed_text(u, a));
         Stmt s(db,
             "INSERT INTO summaries "
-            "(model_id, session_id, text, embedding, level, status, tags, timestamp) "
-            "VALUES (NULL,?,?,?,'turn','complete','',?)");
+            "(model_id, session_id, text, embedding, phon, level, status, tags, timestamp) "
+            "VALUES (NULL,?,?,?,?,'turn','complete','',?)");
         if (sess_null) s.bind_null(1); else s.bind(1, session_id);
         s.bind(2, text);
         bind_embedding(s.raw(), 3, emb);
-        s.bind(4, ts);
+        s.bind(4, phonize(u + " " + a));
+        s.bind(5, ts);
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_cache();
@@ -997,16 +1138,17 @@ struct SqliteBackend::Impl {
                 if (within_window) {
                     std::vector<float> emb2 = embedder->encode(turn_embed_text(u, a));
                     Stmt up(db,
-                        "UPDATE turns SET assistant_text = ?, embedding = ?, "
+                        "UPDATE turns SET assistant_text = ?, embedding = ?, phon = ?, "
                         "model_id = COALESCE(?, model_id), "
                         "session_id = COALESCE(?, session_id), timestamp = ? "
                         "WHERE turn_id = ?");
                     up.bind(1, a);
                     bind_embedding(up.raw(), 2, emb2);
-                    if (model_id) up.bind(3, model_id); else up.bind_null(3);
-                    if (session_id) up.bind(4, session_id); else up.bind_null(4);
-                    up.bind(5, local_timestamp());
-                    up.bind(6, prev_id);
+                    up.bind(3, phonize(u + " " + a));
+                    if (model_id) up.bind(4, model_id); else up.bind_null(4);
+                    if (session_id) up.bind(5, session_id); else up.bind_null(5);
+                    up.bind(6, local_timestamp());
+                    up.bind(7, prev_id);
                     if (!up.exec())
                         throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
                     place_turn_placeholder(prev_id, u, a);
@@ -1023,8 +1165,8 @@ struct SqliteBackend::Impl {
         }
 
         Stmt s(db,
-            "INSERT INTO turns (model_id, session_id, user_text, assistant_text, embedding, timestamp) "
-            "VALUES (?,?,?,?,?,?)");
+            "INSERT INTO turns (model_id, session_id, user_text, assistant_text, embedding, phon, timestamp) "
+            "VALUES (?,?,?,?,?,?,?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
         if (session_id) s.bind(2, session_id); else s.bind_null(2);
         s.bind(3, u);
@@ -1033,7 +1175,8 @@ struct SqliteBackend::Impl {
         if (have_emb)
             bind_embedding(s.raw(), 5, emb);
         else s.bind_null(5);
-        s.bind(6, local_timestamp());
+        s.bind(6, phonize(a.empty() ? u : (u + " " + a)));
+        s.bind(7, local_timestamp());
 
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
@@ -1098,12 +1241,13 @@ struct SqliteBackend::Impl {
         auto emb = embedder->encode(turn_embed_text(u, a));
 
         Stmt s(db,
-            "UPDATE turns SET assistant_text = ?, embedding = ?, "
+            "UPDATE turns SET assistant_text = ?, embedding = ?, phon = ?, "
             "model_id = COALESCE(?, model_id) WHERE turn_id = ?");
         s.bind(1, a);
         bind_embedding(s.raw(), 2, emb);
-        if (model_id) s.bind(3, model_id); else s.bind_null(3);
-        s.bind(4, turn_id);
+        s.bind(3, phonize(u + " " + a));
+        if (model_id) s.bind(4, model_id); else s.bind_null(4);
+        s.bind(5, turn_id);
         return s.exec();
     }
 
@@ -1125,14 +1269,15 @@ struct SqliteBackend::Impl {
         auto emb = embedder->encode(t);
 
         Stmt s(db,
-            "INSERT INTO summaries (model_id, session_id, text, embedding, level, status, tags, timestamp) "
-            "VALUES (?,?,?,?,?,?,?,?)");
+            "INSERT INTO summaries (model_id, session_id, text, embedding, phon, level, status, tags, timestamp) "
+            "VALUES (?,?,?,?,?,?,?,?,?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
         if (session_id) s.bind(2, session_id); else s.bind_null(2);
         s.bind(3, t);
         bind_embedding(s.raw(), 4, emb);
-        s.bind(5, level).bind(6, status).bind(7, tags);
-        s.bind(8, source_timestamp.empty() ? local_timestamp() : source_timestamp);
+        s.bind(5, phonize(t));
+        s.bind(6, level).bind(7, status).bind(8, tags);
+        s.bind(9, source_timestamp.empty() ? local_timestamp() : source_timestamp);
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_cache();
@@ -1150,8 +1295,8 @@ struct SqliteBackend::Impl {
         std::string t = normalize_path(text);
 
         Stmt s(db,
-            "INSERT INTO decisions (text, embedding, status, tags, timestamp) "
-            "VALUES (?,?,?,?,?)");
+            "INSERT INTO decisions (text, embedding, phon, status, tags, timestamp) "
+            "VALUES (?,?,?,?,?,?)");
         s.bind(1, t);
         if (defer_embedding) {
             s.bind_null(2);
@@ -1159,9 +1304,10 @@ struct SqliteBackend::Impl {
             auto emb = embedder->encode(t);
             bind_embedding(s.raw(), 2, emb);
         }
-        s.bind(3, status.empty() ? "active" : status);
-        s.bind(4, tags);
-        s.bind(5, source_timestamp.empty() ? local_timestamp() : source_timestamp);
+        s.bind(3, phonize(t));
+        s.bind(4, status.empty() ? "active" : status);
+        s.bind(5, tags);
+        s.bind(6, source_timestamp.empty() ? local_timestamp() : source_timestamp);
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_dec_cache();
@@ -1423,12 +1569,13 @@ struct SqliteBackend::Impl {
         auto emb = embedder->encode(t);
 
         Stmt s(db,
-            "UPDATE summaries SET text = ?, embedding = ?, "
+            "UPDATE summaries SET text = ?, embedding = ?, phon = ?, "
             "model_id = COALESCE(?, model_id) WHERE summary_id = ?");
         s.bind(1, t);
         bind_embedding(s.raw(), 2, emb);
-        if (model_id) s.bind(3, model_id); else s.bind_null(3);
-        s.bind(4, summary_id);
+        s.bind(3, phonize(t));
+        if (model_id) s.bind(4, model_id); else s.bind_null(4);
+        s.bind(5, summary_id);
         bool ok = s.exec() && sqlite3_changes(db) > 0;
         if (ok) invalidate_cache();
         return ok;
@@ -1447,7 +1594,7 @@ struct SqliteBackend::Impl {
         int model_id  = get_or_create_model(model_name);
         auto emb = embedder->encode(t);
         Stmt s(db,
-            "UPDATE summaries SET text = ?, embedding = ?, model_id = ?, tags = '' "
+            "UPDATE summaries SET text = ?, embedding = ?, phon = ?, model_id = ?, tags = '' "
             "WHERE summary_id = ("
             "  SELECT s.summary_id FROM summaries s "
             "  LEFT JOIN sessions ss ON s.session_id = ss.session_id "
@@ -1456,9 +1603,10 @@ struct SqliteBackend::Impl {
             "  ORDER BY s.summary_id DESC LIMIT 1)");
         s.bind(1, t);
         bind_embedding(s.raw(), 2, emb);
-        if (model_id) s.bind(3, model_id); else s.bind_null(3);
-        s.bind(4, source_timestamp);
-        s.bind(5, session_guid);
+        s.bind(3, phonize(t));
+        if (model_id) s.bind(4, model_id); else s.bind_null(4);
+        s.bind(5, source_timestamp);
+        s.bind(6, session_guid);
         bool ok = s.exec() && sqlite3_changes(db) > 0;
         if (ok) invalidate_cache();
         return ok;
@@ -1527,7 +1675,7 @@ struct SqliteBackend::Impl {
 
         // FTS5 sync triggers re-index from the new text/tags automatically.
         Stmt stmt(db,
-            "UPDATE summaries SET text = ?, embedding = ?, tags = ? "
+            "UPDATE summaries SET text = ?, embedding = ?, phon = ?, tags = ? "
             "WHERE summary_id = ?");
 
         stmt.bind(1, text);
@@ -1536,8 +1684,9 @@ struct SqliteBackend::Impl {
         } else {
             bind_embedding(stmt.raw(), 2, emb);
         }
-        stmt.bind(3, tags_str);
-        stmt.bind(4, memory_id);
+        stmt.bind(3, phonize(text));
+        stmt.bind(4, tags_str);
+        stmt.bind(5, memory_id);
 
         if (!stmt.exec()) return false;
 
@@ -1589,16 +1738,18 @@ struct SqliteBackend::Impl {
         std::vector<Candidate> candidates;
         candidates.reserve(static_cast<size_t>(n_sum + n_doc + n_dec));
 
-        // Score one corpus (vector cosine blended with FTS5 bm25), pushing its
-        // rows as Candidates. Shared by the summaries and documents passes so
-        // the blend logic stays in exactly one place.
+        // Score one corpus: vector cosine blended with FTS5 bm25 (keyword) and
+        // the phonetic "sounds-like" signal. Each signal is min-max normalized
+        // to [0,1] then weighted-summed. Shared by the summaries/documents/
+        // decisions passes so the blend logic lives in exactly one place.
         auto score_corpus =
             [&](const std::vector<int>& ids,
                 const std::vector<std::string>& texts,
                 const Eigen::MatrixXf& cache_emb,
                 const std::vector<json>& meta,
                 const std::vector<std::string>& ts,
-                const std::unordered_map<int, float>& kw) {
+                const std::unordered_map<int, float>& kw,
+                const std::unordered_map<int, float>& ph) {
             int n = static_cast<int>(ids.size());
             if (n == 0) return;
 
@@ -1606,22 +1757,37 @@ struct SqliteBackend::Impl {
             // is the normalized query vector, so this product is raw cosine.
             Eigen::VectorXf similarities = cache_emb * q_norm;   // raw cosine, reported
 
-            Eigen::VectorXf combined = similarities;
-            if (config().bm25_enabled && !kw.empty()) {
-                Eigen::VectorXf kw_vec(n);
+            auto norm_minmax = [](Eigen::VectorXf& v) {
+                float mn = v.minCoeff(), mx = v.maxCoeff();
+                if (mx > mn) v = (v.array() - mn) / (mx - mn);
+            };
+            auto gather = [&](const std::unordered_map<int, float>& m) {
+                Eigen::VectorXf v(n);
                 for (int i = 0; i < n; ++i) {
-                    auto it = kw.find(ids[i]);
-                    kw_vec(i) = (it == kw.end()) ? 0.0f : it->second;
+                    auto it = m.find(ids[i]);
+                    v(i) = (it == m.end()) ? 0.0f : it->second;
                 }
-                auto norm_minmax = [](Eigen::VectorXf& v) {
-                    float mn = v.minCoeff(), mx = v.maxCoeff();
-                    if (mx > mn) v = (v.array() - mn) / (mx - mn);
-                };
-                Eigen::VectorXf vec_norm = similarities, kw_norm = kw_vec;
+                return v;
+            };
+
+            bool use_kw   = config().bm25_enabled && !kw.empty();
+            bool use_phon = config().phon_weight > 0.0f && !ph.empty();
+
+            Eigen::VectorXf combined = similarities;
+            if (use_kw || use_phon) {
+                Eigen::VectorXf vec_norm = similarities;
                 norm_minmax(vec_norm);
-                norm_minmax(kw_norm);
-                combined = config().vector_weight * vec_norm +
-                           config().bm25_weight   * kw_norm;
+                combined = config().vector_weight * vec_norm;
+                if (use_kw) {
+                    Eigen::VectorXf kw_norm = gather(kw);
+                    norm_minmax(kw_norm);
+                    combined += config().bm25_weight * kw_norm;
+                }
+                if (use_phon) {
+                    Eigen::VectorXf ph_norm = gather(ph);
+                    norm_minmax(ph_norm);
+                    combined += config().phon_weight * ph_norm;
+                }
             }
 
             for (int i = 0; i < n; ++i) {
@@ -1632,18 +1798,21 @@ struct SqliteBackend::Impl {
         };
 
         std::string match_expr = fts_match_expr(query);
+        std::string phon_expr  = config().phon_weight > 0.0f
+                               ? phon_match_expr(query) : std::string{};
+        auto no_scores = std::unordered_map<int, float>{};
         score_corpus(cached_ids, cached_texts, cached_embeddings,
                      cached_metadata, cached_timestamps,
-                     config().bm25_enabled ? keyword_scores(match_expr)
-                                           : std::unordered_map<int, float>{});
+                     config().bm25_enabled ? keyword_scores(match_expr) : no_scores,
+                     phon_expr.empty() ? no_scores : sum_phon_scores(phon_expr));
         score_corpus(doc_ids, doc_texts, doc_embeddings,
                      doc_metadata, doc_timestamps,
-                     config().bm25_enabled ? doc_keyword_scores(match_expr)
-                                           : std::unordered_map<int, float>{});
+                     config().bm25_enabled ? doc_keyword_scores(match_expr) : no_scores,
+                     phon_expr.empty() ? no_scores : doc_phon_scores(phon_expr));
         score_corpus(dec_ids, dec_texts, dec_embeddings,
                      dec_metadata, dec_timestamps,
-                     config().bm25_enabled ? dec_keyword_scores(match_expr)
-                                           : std::unordered_map<int, float>{});
+                     config().bm25_enabled ? dec_keyword_scores(match_expr) : no_scores,
+                     phon_expr.empty() ? no_scores : dec_phon_scores(phon_expr));
         auto t_search_end = clock::now();
 
         // ---- merged top-k selection -----------------------------------
@@ -1831,6 +2000,68 @@ struct SqliteBackend::Impl {
     // Cheap backfill: embed only rows left NULL by deferred-embed stores.
     int backfill_embeddings(Embedder& emb_ref) {
         return embed_tables(emb_ref, /*only_missing=*/true, /*progress=*/false);
+    }
+
+    // (Re)compute the phon (Double Metaphone) column for every context-table
+    // row from its text. No embedder needed — pure string work. `only_missing`
+    // limits to rows WHERE phon IS NULL (cheap backfill after a migration adds
+    // the column); false recomputes all rows (e.g. after a phonize() change).
+    // The *_phon_fts sync triggers reindex each UPDATE automatically. Returns
+    // the number of rows rewritten.
+    int rebuild_phon(bool only_missing, bool progress) {
+        struct TableSpec {
+            const char* table;
+            const char* id_col;
+            const char* text_col;
+            const char* extra_col;  // joined with text_col for turns
+        };
+        static constexpr TableSpec tables[] = {
+            { "turns",     "turn_id",     "user_text", "assistant_text" },
+            { "summaries", "summary_id",  "text",      nullptr          },
+            { "decisions", "decision_id", "text",      nullptr          },
+            { "documents", "document_id", "text",      nullptr          },
+        };
+        const char* where = only_missing ? " WHERE phon IS NULL" : "";
+
+        int total_count = 0;
+        if (progress) {
+            for (auto& t : tables) {
+                Stmt s(db, std::format("SELECT COUNT(*) FROM {}{}", t.table, where));
+                if (s.step()) total_count += s.column_int(0);
+            }
+        }
+
+        int done = 0;
+        for (auto& t : tables) {
+            std::string sel = t.extra_col
+                ? std::format("SELECT {} AS id, {}, {} FROM {}{}",
+                              t.id_col, t.text_col, t.extra_col, t.table, where)
+                : std::format("SELECT {} AS id, {} AS text FROM {}{}",
+                              t.id_col, t.text_col, t.table, where);
+            std::string upd = std::format("UPDATE {} SET phon = ? WHERE {} = ?",
+                                          t.table, t.id_col);
+            Stmt select_stmt(db, sel);
+            while (select_stmt.step()) {
+                int id = select_stmt.column_int(0);
+                std::string text = select_stmt.column_text(1);
+                if (t.extra_col) {
+                    std::string a = select_stmt.column_text(2);
+                    if (!a.empty()) text += " " + a;
+                }
+                Stmt update(db, upd);
+                update.bind(1, phonize(text));
+                update.bind(2, id);
+                update.step();
+                ++done;
+                if (progress) {
+                    std::cout << std::format("\rComputing phonetic codes: {}/{}",
+                                             done, total_count);
+                    std::cout.flush();
+                }
+            }
+        }
+        if (progress) std::cout << "\n";
+        return done;
     }
 
     // Set a document's embedding (used by the import path after embedding
@@ -2194,6 +2425,11 @@ int SqliteBackend::rebuild_embeddings(Embedder& embedder) {
 int SqliteBackend::backfill_embeddings(Embedder& embedder) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->backfill_embeddings(embedder);
+}
+
+int SqliteBackend::rebuild_phon(bool only_missing, bool progress) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->rebuild_phon(only_missing, progress);
 }
 
 bool SqliteBackend::update_document_embedding(int document_id,

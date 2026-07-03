@@ -76,13 +76,14 @@ mismatches abort startup with a clear error.
 | `default_limit`     | `5`     | Default result count.                                                       |
 | `default_min_score` | `0.4`   | Cosine floor for returned results.                                          |
 | `bm25_enabled`      | `true`  | Blend BM25 keyword scoring into the rank.                                   |
-| `bm25_weight`       | `3`     | Weight for the BM25 signal (ratio, not percentage; integers preferred).     |
-| `vector_weight`     | `7`     | Weight for the cosine signal. Default blend: 30% BM25 / 70% vector.         |
+| `bm25_weight`       | `4`     | Weight for the BM25 signal (ratio, not percentage; integers preferred).     |
+| `vector_weight`     | `8`     | Weight for the cosine signal.                                               |
+| `phon_weight`       | `1`     | Weight for the phonetic "sounds-like" (Double Metaphone) signal. `0` off.   |
 | `max_search_limit`  | `0`     | Ceiling on client-requested `limit` for sub-users. `0` disables the cap.    |
 
-Weights are ratios; they're normalized internally. `3` and `7` give the
-same blend as `0.3` and `0.7` — the integer form just avoids INI parse
-quirks.
+Weights are ratios; they're normalized internally. The default blend is
+`8` vector / `4` bm25 / `1` phon — meaning-first, with keyword and a gentle
+phonetic nudge. `phon_weight = 0` disables the sounds-like signal entirely.
 
 ## `[inference]` — summarization endpoint
 

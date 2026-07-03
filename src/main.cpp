@@ -248,6 +248,7 @@ int main(int argc, char **argv) {
             // admin flags removed — sudo is the admin gate
             ("yes,y", CLI_YES)
             ("embeddings,e", CLI_EMBEDDINGS)
+            ("missing", "rebuild-phon: only fill rows with a NULL phon column")
             ("output,o", Diskerror::po::value<std::string>(), "Output file");
     opts.add_hidden_options()
             ("command", Diskerror::po::value<std::string>()->default_value("help"), CLI_COMMAND)
@@ -660,6 +661,31 @@ int main(int argc, char **argv) {
                 "dimensions", std::to_string(cfg.embedding_dimensions));
             std::cout << std::format(ragger::lang::MSG_EMBEDDINGS_REBUILT, count) << "\n";
 
+        }
+        else if (command == "rebuild-phon") {
+            // Recompute the phon (Double Metaphone "sounds-like") column from
+            // text across all four context tables. Pure string work — no
+            // embedder, no model-identity change. `--missing` only fills
+            // phon-NULL rows (cheap post-migration backfill); default recomputes
+            // all (e.g. after a phonize() change). Backs up the DB first — cheap
+            // rollback, no drift guard needed.
+            bool only_missing = opts.count("missing") > 0;
+
+            std::string actual_db_path = db_path.empty() ? cfg.resolved_db_path() : db_path;
+            std::string backup_path = actual_db_path + ".bak";
+            try {
+                fs::copy_file(actual_db_path, backup_path,
+                              fs::copy_options::overwrite_existing);
+                std::println(ragger::lang::MSG_DB_BACKED_UP, backup_path);
+            }
+            catch (const std::exception &e) {
+                Diskerror::logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
+            }
+
+            ragger::RaggerMemory memory(db_path, model_dir,
+                                        /*skip_embedding_guard=*/true);
+            int count = memory.rebuild_phon(only_missing, /*progress=*/true);
+            std::println("Rebuilt phonetic codes for {} row(s).", count);
         }
         else if (command == "show-embedding-model") {
             std::println(ragger::lang::MSG_EMBEDDING_MODEL_NAME, cfg.embedding_model);

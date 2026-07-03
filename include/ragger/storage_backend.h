@@ -251,6 +251,11 @@ public:
     /// number of rows updated.
     virtual int backfill_embeddings(Embedder& embedder) = 0;
 
+    /// (Re)compute the phon (Double Metaphone "sounds-like") column for every
+    /// context-table row. only_missing=true does only phon-NULL rows (cheap
+    /// post-migration backfill); false recomputes all. Returns rows rewritten.
+    virtual int rebuild_phon(bool only_missing, bool progress) = 0;
+
     /// Get distinct collection names.
     virtual std::vector<std::string> collections() const = 0;
 

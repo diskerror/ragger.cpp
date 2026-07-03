@@ -99,8 +99,12 @@ vector_type = f16
 default_limit = 5
 default_min_score = 0.4
 bm25_enabled = true
-bm25_weight = 3
-vector_weight = 7
+bm25_weight = 4
+vector_weight = 8
+# Phonetic "sounds-like" (dolphining) blend weight. 0 disables; 1 is a gentle
+# nudge. Matches on how a phrase *sounds* (Double Metaphone) alongside meaning
+# (vector) and keywords (bm25).
+phon_weight = 1
 
 [inference]
 # Default model used for summarization (L2 turn + L3 session). Empty leaves
@@ -272,6 +276,7 @@ void apply_user_overrides(Config& cfg, const Config& user) {
     cfg.bm25_enabled = user.bm25_enabled;
     cfg.bm25_weight = user.bm25_weight;
     cfg.vector_weight = user.vector_weight;
+    cfg.phon_weight = user.phon_weight;
 
     // Inference (user can only pick model)
     cfg.inference_model = user.inference_model;
@@ -386,6 +391,7 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "bm25_enabled")     cfg.bm25_enabled = parse_bool(val);
             else if (key == "bm25_weight")      cfg.bm25_weight = std::stof(val);
             else if (key == "vector_weight")    cfg.vector_weight = std::stof(val);
+            else if (key == "phon_weight")      cfg.phon_weight = std::stof(val);
             else if (key == "max_search_limit") cfg.max_search_limit = std::stoi(val);
         }
         else if (section == "inference") {
@@ -609,6 +615,7 @@ int reload_config() {
     RELOAD(bm25_enabled);
     RELOAD(bm25_weight);
     RELOAD(vector_weight);
+    RELOAD(phon_weight);
 
     // Inference
     RELOAD(inference_model);
