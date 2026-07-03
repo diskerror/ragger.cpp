@@ -1,8 +1,10 @@
 #!/bin/bash
 # build.sh — Build Ragger C++ from source
 #
-# Usage: ./build.sh [clean]
-#   clean  — remove build directory first
+# Usage: ./build.sh [clean] [--stats|--no-stats]
+#   clean      — remove build directory first
+#   --stats    — enable RAGGER_STATS instrumentation (default: ON)
+#   --no-stats — disable RAGGER_STATS instrumentation
 
 set -euo pipefail
 
@@ -45,7 +47,18 @@ fi
 cd "$(dirname "$0")/.."
 BUILD_DIR="build"
 
-if [ "${1:-}" = "clean" ]; then
+RAGGER_STATS_FLAG="ON"   # default: stats on (matches deployment default)
+DO_CLEAN=0
+
+for arg in "$@"; do
+    case "$arg" in
+        clean)       DO_CLEAN=1 ;;
+        --stats)     RAGGER_STATS_FLAG="ON" ;;
+        --no-stats)  RAGGER_STATS_FLAG="OFF" ;;
+    esac
+done
+
+if [ "$DO_CLEAN" = "1" ]; then
     echo "[+] Clean build"
     rm -rf "$BUILD_DIR"
 fi
@@ -96,8 +109,8 @@ esac
 
 # Only re-run cmake if needed
 if [ ! -f Makefile ] || [ ../CMakeLists.txt -nt Makefile ]; then
-    echo "[+] Configuring..."
-    cmake .. $CMAKE_FLAGS
+    echo "[+] Configuring (RAGGER_STATS=$RAGGER_STATS_FLAG)..."
+    cmake .. $CMAKE_FLAGS -DRAGGER_STATS="$RAGGER_STATS_FLAG"
 fi
 
 echo "[+] Building with $JOBS threads..."
