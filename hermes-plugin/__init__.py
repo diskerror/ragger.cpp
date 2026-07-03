@@ -301,18 +301,35 @@ class RaggerMemoryProvider(MemoryProvider):
                 "interrupted": bool,
             }
         """
-        # Skip if either user or assistant is missing/empty — nothing to capture
-        if not turn_data or not turn_data.get("user") or not turn_data.get("assistant"):
+        # Skip if user content is missing — nothing to capture at all
+        if not turn_data or not turn_data.get("user"):
             return
-        
+
+        user = turn_data["user"]
+        assistant = turn_data.get("assistant", "")
+        session_id = turn_data.get("session_id", "")
+
         # Post asynchronously so we don't block turn finalization
         def _post_async():
-            self._post_turn(
-                turn_data["user"],
-                turn_data["assistant"],
-                session_id=turn_data.get("session_id", ""),
-            )
-        
+            if assistant:
+                # Normal path: both sides present — store as a full turn
+                self._post_turn(user, assistant, session_id=session_id)
+            else:
+                # User message only (stopped before any response was generated).
+                # Store the user text alone via /store so it's searchable,
+                # tagged so it's identifiable as an incomplete prompt.
+                self._post(
+                    "/store",
+                    {
+                        "text": f"[incomplete prompt — no response generated]\n{user}",
+                        "metadata": {
+                            "category": "fact",
+                            "source": "hermes-interrupted",
+                            "session_id": session_id,
+                        },
+                    },
+                )
+
         thread = threading.Thread(target=_post_async, daemon=True, name="ragger-post-turn")
         thread.start()
 
@@ -427,3 +444,18 @@ def register(ctx) -> None:
             "/store",
             {"text": content, "metadata": {"category": category, "source": "memory-tool"}},
         )
+
+    @ctx.hook("post_turn_finalized")
+    def _capture_interrupted_turn(turn_data: Optional[dict] = None, **kwargs) -> None:
+        """Capture turns that Hermes skips on interrupt (e.g. user /stop).
+
+        Completed turns are already synced via sync_turn() (the normal
+        MemoryProvider path). Hermes fires this hook for EVERY turn,
+        including interrupted ones, but deliberately skips the sync_turn
+        path when interrupted=True (run_agent issue #15218). To avoid
+        double-posting completed turns to /turn, we act ONLY on the
+        interrupted case here — the gap that was dropping turns.
+        """
+        if not turn_data or not turn_data.get("interrupted"):
+            return
+        provider.post_turn_finalized(turn_data)
