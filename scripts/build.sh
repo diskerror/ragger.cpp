@@ -47,7 +47,7 @@ fi
 cd "$(dirname "$0")/.."
 BUILD_DIR="build"
 
-RAGGER_STATS_FLAG="ON"   # default: stats on (matches deployment default)
+RAGGER_STATS_FLAG="OFF"   # default: stats off
 DO_CLEAN=0
 
 for arg in "$@"; do
@@ -107,8 +107,12 @@ case "$OS" in
         ;;
 esac
 
-# Only re-run cmake if needed
-if [ ! -f Makefile ] || [ ../CMakeLists.txt -nt Makefile ]; then
+# Re-run cmake if the build isn't configured, CMakeLists changed, OR the
+# requested RAGGER_STATS value differs from what's cached (otherwise a flag
+# flip on an existing build dir is silently ignored).
+CACHED_STATS=""
+[ -f CMakeCache.txt ] && CACHED_STATS=$(sed -n 's/^RAGGER_STATS:BOOL=//p' CMakeCache.txt)
+if [ ! -f Makefile ] || [ ../CMakeLists.txt -nt Makefile ] || [ "$CACHED_STATS" != "$RAGGER_STATS_FLAG" ]; then
     echo "[+] Configuring (RAGGER_STATS=$RAGGER_STATS_FLAG)..."
     cmake .. $CMAKE_FLAGS -DRAGGER_STATS="$RAGGER_STATS_FLAG"
 fi
