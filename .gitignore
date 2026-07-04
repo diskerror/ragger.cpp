@@ -30,7 +30,6 @@ models/model.onnx
 # OS
 .DS_Store
 scripts/deploy.sh
-scripts/build-stats.sh
 
 AI_reference/
 AGENT_MEMORY_TRIGGERS_REPORT.md

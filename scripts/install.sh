@@ -1,7 +1,9 @@
 #!/bin/bash
 # install.sh — Install Ragger for the current user.
 #
-# Usage: ./install.sh
+# Usage: ./install.sh [--stats|--no-stats]
+#   --stats     install the instrumented binary from build-stats/
+#   --no-stats  install the default binary from build/ (default)
 #
 # No sudo needed. Layout follows the XDG convention:
 #
@@ -37,8 +39,24 @@ cd "$(dirname "$0")/.."
 SRC="$(pwd)"
 OS="$(uname -s)"
 
-BINARY="build/ragger"
-[ -x "$BINARY" ] || fail "No binary at $BINARY — build first: cmake --build build --parallel"
+# --stats selects the instrumented build tree (build-stats/) produced by
+# `./scripts/build.sh --stats`. Default is the stats-off tree (build/).
+BUILD_DIR="build"
+for arg in "$@"; do
+    case "$arg" in
+        --stats)     BUILD_DIR="build-stats" ;;
+        --no-stats)  BUILD_DIR="build" ;;
+    esac
+done
+
+BINARY="$BUILD_DIR/ragger"
+if [ ! -x "$BINARY" ]; then
+    if [ "$BUILD_DIR" = "build-stats" ]; then
+        fail "No binary at $BINARY — build first: ./scripts/build.sh --stats"
+    else
+        fail "No binary at $BINARY — build first: ./scripts/build.sh"
+    fi
+fi
 
 # --- Paths (single source of truth) ---
 RAGGER_HOME="$HOME/.ragger"
