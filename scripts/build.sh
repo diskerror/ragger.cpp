@@ -45,7 +45,6 @@ if [ ${#missing[@]} -gt 0 ]; then
 fi
 
 cd "$(dirname "$0")/.."
-BUILD_DIR="build"
 
 RAGGER_STATS_FLAG="OFF"   # default: stats off
 DO_CLEAN=0
@@ -57,6 +56,14 @@ for arg in "$@"; do
         --no-stats)  RAGGER_STATS_FLAG="OFF" ;;
     esac
 done
+
+# Dual build dirs: each flag gets its own tree so their CMake caches never go
+# stale against each other. build/ = stats off, build-stats/ = stats on.
+if [ "$RAGGER_STATS_FLAG" = "ON" ]; then
+    BUILD_DIR="build-stats"
+else
+    BUILD_DIR="build"
+fi
 
 if [ "$DO_CLEAN" = "1" ]; then
     echo "[+] Clean build"
@@ -107,13 +114,10 @@ case "$OS" in
         ;;
 esac
 
-# Re-run cmake if the build isn't configured, CMakeLists changed, OR the
-# requested RAGGER_STATS value differs from what's cached (otherwise a flag
-# flip on an existing build dir is silently ignored).
-CACHED_STATS=""
-[ -f CMakeCache.txt ] && CACHED_STATS=$(sed -n 's/^RAGGER_STATS:BOOL=//p' CMakeCache.txt)
-if [ ! -f Makefile ] || [ ../CMakeLists.txt -nt Makefile ] || [ "$CACHED_STATS" != "$RAGGER_STATS_FLAG" ]; then
-    echo "[+] Configuring (RAGGER_STATS=$RAGGER_STATS_FLAG)..."
+# Each flag has its own build dir, so the cache never goes stale against a
+# different flag value. Re-run cmake only when unconfigured or CMakeLists changed.
+if [ ! -f Makefile ] || [ ../CMakeLists.txt -nt Makefile ]; then
+    echo "[+] Configuring (RAGGER_STATS=$RAGGER_STATS_FLAG) in $BUILD_DIR/..."
     cmake .. $CMAKE_FLAGS -DRAGGER_STATS="$RAGGER_STATS_FLAG"
 fi
 
