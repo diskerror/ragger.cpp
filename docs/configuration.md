@@ -262,18 +262,67 @@ information out requires **basic SQL skills**; anyone comfortable with a
 point:
 
 ```sql
--- The top hits for the most recent searches:
-SELECT l.id, l.ts, l.query, h.rank, h.score, h.collection, h.snippet
+-- The top hits for the most recent searches, with the per-signal breakdown:
+SELECT l.id, l.query, h.rank,
+       ROUND(h.score,3)      AS cos,    -- raw cosine (the reported score)
+       ROUND(h.vec_score,3)  AS vec,    -- normalized vector contribution
+       ROUND(h.bm25_score,3) AS bm25,   -- normalized keyword contribution
+       ROUND(h.phon_score,3) AS phon,   -- normalized phonetic contribution
+       ROUND(h.blended,2)    AS blend,  -- final weighted ranking score
+       h.collection, h.snippet
 FROM lookups l
 JOIN hits h ON h.lookup_id = l.id
 ORDER BY l.id DESC, h.rank
 LIMIT 30;
 ```
 
+### Per-signal ranking breakdown
+
+Each `hits` row records not just the final rank but **how each search signal
+contributed**, so you can judge whether a weight (`vector_weight`,
+`bm25_weight`, `phon_weight`) needs tuning — or whether a signal earns its keep
+at all:
+
+| column | meaning |
+|--------|---------|
+| `score` | Raw vector cosine similarity — the absolute "how close in meaning" number, also what the API reports. |
+| `vec_score` | The **min-max-normalized** cosine that actually fed the blend (how it competed *within this result set*). |
+| `bm25_score` | Normalized BM25 keyword contribution, or **NULL** when `bm25_enabled = false`. |
+| `phon_score` | Normalized phonetic ("sounds-like", Double Metaphone) contribution, or **NULL** when `phon_weight = 0`. |
+| `blended` | The final weighted ranking value: `vector_weight·vec + bm25_weight·bm25 + phon_weight·phon`. This is what actually ordered the results. |
+
+A **NULL** in `bm25_score`/`phon_score` means that signal was switched off for
+the search (so you can `AVG()`/filter without a sentinel skewing the numbers); a
+real **0.0** means the signal was active but contributed nothing for that row.
+Because each signal is normalized to `[0,1]` before weighting, the columns are
+directly comparable — e.g. a hit with a low `vec` but a high `phon` is a
+"sounds-like pulled this in" case, and one with `bm25` near 1.0 won on exact
+keywords. Example dissections:
+
+```sql
+-- Hits where the phonetic signal was the strongest contributor:
+SELECT l.query, h.rank, h.vec_score, h.bm25_score, h.phon_score
+FROM lookups l JOIN hits h ON h.lookup_id = l.id
+WHERE h.phon_score IS NOT NULL
+  AND h.phon_score > h.vec_score AND h.phon_score > h.bm25_score
+ORDER BY l.id DESC;
+
+-- Average contribution of each signal across all logged hits:
+SELECT ROUND(AVG(vec_score),3)  AS avg_vec,
+       ROUND(AVG(bm25_score),3) AS avg_bm25,
+       ROUND(AVG(phon_score),3) AS avg_phon
+FROM hits;
+```
+
 The schema is deliberately small and obvious — open it with `sqlite3
 ~/.ragger/stats.db` and `.schema` to see every column, then slice it to answer
-whatever question you're chasing (which queries return weak top scores, how
-often a given collection surfaces, how the score spread changes, and so on).
+whatever question you're chasing.
+
+> **Upgrading an existing `stats.db`:** the four breakdown columns
+> (`vec_score`, `bm25_score`, `phon_score`, `blended`) are added automatically
+> via in-place `ALTER TABLE` the next time an instrumented binary opens the
+> database — rows logged before the upgrade simply carry `NULL` for them. No
+> manual migration or reset needed.
 
 ## Related
 

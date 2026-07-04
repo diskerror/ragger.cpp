@@ -1773,27 +1773,40 @@ struct SqliteBackend::Impl {
             bool use_kw   = config().bm25_enabled && !kw.empty();
             bool use_phon = config().phon_weight > 0.0f && !ph.empty();
 
+            // Normalized [0,1] signal vectors. vec is always computed; kw/ph
+            // only when their signal is active. When neither keyword nor phon
+            // contributes, ranking falls back to raw cosine (combined) so the
+            // vec-only path behaves exactly as before.
+            Eigen::VectorXf vec_norm = similarities;
+            Eigen::VectorXf kw_norm, ph_norm;
             Eigen::VectorXf combined = similarities;
             if (use_kw || use_phon) {
-                Eigen::VectorXf vec_norm = similarities;
                 norm_minmax(vec_norm);
                 combined = config().vector_weight * vec_norm;
                 if (use_kw) {
-                    Eigen::VectorXf kw_norm = gather(kw);
+                    kw_norm = gather(kw);
                     norm_minmax(kw_norm);
                     combined += config().bm25_weight * kw_norm;
                 }
                 if (use_phon) {
-                    Eigen::VectorXf ph_norm = gather(ph);
+                    ph_norm = gather(ph);
                     norm_minmax(ph_norm);
                     combined += config().phon_weight * ph_norm;
                 }
             }
 
             for (int i = 0; i < n; ++i) {
-                candidates.push_back({combined(i),
-                    SearchResult{ids[i], texts[i], similarities(i),
-                                 meta[i], ts[i]}});
+                SearchResult sr{ids[i], texts[i], similarities(i), meta[i], ts[i]};
+                // Per-signal breakdown for RAGGER_STATS. -1 marks an inactive
+                // signal so the analysis can tell "0 contribution" apart from
+                // "not part of this search". vec_score is the normalized cosine
+                // that actually fed the blend (== raw cosine on the vec-only
+                // path, since no min-max is applied there).
+                sr.vec_score  = vec_norm(i);
+                sr.bm25_score = use_kw   ? kw_norm(i) : -1.0f;
+                sr.phon_score = use_phon ? ph_norm(i) : -1.0f;
+                sr.blended    = combined(i);
+                candidates.push_back({combined(i), std::move(sr)});
             }
         };
 

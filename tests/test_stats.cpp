@@ -21,7 +21,9 @@
 #include <sqlite3.h>
 
 #include <cassert>
+#include <cmath>
 #include <filesystem>
+#include <limits>
 #include <print>
 #include <string>
 #include <vector>
@@ -61,6 +63,22 @@ static std::string scalar_text(const std::string& sql) {
     if (sqlite3_step(st) == SQLITE_ROW) {
         auto* p = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
         if (p) out = p;
+    }
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return out;
+}
+
+// Read a single REAL cell; returns NaN when the cell is NULL.
+static double scalar_real(const std::string& sql) {
+    sqlite3* db = nullptr;
+    assert(sqlite3_open(DB.c_str(), &db) == SQLITE_OK);
+    sqlite3_stmt* st = nullptr;
+    assert(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+    double out = std::numeric_limits<double>::quiet_NaN();
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        if (sqlite3_column_type(st, 0) != SQLITE_NULL)
+            out = sqlite3_column_double(st, 0);
     }
     sqlite3_finalize(st);
     sqlite3_close(db);
@@ -165,6 +183,30 @@ int main() {
     assert(scalar("SELECT COUNT(*) FROM hits h "
                   "LEFT JOIN lookups l ON h.lookup_id = l.id "
                   "WHERE l.id IS NULL") == 0);
+    std::println("    OK");
+
+    // --- 6. Per-signal breakdown columns (vec/bm25/phon/blended) --------
+    std::println("  test_per_signal_breakdown...");
+    cleanup();
+    {
+        StatsLogger s(DB);
+        // Two hits: one with all three signals active, one where phon was
+        // inactive (-1 sentinel → NULL) to prove the active/inactive distinction.
+        SearchResult a = mk(201, "all three active", 0.88f, {{"collection", "doc"}});
+        a.vec_score = 0.9f; a.bm25_score = 0.5f; a.phon_score = 0.2f; a.blended = 8.9f;
+        SearchResult b = mk(202, "phon inactive", 0.60f, {{"collection", "doc"}});
+        b.vec_score = 0.4f; b.bm25_score = 0.3f; b.phon_score = -1.0f; b.blended = 4.4f;
+        s.log_lookup("signal probe", 5, 0.0f, {a, b}, 5.0, /*top_n=*/3);
+    }
+    // Active signals round-trip as their stored values.
+    assert(std::abs(scalar_real("SELECT vec_score  FROM hits WHERE memory_id=201") - 0.9) < 1e-6);
+    assert(std::abs(scalar_real("SELECT bm25_score FROM hits WHERE memory_id=201") - 0.5) < 1e-6);
+    assert(std::abs(scalar_real("SELECT phon_score FROM hits WHERE memory_id=201") - 0.2) < 1e-6);
+    assert(std::abs(scalar_real("SELECT blended    FROM hits WHERE memory_id=201") - 8.9) < 1e-6);
+    // Inactive phon (-1) is stored as NULL, not -1.
+    assert(scalar("SELECT phon_score IS NULL FROM hits WHERE memory_id=202") == 1);
+    // ...while its active vec/bm25 still land.
+    assert(std::abs(scalar_real("SELECT vec_score FROM hits WHERE memory_id=202") - 0.4) < 1e-6);
     std::println("    OK");
 
     cleanup();

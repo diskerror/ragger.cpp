@@ -38,6 +38,10 @@ CREATE TABLE IF NOT EXISTS hits (
     rank       INTEGER NOT NULL,
     memory_id  INTEGER NOT NULL,
     score      REAL    NOT NULL,
+    vec_score  REAL,
+    bm25_score REAL,
+    phon_score REAL,
+    blended    REAL,
     collection TEXT,
     snippet    TEXT
 );
@@ -86,6 +90,25 @@ StatsLogger::StatsLogger(const std::string& db_path) {
             db_ = nullptr;
             return;
         }
+        // In-place migration: a stats.db created before the per-signal breakdown
+        // has a `hits` table without the vec/bm25/phon/blended columns, and
+        // CREATE TABLE IF NOT EXISTS won't add them. Add each if missing so the
+        // INSERT keeps working. SQLite has no ADD COLUMN IF NOT EXISTS; probe
+        // pragma_table_info and swallow the "duplicate column" case.
+        for (const char* col : {"vec_score", "bm25_score", "phon_score", "blended"}) {
+            std::string probe = std::string(
+                "SELECT 1 FROM pragma_table_info('hits') WHERE name='") + col + "'";
+            bool exists = false;
+            sqlite3_stmt* ps = nullptr;
+            if (sqlite3_prepare_v2(db_, probe.c_str(), -1, &ps, nullptr) == SQLITE_OK) {
+                exists = (sqlite3_step(ps) == SQLITE_ROW);
+            }
+            sqlite3_finalize(ps);
+            if (!exists) {
+                std::string alter = std::string("ALTER TABLE hits ADD COLUMN ") + col + " REAL";
+                sqlite3_exec(db_, alter.c_str(), nullptr, nullptr, nullptr);  // best-effort
+            }
+        }
         Diskerror::logger::debug("stats: logging enabled → " + path);
     } catch (...) {
         if (db_) { sqlite3_close(db_); db_ = nullptr; }
@@ -130,15 +153,27 @@ void StatsLogger::log_lookup(const std::string& query,
         for (int i = 0; i < cap; ++i) {
             const SearchResult& r = results[i];
             Stmt s(db_,
-                "INSERT INTO hits(lookup_id,rank,memory_id,score,collection,snippet) "
-                "VALUES(?,?,?,?,?,?)");
+                "INSERT INTO hits(lookup_id,rank,memory_id,score,"
+                "vec_score,bm25_score,phon_score,blended,collection,snippet) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)");
             s.bind(1, static_cast<int64_t>(lookup_id))
              .bind(2, i + 1)
              .bind(3, r.id)
              .bind(4, static_cast<double>(r.score));
+            // Per-signal breakdown. A -1 sentinel means the signal was inactive
+            // for this search (bm25 disabled / phon_weight==0) → store NULL so
+            // analysis queries can AVG()/filter without a magic number skewing
+            // results. A real 0.0 (present but no contribution) is preserved.
+            auto bind_signal = [&](int idx, float v) {
+                if (v < 0.0f) s.bind_null(idx); else s.bind(idx, static_cast<double>(v));
+            };
+            bind_signal(5, r.vec_score);
+            bind_signal(6, r.bm25_score);
+            bind_signal(7, r.phon_score);
+            s.bind(8, static_cast<double>(r.blended));
             const std::string coll = collection_of(r);
-            if (coll.empty()) s.bind_null(5); else s.bind(5, coll);
-            s.bind(6, snippet_of(r));
+            if (coll.empty()) s.bind_null(9); else s.bind(9, coll);
+            s.bind(10, snippet_of(r));
             s.exec();
         }
 

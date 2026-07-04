@@ -18,9 +18,20 @@ using json = nlohmann::json;
 struct SearchResult {
     int         id;
     std::string text;
-    float       score;
+    float       score;        // raw vector cosine similarity (reported score)
     json        metadata;
     std::string timestamp;
+
+    // Per-signal ranking breakdown, captured for RAGGER_STATS instrumentation
+    // so each search type's contribution can be judged (tune/keep/drop a weight).
+    // Each *_score is the min-max-normalized [0,1] signal value that actually
+    // fed the weighted blend; a value of -1 means that signal was inactive for
+    // this search (bm25 disabled, or phon_weight==0). `blended` is the final
+    // weighted ranking score (vector_weight*vec + bm25_weight*bm25 + phon_weight*phon).
+    float vec_score  = -1.0f;
+    float bm25_score = -1.0f;
+    float phon_score = -1.0f;
+    float blended    = 0.0f;
 };
 
 /// Input for storing a Level 5 RAG document chunk (lean v2 documents schema).
