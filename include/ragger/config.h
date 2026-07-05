@@ -34,6 +34,13 @@ struct Config {
 
     // --- Storage ---
     std::string formats_dir    = "/var/ragger/formats";
+    // Undocumented CLI override (`--db <path>`): when non-empty, redirects the
+    // memory database away from the default $HOME/.ragger/memories.db. Set at
+    // startup from the hidden --db option; honoured by resolved_db_path() so
+    // every call site (server users_, mcp, recipe, useradd, ...) agrees. Empty
+    // = the default location. Primarily for testing against a DB copy without
+    // an $HOME shuffle.
+    std::string db_path_override;
 
     // --- Embedding ---
     std::string embedding_model = "all-MiniLM-L6-v2";

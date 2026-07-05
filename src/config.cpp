@@ -32,6 +32,8 @@ std::string expand_path(const std::string& path) {
 }
 
 std::string Config::resolved_db_path() const {
+    // Undocumented --db override wins; otherwise the fixed per-user default.
+    if (!db_path_override.empty()) return expand_path(db_path_override);
     return expand_path("~/.ragger/memories.db");
 }
 

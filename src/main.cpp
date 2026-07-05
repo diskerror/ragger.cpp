@@ -253,6 +253,11 @@ int main(int argc, char **argv) {
     opts.add_hidden_options()
             ("command", Diskerror::po::value<std::string>()->default_value("help"), CLI_COMMAND)
             ("args", Diskerror::po::value<std::vector<std::string> >(), CLI_ARGS)
+            // Undocumented: redirect the memory DB (default $HOME/.ragger/
+            // memories.db). Testing/dev convenience — point a daemon or CLI at
+            // a DB copy without an $HOME shuffle. Applied to mutable_config()
+            // after init so every resolved_db_path() consumer agrees.
+            ("db", Diskerror::po::value<std::string>()->default_value(""), "Override memory DB path (undocumented)")
             // --keep-data removed: always keep user data, sudoer can rm manually
             ;
     opts.add_positional("command", 1);
@@ -288,6 +293,13 @@ int main(int argc, char **argv) {
     catch (const std::exception &e) {
         std::cerr << std::format(ragger::lang::ERR_INFERENCE, e.what()) << "\n";
         return 1;
+    }
+
+    // Undocumented --db override: redirect the memory DB before any consumer
+    // reads resolved_db_path(). Applied to the mutable global so the server's
+    // UserStore, mcp, recipe_cli, and useradd/usermod paths all agree.
+    if (auto dbp = opts["db"].as<std::string>(); !dbp.empty()) {
+        ragger::mutable_config().db_path_override = dbp;
     }
 
     const auto &cfg = ragger::config();
