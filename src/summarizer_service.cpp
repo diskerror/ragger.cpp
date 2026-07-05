@@ -113,8 +113,25 @@ void SummarizerService::enqueue_catch_up() {
         ++sess_n;
     }
 
+    // Episode close (EPISODE_PLAN Phase 1): every session whose open episode
+    // is idle past episode_idle_minutes. Additive alongside the L3 path —
+    // Phase 2 removes the running-L3 churn and drives session rollups from
+    // these boundaries instead.
+    size_t ep_n = 0;
+    const int idle_min = config().episode_idle_minutes;
+    for (const auto& guid : backend->episodes_needing_close(idle_min)) {
+        Job j{JobKind::EpisodeClose, -1, -1,
+              {}, {}, {}, guid, {}};
+        std::lock_guard<std::mutex> lk(mutex_);
+        queue_.push_back(std::move(j));
+        ++ep_n;
+    }
+
     Diskerror::logger::info(std::format(
         lang::MSG_SUMMARIZER_START, turn_n, draft_n, sess_n));
+    if (ep_n)
+        Diskerror::logger::info(std::format(
+            "[summarizer] catch-up queued {} episode close(s)", ep_n));
     cv_.notify_all();
 }
 
@@ -134,7 +151,8 @@ void SummarizerService::worker_loop() {
                 case JobKind::L2Turn:           handle_l2(job);         break;
                 case JobKind::L3UpdateSession:  handle_l3_update(job);  break;
                 case JobKind::L3CloseSession:   handle_l3_close(job);   break;
-                case JobKind::L4UpdateProject:  handle_l4_update(job);  break;
+                case JobKind::L4UpdateProject:  handle_l4_update(job);   break;
+                case JobKind::EpisodeClose:     handle_episode_close(job); break;
                 case JobKind::DraftRetry:       handle_draft(job);      break;
             }
         } catch (const std::exception& e) {
@@ -360,6 +378,45 @@ bool SummarizerService::handle_l4_update(const Job& /*j*/) {
                                summarizer_model, "", "", "");
     }
     Diskerror::logger::debug("[summarizer] L4 project summary updated");
+    return true;
+}
+
+// --------------------------------------------------------------------
+// Episode close (EPISODE_PLAN Phase 1): summarize the run of L2 turn
+// summaries accumulated since this session's previous episode end into a
+// single immutable level='episode' row, spanning first→last turn. On
+// inference failure, leave the turns unclosed (retry next catch-up) —
+// same pattern as L2 draft handling.
+// --------------------------------------------------------------------
+bool SummarizerService::handle_episode_close(const Job& j) {
+    if (j.session_guid.empty()) return true;
+
+    const std::string since = backend_.last_episode_end(j.session_guid);
+    auto rows = backend_.l2_summaries_since(j.session_guid, since);
+    if (rows.empty()) return true;  // nothing new to close
+
+    std::vector<std::string> texts;
+    texts.reserve(rows.size());
+    for (const auto& r : rows)
+        if (!r.text.empty()) texts.push_back(r.text);
+    if (texts.empty()) return true;
+
+    const std::string first_ts = rows.front().timestamp;
+    const std::string last_ts  = rows.back().timestamp;
+
+    const std::string summarizer_model =
+        inference_ ? inference_->memory_model : "";
+
+    std::string summary;
+    if (inference_)
+        summary = summarize_texts(*inference_, texts);
+    if (summary.empty()) return false;  // inference down — retry next pass
+
+    backend_.store_episode(summary, summarizer_model, j.session_guid,
+                           first_ts, last_ts);
+    Diskerror::logger::info(std::format(
+        "[summarizer] episode closed for session {} ({} turns, {} → {})",
+        j.session_guid, texts.size(), first_ts, last_ts));
     return true;
 }
 

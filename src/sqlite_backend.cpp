@@ -383,6 +383,16 @@ struct SqliteBackend::Impl {
         if (!column_exists("documents", "phon"))
             exec("ALTER TABLE documents ADD COLUMN phon TEXT");
 
+        // Running-summary timestamps (EPISODE_PLAN Phase 1.2): `timestamp`
+        // remains the insert/create time; `updated_at` records the last
+        // regenerate time of a running row. For immutable `episode` rows we
+        // reuse `updated_at` to carry the episode's last-turn timestamp (the
+        // span end), so `timestamp`=first turn, `updated_at`=last turn.
+        // Additive ADD COLUMN after all CREATE TABLEs (no FTS impact — not an
+        // indexed column). NULL for pre-migration rows.
+        if (!column_exists("summaries", "updated_at"))
+            exec("ALTER TABLE summaries ADD COLUMN updated_at TEXT");
+
         // FTS5 — external-content virtual tables + sync triggers replace
         // the old hand-rolled bm25_* sidecars (issue #49).
         create_fts_schema();
@@ -1424,7 +1434,108 @@ struct SqliteBackend::Impl {
         return out;
     }
 
-    // Session turns newest-first (recipe walk-back direction).
+    // ---- episode layer (EPISODE_PLAN Phase 1) --------------------------
+    // Most recent episode's span-end (stored in updated_at) for a session.
+    // Empty when the session has no episode rows yet.
+    std::string last_episode_end(const std::string& session_guid) {
+        if (session_guid.empty()) return {};
+        Stmt s(db,
+            "SELECT COALESCE(s.updated_at, s.timestamp) "
+            "FROM summaries s "
+            "JOIN sessions ss ON s.session_id = ss.session_id "
+            "WHERE ss.guid = ? AND s.level = 'episode' "
+            "ORDER BY s.timestamp DESC, s.summary_id DESC LIMIT 1");
+        s.bind(1, session_guid);
+        if (s.step()) return s.column_text(0);
+        return {};
+    }
+
+    // Non-draft L2 turn summaries for a session with timestamp > since_ts
+    // (empty since_ts = all), oldest-first. Composes the closing episode.
+    std::vector<SummaryRecord> l2_summaries_since(
+            const std::string& session_guid, const std::string& since_ts) {
+        std::vector<SummaryRecord> out;
+        if (session_guid.empty()) return out;
+        std::string sql =
+            "SELECT s.summary_id, s.text, s.status, s.timestamp "
+            "FROM summaries s "
+            "JOIN sessions ss ON s.session_id = ss.session_id "
+            "WHERE ss.guid = ? AND s.level = 'turn' AND s.tags != 'draft' ";
+        if (!since_ts.empty()) sql += "AND s.timestamp > ? ";
+        sql += "ORDER BY s.timestamp ASC, s.summary_id ASC";
+        Stmt s(db, sql);
+        s.bind(1, session_guid);
+        if (!since_ts.empty()) s.bind(2, since_ts);
+        while (s.step()) {
+            out.push_back({s.column_int(0), s.column_text(1),
+                           s.column_text(2), s.column_text(3)});
+        }
+        return out;
+    }
+
+    // Insert one immutable level='episode' row: timestamp=first_ts (span
+    // start), updated_at=last_ts (span end). Mirrors store_summary.
+    int store_episode(const std::string& text, const std::string& model_name,
+                      const std::string& session_guid,
+                      const std::string& first_ts, const std::string& last_ts) {
+        std::string t = normalize_path(text);
+        int model_id   = get_or_create_model(model_name);
+        int session_id = get_or_create_session(session_guid);
+        auto emb = embedder->encode(t);
+
+        Stmt s(db,
+            "INSERT INTO summaries (model_id, session_id, text, embedding, phon, "
+            "level, status, tags, timestamp, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)");
+        if (model_id) s.bind(1, model_id); else s.bind_null(1);
+        if (session_id) s.bind(2, session_id); else s.bind_null(2);
+        s.bind(3, t);
+        bind_embedding(s.raw(), 4, emb);
+        s.bind(5, phonize(t));
+        s.bind(6, std::string("episode")).bind(7, std::string("complete"))
+         .bind(8, std::string(""));
+        s.bind(9, first_ts.empty() ? local_timestamp() : first_ts);
+        s.bind(10, last_ts.empty() ? (first_ts.empty() ? local_timestamp() : first_ts)
+                                   : last_ts);
+        if (!s.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+        invalidate_cache();
+        return static_cast<int>(sqlite3_last_insert_rowid(db));
+    }
+
+    // Sessions whose open episode is ready to close: they have >=1 non-draft
+    // L2 turn summary past the last episode's end, and their newest turn is
+    // older than idle_minutes. Returns session GUIDs.
+    std::vector<std::string> episodes_needing_close(int idle_minutes) {
+        std::vector<std::string> out;
+        if (idle_minutes <= 0) return out;
+        const std::string cutoff =
+            std::format("datetime('now','localtime','-{} minutes')", idle_minutes);
+        // For each session: last episode end (updated_at of newest episode, or
+        // '' when none). "Turns needing an episode" = non-draft L2 rows with
+        // timestamp > that end. Idle = MAX(turn.timestamp) < cutoff.
+        std::string sql =
+            "SELECT ss.guid "
+            "FROM sessions ss "
+            "WHERE EXISTS ("
+            "  SELECT 1 FROM summaries s "
+            "  WHERE s.session_id = ss.session_id "
+            "    AND s.level = 'turn' AND s.tags != 'draft' "
+            "    AND s.timestamp > COALESCE(("
+            "        SELECT COALESCE(e.updated_at, e.timestamp) FROM summaries e "
+            "        WHERE e.session_id = ss.session_id AND e.level = 'episode' "
+            "        ORDER BY e.timestamp DESC, e.summary_id DESC LIMIT 1), '')) "
+            "  AND (SELECT MAX(t.timestamp) FROM turns t "
+            "        WHERE t.session_id = ss.session_id) < " + cutoff + " "
+            "ORDER BY ss.session_id ASC";
+        Stmt s(db, sql);
+        while (s.step()) {
+            const auto g = s.column_text(0);
+            if (!g.empty()) out.push_back(g);
+        }
+        return out;
+    }
+
     std::vector<TurnRecord> turns_by_session_desc(
             const std::string& session_guid, int limit) {
         return turns_by_session_impl(session_guid, false, limit);
@@ -2385,6 +2496,29 @@ std::vector<DraftSummary> SqliteBackend::draft_summaries(int limit) {
 std::vector<std::string> SqliteBackend::sessions_needing_close(int pause_minutes) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->sessions_needing_close(pause_minutes);
+}
+
+std::string SqliteBackend::last_episode_end(const std::string& session_guid) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->last_episode_end(session_guid);
+}
+
+std::vector<SummaryRecord> SqliteBackend::l2_summaries_since(
+        const std::string& session_guid, const std::string& since_ts) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->l2_summaries_since(session_guid, since_ts);
+}
+
+int SqliteBackend::store_episode(const std::string& text,
+        const std::string& model_name, const std::string& session_guid,
+        const std::string& first_ts, const std::string& last_ts) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->store_episode(text, model_name, session_guid, first_ts, last_ts);
+}
+
+std::vector<std::string> SqliteBackend::episodes_needing_close(int idle_minutes) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->episodes_needing_close(idle_minutes);
 }
 
 std::vector<TurnRecord> SqliteBackend::turns_by_session_desc(

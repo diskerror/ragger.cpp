@@ -194,6 +194,38 @@ public:
     virtual std::vector<std::string> sessions_needing_close(
         int pause_minutes) = 0;
 
+    // --- episode layer (EPISODE_PLAN Phase 1) ---
+    /// The end timestamp (last turn) of the most recent `level='episode'` row
+    /// for this session, or empty if the session has no episodes yet. Stored
+    /// in the episode row's `updated_at` (timestamp=first turn, updated_at=last
+    /// turn). Marks where the next open episode begins.
+    virtual std::string last_episode_end(const std::string& session_guid) = 0;
+
+    /// L2 ('turn') summaries for a session with timestamp strictly greater than
+    /// `since_ts` (pass the previous episode's end; empty = all), oldest-first,
+    /// excluding drafts. These compose the closing episode. Returned as
+    /// SummaryRecords so the caller can read each row's timestamp to derive the
+    /// episode span (first/last turn).
+    virtual std::vector<SummaryRecord> l2_summaries_since(
+        const std::string& session_guid, const std::string& since_ts) = 0;
+
+    /// Insert one immutable `level='episode'` row for a session. `first_ts`
+    /// becomes the row `timestamp`; `last_ts` is stored in `updated_at` (the
+    /// span end). Mirrors store_summary (embed, phon, cache invalidation).
+    /// Returns the new summary_id.
+    virtual int store_episode(const std::string& text,
+                              const std::string& model_name,
+                              const std::string& session_guid,
+                              const std::string& first_ts,
+                              const std::string& last_ts) = 0;
+
+    /// Sessions with at least one non-draft L2 turn summary past their last
+    /// episode's end AND whose most recent turn is older than `idle_minutes`
+    /// (idle) — i.e. ready to have their open episode closed. Returns session
+    /// GUIDs. Anonymous (session_id NULL) turns are skipped.
+    virtual std::vector<std::string> episodes_needing_close(
+        int idle_minutes) = 0;
+
     /// All turns belonging to a session GUID, newest-first up to `limit`
     /// (0 = unbounded). Mirrors `turns_by_session` but in reverse order and
     /// bounded — used by recipes that walk back from the latest prompt.

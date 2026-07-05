@@ -64,7 +64,7 @@ public:
     void enqueue_catch_up();
 
 private:
-    enum class JobKind { L2Turn, L3CloseSession, DraftRetry, L3UpdateSession, L4UpdateProject };
+    enum class JobKind { L2Turn, L3CloseSession, DraftRetry, L3UpdateSession, L4UpdateProject, EpisodeClose };
 
     struct Job {
         JobKind     kind;
@@ -85,6 +85,7 @@ private:
     bool handle_l3_update(const Job& j);   // upsert running L3 from L2 summaries
     bool handle_l3_close(const Job& j);    // finalize running L3 → complete
     bool handle_l4_update(const Job& j);   // upsert running L4 from complete L3s
+    bool handle_episode_close(const Job& j); // close open episode → immutable L3a row
     bool handle_draft(const Job& j);
 
     /// Build a heuristic "draft" summary when inference is unreachable.

@@ -104,6 +104,15 @@ public:
                              const std::string& source_timestamp) override;
     std::vector<DraftSummary> draft_summaries(int limit = 0) override;
     std::vector<std::string> sessions_needing_close(int pause_minutes) override;
+    std::string last_episode_end(const std::string& session_guid) override;
+    std::vector<SummaryRecord> l2_summaries_since(
+        const std::string& session_guid, const std::string& since_ts) override;
+    int store_episode(const std::string& text,
+                      const std::string& model_name,
+                      const std::string& session_guid,
+                      const std::string& first_ts,
+                      const std::string& last_ts) override;
+    std::vector<std::string> episodes_needing_close(int idle_minutes) override;
     std::vector<TurnRecord> turns_by_session_desc(
         const std::string& session_guid, int limit = 0) override;
     std::vector<SummaryRecord> turn_summaries_by_session_desc(

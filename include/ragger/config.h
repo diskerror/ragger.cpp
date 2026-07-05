@@ -146,7 +146,14 @@ struct Config {
     // --- Housekeeping / retention ---
     float cleanup_max_age_hours  = 0.0f;  // 0 = keep forever (default)
     int   housekeeping_interval  = 60;      // seconds; 0 = disabled, <10 clamped to 10
-    int   summary_pause_minutes  = 20;      // idle gap that closes a session's running (L3) summary
+    int   summary_pause_minutes  = 20;      // DEPRECATED alias for episode_idle_minutes (kept one release)
+    // Idle gap (minutes) after a session's last turn that closes the current
+    // episode (and, Phase 2, triggers the session/project rollups). Any
+    // positive integer; no range clamp (ridiculous values are the user's
+    // business — consistent with Ragger's retention philosophy). Default 15,
+    // modelling the walk-away-and-return rhythm. Supersedes summary_pause_minutes,
+    // which is accepted as a deprecated alias when this key is unset.
+    int   episode_idle_minutes   = 15;
 
     // --- System ceilings (0 = no limit) ---
     int  max_search_limit             = 0;

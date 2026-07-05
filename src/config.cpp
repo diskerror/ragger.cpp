@@ -326,6 +326,12 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
     // Temporary storage for inference endpoint sections
     std::map<std::string, Config::InferenceEndpointConfig> endpoint_map;
 
+    // Alias tracking: episode_idle_minutes supersedes the deprecated
+    // summary_pause_minutes. If the new key is never set explicitly but the
+    // old one is present, fall back to the old value after the parse loop.
+    bool episode_idle_set = false;
+    bool summary_pause_set = false;
+
     while (std::getline(file, line)) {
         line = trim(line);
 
@@ -409,6 +415,10 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "target_pct")   cfg.summarizer_target_pct  = std::stoi(val);
             else if (key == "max_pct")      cfg.summarizer_max_pct     = std::stoi(val);
             else if (key == "prompt")       cfg.summarizer_prompt       = val;
+            else if (key == "episode_idle_minutes") {
+                int v = std::stoi(val);
+                if (v > 0) { cfg.episode_idle_minutes = v; episode_idle_set = true; }
+            }
         }
         else if (section.substr(0, 10) == "inference.") {
             // Named endpoint section: [inference.local], [inference.anthropic], etc.
@@ -453,7 +463,14 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
                 int v = std::stoi(val);
                 cfg.housekeeping_interval = (v == 0) ? 0 : std::max(v, 10);
             }
-            else if (key == "summary_pause_minutes") cfg.summary_pause_minutes = std::stoi(val);
+            else if (key == "summary_pause_minutes") {
+                cfg.summary_pause_minutes = std::stoi(val);
+                summary_pause_set = true;
+            }
+            else if (key == "episode_idle_minutes") {
+                int v = std::stoi(val);
+                if (v > 0) { cfg.episode_idle_minutes = v; episode_idle_set = true; }
+            }
         }
         else if (section == "models") {
             cfg.model_aliases[key] = val;
@@ -467,6 +484,15 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
     // Convert endpoint map to vector
     for (auto& [name, ep] : endpoint_map) {
         cfg.inference_endpoints.push_back(ep);
+    }
+
+    // Deprecated-alias fallback: if episode_idle_minutes was never set but the
+    // old summary_pause_minutes is present, adopt it. Keep summary_pause_minutes
+    // itself in sync with the effective idle gap so any lingering reader agrees.
+    if (!episode_idle_set && summary_pause_set && cfg.summary_pause_minutes > 0) {
+        cfg.episode_idle_minutes = cfg.summary_pause_minutes;
+    } else {
+        cfg.summary_pause_minutes = cfg.episode_idle_minutes;
     }
 
     // Fallback: if neither listener is configured, bring up TCP on loopback
@@ -674,6 +700,7 @@ int reload_config() {
     RELOAD(cleanup_max_age_hours);
     RELOAD(housekeeping_interval);
     RELOAD(summary_pause_minutes);
+    RELOAD(episode_idle_minutes);
     RELOAD(capture_turns);
     RELOAD(build_context);
     RELOAD(default_recipe);
