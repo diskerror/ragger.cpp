@@ -876,7 +876,7 @@ void test_episode_rollup_no_dup(ragger::Embedder& emb) {
 
     // updated_at was stamped (non-NULL) on the running row; timestamp fixed.
     sqlite3_prepare_v2(raw,
-        "SELECT timestamp, updated_at FROM summaries WHERE level='session' "
+        "SELECT created_at, updated_at FROM summaries WHERE level='session' "
         "AND session_id=(SELECT session_id FROM sessions WHERE guid='phase2-session')",
         -1, &st, nullptr);
     assert(sqlite3_step(st) == SQLITE_ROW);
@@ -955,7 +955,7 @@ void test_search_merges_three_corpora(ragger::Embedder& emb) {
             sqlite3* raw = nullptr;
             assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
             const char* sql =
-                "INSERT INTO decisions (text, status, tags, timestamp) "
+                "INSERT INTO decisions (text, status, tags, created_at) "
                 "VALUES ('We will migrate the database to PostgreSQL next quarter.', "
                 "'current', '', '2026-01-01T00:00:00Z')";
             char* err = nullptr;

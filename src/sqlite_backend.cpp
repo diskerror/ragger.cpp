@@ -295,32 +295,39 @@ struct SqliteBackend::Impl {
                 phon           TEXT,
                 model_id       INTEGER REFERENCES models(model_id) ON DELETE SET NULL,
                 session_id     INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
-                timestamp      TEXT NOT NULL
+                created_at     TEXT NOT NULL
             )
         )");
-        exec("CREATE INDEX IF NOT EXISTS idx_turns_timestamp ON turns(timestamp)");
+        // NOTE: the created_at index is intentionally NOT created here. On an
+        // existing (pre-migration) DB the column is still named `timestamp` at
+        // this point, so indexing created_at would error. It (and the summaries
+        // created_at index) is created after migrate_created_at_columns() below.
 
         // summaries (L2/L3/L4) — level discriminates turn/session/project.
         // Lean per scripts/schema_v2_fading_memory.sql (the reference DDL).
         // The generic Role-1 store() also lands here (level='session',
         // status='complete'); keyword search is FTS5, not a metadata blob.
+        // created_at = insert/create time; updated_at = last regenerate time
+        // for running rows (session/project) and span-end for episode rows.
+        // Both NOT NULL (updated_at = created_at on first insert).
         exec(R"(
             CREATE TABLE IF NOT EXISTS summaries (
                 summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 text       TEXT NOT NULL,
-                embedding  BLOB,
-                phon       TEXT,
                 level      TEXT NOT NULL,
-                model_id   INTEGER REFERENCES models(model_id) ON DELETE SET NULL,
-                session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                 status     TEXT NOT NULL,
                 tags       TEXT NOT NULL DEFAULT '',
-                timestamp  TEXT NOT NULL
+                session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
+                model_id   INTEGER REFERENCES models(model_id),
+                embedding  BLOB,
+                phon       TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             )
         )");
-        exec("CREATE INDEX IF NOT EXISTS idx_summaries_level     ON summaries(level)");
-        exec("CREATE INDEX IF NOT EXISTS idx_summaries_status    ON summaries(status)");
-        exec("CREATE INDEX IF NOT EXISTS idx_summaries_timestamp ON summaries(timestamp)");
+        exec("CREATE INDEX IF NOT EXISTS idx_summaries_level      ON summaries(level)");
+        exec("CREATE INDEX IF NOT EXISTS idx_summaries_status     ON summaries(status)");
+        // idx_summaries_created_at created after migration (see note above).
 
         // In-place migration for pre-sessions databases: add the session_id
         // FK column to turns/summaries if an existing DB predates it. SQLite
@@ -344,7 +351,7 @@ struct SqliteBackend::Impl {
                 phon        TEXT,
                 status      TEXT NOT NULL,
                 tags        TEXT NOT NULL DEFAULT '',
-                timestamp   TEXT NOT NULL
+                created_at  TEXT NOT NULL
             )
         )");
         exec("CREATE INDEX IF NOT EXISTS idx_decisions_status ON decisions(status)");
@@ -383,20 +390,140 @@ struct SqliteBackend::Impl {
         if (!column_exists("documents", "phon"))
             exec("ALTER TABLE documents ADD COLUMN phon TEXT");
 
-        // Running-summary timestamps (EPISODE_PLAN Phase 1.2): `timestamp`
-        // remains the insert/create time; `updated_at` records the last
-        // regenerate time of a running row. For immutable `episode` rows we
-        // reuse `updated_at` to carry the episode's last-turn timestamp (the
-        // span end), so `timestamp`=first turn, `updated_at`=last turn.
-        // Additive ADD COLUMN after all CREATE TABLEs (no FTS impact — not an
-        // indexed column). NULL for pre-migration rows.
-        if (!column_exists("summaries", "updated_at"))
-            exec("ALTER TABLE summaries ADD COLUMN updated_at TEXT");
+        // One-time migration to the canonical time columns: rename
+        // `timestamp` -> `created_at` on turns/decisions, and rebuild
+        // `summaries` into the new column order with created_at + updated_at
+        // both NOT NULL. No-op on a fresh DB (already in the new shape) and on
+        // an already-migrated DB. Must run AFTER all CREATE TABLE IF NOT EXISTS
+        // (so a fresh DB skips it) and BEFORE create_fts_schema() (the summaries
+        // rebuild drops+recreates that table, so its FTS is rebuilt after).
+        migrate_created_at_columns();
+
+        // created_at indexes — created here (after migration) so the column is
+        // guaranteed to be named created_at whether this is a fresh DB or a
+        // just-migrated one. IF NOT EXISTS makes it idempotent with the index
+        // the summaries rebuild path may have already created.
+        exec("CREATE INDEX IF NOT EXISTS idx_turns_created_at     ON turns(created_at)");
+        exec("CREATE INDEX IF NOT EXISTS idx_summaries_created_at ON summaries(created_at)");
 
         // FTS5 — external-content virtual tables + sync triggers replace
         // the old hand-rolled bm25_* sidecars (issue #49).
         create_fts_schema();
+
+        // The summaries rebuild above (if it ran) recreated the base table with
+        // fresh rowids matching the old summary_id values, but the external-
+        // content summaries_fts / summaries_phon_fts indexes were dropped with
+        // it and recreated EMPTY by create_fts_schema(). Resync them to the
+        // repopulated base. (phon self-heals via its docsize probe, but we
+        // rebuild both explicitly for determinism.) No-op flag on fresh DBs.
+        if (summaries_rebuilt_) {
+            exec("INSERT INTO summaries_fts(summaries_fts) VALUES('rebuild')");
+            exec("INSERT INTO summaries_phon_fts(summaries_phon_fts) VALUES('rebuild')");
+            summaries_rebuilt_ = false;
+        }
     }
+
+    // True for the duration of one open when migrate_created_at_columns()
+    // rebuilt the summaries table, so create_schema() knows to resync its FTS.
+    bool summaries_rebuilt_ = false;
+
+    /// One-time migration to canonical time columns.
+    ///  * turns / decisions: `timestamp` -> `created_at` via RENAME COLUMN
+    ///    (cheap, in place; FTS is over text/phon columns so it's untouched;
+    ///    RENAME COLUMN auto-updates index definitions).
+    ///  * summaries: full table rebuild into the new column order, with
+    ///    created_at (= old timestamp) and updated_at (= COALESCE(old
+    ///    updated_at, old timestamp)) both NOT NULL.
+    /// Guarded on the presence of the legacy `timestamp` column, so it runs at
+    /// most once and never on a fresh DB.
+    void migrate_created_at_columns() {
+        // --- turns / decisions: simple rename ---
+        if (column_exists("turns", "timestamp")) {
+            exec("DROP INDEX IF EXISTS idx_turns_timestamp");
+            exec("ALTER TABLE turns RENAME COLUMN timestamp TO created_at");
+            exec("CREATE INDEX IF NOT EXISTS idx_turns_created_at ON turns(created_at)");
+        }
+        if (column_exists("decisions", "timestamp")) {
+            exec("ALTER TABLE decisions RENAME COLUMN timestamp TO created_at");
+        }
+
+        // --- summaries: reorder columns + created_at/updated_at NOT NULL ---
+        // SQLite cannot reorder columns in place, so rebuild the table. The old
+        // schema may have either `timestamp` alone (pre-Phase-1) or `timestamp`
+        // + nullable `updated_at` (Phase 1). Both are handled by COALESCE.
+        if (!column_exists("summaries", "timestamp")) return;  // already migrated
+
+        const bool had_updated =
+            column_exists("summaries", "updated_at");
+        const std::string updated_expr =
+            had_updated ? "COALESCE(updated_at, timestamp)" : "timestamp";
+
+        // Toggle FK enforcement off around the rebuild (PRAGMA foreign_keys is
+        // a no-op inside a transaction, so set it, then BEGIN). summaries is a
+        // child of models/sessions; rebuilding it with a rename dance keeps the
+        // rowids (= summary_id) stable so no child references break.
+        exec("PRAGMA foreign_keys = OFF");
+        exec("BEGIN");
+        try {
+            // Drop dependent FTS objects (they are content='summaries' and its
+            // triggers fire on writes to the base table we're about to move).
+            exec("DROP TRIGGER IF EXISTS summaries_ai");
+            exec("DROP TRIGGER IF EXISTS summaries_ad");
+            exec("DROP TRIGGER IF EXISTS summaries_au");
+            exec("DROP TRIGGER IF EXISTS summaries_pai");
+            exec("DROP TRIGGER IF EXISTS summaries_pad");
+            exec("DROP TRIGGER IF EXISTS summaries_pau");
+            exec("DROP TABLE IF EXISTS summaries_fts");
+            exec("DROP TABLE IF EXISTS summaries_phon_fts");
+
+            // New table in the canonical order.
+            exec(R"(
+                CREATE TABLE summaries_new (
+                    summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text       TEXT NOT NULL,
+                    level      TEXT NOT NULL,
+                    status     TEXT NOT NULL,
+                    tags       TEXT NOT NULL DEFAULT '',
+                    session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
+                    model_id   INTEGER REFERENCES models(model_id),
+                    embedding  BLOB,
+                    phon       TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            )");
+
+            // Copy, preserving summary_id (so FTS rowids + any external
+            // references stay valid). created_at = old timestamp; updated_at =
+            // COALESCE(old updated_at, old timestamp) → NOT NULL guaranteed.
+            exec(std::format(
+                "INSERT INTO summaries_new "
+                "(summary_id, text, level, status, tags, session_id, model_id, "
+                " embedding, phon, created_at, updated_at) "
+                "SELECT summary_id, text, level, status, tags, session_id, model_id, "
+                "       embedding, phon, timestamp, {} "
+                "FROM summaries", updated_expr));
+
+            exec("DROP TABLE summaries");
+            exec("ALTER TABLE summaries_new RENAME TO summaries");
+
+            // Recreate indexes (old ones vanished with the dropped table).
+            exec("CREATE INDEX IF NOT EXISTS idx_summaries_level      ON summaries(level)");
+            exec("CREATE INDEX IF NOT EXISTS idx_summaries_status     ON summaries(status)");
+            exec("CREATE INDEX IF NOT EXISTS idx_summaries_created_at ON summaries(created_at)");
+            exec("CREATE INDEX IF NOT EXISTS idx_summaries_session    ON summaries(session_id)");
+
+            exec("COMMIT");
+        } catch (...) {
+            exec("ROLLBACK");
+            exec("PRAGMA foreign_keys = ON");
+            throw;
+        }
+        exec("PRAGMA foreign_keys = ON");
+
+        summaries_rebuilt_ = true;
+    }
+
 
     /// FTS5 external-content virtual tables + sync triggers for the four
     /// searchable content tables (turns, summaries, decisions, documents).
@@ -609,7 +736,7 @@ struct SqliteBackend::Impl {
         cached_timestamps.clear();
 
         Stmt s(db,
-            "SELECT summary_id, text, embedding, level, status, tags, timestamp "
+            "SELECT summary_id, text, embedding, level, status, tags, created_at "
             "FROM summaries");
 
         std::vector<std::vector<float>> emb_rows;
@@ -723,7 +850,7 @@ struct SqliteBackend::Impl {
         dec_timestamps.clear();
 
         Stmt s(db,
-            "SELECT decision_id, text, embedding, status, tags, timestamp "
+            "SELECT decision_id, text, embedding, status, tags, created_at "
             "FROM decisions");
 
         std::vector<std::vector<float>> emb_rows;
@@ -932,8 +1059,8 @@ struct SqliteBackend::Impl {
         // *_phon_fts triggers index it. Always computed (cheap), even when the
         // embedding is deferred.
         Stmt s(db,
-            "INSERT INTO summaries (text, embedding, phon, level, status, tags, timestamp, model_id) "
-            "VALUES (?,?,?,?,?,?,?,?)");
+            "INSERT INTO summaries (text, embedding, phon, level, status, tags, created_at, model_id, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)");
 
         s.bind(1, text);
         if (defer_embedding) {
@@ -944,6 +1071,7 @@ struct SqliteBackend::Impl {
         s.bind(3, phonize(text));
         s.bind(4, level).bind(5, status).bind(6, tags_str).bind(7, ts);
         if (model_id) s.bind(8, model_id); else s.bind_null(8);
+        s.bind(9, ts);  // updated_at == created_at on insert
 
         if (!s.exec()) {
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
@@ -1046,7 +1174,7 @@ struct SqliteBackend::Impl {
     // slot, even when dedup moved the timestamp.
     void place_turn_placeholder(int turn_id, const std::string& u,
                                 const std::string& a) {
-        Stmt g(db, "SELECT session_id, timestamp FROM turns WHERE turn_id = ?");
+        Stmt g(db, "SELECT session_id, created_at FROM turns WHERE turn_id = ?");
         g.bind(1, turn_id);
         if (!g.step()) return;
         bool sess_null = g.is_null(0);
@@ -1072,7 +1200,7 @@ struct SqliteBackend::Impl {
         // Already summarized at this slot? leave it.
         {
             Stmt e(db,
-                "SELECT 1 FROM summaries WHERE level='turn' AND timestamp=? "
+                "SELECT 1 FROM summaries WHERE level='turn' AND created_at=? "
                 "AND session_id IS ? AND model_id IS NOT NULL LIMIT 1");
             e.bind(1, ts);
             if (sess_null) e.bind_null(2); else e.bind(2, session_id);
@@ -1081,7 +1209,7 @@ struct SqliteBackend::Impl {
         // Drop any stale NULL-model placeholder for this slot (re-capture).
         {
             Stmt d(db,
-                "DELETE FROM summaries WHERE level='turn' AND timestamp=? "
+                "DELETE FROM summaries WHERE level='turn' AND created_at=? "
                 "AND session_id IS ? AND model_id IS NULL");
             d.bind(1, ts);
             if (sess_null) d.bind_null(2); else d.bind(2, session_id);
@@ -1092,13 +1220,14 @@ struct SqliteBackend::Impl {
         auto emb = embedder->encode(turn_embed_text(u, a));
         Stmt s(db,
             "INSERT INTO summaries "
-            "(model_id, session_id, text, embedding, phon, level, status, tags, timestamp) "
-            "VALUES (NULL,?,?,?,?,'turn','complete','',?)");
+            "(model_id, session_id, text, embedding, phon, level, status, tags, created_at, updated_at) "
+            "VALUES (NULL,?,?,?,?,'turn','complete','',?,?)");
         if (sess_null) s.bind_null(1); else s.bind(1, session_id);
         s.bind(2, text);
         bind_embedding(s.raw(), 3, emb);
         s.bind(4, phonize(u + " " + a));
         s.bind(5, ts);
+        s.bind(6, ts);  // updated_at == created_at on insert
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_cache();
@@ -1129,7 +1258,7 @@ struct SqliteBackend::Impl {
         // assistant_text (partial/prompt-arrival rows) never dedups.
         if (!a.empty()) {
             Stmt p(db,
-                "SELECT turn_id, user_text, timestamp FROM turns "
+                "SELECT turn_id, user_text, created_at FROM turns "
                 "ORDER BY turn_id DESC LIMIT 1");
             if (p.step()) {
                 const int prev_id          = p.column_int(0);
@@ -1150,7 +1279,7 @@ struct SqliteBackend::Impl {
                     Stmt up(db,
                         "UPDATE turns SET assistant_text = ?, embedding = ?, phon = ?, "
                         "model_id = COALESCE(?, model_id), "
-                        "session_id = COALESCE(?, session_id), timestamp = ? "
+                        "session_id = COALESCE(?, session_id), created_at = ? "
                         "WHERE turn_id = ?");
                     up.bind(1, a);
                     bind_embedding(up.raw(), 2, emb2);
@@ -1175,7 +1304,7 @@ struct SqliteBackend::Impl {
         }
 
         Stmt s(db,
-            "INSERT INTO turns (model_id, session_id, user_text, assistant_text, embedding, phon, timestamp) "
+            "INSERT INTO turns (model_id, session_id, user_text, assistant_text, embedding, phon, created_at) "
             "VALUES (?,?,?,?,?,?,?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
         if (session_id) s.bind(2, session_id); else s.bind_null(2);
@@ -1203,13 +1332,13 @@ struct SqliteBackend::Impl {
         std::vector<TurnRecord> out;
         if (session_guid.empty()) return out;
         std::string sql =
-            "SELECT t.turn_id, t.user_text, t.assistant_text, m.name, t.timestamp "
+            "SELECT t.turn_id, t.user_text, t.assistant_text, m.name, t.created_at "
             "FROM turns t "
             "JOIN sessions ss ON t.session_id = ss.session_id "
             "LEFT JOIN models m ON t.model_id = m.model_id "
             "WHERE ss.guid = ? ";
         sql += asc ? "ORDER BY t.turn_id ASC"
-                   : "ORDER BY t.timestamp DESC, t.turn_id DESC";
+                   : "ORDER BY t.created_at DESC, t.turn_id DESC";
         if (limit > 0) sql += " LIMIT ?";
         Stmt s(db, sql);
         s.bind(1, session_guid);
@@ -1279,15 +1408,20 @@ struct SqliteBackend::Impl {
         auto emb = embedder->encode(t);
 
         Stmt s(db,
-            "INSERT INTO summaries (model_id, session_id, text, embedding, phon, level, status, tags, timestamp) "
-            "VALUES (?,?,?,?,?,?,?,?,?)");
+            "INSERT INTO summaries (model_id, session_id, text, embedding, phon, level, status, tags, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
         if (session_id) s.bind(2, session_id); else s.bind_null(2);
         s.bind(3, t);
         bind_embedding(s.raw(), 4, emb);
         s.bind(5, phonize(t));
         s.bind(6, level).bind(7, status).bind(8, tags);
-        s.bind(9, source_timestamp.empty() ? local_timestamp() : source_timestamp);
+        {
+            const std::string ts =
+                source_timestamp.empty() ? local_timestamp() : source_timestamp;
+            s.bind(9, ts);
+            s.bind(10, ts);  // updated_at == created_at on insert
+        }
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_cache();
@@ -1305,7 +1439,7 @@ struct SqliteBackend::Impl {
         std::string t = normalize_path(text);
 
         Stmt s(db,
-            "INSERT INTO decisions (text, embedding, phon, status, tags, timestamp) "
+            "INSERT INTO decisions (text, embedding, phon, status, tags, created_at) "
             "VALUES (?,?,?,?,?,?)");
         s.bind(1, t);
         if (defer_embedding) {
@@ -1332,18 +1466,18 @@ struct SqliteBackend::Impl {
         std::vector<TurnRecord> out;
         std::string sql =
             "SELECT t.turn_id, t.user_text, t.assistant_text, m.name, "
-            "       t.timestamp, COALESCE(ss.guid, '') "
+            "       t.created_at, COALESCE(ss.guid, '') "
             "FROM turns t "
             "LEFT JOIN summaries s "
             "  ON s.level = 'turn' "
             " AND s.session_id IS t.session_id "
-            " AND s.timestamp = t.timestamp "
+            " AND s.created_at = t.created_at "
             " AND s.model_id IS NOT NULL "
             "LEFT JOIN models m ON t.model_id = m.model_id "
             "LEFT JOIN sessions ss ON t.session_id = ss.session_id "
             "WHERE s.summary_id IS NULL "
             "  AND t.assistant_text IS NOT NULL "
-            "ORDER BY t.timestamp ASC, t.turn_id ASC";
+            "ORDER BY t.created_at ASC, t.turn_id ASC";
         if (limit > 0) sql += " LIMIT ?";
         Stmt s(db, sql);
         if (limit > 0) s.bind(1, limit);
@@ -1371,7 +1505,7 @@ struct SqliteBackend::Impl {
             "SELECT 1 FROM summaries s "
             "LEFT JOIN sessions ss ON s.session_id = ss.session_id "
             "WHERE s.level = 'turn' "
-            "  AND s.timestamp = ? "
+            "  AND s.created_at = ? "
             "  AND COALESCE(ss.guid, '') = ? "
             "  AND s.model_id IS NOT NULL "
             "LIMIT 1");
@@ -1384,11 +1518,11 @@ struct SqliteBackend::Impl {
     std::vector<DraftSummary> draft_summaries(int limit) {
         std::vector<DraftSummary> out;
         std::string sql =
-            "SELECT s.summary_id, s.level, COALESCE(ss.guid, ''), s.timestamp "
+            "SELECT s.summary_id, s.level, COALESCE(ss.guid, ''), s.created_at "
             "FROM summaries s "
             "LEFT JOIN sessions ss ON s.session_id = ss.session_id "
             "WHERE s.tags LIKE '%draft%' "
-            "ORDER BY s.timestamp ASC, s.summary_id ASC";
+            "ORDER BY s.created_at ASC, s.summary_id ASC";
         if (limit > 0) sql += " LIMIT ?";
         Stmt s(db, sql);
         if (limit > 0) s.bind(1, limit);
@@ -1419,7 +1553,7 @@ struct SqliteBackend::Impl {
             "               JOIN sessions ss2 ON s2.session_id = ss2.session_id "
             "               WHERE ss2.session_id = ss.session_id "
             "                 AND s2.level = 'turn' AND s2.tags != 'draft') "
-            "  AND (SELECT MAX(t.timestamp) FROM turns t "
+            "  AND (SELECT MAX(t.created_at) FROM turns t "
             "        WHERE t.session_id = ss.session_id) < " + cutoff + " "
             "  AND NOT EXISTS (SELECT 1 FROM summaries s "
             "                   WHERE s.session_id = ss.session_id "
@@ -1440,11 +1574,11 @@ struct SqliteBackend::Impl {
     std::string last_episode_end(const std::string& session_guid) {
         if (session_guid.empty()) return {};
         Stmt s(db,
-            "SELECT COALESCE(s.updated_at, s.timestamp) "
+            "SELECT COALESCE(s.updated_at, s.created_at) "
             "FROM summaries s "
             "JOIN sessions ss ON s.session_id = ss.session_id "
             "WHERE ss.guid = ? AND s.level = 'episode' "
-            "ORDER BY s.timestamp DESC, s.summary_id DESC LIMIT 1");
+            "ORDER BY s.created_at DESC, s.summary_id DESC LIMIT 1");
         s.bind(1, session_guid);
         if (s.step()) return s.column_text(0);
         return {};
@@ -1457,12 +1591,12 @@ struct SqliteBackend::Impl {
         std::vector<SummaryRecord> out;
         if (session_guid.empty()) return out;
         std::string sql =
-            "SELECT s.summary_id, s.text, s.status, s.timestamp "
+            "SELECT s.summary_id, s.text, s.status, s.created_at "
             "FROM summaries s "
             "JOIN sessions ss ON s.session_id = ss.session_id "
             "WHERE ss.guid = ? AND s.level = 'turn' AND s.tags != 'draft' ";
-        if (!since_ts.empty()) sql += "AND s.timestamp > ? ";
-        sql += "ORDER BY s.timestamp ASC, s.summary_id ASC";
+        if (!since_ts.empty()) sql += "AND s.created_at > ? ";
+        sql += "ORDER BY s.created_at ASC, s.summary_id ASC";
         Stmt s(db, sql);
         s.bind(1, session_guid);
         if (!since_ts.empty()) s.bind(2, since_ts);
@@ -1485,7 +1619,7 @@ struct SqliteBackend::Impl {
 
         Stmt s(db,
             "INSERT INTO summaries (model_id, session_id, text, embedding, phon, "
-            "level, status, tags, timestamp, updated_at) "
+            "level, status, tags, created_at, updated_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
         if (session_id) s.bind(2, session_id); else s.bind_null(2);
@@ -1521,11 +1655,11 @@ struct SqliteBackend::Impl {
             "  SELECT 1 FROM summaries s "
             "  WHERE s.session_id = ss.session_id "
             "    AND s.level = 'turn' AND s.tags != 'draft' "
-            "    AND s.timestamp > COALESCE(("
-            "        SELECT COALESCE(e.updated_at, e.timestamp) FROM summaries e "
+            "    AND s.created_at > COALESCE(("
+            "        SELECT COALESCE(e.updated_at, e.created_at) FROM summaries e "
             "        WHERE e.session_id = ss.session_id AND e.level = 'episode' "
-            "        ORDER BY e.timestamp DESC, e.summary_id DESC LIMIT 1), '')) "
-            "  AND (SELECT MAX(t.timestamp) FROM turns t "
+            "        ORDER BY e.created_at DESC, e.summary_id DESC LIMIT 1), '')) "
+            "  AND (SELECT MAX(t.created_at) FROM turns t "
             "        WHERE t.session_id = ss.session_id) < " + cutoff + " "
             "ORDER BY ss.session_id ASC";
         Stmt s(db, sql);
@@ -1546,7 +1680,7 @@ struct SqliteBackend::Impl {
             "SELECT s.text FROM summaries s "
             "JOIN sessions ss ON s.session_id = ss.session_id "
             "WHERE ss.guid = ? AND s.level = 'episode' "
-            "ORDER BY s.timestamp ASC, s.summary_id ASC");
+            "ORDER BY s.created_at ASC, s.summary_id ASC");
         s.bind(1, session_guid);
         while (s.step()) {
             auto t = s.column_text(0);
@@ -1590,7 +1724,7 @@ struct SqliteBackend::Impl {
             "      WHERE level='session' AND session_id IS NOT NULL "
             "      GROUP BY session_id) latest "
             "  ON s.summary_id = latest.mid "
-            "ORDER BY s.timestamp ASC, s.summary_id ASC");
+            "ORDER BY s.created_at ASC, s.summary_id ASC");
         while (s.step()) {
             auto t = s.column_text(0);
             if (!t.empty()) out.push_back(std::move(t));
@@ -1609,11 +1743,11 @@ struct SqliteBackend::Impl {
         std::vector<SummaryRecord> out;
         if (session_guid.empty()) return out;
         std::string sql =
-            "SELECT s.summary_id, s.text, s.status, s.timestamp "
+            "SELECT s.summary_id, s.text, s.status, s.created_at "
             "FROM summaries s "
             "JOIN sessions ss ON s.session_id = ss.session_id "
             "WHERE ss.guid = ? AND s.level = ? "
-            "ORDER BY s.timestamp DESC, s.summary_id DESC";
+            "ORDER BY s.created_at DESC, s.summary_id DESC";
         if (limit > 0) sql += " LIMIT ?";
         Stmt s(db, sql);
         s.bind(1, session_guid).bind(2, level);
@@ -1679,7 +1813,7 @@ struct SqliteBackend::Impl {
             "SELECT s.text FROM summaries s "
             "JOIN sessions ss ON s.session_id = ss.session_id "
             "WHERE ss.guid = ? AND s.level = 'turn' AND s.tags != 'draft' "
-            "ORDER BY s.timestamp ASC, s.summary_id ASC");
+            "ORDER BY s.created_at ASC, s.summary_id ASC");
         s.bind(1, session_guid);
         while (s.step()) {
             auto t = s.column_text(0);
@@ -1695,7 +1829,7 @@ struct SqliteBackend::Impl {
         Stmt s(db,
             "SELECT text FROM summaries "
             "WHERE level='session' AND status='complete' "
-            "ORDER BY timestamp ASC, summary_id ASC");
+            "ORDER BY created_at ASC, summary_id ASC");
         while (s.step()) {
             auto t = s.column_text(0);
             if (!t.empty()) out.push_back(std::move(t));
@@ -1711,7 +1845,7 @@ struct SqliteBackend::Impl {
         if (limit <= 0) return out;
         Stmt s(db,
             "SELECT text FROM summaries WHERE level = ? "
-            "ORDER BY timestamp DESC, summary_id DESC LIMIT ?");
+            "ORDER BY created_at DESC, summary_id DESC LIMIT ?");
         s.bind(1, level).bind(2, limit);
         while (s.step()) {
             auto text = s.column_text(0);
@@ -1725,7 +1859,7 @@ struct SqliteBackend::Impl {
         if (limit <= 0) return out;
         Stmt s(db,
             "SELECT text FROM decisions WHERE status = 'current' "
-            "ORDER BY timestamp DESC, decision_id DESC LIMIT ?");
+            "ORDER BY created_at DESC, decision_id DESC LIMIT ?");
         s.bind(1, limit);
         while (s.step()) {
             auto text = s.column_text(0);
@@ -1771,7 +1905,7 @@ struct SqliteBackend::Impl {
             "WHERE summary_id = ("
             "  SELECT s.summary_id FROM summaries s "
             "  LEFT JOIN sessions ss ON s.session_id = ss.session_id "
-            "  WHERE s.level='turn' AND s.timestamp = ? "
+            "  WHERE s.level='turn' AND s.created_at = ? "
             "    AND COALESCE(ss.guid,'') = ? "
             "  ORDER BY s.summary_id DESC LIMIT 1)");
         s.bind(1, t);
@@ -1799,7 +1933,7 @@ struct SqliteBackend::Impl {
             "WHERE summary_id = ("
             "  SELECT s.summary_id FROM summaries s "
             "  LEFT JOIN sessions ss ON s.session_id = ss.session_id "
-            "  WHERE s.level='turn' AND s.timestamp = ? "
+            "  WHERE s.level='turn' AND s.created_at = ? "
             "    AND COALESCE(ss.guid,'') = ? AND s.model_id IS NULL "
             "  ORDER BY s.summary_id DESC LIMIT 1)");
         s.bind(1, model_id);
@@ -2077,7 +2211,7 @@ struct SqliteBackend::Impl {
     std::vector<SearchResult> load_all(const std::string& /*collection*/) {
         std::vector<SearchResult> results;
         Stmt s(db,
-            "SELECT summary_id, text, level, status, tags, timestamp "
+            "SELECT summary_id, text, level, status, tags, created_at "
             "FROM summaries ORDER BY summary_id");
 
         while (s.step()) {
@@ -2356,7 +2490,7 @@ struct SqliteBackend::Impl {
         // Lean v2 summaries expose level / status / tags / timestamp. Filter
         // on those columns; any other requested key matches nothing (there is
         // no free-form metadata blob in the lean schema).
-        std::string sql = "SELECT summary_id, text, level, status, tags, timestamp "
+        std::string sql = "SELECT summary_id, text, level, status, tags, created_at "
                           "FROM summaries";
         std::string where;
         std::vector<std::string> binds;
@@ -2376,15 +2510,15 @@ struct SqliteBackend::Impl {
         }
 
         if (!after.empty()) {
-            where += (where.empty() ? " WHERE " : " AND ") + std::string("timestamp >= ?");
+            where += (where.empty() ? " WHERE " : " AND ") + std::string("created_at >= ?");
             binds.push_back(after);
         }
         if (!before.empty()) {
-            where += (where.empty() ? " WHERE " : " AND ") + std::string("timestamp < ?");
+            where += (where.empty() ? " WHERE " : " AND ") + std::string("created_at < ?");
             binds.push_back(before);
         }
 
-        sql += where + " ORDER BY timestamp DESC";
+        sql += where + " ORDER BY created_at DESC";
         if (limit > 0) sql += " LIMIT " + std::to_string(limit);
 
         Stmt stmt(db, sql);
@@ -2732,7 +2866,7 @@ int SqliteBackend::cleanup_old_conversations(float max_age_hours) {
     // timestamp. (Pre-v2 this deleted summaries tagged collection='conversation';
     // that column is gone in the lean schema.)
     Stmt stmt(pImpl->db,
-        "DELETE FROM turns WHERE timestamp < ?");
+        "DELETE FROM turns WHERE created_at < ?");
     stmt.bind(1, cutoff_str);
 
     int deleted = 0;

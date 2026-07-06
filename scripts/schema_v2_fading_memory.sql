@@ -51,32 +51,35 @@ CREATE TABLE turns (
     assistant_text TEXT,
     embedding      BLOB, -- embed(user_text + assistant_text)
     phon           TEXT, -- phonize(user_text + assistant_text): Double Metaphone "sounds-like"
-    timestamp      TEXT NOT NULL
+    created_at     TEXT NOT NULL
 );
-CREATE INDEX idx_turns_timestamp ON turns (timestamp);
-CREATE INDEX idx_turns_session   ON turns (session_id);
+CREATE INDEX idx_turns_created_at ON turns (created_at);
+CREATE INDEX idx_turns_session    ON turns (session_id);
 
 -- ---------------------------------------------------------------------------
 -- summaries (L2/L3/L4)
--- timestamp: 'turn' copies its source turn's ts; 'session'/'project' use
--- (re)write time. model_id: 'turn' copies the turn's model; 'session'/
--- 'project' get the model that produced the summary.
+-- created_at: 'turn' copies its source turn's ts; 'session'/'project'/'episode'
+-- use (re)write / span-start time. updated_at: running rows (session/project)
+-- record their last regenerate time; 'episode' rows carry the span-end; on any
+-- first insert updated_at == created_at. model_id: 'turn' copies the turn's
+-- model; 'session'/'project'/'episode' get the model that produced the summary.
 -- ---------------------------------------------------------------------------
 CREATE TABLE summaries (
     summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    model_id   INTEGER REFERENCES models (model_id) ON DELETE SET NULL,
+    text       TEXT            NOT NULL,
+    level      TEXT            NOT NULL, -- 'turn' | 'episode' | 'session' | 'project'
+    status     TEXT            NOT NULL, -- 'current' | 'complete'
+    tags       TEXT DEFAULT '' NOT NULL,
     session_id INTEGER REFERENCES sessions (session_id) ON DELETE SET NULL,
-    text       TEXT NOT NULL,
+    model_id   INTEGER REFERENCES models (model_id),
     embedding  BLOB,
     phon       TEXT, -- phonize(text): Double Metaphone "sounds-like"
-    level      TEXT NOT NULL, -- 'turn' | 'session' | 'project'
-    status     TEXT NOT NULL, -- 'current' | 'complete'
-    tags       TEXT NOT NULL DEFAULT '',
-    timestamp  TEXT NOT NULL
+    created_at TEXT            NOT NULL,
+    updated_at TEXT            NOT NULL
 );
 CREATE INDEX idx_summaries_level ON summaries (level);
 CREATE INDEX idx_summaries_status ON summaries (status);
-CREATE INDEX idx_summaries_timestamp ON summaries (timestamp);
+CREATE INDEX idx_summaries_created_at ON summaries (created_at);
 CREATE INDEX idx_summaries_session ON summaries (session_id);
 
 -- ---------------------------------------------------------------------------
@@ -89,7 +92,7 @@ CREATE TABLE decisions (
     phon        TEXT, -- phonize(text): Double Metaphone "sounds-like"
     status      TEXT NOT NULL, -- current|superseded|revisit|deprecated
     tags        TEXT NOT NULL DEFAULT '',
-    timestamp   TEXT NOT NULL
+    created_at  TEXT NOT NULL
 );
 CREATE INDEX idx_decisions_status ON decisions (status);
 
