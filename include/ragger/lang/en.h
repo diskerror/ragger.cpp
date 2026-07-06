@@ -278,7 +278,6 @@ Commands:
   export <all|table> Dump database as SQL (like mysqldump)
                        -e, --embeddings  include embedding blobs
                        --output <file>   write to file instead of stdout
-  chat               Interactive chat with memory context
   mcp                Start MCP server (JSON-RPC over stdin/stdout)
   recipe [name]      List/inspect build_context recipes (interactive picker)
   useradd <name>     Create a user and issue a bearer token (printed once)
@@ -290,6 +289,8 @@ Commands:
   reload             Reload config on running daemon (SIGHUP)
                      options: --user <name>, --dry-run
   rebuild-embeddings Rebuild embeddings for all memories
+  rebuild-phon       Recompute the phonetic (sounds-like) index column
+                     options: --missing  only fill rows with a NULL phon column
   show-embedding-model  Show current embedding model info
   embed               Embed text from stdin, write JSON array to stdout
   help               Show this help
