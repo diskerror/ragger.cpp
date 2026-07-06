@@ -59,21 +59,21 @@ if [ ! -x "$BINARY" ]; then
 fi
 
 # --- Paths (single source of truth) ---
-RAGGER_HOME="$HOME/.ragger"
+RAGGER_BASE="$HOME/.ragger"
 BIN_DIR="$HOME/.local/bin"          # XDG user executables
-LOG_DIR="$RAGGER_HOME"
-MODEL_DIR="$RAGGER_HOME/models"
-FORMATS_DIR="$RAGGER_HOME/formats"
-RECIPES_DIR="$RAGGER_HOME/recipes"
-WEB_DIR="$RAGGER_HOME/www"
-CONF_FILE="$RAGGER_HOME/settings.ini"
+LOG_DIR="$RAGGER_BASE"
+MODEL_DIR="$RAGGER_BASE/models"
+FORMATS_DIR="$RAGGER_BASE/formats"
+RECIPES_DIR="$RAGGER_BASE/recipes"
+WEB_DIR="$RAGGER_BASE/www"
+CONF_FILE="$RAGGER_BASE/settings.ini"
 DEST="$BIN_DIR/ragger"
 
 # ============================================================
 # PHASE 1: Directory layout
 # ============================================================
 
-for d in "$RAGGER_HOME" "$BIN_DIR" "$LOG_DIR" "$MODEL_DIR" "$FORMATS_DIR" "$RECIPES_DIR" "$WEB_DIR"; do
+for d in "$RAGGER_BASE" "$BIN_DIR" "$LOG_DIR" "$MODEL_DIR" "$FORMATS_DIR" "$RECIPES_DIR" "$WEB_DIR"; do
     if [ ! -d "$d" ]; then
         info "Creating $d"
         mkdir -p "$d"
@@ -82,7 +82,7 @@ done
 
 # Migration: older installs put the binary under ~/.ragger/bin. If that
 # directory exists, clean it up so we have one authoritative location.
-OLD_BIN_DIR="$RAGGER_HOME/bin"
+OLD_BIN_DIR="$RAGGER_BASE/bin"
 if [ -d "$OLD_BIN_DIR" ]; then
     info "Removing legacy $OLD_BIN_DIR (binary now lives at $DEST)"
     rm -rf "$OLD_BIN_DIR"
@@ -105,17 +105,17 @@ else
 fi
 
 # Default SOUL.md (user persona) if missing
-if [ ! -f "$RAGGER_HOME/SOUL.md" ] && [ -f "$SRC/SOUL.md" ]; then
+if [ ! -f "$RAGGER_BASE/SOUL.md" ] && [ -f "$SRC/SOUL.md" ]; then
     info "Installing default SOUL.md"
-    cp "$SRC/SOUL.md" "$RAGGER_HOME/SOUL.md"
+    cp "$SRC/SOUL.md" "$RAGGER_BASE/SOUL.md"
 fi
 
 # Agent memory-usage instructions (served by `ragger mcp` via the MCP
 # initialize `instructions` field). Install if missing — preserves user edits.
-if [ ! -f "$RAGGER_HOME/agent-memory-instructions.md" ] && \
+if [ ! -f "$RAGGER_BASE/agent-memory-instructions.md" ] && \
    [ -f "$SRC/docs/agent-memory-instructions.md" ]; then
     info "Installing agent memory instructions"
-    cp "$SRC/docs/agent-memory-instructions.md" "$RAGGER_HOME/agent-memory-instructions.md"
+    cp "$SRC/docs/agent-memory-instructions.md" "$RAGGER_BASE/agent-memory-instructions.md"
 fi
 
 # Web UI
@@ -175,8 +175,8 @@ fi
 # already bypassed by the server, so this token is optional for most uses
 # — but it's cheap to create and avoids a "wait, I need a token" moment
 # the first time someone wires up an OpenClaw / Claude Desktop / curl client.
-if [ ! -f "$RAGGER_HOME/token" ]; then
-    info "Bootstrapping bearer token at $RAGGER_HOME/token"
+if [ ! -f "$RAGGER_BASE/token" ]; then
+    info "Bootstrapping bearer token at $RAGGER_BASE/token"
     "$DEST" add-self >/dev/null 2>&1 || \
         warn "add-self failed — run 'ragger add-self' manually after install"
 fi
@@ -291,7 +291,7 @@ else
 fi
 
 echo ""
-info "Installed to $RAGGER_HOME"
+info "Installed to $RAGGER_BASE"
 
 if [ -d "$HOME/.openclaw" ]; then
     echo ""

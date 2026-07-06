@@ -29,4 +29,19 @@ std::string home_dir() {
     return {};
 }
 
+// Testing-only base-dir override, set once at startup from the hidden
+// --ragger-base CLI flag. No env var equivalent — CLI-only, by design.
+static std::string _ragger_base_override;
+
+void set_ragger_base_override(const std::string& path) {
+    _ragger_base_override = path;
+}
+
+std::string ragger_base_dir() {
+    if (!_ragger_base_override.empty()) return _ragger_base_override;
+    std::string home = home_dir();
+    if (home.empty()) return {};
+    return home + "/.ragger";
+}
+
 } // namespace ragger

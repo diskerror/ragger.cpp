@@ -23,24 +23,23 @@ enum class ConfigError {
 
 struct Config {
     // --- Server ---
-    // Listener selection: each listener is enabled only when its field is
-    // non-empty after config load. Both may be set simultaneously (dual
-    // listener). If both are empty after load, load_config() falls bind back
-    // to "127.0.0.1" so the daemon always has at least one listener.
-    std::string socket_path    = "";  // empty = no AF_UNIX listener
+    // Listener selection: socket_enabled controls the AF_UNIX listener
+    // (path is always ragger_base_dir()/ragger.sock — not independently
+    // configurable). bind_address controls the TCP listener; empty = off.
+    // Both may be set simultaneously (dual listener). If both end up off
+    // after config load, load_config() falls bind back to "127.0.0.1" so
+    // the daemon always has at least one listener.
+    bool        socket_enabled  = true;   // AF_UNIX listener at resolved_socket_path()
     std::string bind_address   = "";  // empty = no TCP listener
     int         port           = 8432;  // only meaningful when bind_address is set
     std::string server_name;   // hostname for cpp-httplib (e.g. "ragger.local")
 
     // --- Storage ---
-    std::string formats_dir    = "/var/ragger/formats";
-    // Undocumented CLI override (`--db <path>`): when non-empty, redirects the
-    // memory database away from the default $HOME/.ragger/memories.db. Set at
-    // startup from the hidden --db option; honoured by resolved_db_path() so
-    // every call site (server users_, mcp, recipe, useradd, ...) agrees. Empty
-    // = the default location. Primarily for testing against a DB copy without
-    // an $HOME shuffle.
-    std::string db_path_override;
+    // formats_dir, model_dir, recipes_dir, and log_dir are no longer
+    // independently configurable — every Ragger path is now hardcoded
+    // relative to ragger_base_dir() (see util/fs.h), so the entire on-disk
+    // footprint moves together. The only override is the hidden
+    // --ragger-base CLI flag (testing only; no env var equivalent).
 
     // --- Embedding ---
     std::string embedding_model = "all-MiniLM-L6-v2";
@@ -50,7 +49,6 @@ struct Config {
     // blob written to the DB. Tracked in the settings table for drift
     // protection — a whole DB must use one type (model+type are paired).
     std::string embedding_vector_type = "f16";
-    std::string model_dir;   // empty = resolved at runtime (single_user: ~/.ragger/models, daemon: /var/ragger/models)
 
     // --- Search ---
     int   default_search_limit = 5;
@@ -61,6 +59,8 @@ struct Config {
     // Phonetic ("dolphining" sounds-like) blend weight. Default 1 (low) so the
     // signal nudges rather than dominates; 0 disables it. See phon_scores().
     float phon_weight          = 1.0f;
+    // Reserved: not yet wired to search behavior.
+    bool  inject_data          = false;
 
     // --- Embed (subprocess) ---
     int embed_timeout_ms  = 10000;
@@ -112,13 +112,8 @@ struct Config {
     std::string summarizer_prompt = "";
 
     // --- Logging ---
-    std::string log_file;   //  ~/.ragger/activity.log
+    std::string log_file;   //  hardcoded to ~/.ragger/activity.log
     std::string log_level   = "warn";   //  trace, debug, info, warn, error, and critical
-    std::string log_dir;    // empty = resolved at runtime (single_user: ~/.ragger, daemon: /var/log/ragger)
-    bool query_log_enabled  = true;
-    bool http_log_enabled   = true;
-    bool mcp_log_enabled    = true;
-    bool debug_log_enabled  = false;  // opt-in verbose tracing (per-chunk, etc.)
 
     // --- Paths ---
     bool normalize_home_path   = true;
@@ -142,13 +137,9 @@ struct Config {
     // Agent-driven search/store tools are unaffected by either flag.
     bool build_context = false;
     // Recipe name applied when the caller doesn't specify one. Recipes are
-    // loaded from `recipes_dir` (JSON files); built-ins cover the case where
-    // the directory is missing or empty.
+    // loaded from ~/.ragger/recipes (JSON files); built-ins cover the case
+    // where the directory is missing or empty.
     std::string default_recipe = "natural_fading";
-    std::string recipes_dir;   // empty = ~/.ragger/recipes
-
-    // --- Model aliases ---
-    std::map<std::string, std::string> model_aliases;  // short name → full name or .gguf filename
 
     // --- Housekeeping / retention ---
     float cleanup_max_age_hours  = 0.0f;  // 0 = keep forever (default)
@@ -165,16 +156,30 @@ struct Config {
     // --- System ceilings (0 = no limit) ---
     int  max_search_limit             = 0;
 
-    /// Resolved paths (~ expanded)
+    /// Resolved paths — all hardcoded relative to ragger_base_dir() (see
+    /// util/fs.h), so every on-disk location Ragger ever touches is defined
+    /// in exactly one place. Other modules call these instead of
+    /// hand-building "~/.ragger/..." strings.
     std::string resolved_db_path() const;
-    std::string resolved_log_dir() const;
     std::string resolved_model_dir() const;
+    std::string resolved_recipes_dir() const;
+    std::string resolved_formats_dir() const;
+    std::string resolved_settings_path() const;
+    std::string resolved_token_path() const;
+    std::string resolved_stats_db_path() const;
+    std::string resolved_agent_instructions_path() const;
+    std::string resolved_log_file_path() const;
+    std::string resolved_socket_path() const;
 
     /// Resolve a model name: check aliases, prepend model_dir for .gguf files.
     std::string resolve_model(const std::string& name) const;
 };
 
-/// Expand ~ to $HOME in a path string.
+/// Expand a leading ~ to the real $HOME in a path string. This is for
+/// user-supplied paths only (CLI --db/--config args, settings.ini
+/// socket_path/bind_address, etc.) — it is NOT how Ragger's own hardcoded
+/// paths are resolved; those go through Config::resolved_XX() /
+/// ragger_base_dir() instead (see util/fs.h).
 std::string expand_path(const std::string& path);
 
 /// Find system config file using search order. Returns path or throws.

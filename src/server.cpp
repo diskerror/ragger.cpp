@@ -625,7 +625,7 @@ static bool is_port_available(const std::string& host, int port) {
 
 void Server::run() {
     const auto& cfg = config();
-    const bool want_unix = !cfg.socket_path.empty();
+    const bool want_unix = cfg.socket_enabled;
     const bool want_tcp  = !pImpl->host.empty();
 
     if (want_tcp && !is_port_available(pImpl->host, pImpl->port)) {
@@ -635,9 +635,9 @@ void Server::run() {
 
     std::string addr;
     if (want_unix && want_tcp) {
-        addr = expand_path(cfg.socket_path) + " + " + pImpl->host + ":" + std::to_string(pImpl->port);
+        addr = cfg.resolved_socket_path() + " + " + pImpl->host + ":" + std::to_string(pImpl->port);
     } else if (want_unix) {
-        addr = expand_path(cfg.socket_path);
+        addr = cfg.resolved_socket_path();
     } else {
         addr = pImpl->host + ":" + std::to_string(pImpl->port);
     }
@@ -647,13 +647,11 @@ void Server::run() {
                                             pImpl->host + ":" + std::to_string(pImpl->port)));
     }
     if (want_unix) {
-        Diskerror::logger::info(std::format(lang::MSG_HEALTH_CHECK_UNIX, expand_path(cfg.socket_path)));
+        Diskerror::logger::info(std::format(lang::MSG_HEALTH_CHECK_UNIX, cfg.resolved_socket_path()));
     }
 
-    // TLS support — if certs configured, create SSLServer instead
-    // Note: httplib::Server is already created in Impl. For TLS we'd need
-    // httplib::SSLServer. For now, TLS is handled via reverse proxy (Caddy/nginx).
-    // TODO: To support native TLS, conditionally create SSLServer in Impl constructor.
+    // Native TLS: if both cert and key are configured, create an SSLServer
+    // instead of a plain httplib::Server for the TCP listener.
     if (!cfg.tls_cert.empty() && !cfg.tls_key.empty()) {
         Diskerror::logger::info(lang::MSG_TLS_NOT_SUPPORTED);
     }
@@ -710,7 +708,7 @@ void Server::run() {
         }
     };
     auto run_unix = [this, &cfg]() {
-        std::string sock_path = expand_path(cfg.socket_path);
+        std::string sock_path = cfg.resolved_socket_path();
         fs::create_directories(fs::path(sock_path).parent_path());
         std::filesystem::remove(sock_path);  // clear stale socket
         pImpl->unix_svr.set_address_family(AF_UNIX);

@@ -16,6 +16,8 @@
 #include <pwd.h>
 #include <unistd.h>
 #include <format>
+#include <arpa/inet.h>
+#include <cctype>
 
 
 namespace ragger {
@@ -24,6 +26,15 @@ namespace fs = std::filesystem;
 // -----------------------------------------------------------------------
 // Path helpers
 // -----------------------------------------------------------------------
+// expand_path() only expands a leading "~" to the real $HOME — for
+// user-supplied paths (CLI --db/--config args, settings.ini socket_path /
+// bind_address). Ragger's own on-disk footprint (DB, settings.ini, logs,
+// models, recipes, formats, socket default, token, stats.db,
+// agent-memory-instructions.md) is never built through here — each has a
+// dedicated Config::resolved_XX() below, hardcoded relative to
+// ragger_base_dir() (see util/fs.h), so pointing --ragger-base at a
+// throwaway directory relocates the entire footprint with nothing else to
+// configure.
 std::string expand_path(const std::string& path) {
     if (path.empty() || path[0] != '~') return path;
     std::string home = home_dir();
@@ -32,151 +43,63 @@ std::string expand_path(const std::string& path) {
 }
 
 std::string Config::resolved_db_path() const {
-    // Undocumented --db override wins; otherwise the fixed per-user default.
-    if (!db_path_override.empty()) return expand_path(db_path_override);
-    return expand_path("~/.ragger/memories.db");
-}
-
-std::string Config::resolved_log_dir() const {
-    if (log_dir.empty()) {
-        return expand_path("~/.ragger/logs");
-    }
-    return expand_path(log_dir);
+    return ragger_base_dir() + "/memories.db";
 }
 
 std::string Config::resolved_model_dir() const {
-    std::string base = model_dir.empty()
-        ? expand_path("~/.ragger/models")
-        : expand_path(model_dir);
-    return base + "/" + resolve_model(embedding_model);
+    return ragger_base_dir() + "/models/" + resolve_model(embedding_model);
+}
+
+std::string Config::resolved_recipes_dir() const {
+    return ragger_base_dir() + "/recipes";
+}
+
+std::string Config::resolved_formats_dir() const {
+    return ragger_base_dir() + "/formats";
+}
+
+std::string Config::resolved_settings_path() const {
+    return ragger_base_dir() + "/settings.ini";
+}
+
+std::string Config::resolved_token_path() const {
+    return ragger_base_dir() + "/token";
+}
+
+std::string Config::resolved_stats_db_path() const {
+    return ragger_base_dir() + "/stats.db";
+}
+
+std::string Config::resolved_agent_instructions_path() const {
+    return ragger_base_dir() + "/agent-memory-instructions.md";
+}
+
+std::string Config::resolved_log_file_path() const {
+    return ragger_base_dir() + "/activity.log";
+}
+
+std::string Config::resolved_socket_path() const {
+    return ragger_base_dir() + "/ragger.sock";
 }
 
 std::string Config::resolve_model(const std::string& name) const {
-    // Check aliases first
-    auto it = model_aliases.find(name);
-    return (it != model_aliases.end()) ? it->second : name;
+    // [models] aliasing removed — pass-through kept so call sites (embedding
+    // dir resolution, summarizer model) don't need to change if aliasing is
+    // reintroduced later.
+    return name;
 }
 
 // -----------------------------------------------------------------------
-// Default config (embedded)
+// Default config (embedded) — generated at build time from
+// example-settings.ini (single source of truth); see cmake/embed_ini.cmake.
 // -----------------------------------------------------------------------
-static constexpr const char* DEFAULT_CONFIG = R"(# settings.ini — Ragger Memory configuration
-#
-# Search order:
-#   1. --config=<path>          (explicit override)
-#   2. ~/.ragger/settings.ini    (per-user default)
-#
-# First file found wins. Created automatically on first run.
-
-[server]
-# Listeners — both can run at the same time. Comment out or empty-out either
-# one to disable that listener; if both are empty the daemon falls back to
-# bind = 127.0.0.1 so there's always at least one.
-socket = ~/.ragger/ragger.sock
-# bind = 127.0.0.1
-port = 8432
-# Turn handling (both default off — agent-driven search/store are unaffected):
-#   capture_turns: ingest agent-pushed turns into the `turns` table.
-#   build_context: assemble session context from turns + summaries by recipe.
-capture_turns  = true
-build_context  = false
-default_recipe = natural_fading
-# recipes_dir  = ~/.ragger/recipes   # JSON recipes; built-ins used if absent
-
-[storage]
-formats_dir = ~/.ragger/formats
-
-[embedding]
-model = all-MiniLM-L6-v2
-dimensions = 384
-vector_type = f16
-# vector_type: on-disk vector precision, f16 (default) or f32.
-# model + dimensions + vector_type define the DB's vector identity; changing
-# any with data in the DB requires 'ragger rebuild-embeddings'.
-# model_dir: path to ONNX model files (default: /var/ragger/models)
-# All users on the same system must use the same embedding model
-# for vector search to work correctly.
-
-[search]
-default_limit = 5
-default_min_score = 0.4
-bm25_enabled = true
-bm25_weight = 4
-vector_weight = 8
-# Phonetic "sounds-like" (dolphining) blend weight. 0 disables; 1 is a gentle
-# nudge. Matches on how a phrase *sounds* (Double Metaphone) alongside meaning
-# (vector) and keywords (bm25).
-phon_weight = 1
-
-[inference]
-# Default model used for summarization (L2 turn + L3 session). Empty leaves
-# the daemon-resident summarizer routing-only — set this to something your
-# api_url serves (e.g. a small local Gemma/Qwen quant).
-model =
-max_tokens = 4096
-
-# Default points at LM Studio's localhost; change or comment out to use a
-# different provider. The summarizer treats an unreachable endpoint as a
-# transient failure: turns get a tagged "draft" L2 row and are rewritten
-# by a housekeeping pass once the endpoint comes back.
-api_url = http://localhost:1234/v1
-# api_key = lmstudio-local
-
-# Multiple endpoints (advanced setup):
-# Use [inference.<name>] sections for multiple endpoints
-# Model routing: first matching glob pattern wins
-
-# [inference.local]
-# api_url = http://localhost:1234/v1
-# api_key = lmstudio-local
-# models = qwen/*, llama/*, mistral/*
-
-# [inference.anthropic]
-# api_url = https://api.anthropic.com/v1
-# api_key = sk-ant-...
-# models = claude-*
-
-# Optional: route summarization to a separate cheaper/local model.
-# Falls back to the main [inference] model when unset.
-[summarizer]
-# model        = qwen2.5:7b
-# api_url      = http://localhost:11434/v1
-# api_key      =
-# max_tokens   = 1024
-#
-# target_pct   = 0    # target summary length as % of raw turn; 0 = 30%
-# max_pct       = 0    # hard cap as % of raw turn; 0 = 60%
-#
-# System prompt for the summarizer. Leave empty (or omit) to use the built-in
-# default. Any non-empty value is passed through as-is. Two {} placeholders
-# are required (target chars, hard cap) if you override it.
-# Set to a single space to suppress the system prompt entirely: prompt = " "
-# Quote the value to protect # characters from being treated as comments.
-#
-# prompt = "Summarize this conversation into a concise memory entry. Extract key facts, decisions, questions asked, topics discussed. Write in third person past tense. Target about {} characters; never exceed {}. If the exchange is trivial (a single command like /exit, a one-line greeting), respond with a short phrase, not a full sentence."
-
-[logging]
-log_file = ~/.ragger/activity.log
-# Log Levels: trace, debug, info, warn, error, and critical
-log_level = warn
-
-[paths]
-normalize_home = true
-
-[import]
-minimum_chunk_size = 300
-
-[embed]
-timeout_ms = 10000
-retries = 1
-max_workers = 8
-)";
+#include "default_config.inc"
 
 // -----------------------------------------------------------------------
 // Bootstrap ~/.ragger/ on first run
 // -----------------------------------------------------------------------
 static std::string bootstrap_user_config() {
-    std::string ragger_dir = expand_path("~/.ragger");
+    std::string ragger_dir = ragger_base_dir();
     std::string conf_path  = ragger_dir + "/settings.ini";
 
     fs::create_directories(ragger_dir);
@@ -219,7 +142,7 @@ std::expected<std::string, ConfigError> find_system_config(const std::string& cl
 }
 
 std::expected<std::string, ConfigError> find_user_config() {
-    std::string user_conf = expand_path("~/.ragger/settings.ini");
+    std::string user_conf = ragger_base_dir() + "/settings.ini";
     try {
         if (fs::exists(user_conf)) {
             return user_conf;
@@ -239,12 +162,9 @@ struct ServerLockedKey {
 
 static const ServerLockedKey SERVER_LOCKED[] = {
     {"server", "port"},
-    {"storage", "formats_dir"},
-    {"logging", "log_dir"},
     {"embedding", "model"},
     {"embedding", "dimensions"},
     {"embedding", "vector_type"},
-    {"embedding", "model_dir"},
     // System ceilings
     {"search", "max_search_limit"},
     // Inference endpoints (user can only pick model)
@@ -261,15 +181,41 @@ static void clamp_to_ceiling(int& value, int ceiling) {
     if (value <= 0 || value > ceiling) value = ceiling;
 }
 
+/// Validate a bind address: must be a valid IPv4/IPv6 literal, or a
+/// hostname made of alnum/hyphen/dot characters. Throws std::runtime_error
+/// on anything else — a malformed bind value is a startup error, not a
+/// silent fallback, since silently ignoring it could bind somewhere the
+/// user didn't intend.
+static void validate_bind_address(const std::string& addr) {
+    if (addr.empty()) return;  // empty = TCP listener disabled, always fine
+
+    struct in_addr  a4{};
+    struct in6_addr a6{};
+    if (inet_pton(AF_INET, addr.c_str(), &a4) == 1) return;
+    if (inet_pton(AF_INET6, addr.c_str(), &a6) == 1) return;
+
+    // Hostname: alnum, '-', '.' only; must not start/end with '.' or '-'.
+    bool looks_like_hostname = !addr.empty() &&
+        std::all_of(addr.begin(), addr.end(), [](unsigned char c) {
+            return std::isalnum(c) || c == '-' || c == '.';
+        }) &&
+        addr.front() != '.' && addr.front() != '-' &&
+        addr.back()  != '.' && addr.back()  != '-';
+
+    if (!looks_like_hostname) {
+        throw std::runtime_error(
+            "invalid [server] bind address: \"" + addr +
+            "\" (expected an IPv4/IPv6 literal or hostname)");
+    }
+}
+
 void apply_user_overrides(Config& cfg, const Config& user) {
     // New pattern: user config overrides everything EXCEPT server-locked fields
     // Server-locked fields stay as loaded from system config
     
     // User can override everything except SERVER_LOCKED:
     // ✗ server.host, server.port
-    // ✗ storage.formats_dir
-    // ✗ logging.log_dir (always locked — one server, one log location)
-    // ✗ embedding.model, embedding.dimensions, embedding.model_dir
+    // ✗ embedding.model, embedding.dimensions, embedding.vector_type
     // ✓ Everything else
     
     // Search (all user-overridable)
@@ -284,16 +230,14 @@ void apply_user_overrides(Config& cfg, const Config& user) {
     cfg.inference_model = user.inference_model;
     cfg.inference_default = user.inference_default;
     
-    // Logging (query_log, http_log, mcp_log are user-overridable; log_dir is SERVER_LOCKED)
-    cfg.query_log_enabled = user.query_log_enabled;
-    cfg.http_log_enabled = user.http_log_enabled;
-    cfg.mcp_log_enabled = user.mcp_log_enabled;
-    
     // Paths (all user-overridable)
     cfg.normalize_home_path = user.normalize_home_path;
     
     // Import (all user-overridable)
     cfg.minimum_chunk_size = user.minimum_chunk_size;
+
+    // Search (reserved toggle)
+    cfg.inject_data = user.inject_data;
 
     // Apply system ceilings
     clamp_to_ceiling(cfg.default_search_limit, cfg.max_search_limit);
@@ -375,23 +319,21 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
 
         // Map to config fields
         if (section == "server") {
-            if      (key == "socket") cfg.socket_path = strip_quotes(val);
+            if      (key == "socket_enable") cfg.socket_enabled = parse_bool(val);
+            else if (key == "socket") cfg.socket_enabled = !strip_quotes(val).empty();  // legacy key, back-compat
             else if (key == "bind") cfg.bind_address = strip_quotes(val);
             else if (key == "port") cfg.port = std::stoi(val);
             else if (key == "server_name" || key == "hostname") cfg.server_name = val;
             else if (key == "capture_turns") cfg.capture_turns = parse_bool(val);
             else if (key == "build_context") cfg.build_context = parse_bool(val);
             else if (key == "default_recipe") cfg.default_recipe = val;
-            else if (key == "recipes_dir")    cfg.recipes_dir = val;
-        }
-        else if (section == "storage") {
-            if (key == "formats_dir") cfg.formats_dir = val;
+            else if (key == "cert" || key == "tls_cert") cfg.tls_cert = val;
+            else if (key == "key" || key == "tls_key") cfg.tls_key = val;
         }
         else if (section == "embedding") {
             if      (key == "model")      cfg.embedding_model = val;
             else if (key == "dimensions") cfg.embedding_dimensions = std::stoi(val);
             else if (key == "vector_type") cfg.embedding_vector_type = val;
-            else if (key == "model_dir")  cfg.model_dir = val;
         }
         else if (section == "search") {
             if      (key == "default_limit")    cfg.default_search_limit = std::stoi(val);
@@ -401,6 +343,7 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "vector_weight")    cfg.vector_weight = std::stof(val);
             else if (key == "phon_weight")      cfg.phon_weight = std::stof(val);
             else if (key == "max_search_limit") cfg.max_search_limit = std::stoi(val);
+            else if (key == "inject_data")      cfg.inject_data = parse_bool(val);
         }
         else if (section == "inference") {
             if      (key == "model")      cfg.inference_model = val;
@@ -436,18 +379,14 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "max_tokens") ep.max_tokens = std::stoi(val);
         }
         else if (section == "logging") {
-            if      (key == "log_dir")   cfg.log_dir = val;
-            else if (key == "log_file")  cfg.log_file = expand_path(val);
-            else if (key == "log_level") cfg.log_level = val;
-            else if (key == "query_log") cfg.query_log_enabled = parse_bool(val);
-            else if (key == "http_log")  cfg.http_log_enabled = parse_bool(val);
-            else if (key == "mcp_log")   cfg.mcp_log_enabled = parse_bool(val);
-            else if (key == "debug_log") cfg.debug_log_enabled = parse_bool(val);
+            if (key == "log_level") cfg.log_level = val;
         }
         else if (section == "paths") {
             if (key == "normalize_home") cfg.normalize_home_path = parse_bool(val);
         }
         else if (section == "tls" || section == "ssl") {
+            // Legacy standalone section — kept silently for back-compat.
+            // TLS now lives under [server] (cert=/key=); see above.
             if (key == "cert" || key == "tls_cert") cfg.tls_cert = val;
             else if (key == "key" || key == "tls_key") cfg.tls_key = val;
         }
@@ -474,9 +413,6 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
                 if (v > 0) { cfg.episode_idle_minutes = v; episode_idle_set = true; }
             }
         }
-        else if (section == "models") {
-            cfg.model_aliases[key] = val;
-        }
         else if (section == "llama") {
             // [llama] section removed — use external inference providers
             // Silently ignore for backward compatibility with old configs
@@ -500,21 +436,21 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
     // Fallback: if neither listener is configured, bring up TCP on loopback
     // so the daemon always has at least one listener. Both can be set at
     // once — the server runs each in its own thread.
-    std::string expanded_socket = expand_path(cfg.socket_path);
-    if (expanded_socket.empty() && cfg.bind_address.empty()) {
+    if (!cfg.socket_enabled && cfg.bind_address.empty()) {
         cfg.bind_address = "127.0.0.1";
     }
 
-    // Expand socket_path and bind_address if they start with ~
-    if (!cfg.socket_path.empty() && cfg.socket_path[0] == '~') {
-        cfg.socket_path = expanded_socket;
-    }
+    // Expand bind_address if it starts with ~ (rare, but historically
+    // supported for host-as-path oddities; kept for back-compat).
     if (!cfg.bind_address.empty() && cfg.bind_address[0] == '~') {
         // For bind_address, expand ~ to home but keep the host part
         std::string home = expand_path("~");
         if (home.back() != '/') home += '/';
         cfg.bind_address = home + cfg.bind_address.substr(1);
     }
+
+    // A malformed bind address is a startup error, not a silent fallback.
+    validate_bind_address(cfg.bind_address);
 
     return cfg;
 }
@@ -575,8 +511,7 @@ void init_config(const std::string& cli_config_path) {
         }
     }
 
-    if (cfg.log_file.empty())
-        cfg.log_file = expand_path("~/.ragger/activity.log");
+    cfg.log_file = cfg.resolved_log_file_path();
 
     g_config = &cfg;
 }
@@ -623,6 +558,8 @@ int reload_config() {
         }
     };
     warn_restart("port", fresh.port != cfg.port);
+    warn_restart("socket_enabled", fresh.socket_enabled != cfg.socket_enabled);
+    warn_restart("bind_address", fresh.bind_address != cfg.bind_address);
     warn_restart("tls_cert", fresh.tls_cert != cfg.tls_cert);
     warn_restart("tls_key", fresh.tls_key != cfg.tls_key);
     warn_restart("embedding_model", fresh.embedding_model != cfg.embedding_model);
@@ -644,6 +581,7 @@ int reload_config() {
     RELOAD(bm25_weight);
     RELOAD(vector_weight);
     RELOAD(phon_weight);
+    RELOAD(inject_data);
 
     // Inference
     RELOAD(inference_model);
@@ -676,10 +614,8 @@ int reload_config() {
     }
 
     // Logging
-    RELOAD(query_log_enabled);
-    RELOAD(http_log_enabled);
-    RELOAD(mcp_log_enabled);
-    RELOAD(debug_log_enabled);
+    // (log_level itself is not hot-reloadable — Diskerror::logger is
+    // constructed once at startup with the level fixed.)
 
     // Paths
     RELOAD(normalize_home_path);
@@ -692,12 +628,6 @@ int reload_config() {
     RELOAD(embed_retries);
     RELOAD(embed_max_workers);
 
-    // Model aliases
-    if (cfg.model_aliases != fresh.model_aliases) {
-        cfg.model_aliases = fresh.model_aliases;
-        ++changes;
-    }
-
     // Housekeeping / retention
     RELOAD(cleanup_max_age_hours);
     RELOAD(housekeeping_interval);
@@ -706,7 +636,6 @@ int reload_config() {
     RELOAD(capture_turns);
     RELOAD(build_context);
     RELOAD(default_recipe);
-    RELOAD(recipes_dir);
 
     // System ceilings
     RELOAD(max_search_limit);

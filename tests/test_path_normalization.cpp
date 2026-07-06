@@ -136,7 +136,12 @@ int main() {
     assert(cfg.normalize_home_path == true);
 
     // Embedder needed for SqliteBackend store()
-    ragger::Embedder emb(cfg.resolved_model_dir());
+    auto model_dir = cfg.resolved_model_dir();
+    if (!std::filesystem::exists(model_dir + "/model.onnx")) {
+        std::cerr << "Skipping path normalization tests: model not found at " << model_dir << "\n";
+        return 0;
+    }
+    ragger::Embedder emb(model_dir);
 
     test_normalize_home_in_stored_text(emb);
     test_normalize_preserves_non_home_paths(emb);

@@ -2,6 +2,7 @@
  * API format loader and request/response transformers
  */
 #include "ragger/api_formats.h"
+#include "ragger/config.h"
 #include "ragger/lang.h"
 #include "ragger/util/fs.h"
 #include "diskerror/logger.h"
@@ -40,36 +41,19 @@ static const ApiFormat OPENAI_FORMAT = {
 // -----------------------------------------------------------------------
 // Format search dirs
 // -----------------------------------------------------------------------
-static std::string _system_formats_dir = "/var/ragger/formats";
+static std::vector<std::string> _format_search_dirs() {
+    std::vector<std::string> dirs;
+    dirs.push_back(config().resolved_formats_dir());
 
-void init_formats_dir(const std::string& path) {
-    _system_formats_dir = path;
-    // Expand ~ if present
-    if (!path.empty() && path[0] == '~') {
-        std::string home = home_dir();
-        if (!home.empty()) {
-            _system_formats_dir = home + path.substr(1);
+    // Package formats dir: try relative to the source tree (development only).
+    std::string home = home_dir();
+    if (!home.empty()) {
+        std::string source_formats = home + "/CLionProjects/Ragger/formats";
+        if (fs::exists(source_formats)) {
+            dirs.push_back(source_formats);
         }
     }
-}
 
-static std::vector<std::string> _format_search_dirs() {
-    std::string home = home_dir();
-    std::vector<std::string> dirs;
-
-    if (!home.empty()) {
-        dirs.push_back(home + "/.ragger/formats");
-    }
-    dirs.push_back(_system_formats_dir);
-
-    // Package formats dir: try relative to executable and a few hardcoded paths
-    // In production, this would be ../formats from the binary
-    // For development, check the source tree
-    std::string source_formats = home + "/CLionProjects/Ragger/formats";
-    if (fs::exists(source_formats)) {
-        dirs.push_back(source_formats);
-    }
-    
     return dirs;
 }
 

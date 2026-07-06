@@ -72,7 +72,7 @@ std::string snippet_of(const SearchResult& r, std::size_t max = 160) {
 
 StatsLogger::StatsLogger(const std::string& db_path) {
     const std::string path =
-        db_path.empty() ? expand_path("~/.ragger/stats.db") : expand_path(db_path);
+        db_path.empty() ? config().resolved_stats_db_path() : expand_path(db_path);
     try {
         if (sqlite3_open(path.c_str(), &db_) != SQLITE_OK) {
             Diskerror::logger::warn(std::string("stats: open failed: ") +

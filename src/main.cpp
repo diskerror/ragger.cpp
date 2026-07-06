@@ -226,7 +226,6 @@ int main(int argc, char **argv) {
             ("config", Diskerror::po::value<std::string>()->default_value(""), CLI_CONFIG_FILE)
             ("host", Diskerror::po::value<std::string>(), CLI_HOST)
             ("port,p", Diskerror::po::value<int>(), CLI_PORT)
-            ("model-dir", Diskerror::po::value<std::string>(), CLI_MODEL_DIR)
             ("min-chunk-size", Diskerror::po::value<int>(), CLI_MIN_CHUNK_SIZE)
             ("num,n", Diskerror::po::value<int>(),
                 "search: number of results to return (default: 3)")
@@ -253,11 +252,11 @@ int main(int argc, char **argv) {
     opts.add_hidden_options()
             ("command", Diskerror::po::value<std::string>()->default_value("help"), CLI_COMMAND)
             ("args", Diskerror::po::value<std::vector<std::string> >(), CLI_ARGS)
-            // Undocumented: redirect the memory DB (default $HOME/.ragger/
-            // memories.db). Testing/dev convenience — point a daemon or CLI at
-            // a DB copy without an $HOME shuffle. Applied to mutable_config()
-            // after init so every resolved_db_path() consumer agrees.
-            ("db", Diskerror::po::value<std::string>()->default_value(""), "Override memory DB path (undocumented)")
+            // Undocumented, testing-only: relocate the entire ~/.ragger base
+            // directory (DB, settings.ini, logs, models, recipes, formats,
+            // socket, token — everything). No env var equivalent — CLI-only.
+            // Must be applied before any config/path resolution happens.
+            ("ragger-base", Diskerror::po::value<std::string>()->default_value(""), "Override the ~/.ragger base directory (undocumented, testing only)")
             // --keep-data removed: always keep user data, sudoer can rm manually
             ;
     opts.add_positional("command", 1);
@@ -285,6 +284,13 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    // Undocumented, testing-only --ragger-base: relocate the entire ~/.ragger
+    // base directory before ANY config/path resolution happens (this must run
+    // before init_config(), since settings.ini's own location depends on it).
+    if (auto rh = opts["ragger-base"].as<std::string>(); !rh.empty()) {
+        ragger::set_ragger_base_override(rh);
+    }
+
     // Load config file
     try {
         bool server_cmd = (command == "serve");
@@ -293,13 +299,6 @@ int main(int argc, char **argv) {
     catch (const std::exception &e) {
         std::cerr << std::format(ragger::lang::ERR_INFERENCE, e.what()) << "\n";
         return 1;
-    }
-
-    // Undocumented --db override: redirect the memory DB before any consumer
-    // reads resolved_db_path(). Applied to the mutable global so the server's
-    // UserStore, mcp, recipe_cli, and useradd/usermod paths all agree.
-    if (auto dbp = opts["db"].as<std::string>(); !dbp.empty()) {
-        ragger::mutable_config().db_path_override = dbp;
     }
 
     const auto &cfg = ragger::config();
@@ -311,7 +310,6 @@ int main(int argc, char **argv) {
     std::string host = opts.count("host") ? opts["host"].as<std::string>() : cfg.bind_address;
     int port = opts.count("port") ? opts["port"].as<int>() : cfg.port;
     std::string db_path = cfg.resolved_db_path();
-    std::string model_dir = opts.count("model-dir") ? opts["model-dir"].as<std::string>() : "";
     int min_chunk_size = opts.count("min-chunk-size")
                              ? opts["min-chunk-size"].as<int>()
                              : cfg.minimum_chunk_size;
@@ -326,7 +324,7 @@ int main(int argc, char **argv) {
             const auto &cfg = ragger::config();
             std::unique_ptr<ragger::RaggerMemory> mem_ptr;
             // Single-user mode only
-            mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path, model_dir);
+            mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path);
             auto &memory = *mem_ptr;
             Diskerror::logger::info(std::format(MSG_LOADED_MEMORIES, memory.count()));
 
@@ -365,7 +363,7 @@ int main(int argc, char **argv) {
             }
             else {
                 // Fall back to direct DB access
-                ragger::RaggerMemory memory(db_path, model_dir);
+                ragger::RaggerMemory memory(db_path);
                 response = memory.search(query, limit,
                                          cfg.default_min_score, colls);
             }
@@ -404,7 +402,7 @@ int main(int argc, char **argv) {
             }
             else {
                 // Fall back to direct DB access
-                ragger::RaggerMemory memory(db_path, model_dir);
+                ragger::RaggerMemory memory(db_path);
                 id = memory.store(text, meta);
             }
             std::cout << std::format(ragger::lang::MSG_STORED_WITH_ID, id) << "\n";
@@ -422,7 +420,7 @@ int main(int argc, char **argv) {
             }
             else {
                 // Fall back to direct DB access
-                ragger::RaggerMemory memory(db_path, model_dir);
+                ragger::RaggerMemory memory(db_path);
                 count = memory.count();
             }
             std::cout << count << "\n";
@@ -481,7 +479,7 @@ int main(int argc, char **argv) {
                     return 0;
                 }
 
-                ragger::RaggerMemory memory(db_path, model_dir);
+                ragger::RaggerMemory memory(db_path);
                 int n = 0;
                 for (const auto& t : turns) {
                     std::string text = "User: " + t.user_text;
@@ -525,7 +523,7 @@ int main(int argc, char **argv) {
                     std::println("Nothing to import.");
                     return 0;
                 }
-                ragger::RaggerMemory memory(db_path, model_dir);
+                ragger::RaggerMemory memory(db_path);
                 int n = 0;
                 for (const auto& s : items) {
                     memory.store_summary(s.text, "project", "complete",
@@ -543,7 +541,7 @@ int main(int argc, char **argv) {
             std::string imp_title = opts["title"].as<std::string>();
             int         imp_year  = opts["year"].as<int>();
             std::string imp_tags  = opts["tags"].as<std::string>();
-            ragger::RaggerMemory memory(db_path, model_dir);
+            ragger::RaggerMemory memory(db_path);
             for (auto &filepath: args) {
                 do_import(memory, filepath, min_chunk_size,
                           imp_title, imp_year, imp_tags);
@@ -598,7 +596,7 @@ int main(int argc, char **argv) {
 
         }
         else if (command == "mcp") {
-            auto mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path, model_dir);
+            auto mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path);
             ragger::run_mcp(*mem_ptr);
 
         }
@@ -620,7 +618,7 @@ int main(int argc, char **argv) {
             // a pending model/dtype/dims change doesn't block the count/confirm.
             // Count across all four embedded tables — what the rebuild touches,
             // not just summaries (count()).
-            ragger::RaggerMemory memory_temp(db_path, model_dir,
+            ragger::RaggerMemory memory_temp(db_path,
                                              /*skip_embedding_guard=*/true);
             int total_count = memory_temp.backend()->count_embeddable_rows();
             memory_temp.close();
@@ -661,7 +659,7 @@ int main(int argc, char **argv) {
             // identity so the new model/dtype/dimensions "take". Doing this
             // *after* the re-encode means an aborted/failed rebuild leaves
             // settings≠config, so the guard still catches it next startup.
-            ragger::RaggerMemory memory(db_path, model_dir,
+            ragger::RaggerMemory memory(db_path,
                                         /*skip_embedding_guard=*/true);
             int count = memory.rebuild_embeddings();
             ragger::UserStore settings_store(db_path);
@@ -694,7 +692,7 @@ int main(int argc, char **argv) {
                 Diskerror::logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
             }
 
-            ragger::RaggerMemory memory(db_path, model_dir,
+            ragger::RaggerMemory memory(db_path,
                                         /*skip_embedding_guard=*/true);
             int count = memory.rebuild_phon(only_missing, /*progress=*/true);
             std::println("Rebuilt phonetic codes for {} row(s).", count);
@@ -702,7 +700,7 @@ int main(int argc, char **argv) {
         else if (command == "show-embedding-model") {
             std::println(ragger::lang::MSG_EMBEDDING_MODEL_NAME, cfg.embedding_model);
             std::println(ragger::lang::MSG_EMBEDDING_DIMENSIONS, cfg.embedding_dimensions);
-            std::string model_path = model_dir.empty() ? cfg.model_dir : model_dir;
+            std::string model_path = cfg.resolved_model_dir();
             if (!model_path.empty() && fs::is_directory(model_path))
                 std::println(ragger::lang::MSG_EMBEDDING_PATH, model_path);
             else

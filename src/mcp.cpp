@@ -63,7 +63,7 @@ static bool http_server_running() {
 /// concise built-in fallback if that file isn't present.
 static std::string mcp_instructions() {
     std::string text =
-        read_file_to_string(expand_path("~/.ragger/agent-memory-instructions.md"));
+        read_file_to_string(config().resolved_agent_instructions_path());
     if (!text.empty()) return text;
     return "You have a persistent semantic memory via the `search` and `store` "
            "tools. Search at the start of a task and before asking the user "

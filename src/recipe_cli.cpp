@@ -35,9 +35,7 @@ const char* layer_kind_name(LayerKind k) {
 }
 
 std::vector<Recipe> load_all() {
-    std::string dir = config().recipes_dir.empty()
-        ? expand_path("~/.ragger/recipes")
-        : expand_path(config().recipes_dir);
+    std::string dir = config().resolved_recipes_dir();
     auto recipes = load_recipes_from_dir(dir);
     if (recipes.empty()) recipes = builtin_recipes();
     return recipes;

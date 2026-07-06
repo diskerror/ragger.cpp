@@ -6,11 +6,10 @@
  *
  * Search order for format files:
  *   1. ~/.ragger/formats/<name>.json       (user override)
- *   2. <formats_dir>/<name>.json           (from config, default /var/ragger/formats)
- *   3. <package>/formats/<name>.json       (shipped with Ragger)
+ *   2. <package>/formats/<name>.json       (shipped with Ragger)
  *
- * Custom formats: drop a .json file in ~/.ragger/formats/ or the configured
- * formats_dir and reference it by name (without .json): format = myformat
+ * Custom formats: drop a .json file in ~/.ragger/formats/ and reference it
+ * by name (without .json): format = myformat
  */
 #pragma once
 
@@ -46,9 +45,6 @@ struct ApiMessage {
     std::string role;
     std::string content;
 };
-
-/// Set the system formats directory from config. Call once at startup.
-void init_formats_dir(const std::string& path);
 
 /// Get a format definition by name. Returns hardcoded OpenAI if not found.
 ApiFormat get_format(const std::string& name);

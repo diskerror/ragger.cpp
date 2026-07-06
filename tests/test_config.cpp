@@ -1,4 +1,5 @@
 #include "ragger/config.h"
+#include "ragger/util/fs.h"
 #include <cassert>
 #include <cstdlib>
 #include <fstream>
@@ -275,6 +276,36 @@ void test_default_values() {
     std::println(" OK");
 }
 
+void test_ragger_base_default() {
+    std::print("  test_ragger_base_default...");
+
+    // No override set (default state at process start) — should be $HOME/.ragger
+    ragger::set_ragger_base_override("");
+    const char* home = std::getenv("HOME");
+    assert(home != nullptr);
+    assert(ragger::ragger_base_dir() == std::string(home) + "/.ragger");
+
+    std::println(" OK");
+}
+
+void test_ragger_base_override() {
+    std::print("  test_ragger_base_override...");
+
+    ragger::set_ragger_base_override("/tmp/ragger-base-override-test");
+    assert(ragger::ragger_base_dir() == "/tmp/ragger-base-override-test");
+
+    // Resolved config paths must honor the override
+    ragger::Config cfg;
+    assert(cfg.resolved_db_path() == "/tmp/ragger-base-override-test/memories.db");
+    assert(cfg.resolved_recipes_dir() == "/tmp/ragger-base-override-test/recipes");
+    assert(cfg.resolved_formats_dir() == "/tmp/ragger-base-override-test/formats");
+
+    // Reset so subsequent tests (and expand_path("~/.ragger/...") below) see the default.
+    ragger::set_ragger_base_override("");
+
+    std::println(" OK");
+}
+
 int main() {
     std::print("Running config tests:\n");
 
@@ -288,6 +319,9 @@ int main() {
     test_inline_comments();
 
     test_default_values();
+
+    test_ragger_base_default();
+    test_ragger_base_override();
 
     // expand_path with ~
     std::string expanded = ragger::expand_path("~/.ragger/memories.db");

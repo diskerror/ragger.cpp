@@ -70,7 +70,7 @@ std::string hash_token(const std::string& token) {
 }
 
 std::string token_path() {
-    return expand_path("~/.ragger/token");
+    return config().resolved_token_path();
 }
 
 std::string load_token() {

@@ -4,7 +4,9 @@
  * Tests token generation, hashing, and persistence.
  */
 #include "ragger/auth.h"
+#include "ragger/config.h"
 #include "ragger/user_store.h"
+#include "ragger/util/fs.h"
 #include <cassert>
 #include <cstdlib>
 #include <filesystem>
@@ -67,44 +69,50 @@ void test_generate_token() {
 void test_token_path() {
     std::println("  test_token_path...");
 
+    // Isolate against a throwaway --ragger-base so this never touches the
+    // real ~/.ragger/token.
+    std::string ragger_base = "/tmp/ragger_test_home_" + std::to_string(getpid()) + "/.ragger";
+    ragger::set_ragger_base_override(ragger_base);
+
     auto path = ragger::token_path();
     assert(!path.empty());
     assert(path.find("/.ragger/token") != std::string::npos);
+    assert(path.rfind(ragger_base, 0) == 0);  // rooted under the override
 
+    ragger::set_ragger_base_override("");
     std::println(" OK");
 }
 
 void test_load_token() {
     std::println("  test_load_token...");
 
-    // This test depends on whether ~/.ragger/token exists
-    // We'll just verify it doesn't crash and returns a string
-    auto token = ragger::load_token();
-    // Token might be empty if file doesn't exist, which is fine
+    // Isolated, empty ragger-base — no token file exists yet, so this
+    // exercises the "not found" path without touching the real ~/.ragger.
+    std::string ragger_base = "/tmp/ragger_test_home_" + std::to_string(getpid()) + "_load/.ragger";
+    ragger::set_ragger_base_override(ragger_base);
 
+    auto token = ragger::load_token();
+    assert(token.empty());  // no token file in the fresh isolated dir
+
+    ragger::set_ragger_base_override("");
+    fs::remove_all(ragger_base);
     std::println(" OK");
 }
 
 void test_ensure_token_with_temp_dir() {
     std::println("  test_ensure_token_with_temp_dir...");
 
-    // Save original HOME
-    const char* original_home = std::getenv("HOME");
-    assert(original_home != nullptr);
-
-    // Create temp directory for testing
-    std::string temp_home = "/tmp/ragger_test_home_" + std::to_string(getpid());
-    fs::create_directories(temp_home);
-
-    // Set temp HOME
-    setenv("HOME", temp_home.c_str(), 1);
+    // Use the --ragger-base override mechanism (not HOME-swapping) to
+    // isolate this test — this is exactly what --ragger-base is for.
+    std::string ragger_base = "/tmp/ragger_test_home_" + std::to_string(getpid()) + "/.ragger";
+    ragger::set_ragger_base_override(ragger_base);
 
     // ensure_token should create the directory and token
     auto token1 = ragger::ensure_token();
     assert(!token1.empty());
 
-    // Verify the token file was created
-    std::string token_file = temp_home + "/.ragger/token";
+    // Verify the token file was created under the override, not real ~/.ragger
+    std::string token_file = ragger_base + "/token";
     assert(fs::exists(token_file));
 
     // ensure_token again should return the same token
@@ -112,10 +120,8 @@ void test_ensure_token_with_temp_dir() {
     assert(token1 == token2);
 
     // Clean up
-    fs::remove_all(temp_home);
-
-    // Restore original HOME
-    setenv("HOME", original_home, 1);
+    ragger::set_ragger_base_override("");
+    fs::remove_all(ragger_base);
 
     std::println(" OK");
 }
@@ -199,6 +205,14 @@ void test_token_roundtrip() {
 int main() {
     std::println("Running auth tests:");
 
+    // token_path()/load_token()/ensure_token() now resolve through
+    // Config::resolved_token_path(), which requires config() to be
+    // initialized. Isolate against a throwaway --ragger-base for the whole
+    // test binary so nothing here ever touches the real ~/.ragger.
+    std::string isolated_base = "/tmp/ragger_test_auth_base_" + std::to_string(getpid()) + "/.ragger";
+    ragger::set_ragger_base_override(isolated_base);
+    ragger::init_config("");
+
     test_hash_token();
     test_generate_token();
     test_token_path();
@@ -209,6 +223,9 @@ int main() {
     test_useradd_update_existing();
     test_userdel();
     test_token_roundtrip();
+
+    ragger::set_ragger_base_override("");
+    fs::remove_all(isolated_base);
 
     std::println("test_auth: all passed");
     return 0;

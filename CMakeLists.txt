@@ -183,6 +183,23 @@ find_package(CURL REQUIRED)
 find_package(OpenSSL REQUIRED)
 
 # ---------------------------------------------------------------------------
+# Embed example-settings.ini into a generated header (single source of truth
+# for both the user-facing template and config.cpp's DEFAULT_CONFIG string).
+# ---------------------------------------------------------------------------
+set(RAGGER_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${RAGGER_GENERATED_DIR}")
+add_custom_command(
+    OUTPUT "${RAGGER_GENERATED_DIR}/default_config.inc"
+    COMMAND ${CMAKE_COMMAND}
+            -DSRC=${CMAKE_SOURCE_DIR}/example-settings.ini
+            -DDST=${RAGGER_GENERATED_DIR}/default_config.inc
+            -P ${CMAKE_SOURCE_DIR}/cmake/embed_ini.cmake
+    DEPENDS "${CMAKE_SOURCE_DIR}/example-settings.ini" "${CMAKE_SOURCE_DIR}/cmake/embed_ini.cmake"
+    COMMENT "Embedding example-settings.ini -> default_config.inc"
+)
+add_custom_target(generate_default_config DEPENDS "${RAGGER_GENERATED_DIR}/default_config.inc")
+
+# ---------------------------------------------------------------------------
 # ragger library (core logic, no main())
 # ---------------------------------------------------------------------------
 add_library(ragger_core STATIC
@@ -215,6 +232,10 @@ add_library(ragger_core STATIC
 target_include_directories(ragger_core PUBLIC
     "${CMAKE_SOURCE_DIR}/include"
 )
+target_include_directories(ragger_core PRIVATE
+    "${RAGGER_GENERATED_DIR}"
+)
+add_dependencies(ragger_core generate_default_config)
 target_compile_definitions(ragger_core PUBLIC
     RAGGER_VERSION="${PROJECT_VERSION}"
     RAGGER_COMMIT="${RAGGER_COMMIT}"

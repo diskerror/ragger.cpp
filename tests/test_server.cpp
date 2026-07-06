@@ -44,7 +44,7 @@ void test_server_instantiation() {
     }
 
     std::string temp_db = "/tmp/ragger_test_server.db";
-    ragger::RaggerMemory mem(temp_db, model_dir);
+    ragger::RaggerMemory mem(temp_db);
 
     // Create server on a high port (won't actually run it)
     ragger::Server server(mem, "127.0.0.1", 18432);

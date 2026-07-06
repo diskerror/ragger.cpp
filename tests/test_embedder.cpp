@@ -9,6 +9,7 @@
 #include "ragger/embedder.h"
 #include <cassert>
 #include <cmath>
+#include <filesystem>
 #include <iostream>
 #include <numeric>
 #include <print>
@@ -110,7 +111,12 @@ int main() {
 
     ragger::init_config("");
     auto cfg = ragger::config();
-    ragger::Embedder emb(cfg.resolved_model_dir());
+    auto model_dir = cfg.resolved_model_dir();
+    if (!std::filesystem::exists(model_dir + "/model.onnx")) {
+        std::cerr << "Skipping embedder tests: model not found at " << model_dir << "\n";
+        return 0;
+    }
+    ragger::Embedder emb(model_dir);
 
     test_output_shape(emb);
     test_deterministic(emb);

@@ -15,7 +15,6 @@ constexpr const char* CLI_VERSION             = "Show version";
 constexpr const char* CLI_CONFIG_FILE         = "Path to config file";
 constexpr const char* CLI_HOST                = "Server bind address (overrides config)";
 constexpr const char* CLI_PORT                = "Server port (overrides config)";
-constexpr const char* CLI_MODEL_DIR           = "Model directory path (overrides config)";
 constexpr const char* CLI_COMMAND             = "Command";
 constexpr const char* CLI_ARGS                = "Command arguments";
 constexpr const char* CLI_USAGE_SEARCH        = "Usage: ragger search <query>";

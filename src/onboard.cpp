@@ -73,7 +73,7 @@ bool prompt_yn(const std::string& label, bool def) {
 // --------------------------------------------------------------------------
 
 std::string settings_path() {
-    return expand_path("~/.ragger/settings.ini");
+    return config().resolved_settings_path();
 }
 
 std::string read_file(const std::string& path) {
@@ -189,7 +189,7 @@ std::string pick_from_list(const std::vector<std::string>& options,
 // --------------------------------------------------------------------------
 
 bool embedding_model_present() {
-    std::string mdir = expand_path("~/.ragger/models/all-MiniLM-L6-v2");
+    std::string mdir = config().resolved_model_dir();
     return fs::exists(mdir + "/model.onnx");
 }
 
@@ -222,10 +222,8 @@ int run_onboard(const std::vector<std::string>& /*args*/,
     section("Storage");
     std::println("Ragger keeps everything under ~/.ragger/:");
     std::println("  db:        {}", config().resolved_db_path());
-    std::println("  models:    {}", expand_path("~/.ragger/models"));
-    std::println("  recipes:   {}",
-                 config().recipes_dir.empty()
-                     ? expand_path("~/.ragger/recipes") : config().recipes_dir);
+    std::println("  models:    {}", config().resolved_model_dir());
+    std::println("  recipes:   {}", config().resolved_recipes_dir());
     std::println("");
     std::println("To put any of these on a different disk, symlink the path:");
     std::println("  ln -s /mnt/big/ragger ~/.ragger");

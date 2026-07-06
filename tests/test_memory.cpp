@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <iostream>
 #include <print>
+#include <stdexcept>
 
 namespace fs = std::filesystem;
 
@@ -99,6 +100,20 @@ void test_delete() {
 }
 
 
+void test_empty_db_path_throws() {
+    std::println("  test_empty_db_path_throws...");
+
+    bool threw = false;
+    try {
+        ragger::RaggerMemory mem("");
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    assert(threw);
+
+    std::println(" OK");
+}
+
 int main() {
     ragger::init_config("");
     auto model_dir = ragger::config().resolved_model_dir();
@@ -115,6 +130,7 @@ int main() {
     test_store_with_tags();
     test_count();
     test_delete();
+    test_empty_db_path_throws();
 
     std::println("test_memory: all passed");
     return 0;

@@ -16,24 +16,26 @@
 #include <algorithm>
 #include <format>
 #include <mutex>
+#include <stdexcept>
 
 namespace ragger {
 
 RaggerMemory::RaggerMemory(const std::string& db_path,
-                           const std::string& model_dir,
                            bool skip_embedding_guard)
 {
-    // Resolve model directory from config or override
-    std::string resolved_model_dir = model_dir.empty()
-        ? config().resolved_model_dir()
-        : expand_path(model_dir);
+    if (db_path.empty()) {
+        throw std::invalid_argument("RaggerMemory: db_path must not be empty");
+    }
+
+    // Model directory always comes from config — hardcoded relative to
+    // ragger_base_dir() (see config.cpp), same as every other Ragger path.
+    std::string resolved_model_dir = config().resolved_model_dir();
 
     // Create embedder
     embedder_ = std::make_unique<Embedder>(resolved_model_dir);
 
     // The resolved path — used for both the storage backend and the user store.
-    const std::string resolved_db = db_path.empty() ? config().resolved_db_path()
-                                                     : expand_path(db_path);
+    const std::string resolved_db = expand_path(db_path);
 
     backend_    = std::make_unique<SqliteBackend>(*embedder_, resolved_db);
     user_store_ = std::make_unique<UserStore>(resolved_db);
@@ -315,9 +317,7 @@ RecipeCache& recipe_cache() {
 const std::vector<Recipe>& cached_recipes() {
     auto& c = recipe_cache();
     std::lock_guard<std::mutex> lk(c.mu);
-    const std::string dir = config().recipes_dir.empty()
-        ? expand_path("~/.ragger/recipes")
-        : expand_path(config().recipes_dir);
+    const std::string dir = config().resolved_recipes_dir();
     if (!c.loaded || c.loaded_dir != dir) {
         c.recipes = load_recipes_from_dir(dir);
         if (c.recipes.empty()) c.recipes = builtin_recipes();

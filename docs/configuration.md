@@ -64,10 +64,11 @@ mismatches abort startup with a clear error.
 
 | Key          | Default            | Description                                                  |
 |--------------|--------------------|--------------------------------------------------------------|
-| `model`      | `all-MiniLM-L6-v2` | Sentence-transformer model name; resolved under `model_dir`. |
+| `model`      | `all-MiniLM-L6-v2` | Sentence-transformer model name; resolved under `~/.ragger/models/`. |
 | `dimensions` | `384`              | Vector size; must match the model.                           |
 | `vector_type`| `f16`              | On-disk precision. `f16` halves blob size; `f32` is full precision. In-memory math is always f32. |
-| `model_dir`  | `~/.ragger/models` | Where ONNX model files live.                                 |
+
+Model files always live at `~/.ragger/models/<model-name>/` — this is not independently configurable; it's hardcoded like every other Ragger path.
 
 ## `[search]`
 

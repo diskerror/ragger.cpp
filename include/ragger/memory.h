@@ -20,12 +20,15 @@ using json = nlohmann::json;
 
 class RaggerMemory {
 public:
-    /// Construct with optional override for DB path and model dir.
-    /// `skip_embedding_guard` bypasses the startup model/dtype/dimensions drift
-    /// check (used by `rebuild-embeddings`, which intentionally re-encodes at
-    /// the new config and rewrites the settings afterward).
-    explicit RaggerMemory(const std::string& db_path = "",
-                          const std::string& model_dir = "",
+    /// Construct against a specific DB path. `skip_embedding_guard` bypasses
+    /// the startup model/dtype/dimensions drift check (used by
+    /// `rebuild-embeddings`, which intentionally re-encodes at the new
+    /// config and rewrites the settings afterward). The model directory is
+    /// always resolved from config (Config::resolved_model_dir(), which
+    /// itself honors the --model-dir override) — it is not a constructor
+    /// parameter.
+    /// Throws std::invalid_argument if db_path is empty.
+    explicit RaggerMemory(const std::string& db_path,
                           bool skip_embedding_guard = false);
     ~RaggerMemory();
 
