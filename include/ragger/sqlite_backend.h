@@ -113,6 +113,11 @@ public:
                       const std::string& first_ts,
                       const std::string& last_ts) override;
     std::vector<std::string> episodes_needing_close(int idle_minutes) override;
+    std::vector<std::string> episode_texts(const std::string& session_guid) override;
+    std::optional<std::pair<int, std::string>>
+        session_summary_row(const std::string& session_guid) override;
+    bool set_summary_updated_at(int summary_id) override;
+    std::vector<std::string> latest_session_summary_texts() override;
     std::vector<TurnRecord> turns_by_session_desc(
         const std::string& session_guid, int limit = 0) override;
     std::vector<SummaryRecord> turn_summaries_by_session_desc(

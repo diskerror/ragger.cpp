@@ -103,20 +103,19 @@ void SummarizerService::enqueue_catch_up() {
         ++draft_n;
     }
 
-    // L3 close: every session ready for finalization.
-    const int pause_min = config().summary_pause_minutes;
-    for (const auto& guid : backend->sessions_needing_close(pause_min)) {
-        Job j{JobKind::L3CloseSession, -1, -1,
-              {}, {}, {}, guid, {}};
-        std::lock_guard<std::mutex> lk(mutex_);
-        queue_.push_back(std::move(j));
-        ++sess_n;
-    }
+    // Phase 2: session/project rollups are driven by episode boundaries
+    // (handle_episode_close cascades into a session rollup + project rollup),
+    // so there is no separate per-tick "session close" scan. The old
+    // sessions_needing_close() path is retired here — it fired on the same
+    // idle condition as episodes_needing_close() and, since session rows no
+    // longer flip to 'complete', would have re-rolled every idle session on
+    // every tick (harmless to the DB thanks to in-place upsert, but wasteful
+    // inference). `sess_n` stays 0.
+    (void)sess_n;
 
     // Episode close (EPISODE_PLAN Phase 1): every session whose open episode
-    // is idle past episode_idle_minutes. Additive alongside the L3 path —
-    // Phase 2 removes the running-L3 churn and drives session rollups from
-    // these boundaries instead.
+    // is idle past episode_idle_minutes. Each close cascades into the session
+    // and project rollups (Phase 2).
     size_t ep_n = 0;
     const int idle_min = config().episode_idle_minutes;
     for (const auto& guid : backend->episodes_needing_close(idle_min)) {
@@ -167,10 +166,12 @@ void SummarizerService::worker_loop() {
 }
 
 void SummarizerService::pause_timer_loop() {
-    // The pause-check cadence is the smaller of 60s and pause_minutes/2,
+    // The pause-check cadence is the smaller of 60s and idle_minutes/2,
     // capped at 10s minimum so we don't spin tightly on misconfiguration.
+    // Phase 2.4: timing flows from episode_idle_minutes (summary_pause_minutes
+    // is a deprecated alias resolved into it at config load).
     auto poll_interval = [] {
-        int pm = config().summary_pause_minutes;
+        int pm = config().episode_idle_minutes;
         if (pm <= 0) return std::chrono::seconds(60);
         int secs = std::min(60, std::max(10, (pm * 60) / 2));
         return std::chrono::seconds(secs);
@@ -281,27 +282,35 @@ bool SummarizerService::handle_l2(const Job& j) {
     Diskerror::logger::info(std::format(
         lang::MSG_SUMMARIZER_L2, display_guid, ts));
 
-    // After each successful L2, kick an L3 update for this session so
-    // the running session summary always reflects the latest turn.
-    if (!guid.empty()) {
-        Job l3j{JobKind::L3UpdateSession, -1, -1,
-                {}, {}, {}, guid, {}};
-        std::lock_guard<std::mutex> lk(mutex_);
-        queue_.push_back(std::move(l3j));
-        cv_.notify_one();
-    }
+    // Phase 2: no per-turn running-L3 update. The session rollup is rebuilt
+    // only on boundaries (episode close / session end), driven from
+    // handle_episode_close — this is what kills the running-L3 churn that was
+    // snapshotting the same summary dozens of times.
     return true;
 }
 
 // --------------------------------------------------------------------
-// L3 update: rebuild the running session summary from all L2 summaries.
-// Called after every successful L2 write. Upserts a single status='current'
-// row (create on first call, update in-place on subsequent ones).
+// Session rollup (Phase 2): rebuild the running session summary from the
+// session's episodes plus any tail L2 turns not yet folded into an episode.
+// INSERT-OR-UPDATE IN PLACE keyed on (session_id, level='session') IGNORING
+// status — this is the bloat-bug fix. The old code matched status='current'
+// and INSERTed a fresh row whenever it found none (e.g. after a close flipped
+// the row to 'complete'), stacking dozens of near-duplicate rows. Now there is
+// exactly one 'session' row per session_id, forever.
 // --------------------------------------------------------------------
 bool SummarizerService::handle_l3_update(const Job& j) {
     if (j.session_guid.empty()) return true;
 
-    auto texts = backend_.l2_summary_texts(j.session_guid);
+    // Corpus = episodes (oldest-first) + tail L2 turns past the last episode.
+    auto texts = backend_.episode_texts(j.session_guid);
+    const std::string since = backend_.last_episode_end(j.session_guid);
+    for (const auto& r : backend_.l2_summaries_since(j.session_guid, since))
+        if (!r.text.empty()) texts.push_back(r.text);
+
+    // Fallback for sessions with no episodes yet (e.g. very short session
+    // ended before an episode closed): roll up straight from all L2 summaries.
+    if (texts.empty())
+        texts = backend_.l2_summary_texts(j.session_guid);
     if (texts.empty()) return true;
 
     const std::string summarizer_model =
@@ -312,39 +321,38 @@ bool SummarizerService::handle_l3_update(const Job& j) {
         summary = summarize_texts(*inference_, texts);
     if (summary.empty()) return false;  // retry next pass
 
-    auto existing = backend_.current_session_summary(j.session_guid);
+    // Match ignoring status so we never insert a duplicate.
+    auto existing = backend_.session_summary_row(j.session_guid);
     if (existing) {
         backend_.update_summary_text(existing->first, summary, summarizer_model);
+        backend_.set_summary_updated_at(existing->first);
     } else {
         backend_.store_summary(summary, "session", "current",
                                summarizer_model, j.session_guid, "", "");
     }
     Diskerror::logger::debug(std::format(
-        "[summarizer] L3 updated for session {}", j.session_guid));
+        "[summarizer] session rollup updated for {}", j.session_guid));
     return true;
 }
 
 // --------------------------------------------------------------------
-// L3 close: finalize the session — mark its running 'current' L3
-// summary as 'complete', then trigger an L4 update.
-// Called by the pause timer when a session has been idle long enough.
+// Session close (Phase 2): a session idle past the threshold gets a FINAL
+// rollup so any tail turns not yet in an episode are folded in, then the
+// project rollup cascades. We no longer flip status current→complete as a
+// "close" mechanism — that flip was what made the old find-existing query
+// (which matched status='current') miss the row and INSERT a duplicate. The
+// session row stays a single running row keyed by (session_id, level).
 // --------------------------------------------------------------------
 bool SummarizerService::handle_l3_close(const Job& j) {
     if (j.session_guid.empty()) return true;
 
-    auto existing = backend_.current_session_summary(j.session_guid);
-    if (!existing) {
-        // No current L3 yet — try an update first then close.
-        if (!handle_l3_update(j)) return false;
-        existing = backend_.current_session_summary(j.session_guid);
-        if (!existing) return false;
-    }
+    // Final rollup (insert-or-update in place, ignoring status).
+    if (!handle_l3_update(j)) return false;
 
-    backend_.set_summary_status(existing->first, "complete");
     Diskerror::logger::info(std::format(
         lang::MSG_SUMMARIZED_SESSION, j.session_guid, 0));
 
-    // Immediately update the L4 project summary.
+    // Refresh the L4 project summary.
     Job l4j{JobKind::L4UpdateProject, -1, -1, {}, {}, {}, {}, {}};
     {
         std::lock_guard<std::mutex> lk(mutex_);
@@ -355,11 +363,12 @@ bool SummarizerService::handle_l3_close(const Job& j) {
 }
 
 // --------------------------------------------------------------------
-// L4 update: rebuild the running project summary from all complete L3s.
-// Upserts a single status='current' project row (session-unscoped).
+// L4 update: rebuild the running project summary. Phase 2: session rows now
+// stay running (never flipped to 'complete'), so the corpus is the newest
+// 'session' summary per session_id. Upserts a single project row.
 // --------------------------------------------------------------------
 bool SummarizerService::handle_l4_update(const Job& /*j*/) {
-    auto texts = backend_.complete_l3_summary_texts();
+    auto texts = backend_.latest_session_summary_texts();
     if (texts.empty()) return true;
 
     const std::string summarizer_model =
@@ -373,6 +382,7 @@ bool SummarizerService::handle_l4_update(const Job& /*j*/) {
     auto existing = backend_.current_project_summary();
     if (existing) {
         backend_.update_summary_text(existing->first, summary, summarizer_model);
+        backend_.set_summary_updated_at(existing->first);
     } else {
         backend_.store_summary(summary, "project", "current",
                                summarizer_model, "", "", "");
@@ -417,6 +427,18 @@ bool SummarizerService::handle_episode_close(const Job& j) {
     Diskerror::logger::info(std::format(
         "[summarizer] episode closed for session {} ({} turns, {} → {})",
         j.session_guid, texts.size(), first_ts, last_ts));
+
+    // Phase 2: an episode boundary is when the session rollup regenerates.
+    // Queue a session rollup (which folds this new episode in), then the
+    // project rollup cascades off it.
+    {
+        Job sj{JobKind::L3UpdateSession, -1, -1, {}, {}, {}, j.session_guid, {}};
+        Job pj{JobKind::L4UpdateProject, -1, -1, {}, {}, {}, {}, {}};
+        std::lock_guard<std::mutex> lk(mutex_);
+        queue_.push_back(std::move(sj));
+        queue_.push_back(std::move(pj));
+        cv_.notify_one();
+    }
     return true;
 }
 

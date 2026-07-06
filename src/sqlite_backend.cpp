@@ -1536,6 +1536,68 @@ struct SqliteBackend::Impl {
         return out;
     }
 
+    // ---- Phase 2: boundary-triggered session/project rollups -----------
+    // All episode texts for a session, oldest-first. Corpus for the session
+    // rollup (episodes + any tail L2 turns are combined by the caller).
+    std::vector<std::string> episode_texts(const std::string& session_guid) {
+        std::vector<std::string> out;
+        if (session_guid.empty()) return out;
+        Stmt s(db,
+            "SELECT s.text FROM summaries s "
+            "JOIN sessions ss ON s.session_id = ss.session_id "
+            "WHERE ss.guid = ? AND s.level = 'episode' "
+            "ORDER BY s.timestamp ASC, s.summary_id ASC");
+        s.bind(1, session_guid);
+        while (s.step()) {
+            auto t = s.column_text(0);
+            if (!t.empty()) out.push_back(std::move(t));
+        }
+        return out;
+    }
+
+    // The session's single level='session' row IGNORING status (bloat-bug
+    // fix). Newest wins if somehow more than one exists. Returns (id, text).
+    std::optional<std::pair<int, std::string>> session_summary_row(
+            const std::string& session_guid) {
+        std::optional<std::pair<int, std::string>> out;
+        if (session_guid.empty()) return out;
+        Stmt s(db,
+            "SELECT summary_id, text FROM summaries "
+            "WHERE level='session' "
+            "  AND session_id = (SELECT session_id FROM sessions WHERE guid = ?) "
+            "ORDER BY summary_id DESC LIMIT 1");
+        s.bind(1, session_guid);
+        if (s.step())
+            out = std::make_pair(s.column_int(0), s.column_text(1));
+        return out;
+    }
+
+    // Stamp updated_at = now for a running rollup row.
+    bool set_summary_updated_at(int summary_id) {
+        Stmt s(db, "UPDATE summaries SET updated_at = ? WHERE summary_id = ?");
+        s.bind(1, local_timestamp()).bind(2, summary_id);
+        return s.exec() && sqlite3_changes(db) > 0;
+    }
+
+    // Project-rollup input: newest level='session' text per session_id,
+    // oldest-first by that row's timestamp. Session rows stay running now
+    // (never flipped to 'complete'), so we pick the latest per session.
+    std::vector<std::string> latest_session_summary_texts() {
+        std::vector<std::string> out;
+        Stmt s(db,
+            "SELECT s.text FROM summaries s "
+            "JOIN (SELECT session_id, MAX(summary_id) AS mid FROM summaries "
+            "      WHERE level='session' AND session_id IS NOT NULL "
+            "      GROUP BY session_id) latest "
+            "  ON s.summary_id = latest.mid "
+            "ORDER BY s.timestamp ASC, s.summary_id ASC");
+        while (s.step()) {
+            auto t = s.column_text(0);
+            if (!t.empty()) out.push_back(std::move(t));
+        }
+        return out;
+    }
+
     std::vector<TurnRecord> turns_by_session_desc(
             const std::string& session_guid, int limit) {
         return turns_by_session_impl(session_guid, false, limit);
@@ -2519,6 +2581,27 @@ int SqliteBackend::store_episode(const std::string& text,
 std::vector<std::string> SqliteBackend::episodes_needing_close(int idle_minutes) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->episodes_needing_close(idle_minutes);
+}
+
+std::vector<std::string> SqliteBackend::episode_texts(const std::string& session_guid) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->episode_texts(session_guid);
+}
+
+std::optional<std::pair<int, std::string>>
+SqliteBackend::session_summary_row(const std::string& session_guid) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->session_summary_row(session_guid);
+}
+
+bool SqliteBackend::set_summary_updated_at(int summary_id) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->set_summary_updated_at(summary_id);
+}
+
+std::vector<std::string> SqliteBackend::latest_session_summary_texts() {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->latest_session_summary_texts();
 }
 
 std::vector<TurnRecord> SqliteBackend::turns_by_session_desc(

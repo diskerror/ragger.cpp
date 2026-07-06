@@ -226,6 +226,28 @@ public:
     virtual std::vector<std::string> episodes_needing_close(
         int idle_minutes) = 0;
 
+    /// All `level='episode'` summary texts for a session, oldest-first. The
+    /// ordered episode corpus a session rollup is rebuilt from (Phase 2).
+    virtual std::vector<std::string> episode_texts(
+        const std::string& session_guid) = 0;
+
+    /// The session's single `level='session'` row **ignoring status**
+    /// (newest wins if somehow >1). This is the bloat-bug fix: the rollup
+    /// upsert must find an existing row regardless of 'current'/'complete',
+    /// so it never INSERTs a duplicate. Returns (summary_id, text) or nullopt.
+    virtual std::optional<std::pair<int, std::string>>
+        session_summary_row(const std::string& session_guid) = 0;
+
+    /// Stamp a summary row's `updated_at` = now (last-regenerate time for a
+    /// running rollup row). Returns false if the row is absent.
+    virtual bool set_summary_updated_at(int summary_id) = 0;
+
+    /// Project-rollup input (Phase 2): the newest `level='session'` summary
+    /// text per session_id, across all sessions, oldest-first by row
+    /// timestamp. Replaces the complete-L3 corpus now that session rows stay
+    /// running (never flipped to 'complete').
+    virtual std::vector<std::string> latest_session_summary_texts() = 0;
+
     /// All turns belonging to a session GUID, newest-first up to `limit`
     /// (0 = unbounded). Mirrors `turns_by_session` but in reverse order and
     /// bounded — used by recipes that walk back from the latest prompt.

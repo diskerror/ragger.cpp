@@ -792,6 +792,123 @@ void test_summary_primitives(ragger::Embedder& emb) {
     cleanup();
 }
 
+// Phase 2 (EPISODE_PLAN): episode layer + boundary-triggered session/project
+// rollups. Deterministic backend-level verification of the bloat-bug fix — no
+// inference needed. Reproduces the shape of the original 1956–1977 defect
+// (repeated rollups after a "close") and asserts exactly one session row.
+void test_episode_rollup_no_dup(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    const std::string G = "phase2-session";
+
+    // No episodes / no session row yet.
+    assert(db.last_episode_end(G).empty());
+    assert(!db.session_summary_row(G).has_value());
+    assert(db.episode_texts(G).empty());
+
+    // Two L2 turn summaries land (distinct timestamps → distinct rows).
+    db.store_summary("Turn one: discussed knowledge graphs.", "turn", "complete",
+                     "memo", G, "2026-01-01 10:00:00");
+    db.store_summary("Turn two: phonetic pun edges.", "turn", "complete",
+                     "memo", G, "2026-01-01 10:00:02");
+
+    // Before any episode, l2_summaries_since(all) returns both.
+    assert(db.l2_summaries_since(G, "").size() == 2);
+
+    // Close episode 1 spanning both turns.
+    int ep1 = db.store_episode("Episode 1: KG design + phonetic edges.",
+                               "memo", G, "2026-01-01 10:00:00",
+                               "2026-01-01 10:00:02");
+    assert(ep1 > 0);
+    assert(db.last_episode_end(G) == "2026-01-01 10:00:02");
+    assert(db.episode_texts(G).size() == 1);
+    // No L2 past the episode end now.
+    assert(db.l2_summaries_since(G, db.last_episode_end(G)).empty());
+
+    // First session rollup: insert (no existing row).
+    assert(!db.session_summary_row(G).has_value());
+    int sess = db.store_summary("Session rollup v1.", "session", "current",
+                                "memo", G, "2026-01-01 10:00:03");
+    assert(sess > 0);
+    auto row = db.session_summary_row(G);
+    assert(row.has_value() && row->first == sess);
+
+    // Simulate the OLD close behaviour: flip to 'complete'. The bloat bug was
+    // that the next find-existing (which matched status='current') then MISSED
+    // this row and INSERTed a duplicate. session_summary_row IGNORES status, so
+    // it must still find exactly this row.
+    assert(db.set_summary_status(sess, "complete"));
+    auto row2 = db.session_summary_row(G);
+    assert(row2.has_value() && row2->first == sess);   // <-- the fix
+
+    // Second episode + rollup: update in place, must NOT insert a new row.
+    db.store_summary("Turn three: curated fiction corpus.", "turn", "complete",
+                     "memo", G, "2026-01-01 11:00:00");
+    db.store_episode("Episode 2: curated corpus bet.", "memo", G,
+                     "2026-01-01 11:00:00", "2026-01-01 11:00:00");
+    assert(db.episode_texts(G).size() == 2);
+
+    auto existing = db.session_summary_row(G);
+    assert(existing.has_value());
+    assert(db.update_summary_text(existing->first, "Session rollup v2.", "memo"));
+    assert(db.set_summary_updated_at(existing->first));
+
+    // Run the upsert cycle several more times (mimics repeated housekeeping
+    // ticks + an inference-outage catch-up storm) — the invariant holds.
+    for (int i = 0; i < 10; ++i) {
+        auto e = db.session_summary_row(G);
+        assert(e.has_value());
+        db.update_summary_text(e->first, "Session rollup iter.", "memo");
+        db.set_summary_updated_at(e->first);
+    }
+
+    // INVARIANT: exactly one level='session' row for this session.
+    sqlite3* raw = nullptr;
+    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(raw,
+        "SELECT COUNT(*) FROM summaries WHERE level='session' "
+        "AND session_id=(SELECT session_id FROM sessions WHERE guid='phase2-session')",
+        -1, &st, nullptr);
+    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1);
+    sqlite3_finalize(st);
+
+    // updated_at was stamped (non-NULL) on the running row; timestamp fixed.
+    sqlite3_prepare_v2(raw,
+        "SELECT timestamp, updated_at FROM summaries WHERE level='session' "
+        "AND session_id=(SELECT session_id FROM sessions WHERE guid='phase2-session')",
+        -1, &st, nullptr);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(std::string(reinterpret_cast<const char*>(sqlite3_column_text(st, 0)))
+           == "2026-01-01 10:00:03");                        // create time fixed
+    assert(sqlite3_column_type(st, 1) != SQLITE_NULL);       // updated_at set
+    sqlite3_finalize(st);
+
+    // Episode rows are immutable: timestamp=first, updated_at=last (span).
+    sqlite3_prepare_v2(raw,
+        "SELECT COUNT(*) FROM summaries WHERE level='episode' "
+        "AND session_id=(SELECT session_id FROM sessions WHERE guid='phase2-session')",
+        -1, &st, nullptr);
+    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 2);
+    sqlite3_finalize(st);
+    sqlite3_close(raw);
+
+    // Project rollup input: newest session text per session_id.
+    auto proj_input = db.latest_session_summary_texts();
+    assert(proj_input.size() == 1);
+    assert(proj_input[0] == "Session rollup iter.");
+
+    // A second session contributes its own latest row to the project corpus.
+    const std::string G2 = "phase2-session-b";
+    db.store_summary("Other session rollup.", "session", "current",
+                     "memo", G2, "2026-01-02 09:00:00");
+    assert(db.latest_session_summary_texts().size() == 2);
+
+    db.close();
+    cleanup();
+}
+
 void test_path_normalization(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
@@ -910,6 +1027,7 @@ int main() {
     test_store_turn(emb);
     test_store_turn_dedup(emb);
     test_summary_primitives(emb);
+    test_episode_rollup_no_dup(emb);
     test_path_normalization(emb);
 
     std::println("test_sqlite_backend: all passed");
