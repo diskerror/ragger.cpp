@@ -28,9 +28,10 @@ computed for each document:
 - **BM25 score:** Okapi BM25 keyword relevance (exact term matching)
 
 Both scores are min-max normalized to [0,1], then blended with configurable
-weights (default: 70% vector, 30% BM25). Top-k results are returned ranked
-by the blended score; the reported score remains raw cosine similarity for
-consistency.
+weights (default: vector 8 / BM25 4 / phonetic 1 — meaning-first, with
+keyword and a gentle "sounds-like" nudge). Top-k results are returned
+ranked by the blended score; the reported score remains raw cosine
+similarity for consistency.
 
 ### 3. Generation
 
@@ -73,24 +74,28 @@ configurable weights.
 
 ### Blending Weights
 
-Default blend: **70% vector, 30% BM25**.
+Default blend: **vector 8 / BM25 4 / phonetic 1** ("sounds-like" via
+Double Metaphone, off by default weight 0 in older versions — now on
+lightly by default).
 
-Configure via `vector_weight` and `bm25_weight` in `[search]`:
+Configure via `vector_weight`, `bm25_weight`, and `phon_weight` in `[search]`:
 
 ```ini
 [search]
-vector_weight = 7
-bm25_weight = 3
+vector_weight = 8
+bm25_weight   = 4
+phon_weight   = 1
 ```
 
-Weights are ratios (not percentages). They're normalized to sum to 1.0
-internally. Using integers avoids floating-point config parsing issues.
+Weights are ratios (not percentages). They're normalized internally.
+Using integers avoids floating-point config parsing issues.
 
-**To disable BM25 entirely:**
+**To disable BM25 or the phonetic signal:**
 
 ```ini
 [search]
 bm25_enabled = false
+phon_weight  = 0
 ```
 
 ## BM25 Tuning
@@ -217,45 +222,14 @@ For larger deployments, the pluggable `StorageBackend` interface
 in a vector database — `SqliteBackend` is the only concrete
 implementation today.
 
-## Query Logging
+## Retrieval instrumentation (optional, build-time)
 
-Search queries are logged to `~/.ragger/query.log` as single-line JSON
-entries with timing, result scores, and quality metrics.
-
-**Example log entry:**
-
-```json
-{
-  "timestamp": "2024-03-20T15:23:45",
-  "query": "API authentication",
-  "limit": 5,
-  "min_score": 0.4,
-  "results": 3,
-  "top_score": 0.82,
-  "elapsed_ms": 12.3,
-  "total_docs": 10614
-}
-```
-
-**Fields:**
-
-- `timestamp` — ISO 8601 timestamp
-- `query` — The search query
-- `limit` — Requested result count
-- `min_score` — Minimum score threshold
-- `results` — Actual result count (after filtering by score)
-- `top_score` — Highest score in results
-- `elapsed_ms` — Query time in milliseconds
-- `total_docs` — Total documents in the database
-
-**Enable/disable:**
-
-```ini
-[logging]
-query_log = true
-```
-
-Logging failures are caught silently — they never break search operations.
+Per-query logging is not a runtime `settings.ini` option — there is no
+`query.log` and no `[logging] query_log` key. Instead, a compile-time
+flag (`RAGGER_STATS`, off by default) logs every search's per-signal
+score breakdown to a separate, discardable `~/.ragger/stats.db`. See
+[Configuration → retrieval stats](configuration.md#build-time-instrumentation-retrieval-stats-ragger_stats)
+for the full schema and example queries.
 
 ## Related
 

@@ -7,8 +7,20 @@ you see is the file the daemon reads.
 
 `~/.ragger/settings.ini`. `install.sh` copies `example-settings.ini` from
 the source tree the first time, then leaves it alone on re-installs.
+`example-settings.ini` is the single source of truth for the full key
+list — it's also compiled directly into the binary as the built-in
+default (via a CMake build step), so the shipped template and the
+fallback config can never drift apart.
 
-To run against a different file (testing, side-by-side configs):
+Every other on-disk path Ragger uses (database, models, recipes, formats,
+log, token, stats, socket) is hardcoded relative to a single base
+directory, `~/.ragger` by default. None of that is independently
+configurable in `settings.ini`. The only way to relocate the whole tree
+is the hidden `--ragger-base <path>` CLI flag — undocumented in
+`--help`, meant for tests, not for normal use. If you need Ragger's data
+on a different disk, symlink `~/.ragger` there instead.
+
+To run against a different settings file (testing, side-by-side configs):
 
 ```bash
 ragger serve --config /custom/path/settings.ini
@@ -17,43 +29,40 @@ ragger serve --config /custom/path/settings.ini
 ## Quick map of the sections
 
 | Section          | Purpose                                                        |
-|------------------|----------------------------------------------------------------|
-| `[server]`       | Bind address, port, turn-capture/build-context toggles, recipes |
-| `[storage]`      | Where the SQLite database lives                                |
+|------------------|-----------------------------------------------------------------|
+| `[server]`       | Socket/bind/port, TLS cert/key, turn-capture/build-context toggles, recipes |
 | `[embedding]`    | Model, vector dimensions, on-disk precision                    |
-| `[search]`       | Default limit, score floor, BM25/vector blend                  |
-| `[inference]`    | Summarization endpoint (used by the L2/L3 worker)              |
+| `[search]`       | Default limit, score floor, BM25/vector/phonetic blend, `inject_data` |
+| `[summarizer]`   | Inference endpoint used by the L2/L3 background worker         |
 | `[embed]`        | Embedding subprocess pool — timeouts, retries, concurrency     |
-| `[tls]`          | Cert/key paths if you terminate TLS in-process                 |
-| `[logging]`      | Log directory, level, per-stream toggles                       |
-| `[housekeeping]` | Retention, pass cadence, summary-pause minutes                 |
+| `[logging]`      | Log level (one unified log file — see below)                  |
+| `[housekeeping]` | Retention, pass cadence, episode-idle minutes                  |
 | `[import]`       | Minimum chunk size for markdown imports                        |
 | `[paths]`        | Path normalization options                                     |
-| `[models]`       | Aliases for inference model routing                            |
 
-The shipped `example-settings.ini` is the single source of truth for the
-full key list. The tables below cover the keys you're most likely to
-touch.
+The tables below cover every key currently recognized by the parser.
 
 ## `[server]`
 
 | Key              | Default         | Description |
 |------------------|-----------------|-------------|
-| `socket`         | `~/.ragger/ragger.sock` | Unix socket; the primary transport. Empty disables it. |
-| `bind`           | `(empty)`       | TCP bind address. Empty = unix socket only. |
+| `socket_enable`  | `true`          | AF_UNIX listener, always at `~/.ragger/ragger.sock` (path not configurable). Legacy key `socket = <path>` is still accepted for back-compat — any non-empty value enables the listener. |
+| `bind`           | `(empty)`       | TCP bind address. Empty = unix socket only. Must be a valid IPv4/IPv6 literal or hostname — a malformed value fails at startup. |
 | `port`           | `8432`          | TCP port (only meaningful when `bind` is set). |
 | `server_name`    | `(empty)`       | Hostname used by cpp-httplib (e.g. `ragger.local`). |
+| `cert`           | `(empty)`       | Path to a TLS certificate chain (PEM). Both `cert` and `key` must be set to enable native TLS. Native TLS isn't wired up yet (see [TLS setup](tls-setup.md)) — use a reverse proxy for now. |
+| `key`            | `(empty)`       | Path to a TLS private key (PEM). |
 | `capture_turns`  | `true`          | **Write side.** When `true`, `capture_turn` (MCP) / `POST /turn` ingests agent-pushed turns into the `turns` table. Set `false` to make the call a no-op. |
-| `build_context`  | `false`         | **Read side.** When `true`, `build_context` / `GET /session/<id>` assembles a recipe-shaped payload. Only meaningful when `capture_turns` is also on. Agent-driven `search`/`store` work either way. |
-| `default_recipe` | `natural_fading` | Recipe used when the caller doesn't name one. See [Recipes](#recipes) below. |
-| `recipes_dir`    | `~/.ragger/recipes` | Where the daemon loads recipe JSON from. Built-ins kick in only if this directory is missing or empty. |
+| `build_context`  | `false`         | **Read side.** When `true`, `build_context` / `GET /session/<id>` assembles a recipe-shaped payload. Only meaningful when `capture_turns` is also on. Agent-driven `search`/`store` work either way. Not currently documented in `example-settings.ini` — code and default (`false`) remain intact if you want to opt back in by hand. |
+| `default_recipe` | `natural_fading` | Recipe used when the caller doesn't name one. See [Recipes](#recipes) below. Also undocumented in the shipped template for the same reason as `build_context`; both keys are still parsed. |
 
-## `[storage]`
+Both listeners can run at the same time. If `socket_enable` is false and
+`bind` is empty, the daemon falls back to `bind = 127.0.0.1` so there's
+always at least one listener.
 
-| Key            | Default                  | Description                  |
-|----------------|--------------------------|------------------------------|
-| `db_path`      | `~/.ragger/memories.db`  | SQLite database file.        |
-| `formats_dir`  | `~/.ragger/formats`      | Inference API format JSON.   |
+`[tls]` / `[ssl]` (legacy standalone sections) are still silently
+accepted with `cert`/`key` keys for back-compat with older configs —
+new configs should set `cert`/`key` under `[server]` instead.
 
 ## `[embedding]`
 
@@ -64,11 +73,12 @@ mismatches abort startup with a clear error.
 
 | Key          | Default            | Description                                                  |
 |--------------|--------------------|--------------------------------------------------------------|
-| `model`      | `all-MiniLM-L6-v2` | Sentence-transformer model name; resolved under `~/.ragger/models/`. |
+| `model`      | `all-MiniLM-L6-v2` | Sentence-transformer model name; resolved under `~/.ragger/models/<model-name>/`. |
 | `dimensions` | `384`              | Vector size; must match the model.                           |
 | `vector_type`| `f16`              | On-disk precision. `f16` halves blob size; `f32` is full precision. In-memory math is always f32. |
 
-Model files always live at `~/.ragger/models/<model-name>/` — this is not independently configurable; it's hardcoded like every other Ragger path.
+Model files always live at `~/.ragger/models/<model-name>/` — not
+independently configurable; hardcoded like every other Ragger path.
 
 ## `[search]`
 
@@ -80,23 +90,30 @@ Model files always live at `~/.ragger/models/<model-name>/` — this is not inde
 | `bm25_weight`       | `4`     | Weight for the BM25 signal (ratio, not percentage; integers preferred).     |
 | `vector_weight`     | `8`     | Weight for the cosine signal.                                               |
 | `phon_weight`       | `1`     | Weight for the phonetic "sounds-like" (Double Metaphone) signal. `0` off.   |
+| `inject_data`       | `false` | Reserved — parsed and hot-reloadable, not yet wired to any search behavior. |
 | `max_search_limit`  | `0`     | Ceiling on client-requested `limit` for sub-users. `0` disables the cap.    |
 
 Weights are ratios; they're normalized internally. The default blend is
 `8` vector / `4` bm25 / `1` phon — meaning-first, with keyword and a gentle
 phonetic nudge. `phon_weight = 0` disables the sounds-like signal entirely.
 
-## `[inference]` — summarization endpoint
+## `[summarizer]` — the only inference endpoint
 
 Ragger only calls inference for L2/L3 summarization. There is no chat
-surface.
+surface. (Older versions had a separate `[inference]` block for a
+general-purpose endpoint plus `[inference.<name>]` multi-endpoint
+routing — both are gone from the documented config; `[summarizer]` is
+the sole inference section going forward.)
 
 | Key          | Default                       | Description |
-|--------------|-------------------------------|-------------|
-| `model`      | *(empty)*                     | Model name the summarizer asks for. Empty disables real summarization (drafts only). |
+|--------------|--------------------------------|-------------|
+| `model`      | `qwen3-4b-instruct-2507`       | Model name the summarizer asks for. |
 | `api_url`    | `http://localhost:1234/v1`    | OpenAI-compatible base URL. Default targets LM Studio's localhost convention. |
 | `api_key`    | *(empty)*                     | Bearer key for the endpoint, if it needs one.   |
-| `max_tokens` | `4096`                        | Cap for a single summarization call.            |
+| `max_tokens` | `1024`                         | Cap for a single summarization call.            |
+| `target_pct` | `40`                           | Target summary length as % of the raw turn. `0` = built-in default of 30%. |
+| `max_pct`    | `60`                           | Hard cap as % of the raw turn. `0` = built-in default of 60%. |
+| `prompt`     | *(built-in default)*           | System prompt sent to the summarizer. Quote it to protect `#` from being read as a comment. Two `{}` placeholders (target chars, hard cap) are required if you override it. Set to a single space `" "` to suppress the system prompt entirely. |
 
 **Choosing a model.** Summarization is a short, low-complexity task —
 model quality matters far less than model speed.
@@ -109,8 +126,8 @@ model quality matters far less than model speed.
   with reasoning enabled, etc.). They spend 200–300 tokens on internal
   chain-of-thought before writing a single output token — summaries
   take 30–60× longer for no quality gain on this task.
-- **Keep `max_tokens` at 1024 or below.** The summarizer targets ¼ of
-  the source length and caps at the source length. 1024 tokens is
+- **Keep `max_tokens` at 1024 or below.** The summarizer targets a
+  fraction of the source length and caps well under it. 1024 tokens is
   generous for any single turn. Requesting more wastes KV cache and
   will crash GGUF models loaded in LM Studio with `parallel > 1`
   (each slot's budget is `context_length / parallel`; requesting more
@@ -125,18 +142,14 @@ concatenation, tagged `draft`) so the chronology stays intact. A
 housekeeping pass re-summarizes drafts the next time inference is
 available — no manual catch-up needed.
 
-For multiple endpoints (e.g. a fast local model plus a remote
-fallback), declare `[inference.<name>]` sections; the client routes by
-fnmatch globs in each section's `models` key. See
-`example-settings.ini` for a worked example.
-
 ## `[housekeeping]`
 
 | Key                     | Default | Description                                                                        |
 |-------------------------|---------|------------------------------------------------------------------------------------|
 | `cleanup_max_age_hours` | `0`     | Raw-turn lifetime. `0` = keep forever (default). Set to hours (e.g. `336` = 2 weeks) to auto-purge old turns. |
 | `housekeeping_interval` | `60`    | Seconds between background passes. `0` disables; values under 10 are clamped to 10.|
-| `summary_pause_minutes` | `20`    | Idle gap that closes a session's running L3 summary.                               |
+| `episode_idle_minutes`  | `15`    | Idle gap (minutes) that closes an episode of work within a session, and drives session/project rollups. Any positive integer. |
+| `summary_pause_minutes` | `20`    | Deprecated alias for `episode_idle_minutes` — honored only when `episode_idle_minutes` is unset. |
 
 The same housekeeping loop catches turns that landed without a
 summary (e.g. captured via MCP while the daemon was down) and rewrites
@@ -156,21 +169,32 @@ model.
 ## `[logging]`
 
 | Key         | Default                  | Description                                                              |
-|-------------|--------------------------|--------------------------------------------------------------------------|
-| `log_file`  | `~/.ragger/activity.log` | Primary log file.                                                        |
+|-------------|--------------------------|----------------------------------------------------------------------------|
 | `log_level` | `warn`                   | One of `trace`, `debug`, `info`, `warn`, `error`, `critical`.            |
-| `log_dir`   | `~/.ragger`              | Directory for per-stream logs (query, http, mcp).                        |
-| `query_log` | `true`                   | Log every search query as single-line JSON to `query.log`.               |
-| `http_log`  | `true`                   | Log HTTP requests.                                                       |
-| `mcp_log`   | `true`                   | Log MCP requests.                                                        |
-| `debug_log` | `false`                  | Opt-in per-chunk / per-embedding tracing.                                |
+
+Everything — queries, HTTP, MCP, general daemon activity — goes to one
+log file, hardcoded at `~/.ragger/activity.log`. There are no separate
+per-stream log files or toggles (older versions had `log_dir`,
+`query_log`, `http_log`, `mcp_log`, `debug_log` — all removed; a single
+unified log replaces them).
+
+## `[paths]`
+
+| Key              | Default | Description                                         |
+|------------------|---------|------------------------------------------------------|
+| `normalize_home` | `true`  | Replace `/Users/<you>` (or `/home/<you>`) with `~` in stored text. |
+
+## `[import]`
+
+| Key                   | Default | Description                            |
+|-----------------------|---------|-----------------------------------------|
+| `minimum_chunk_size`  | `300`   | Minimum characters per chunk when importing markdown/text. |
 
 ## Recipes
 
-A recipe is a JSON file in `recipes_dir` (default
-`~/.ragger/recipes/`) that describes how `build_context` should assemble
-the payload for an agent. Each recipe is a list of layers walked back
-from the latest turn:
+A recipe is a JSON file in `~/.ragger/recipes/` that describes how
+`build_context` should assemble the payload for an agent. Each recipe is
+a list of layers walked back from the latest turn:
 
 ```json
 {
@@ -204,7 +228,7 @@ to the next on miss):
 1. The `recipe` argument on the `build_context` MCP tool or the
    `?recipe=` query param on `GET /session/<id>`.
 2. DB `settings.recipe` (set by `ragger recipe`). The sentinel value
-   `default` means "track [server] default_recipe in settings.ini" —
+   `default` means "track `[server] default_recipe` in settings.ini" —
    pick it to revert.
 3. `[server] default_recipe` in `settings.ini`.
 4. The first built-in if all of the above miss.
@@ -212,6 +236,11 @@ to the next on miss):
 The DB lookup happens once per `build_context` call; changing your
 choice with `ragger recipe` takes effect on the next request, no
 daemon restart needed.
+
+Note: `build_context`/`default_recipe` are still functional (code and
+recipes are fully intact) but no longer documented in the shipped
+`example-settings.ini` template — set them by hand if you want the
+feature; the default remains off (`build_context = false`).
 
 ## Ceilings for sub-users
 
@@ -226,8 +255,9 @@ For a personal install with no sub-users, leave ceilings at `0`.
 
 `ragger reload` sends `SIGHUP` to the daemon, which re-reads the file
 and applies hot-reloadable keys in place. Keys that require a restart
-log a warning instead of silently being ignored. The reload also
-re-scans `recipes_dir`.
+(e.g. `port`, `socket_enable`, `bind`, `tls_cert`, `tls_key`,
+`embedding_model`, `embedding_dimensions`, `embedding_vector_type`) log
+a warning instead of silently being ignored.
 
 ## Build-time instrumentation: retrieval stats (`RAGGER_STATS`)
 

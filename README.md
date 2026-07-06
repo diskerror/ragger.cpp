@@ -34,13 +34,13 @@ diverged at v0.9.4 — now the sole focus.
   summaries, project summaries, and decisions. Five recipes ship; users
   can drop more JSON into `~/.ragger/recipes/`.
 - **Hybrid search.** BM25/FTS5 keyword search blended with dense vector
-  cosine via Eigen3. Configurable weights; both signals normalized
-  before blending.
+  cosine via Eigen3, plus an optional phonetic ("sounds-like") signal.
+  Configurable weights; all signals normalized before blending.
 - **Local embeddings.** `all-MiniLM-L6-v2` via ONNX Runtime (384-dim).
   Stored as IEEE half (f16) by default to halve disk; in-memory math
   stays f32. Re-encode any time with `ragger rebuild-embeddings`.
 - **HTTP and MCP, same data.** Daemon serves a REST API; `ragger mcp`
-  speaks JSON-RPC over stdio. Bearer-token auth on remote requests,
+  speaks JSON-RPC over stdio. Bearer-token auth on remote requests;
   unix-socket and loopback are pre-authenticated.
 - **Markdown-aware import.** Heading-aware chunking; Claude Code and
   claude.ai conversation archives import with original timestamps.
@@ -83,6 +83,12 @@ cmake -B build -DBOOST_ROOT=/opt/local/libexec/boost/1.88 \
 
 ## Layout
 
+Every on-disk path is hardcoded relative to a single base directory
+(`~/.ragger` by default). There's no per-path config — the only way to
+relocate the whole tree is the hidden `--ragger-base <path>` flag
+(testing only; not documented in `--help`). Symlink `~/.ragger`
+elsewhere if you need the data on a different disk.
+
 | What | Where |
 |---|---|
 | Binary | `~/.local/bin/ragger` |
@@ -91,10 +97,11 @@ cmake -B build -DBOOST_ROOT=/opt/local/libexec/boost/1.88 \
 | Embedding model | `~/.ragger/models/` |
 | Recipes | `~/.ragger/recipes/` |
 | Inference formats | `~/.ragger/formats/` |
-| Logs | `~/.ragger/logs/` |
+| Log | `~/.ragger/activity.log` |
 | Persona | `~/.ragger/SOUL.md` |
 | Bearer token | `~/.ragger/token` |
 | Unix socket | `~/.ragger/ragger.sock` |
+| Retrieval stats (opt-in build) | `~/.ragger/stats.db` |
 
 ## Build dependencies
 
@@ -142,12 +149,12 @@ Windows needs porting (`fork()`, the bash/launchctl/systemd install scripts).
 | Guide | |
 |-------|--|
 | [Getting started](docs/getting-started.md) | Setup and first run |
-| [Configuration](docs/configuration.md) | `settings.ini` reference, including the new turn-capture, summarizer, and recipe keys |
+| [Configuration](docs/configuration.md) | `settings.ini` reference |
 | [Search & RAG](docs/search-and-rag.md) | How hybrid search works |
-| [HTTP API](docs/http-api.md) | REST endpoints, MCP, auth, the new `/turn` and `/session/<id>?recipe=` paths |
+| [HTTP API](docs/http-api.md) | REST endpoints, MCP, auth, `/turn` and `/session/<id>?recipe=` |
 | [Importing conversations](docs/importing-conversations.md) | Claude Code / claude.ai history |
 | [Deployment](docs/deployment.md) | Daemon lifecycle, sub-users, reverse proxy |
-| [TLS setup](docs/tls-setup.md) | HTTPS via reverse proxy |
+| [TLS setup](docs/tls-setup.md) | HTTPS via reverse proxy or native cert/key |
 | [Agent integration](docs/agent-integration.md) | MCP and Claude Desktop |
 | [Agent memory instructions](docs/agent-memory-instructions.md) | Guidance served to agents over MCP |
 | [OpenClaw](docs/openclaw.md) | OpenClaw plugin setup |
@@ -156,7 +163,7 @@ Windows needs porting (`fork()`, the bash/launchctl/systemd install scripts).
 ## Tests
 
 ```bash
-cd build && ctest --output-on-failure   # 12 suites
+cd build && ctest --output-on-failure   # 14 suites
 ```
 
 ## License

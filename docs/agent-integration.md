@@ -33,7 +33,7 @@ Once turn capture is on, the daemon-resident summarizer takes care of:
   written *with the source turn's timestamp* so a turn and its summary
   share a join key — no FK column, embedding rebuilds preserve the
   link.
-- **L3 session summaries.** After `summary_pause_minutes` of idle on a
+- **L3 session summaries.** After `episode_idle_minutes` of idle on a
   session, the worker reads the session's turns, summarizes the whole
   transcript, and writes a `level='session'` row. The session is
   closed by the existence of that row — no separate state.
@@ -144,7 +144,7 @@ bearer token. Memories are isolated per-user at the API layer.
 
 **Offline / air-gapped.**
 The embedding model downloads once; after that, no network is needed
-unless you've pointed `[inference] api_url` at a remote summarizer.
+unless you've pointed `[summarizer] api_url` at a remote endpoint.
 
 ## What MCP can and can't do
 

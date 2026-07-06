@@ -28,9 +28,15 @@ most modern shells); everything else under `~/.ragger/`:
 | Embedding model      | `~/.ragger/models/`         |
 | Recipes              | `~/.ragger/recipes/`        |
 | Inference formats    | `~/.ragger/formats/`        |
-| Logs                 | `~/.ragger/logs/`           |
+| Log                  | `~/.ragger/activity.log`    |
 | Persona              | `~/.ragger/SOUL.md`         |
 | Bearer token         | `~/.ragger/token`           |
+
+Every path above is hardcoded relative to `~/.ragger` — none of it is
+independently configurable in `settings.ini`. The only override is a
+hidden `--ragger-base <path>` CLI flag (testing only, not shown in
+`--help`); symlink `~/.ragger` elsewhere if you need the data on a
+different disk.
 
 `install.sh` is idempotent — re-run it after any rebuild to refresh the
 binary, service unit, and shipped recipes. Your config, database, and
@@ -107,16 +113,19 @@ extend the menu — see [Configuration → Recipes](configuration.md#recipes).
 
 ## Turn capture
 
-Both sides of the turn pipeline ship enabled — agents that POST turns
-get them ingested and summarized, and they can ask for a recipe-shaped
-context payload to inject. To turn either off, edit
-`~/.ragger/settings.ini`:
+`capture_turns` ships enabled; `build_context` ships **disabled**
+(agents get `search`/`store` either way; the recipe-shaped context
+payload is opt-in). To change either, edit `~/.ragger/settings.ini`:
 
 ```ini
 [server]
-capture_turns = false    # write: stop ingesting agent-pushed turns
-build_context = false    # read: stop serving recipe context payloads
+capture_turns = true     # write: ingest agent-pushed turns
+build_context = false    # read: serve recipe-shaped context payloads
 ```
+
+Note: `build_context` and `default_recipe` are still fully functional
+but no longer documented in the shipped `example-settings.ini` template
+— add them by hand if you want the read side turned on.
 
 `ragger reload` (or `ragger restart`) picks up the change. With
 capture on, every turn an agent hands Ragger gets summarized in the
@@ -125,11 +134,9 @@ agent.
 
 ## Embedding model
 
-The model is downloaded on first use. To pull it explicitly:
-
-```bash
-ragger update-model
-```
+The model is downloaded once by `install.sh` (~90 MB); re-run the
+script if the network was down the first time. There's no separate
+CLI command to fetch it — `install.sh` is the mechanism.
 
 Files land in `~/.ragger/models/all-MiniLM-L6-v2/`.
 

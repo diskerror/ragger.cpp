@@ -9,7 +9,7 @@ Ragger installs per-user. The executable lives on `PATH` under
 ~/.ragger/settings.ini      # config
 ~/.ragger/memories.db       # SQLite database
 ~/.ragger/ragger.sock       # unix socket (daemon)
-~/.ragger/logs/             # daemon logs
+~/.ragger/activity.log      # daemon log (unified — no separate per-stream logs)
 ~/.ragger/models/           # embedding models
 ~/.ragger/formats/          # inference API format definitions
 ~/.ragger/recipes/          # build_context recipes (JSON)
@@ -18,7 +18,9 @@ Ragger installs per-user. The executable lives on `PATH` under
 ```
 
 No `sudo`, no system user, no `/etc/` or `/var/` paths. The daemon
-runs as you.
+runs as you. Every path above is hardcoded relative to `~/.ragger` —
+the only override is a hidden `--ragger-base <path>` CLI flag
+(testing only, not shown in `--help`).
 
 ## Multi-user: One Install, Many Clients
 
@@ -51,7 +53,7 @@ ragger start         # bring the daemon up
 
 `install.sh`:
 
-- Creates `~/.local/bin` and `~/.ragger/{logs,models,formats,recipes,www}` if missing
+- Creates `~/.local/bin` and `~/.ragger/{models,formats,recipes,www}` if missing
 - Copies `example-settings.ini` → `~/.ragger/settings.ini` on first run
 - Refreshes `~/.ragger/formats/` and `~/.ragger/recipes/` from the source
   tree (user-added files are preserved; user edits to shipped files are
@@ -105,11 +107,10 @@ and it's optional.
 
 ### Logs
 
-- `~/.ragger/logs/stdout.log`
-- `~/.ragger/logs/stderr.log`
-
-`deploy.sh` truncates these on each deploy so a fresh run is easy to
-read.
+`~/.ragger/activity.log` — one unified log for daemon startup,
+queries, HTTP, and MCP activity. There are no separate stdout/stderr
+files or per-stream logs; the LaunchAgent/systemd unit points both
+stdout and stderr at this same file.
 
 ## Adding Sub-Users
 
@@ -176,7 +177,7 @@ mv ~/.local/bin/ragger-cpp ~/.local/bin/ragger
 ## Troubleshooting
 
 **Daemon won't start:**
-Check `~/.ragger/logs/stderr.log`. Common causes: port 8432 already
+Check `~/.ragger/activity.log`. Common causes: port 8432 already
 in use, missing embedding model in `~/.ragger/models/`, invalid
 `settings.ini` (run `ragger serve` in the foreground to see the
 parse error).

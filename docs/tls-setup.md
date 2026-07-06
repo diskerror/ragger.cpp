@@ -6,6 +6,15 @@ every request — plaintext HTTP across a network leaks them. Local-only
 use (unix socket, `127.0.0.1`) doesn't need TLS; loopback and the
 socket are pre-authenticated.
 
+**Native TLS is not wired up yet.** `cert`/`key` are parsed and
+accepted under `[server]` in `settings.ini`, but the daemon currently
+only logs that TLS config is present and serves plain HTTP regardless
+— see `MSG_TLS_NOT_SUPPORTED` in the source. Use a reverse proxy
+(option 3 below) for real TLS termination today; the self-signed and
+Let's Encrypt sections below describe the config keys for when native
+support lands, and are otherwise reusable as cert-generation recipes
+to feed into a reverse proxy.
+
 Three options below — pick whichever fits your setup.
 
 ---
@@ -37,12 +46,15 @@ Add to `~/.ragger/settings.ini`:
 
 ```ini
 [server]
-tls_cert = ~/.ragger/tls/cert.pem
-tls_key  = ~/.ragger/tls/key.pem
+cert = ~/.ragger/tls/cert.pem
+key  = ~/.ragger/tls/key.pem
 ```
 
-Restart the daemon (`ragger restart`). Access via `https://192.168.0.166:8432` (HTTPS works on
-any port — 443 is just the convention).
+(Not yet functional — see note above. Restart the daemon after editing
+either way; `ragger restart`.) Once native TLS lands, access would be
+via `https://192.168.0.166:8432` (HTTPS works on any port — 443 is
+just the convention). Until then, put this cert/key pair in front of a
+reverse proxy instead (option 3).
 
 ### Trust the certificate
 
@@ -103,9 +115,13 @@ Certificates are saved to:
 
 ```ini
 [server]
-tls_cert = /etc/letsencrypt/live/chat.yourdomain.com/fullchain.pem
-tls_key  = /etc/letsencrypt/live/chat.yourdomain.com/privkey.pem
+cert = /etc/letsencrypt/live/chat.yourdomain.com/fullchain.pem
+key  = /etc/letsencrypt/live/chat.yourdomain.com/privkey.pem
 ```
+
+(See the native-TLS note at the top — these keys are parsed but not
+yet enforced. Use a reverse proxy today; option 3 below shows the same
+cert wired into Caddy/nginx instead.)
 
 ### Automatic renewal
 
