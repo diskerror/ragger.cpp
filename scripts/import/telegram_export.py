@@ -16,7 +16,9 @@ Usage:
 
 First run will prompt for phone number + login code (and 2FA password if
 set) interactively; session is cached in telegram_export.session next to
-this script so subsequent runs don't re-prompt.
+this script while the export is in progress. On a successful run this
+session file is deleted at the end — it's an authenticated credential and
+shouldn't linger on disk. A re-run will simply re-prompt for login.
 """
 
 import argparse
@@ -139,6 +141,13 @@ def main():
     args = ap.parse_args()
 
     asyncio.run(export(args.chat, Path(args.output), args.limit, args.self_name))
+
+    # Export succeeded (asyncio.run raises on failure, so we only get here on
+    # success) — the session file is an authenticated credential, not build
+    # output; delete it so it doesn't linger on disk between runs.
+    if SESSION_PATH.exists():
+        SESSION_PATH.unlink()
+        print(f"Removed {SESSION_PATH}", file=sys.stderr)
 
 
 if __name__ == "__main__":
