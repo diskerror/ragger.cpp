@@ -50,7 +50,7 @@ The tables below cover every key currently recognized by the parser.
 | `bind`           | `(empty)`       | TCP bind address. Empty = unix socket only. Must be a valid IPv4/IPv6 literal or hostname — a malformed value fails at startup. |
 | `port`           | `8432`          | TCP port (only meaningful when `bind` is set). |
 | `server_name`    | `(empty)`       | Hostname used by cpp-httplib (e.g. `ragger.local`). |
-| `cert`           | `(empty)`       | Path to a TLS certificate chain (PEM). Both `cert` and `key` must be set to enable native TLS. Native TLS isn't wired up yet (see [TLS setup](tls-setup.md)) — use a reverse proxy for now. |
+| `cert`           | `(empty)`       | Path to a TLS certificate chain (PEM). Both `cert` and `key` must be set and load successfully to enable native TLS — once active, the TCP listener serves HTTPS only. Any problem (only one set, unloadable pair) is logged as a warning (stderr + `~/.ragger/activity.log`) and the daemon falls back to plain HTTP rather than refusing to start. |
 | `key`            | `(empty)`       | Path to a TLS private key (PEM). |
 | `capture_turns`  | `true`          | **Write side.** When `true`, `capture_turn` (MCP) / `POST /turn` ingests agent-pushed turns into the `turns` table. Set `false` to make the call a no-op. |
 | `build_context`  | `false`         | **Read side.** When `true`, `build_context` / `GET /session/<id>` assembles a recipe-shaped payload. Only meaningful when `capture_turns` is also on. Agent-driven `search`/`store` work either way. Not currently documented in `example-settings.ini` — code and default (`false`) remain intact if you want to opt back in by hand. |

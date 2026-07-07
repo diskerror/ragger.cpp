@@ -63,23 +63,6 @@ constexpr const char* CLI_EMBEDDINGS          = "Include embedding column in exp
 constexpr const char* ERR_PAYLOAD_DUMP_DIR    = "Error: cannot create payload dump directory '{}': {}";
 constexpr const char* MSG_PAYLOAD_DUMP_CREATED= "Created payload dump directory: {}";
 
-// --- Inference / chat setup ---
-constexpr const char* ERR_NO_ENDPOINTS_HINT    = R"(Error: no inference endpoints configured.
-Add to settings.ini:
-
-  [inference]
-  api_url = http://localhost:1234/v1
-  api_key = lmstudio-local
-
-Or for multiple endpoints:
-
-  [inference.local]
-  api_url = http://localhost:1234/v1
-  api_key = lmstudio-local
-  models = qwen/*, llama/*)";
-constexpr const char* ERR_ENDPOINT_UNREACHABLE= "Error: cannot reach inference endpoint '{}' at {}\n    {}";
-constexpr const char* ERR_ENDPOINT_HTTP       = "Error: inference endpoint '{}' returned HTTP {}";
-
 // --- Daemon control ---
 constexpr const char* ERR_HOME_NOT_FOUND      = "Error: cannot resolve $HOME";
 constexpr const char* ERR_PLIST_NOT_FOUND     = "Error: {} not found. Run ./install.sh first.";
@@ -143,15 +126,9 @@ constexpr const char* MSG_ABORTED             = "Aborted.";
 constexpr const char* MSG_DB_BACKED_UP        = "Database backed up to: {}";
 constexpr const char* WARN_BACKUP_FAILED      = "Warning: Failed to create backup: {}";
 constexpr const char* MSG_EMBEDDINGS_REBUILT  = "✓ Embeddings rebuilt: {} rows";
-
-// --- Chat prompts ---
-constexpr const char* CHAT_PROMPT_USER        = "You: ";
-constexpr const char* CHAT_PROMPT_ASSISTANT   = "Assistant: ";
-constexpr const char* WARN_STORE_TURN         = "Warning: failed to store turn: {}";
+// --- Import / embed warnings ---
 constexpr const char* WARN_EMBED_SUBPROCESS   = "Warning: embed subprocess failed (attempt {}/{}); embedding skipped";
 constexpr const char* WARN_IMPORT_EMBED_SKIPPED = "Warning: {}/{} chunks left unembedded (embed subprocess failed or timed out); re-import to retry";
-constexpr const char* WARN_ORPHAN_CHECK       = "Warning: orphan check failed: {}";
-constexpr const char* WARN_SUMMARY            = "Warning: summary generation failed: {}";
 
 // --- Summarizer service (daemon-resident L2/L3 worker) -------------
 constexpr const char* MSG_SUMMARIZER_START    = "Summarizer started (catch-up queued: {} turn(s), {} draft(s), {} session(s) to close)";
@@ -163,69 +140,9 @@ constexpr const char* MSG_SUMMARIZER_REDRAFT  = "Rewrote draft L2 summary_id {} 
 constexpr const char* WARN_SUMMARIZER_L2      = "Summarizer L2 failed for turn_id {}: {}";
 constexpr const char* WARN_SUMMARIZER_L3      = "Summarizer L3 failed for session {}: {}";
 constexpr const char* WARN_SUMMARIZER_DRAFT   = "Summarizer draft retry failed for summary_id {}: {}";
-constexpr const char* ERR_NO_SYSTEM_PROMPT    = "Error: no system prompt files found. ";
-constexpr const char* MSG_NO_SYSTEM_PROMPT_HINT = "Create ~/.ragger/SYSTEM.md or add SOUL.md / USER.md / MEMORY.md.";
-constexpr const char* MSG_NO_PERSONA_FILES    = "No persona files found in {}. Chat will use an empty system prompt.";
-constexpr const char* WARN_ENDPOINT_DOWN      = "Warning: {} is not reachable";
-constexpr const char* WARN_CHAT_ERROR         = "Warning: {}";
-constexpr const char* WARN_MEMORY_SEARCH      = "Warning: memory search failed: {}";
+constexpr const char* WARN_SUMMARY            = "Warning: summary generation failed: {}";
 
-// --- Chat REPL banner / status ---
-constexpr const char* MSG_CHAT_BANNER         = "Ragger Chat (model: {})";
-constexpr const char* MSG_CHAT_TURN_STORAGE   = "Turn storage: {}";
-constexpr const char* MSG_CHAT_CONTEXT_SIZED  = "Context: {} tokens ({}) → {}% = {} chars persona";
-constexpr const char* MSG_CHAT_CONTEXT_OPEN   = "Context: {} ({}) | Persona: {}";
-constexpr const char* MSG_CHAT_CTX_UNKNOWN    = "unknown";
-constexpr const char* MSG_CHAT_CTX_TOKENS     = "{} tokens";
-constexpr const char* MSG_CHAT_PERSONA_CHARS  = "{} chars";
-constexpr const char* MSG_CHAT_PERSONA_NONE   = "unlimited";
-constexpr const char* MSG_CHAT_QUIT_HINT      = "Type '/quit' or Ctrl+D to exit";
-constexpr const char* MSG_CHAT_GOODBYE        = "Goodbye!";
-
-// --- Chat recovery ---
-constexpr const char* MSG_ORPHAN_FOUND        = "Found {} orphaned turns from previous session...";
-constexpr const char* MSG_ORPHAN_RECOVERED    = "Recovered {} orphaned turns (deleted {} raw entries)";
-constexpr const char* MSG_SUMMARIZING         = "Summarizing in background...";
-
-// --- Chat /models ---
-constexpr const char* MSG_MODELS_QUERYING     = "Querying {} ({})...";
-constexpr const char* MSG_MODELS_NONE         = "  (no models returned or endpoint unreachable)";
-constexpr const char* MSG_MODELS_COUNT        = "{} model(s)";
-constexpr const char* MSG_MODELS_NO_ENDPOINTS = "No endpoints configured.";
-constexpr const char* MSG_MODELS_ALIASES      = "Aliases:";
-constexpr const char* MSG_MODELS_ALIAS_LINE   = "  {} → {}";
-constexpr const char* MSG_MODELS_CURRENT      = "Current: {}";
-constexpr const char* MSG_MODEL_DEFAULT       = "(default)";
-
-// --- Chat /model ---
-constexpr const char* MSG_MODEL_CURRENT       = "Current model: {}";
-constexpr const char* MSG_MODEL_USAGE_SWITCH  = "Use /model <name> to switch";
-constexpr const char* MSG_MODEL_USAGE         = "Usage: /model <name>";
-constexpr const char* MSG_MODEL_SWITCHED      = "Switched to: {}";
-constexpr const char* MSG_MODEL_ALIAS_SUFFIX  = " (alias: {})";
-
-// --- Chat /endpoints ---
-constexpr const char* MSG_ENDPOINTS_HEADER    = "Endpoints:";
-constexpr const char* MSG_ENDPOINT_LINE       = "  {} {} — {} [{}]{}";
-constexpr const char* MSG_ENDPOINT_ACTIVE     = " (active)";
-constexpr const char* MSG_ENDPOINT_ROUTING    = "Routing: {}";
-constexpr const char* MSG_ENDPOINT_USAGE      = "Use /endpoint <name> to force, /endpoint auto to auto-route";
-constexpr const char* MSG_ENDPOINT_CURRENT    = "Current endpoint: {}";
-constexpr const char* MSG_ENDPOINT_USAGE_ARG  = "Usage: /endpoint <name|auto>";
-constexpr const char* MSG_ENDPOINT_AUTO       = "Routing: auto (model-based)";
-constexpr const char* MSG_ENDPOINT_FORCED     = "Forced endpoint: {}";
-constexpr const char* MSG_ENDPOINT_AVAILABLE  = "Available: {}";
-
-// --- Chat /help ---
-constexpr const char* MSG_HELP_HEADER         = "Commands:";
-constexpr const char* MSG_HELP_MODELS         = "  /models          — list models available on active endpoint";
-constexpr const char* MSG_HELP_MODEL          = "  /model [name]    — show or switch model (alias or full name)";
-constexpr const char* MSG_HELP_ENDPOINTS      = "  /endpoints       — list inference endpoints with status";
-constexpr const char* MSG_HELP_ENDPOINT       = "  /endpoint [name] — show, force, or auto-route endpoint";
-constexpr const char* MSG_HELP_HELP           = "  /help            — show this help";
-constexpr const char* MSG_HELP_QUIT           = "  /quit            — exit chat (also /exit, Ctrl+D)";
-
-// --- Chat inference error ---
+// --- Generic CLI error wrapper ---
 constexpr const char* ERR_INFERENCE           = "Error: {}";
 
 // --- Errors: config ---
@@ -328,8 +245,6 @@ constexpr const char* MSG_CONFIG_RELOADED_NONE  = "Config reloaded: no changes";
 constexpr const char* MSG_INFERENCE_ENABLED     = "Inference: enabled ({} endpoint(s))";
 constexpr const char* MSG_CREATED_USER          = "Created user: {} (id={})";
 constexpr const char* MSG_SINGLE_USER_MODE      = "Single-user mode initialized";
-constexpr const char* ERR_MEMORY_SEARCH_FAIL    = "Memory search failed for /chat: {}";
-constexpr const char* ERR_NO_SYSTEM_PROMPT_FILES = "No system prompt files found (SYSTEM.md, SOUL.md, USER.md, etc.) — ";
 constexpr const char* ERR_LOGIN                 = "Login error: {}";
 constexpr const char* MSG_BIND_UNIX_SOCKET      = "Binding AF_UNIX socket: {}";
 constexpr const char* ERR_LISTEN_UNIX           = "listen() on unix socket returned false: {} (errno={})";
@@ -362,7 +277,10 @@ constexpr const char* HTTP_LOGIN_FAILED         = "login failed";
 // --- Server: startup/runtime ---
 constexpr const char* MSG_HEALTH_CHECK_TCP      = "  Health check: curl http://{}/health";
 constexpr const char* MSG_HEALTH_CHECK_UNIX     = "  Health check: curl --unix-socket {} http://localhost/health";
-constexpr const char* MSG_TLS_NOT_SUPPORTED     = "TLS config present — native TLS not yet supported with httplib. Use reverse proxy.";
+constexpr const char* MSG_TLS_ENABLED           = "Native TLS enabled (cert: {})";
+constexpr const char* WARN_TLS_PARTIAL_CONFIG   = "[server] TLS misconfigured: only '{}' is set — both cert and key are required. Serving plain HTTP.";
+constexpr const char* WARN_TLS_INVALID_CERT     = "TLS setup failed: could not load cert '{}' / key '{}'. Falling back to plain HTTP — fix the cert/key to enable TLS.";
+constexpr const char* WARN_TLS_SETUP_FAILED     = "TLS setup failed: {}. Falling back to plain HTTP — fix the cert/key to enable TLS.";
 constexpr const char* MSG_PID_FILE              = "PID file: {}";
 constexpr const char* MSG_UNIX_CHMOD_TIMEOUT    = "Unix socket chmod 0600 timed out; check {}";
 

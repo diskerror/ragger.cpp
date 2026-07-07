@@ -98,7 +98,6 @@ elsewhere if you need the data on a different disk.
 | Recipes | `~/.ragger/recipes/` |
 | Inference formats | `~/.ragger/formats/` |
 | Log | `~/.ragger/activity.log` |
-| Persona | `~/.ragger/SOUL.md` |
 | Bearer token | `~/.ragger/token` |
 | Unix socket | `~/.ragger/ragger.sock` |
 | Retrieval stats (opt-in build) | `~/.ragger/stats.db` |

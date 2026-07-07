@@ -74,8 +74,15 @@ struct Server::Impl {
     // time. cpp-httplib::Server::listen() blocks the calling thread and binds
     // exactly one socket, so each listener gets its own Server and its own
     // thread. Routes are registered on both via setup_routes(httplib::Server&).
-    httplib::Server unix_svr;
-    httplib::Server tcp_svr;
+    //
+    // tcp_svr is a pointer because it's either a plain httplib::Server or an
+    // httplib::SSLServer, decided once at construction time from [server]
+    // cert/key. httplib::SSLServer derives from Server (virtual dtor), so a
+    // base-class pointer works for both; setup_routes()/listen()/stop() are
+    // all virtual or take the base type.
+    httplib::Server                  unix_svr;
+    std::unique_ptr<httplib::Server> tcp_svr;
+    bool                              tls_enabled_ = false;
     RaggerMemory&   memory;
     UserStore       users_;
     std::string     host;
@@ -99,9 +106,57 @@ struct Server::Impl {
     {
         bootstrap_auth();
         init_inference();
+        tcp_svr = make_tcp_server();
         setup_routes(unix_svr);
-        setup_routes(tcp_svr);
+        setup_routes(*tcp_svr);
         warmup();
+    }
+
+    /// Build the TCP listener — plain httplib::Server, or an SSLServer when
+    /// [server] cert + key are both configured and load successfully. Any
+    /// TLS problem (partial config, unloadable cert/key, construction
+    /// failure) is logged as a warning (stderr + activity.log) and the
+    /// daemon falls back to plain HTTP rather than refusing to start — a
+    /// working insecure daemon beats a daemon that won't come up at all.
+    std::unique_ptr<httplib::Server> make_tcp_server() {
+        const auto& cfg = config();
+        const bool have_cert = !cfg.tls_cert.empty();
+        const bool have_key  = !cfg.tls_key.empty();
+
+        if (have_cert != have_key) {
+            // Only one of cert/key set — misconfiguration. Warn and fall
+            // back to plain HTTP; enforcing TLS on a half-configured pair
+            // isn't possible.
+            std::string msg = std::format(lang::WARN_TLS_PARTIAL_CONFIG,
+                have_cert ? "cert" : "key");
+            Diskerror::logger::warn(msg);
+            std::cerr << msg << "\n";
+            return std::make_unique<httplib::Server>();
+        }
+
+        if (!have_cert && !have_key) {
+            return std::make_unique<httplib::Server>();
+        }
+
+        try {
+            auto svr = std::make_unique<httplib::SSLServer>(
+                cfg.tls_cert.c_str(), cfg.tls_key.c_str());
+            if (!svr->is_valid()) {
+                std::string msg = std::format(lang::WARN_TLS_INVALID_CERT,
+                    cfg.tls_cert, cfg.tls_key);
+                Diskerror::logger::warn(msg);
+                std::cerr << msg << "\n";
+                return std::make_unique<httplib::Server>();
+            }
+            tls_enabled_ = true;
+            Diskerror::logger::info(std::format(lang::MSG_TLS_ENABLED, cfg.tls_cert));
+            return svr;
+        } catch (const std::exception& e) {
+            std::string msg = std::format(lang::WARN_TLS_SETUP_FAILED, e.what());
+            Diskerror::logger::warn(msg);
+            std::cerr << msg << "\n";
+            return std::make_unique<httplib::Server>();
+        }
     }
 
     void warmup() {
@@ -244,7 +299,7 @@ struct Server::Impl {
                         Diskerror::logger::info("Shutdown signal received; stopping listeners");
                         timer_running_ = false;
                         unix_svr.stop();
-                        tcp_svr.stop();
+                        if (tcp_svr) tcp_svr->stop();
                         break;
                     }
                     // Check for signal-triggered housekeeping
@@ -650,12 +705,6 @@ void Server::run() {
         Diskerror::logger::info(std::format(lang::MSG_HEALTH_CHECK_UNIX, cfg.resolved_socket_path()));
     }
 
-    // Native TLS: if both cert and key are configured, create an SSLServer
-    // instead of a plain httplib::Server for the TCP listener.
-    if (!cfg.tls_cert.empty() && !cfg.tls_key.empty()) {
-        Diskerror::logger::info(lang::MSG_TLS_NOT_SUPPORTED);
-    }
-
     // Write PID file (per-port)
     std::string port_str = std::to_string(pImpl->port);
     fs::create_directories("/tmp/ragger");
@@ -702,7 +751,7 @@ void Server::run() {
     std::thread tcp_thread;
     auto run_tcp = [this]() {
         Diskerror::logger::info(std::format(ragger::lang::MSG_BIND_TCP, pImpl->host, std::to_string(pImpl->port)));
-        bool ok = pImpl->tcp_svr.listen(pImpl->host, pImpl->port);
+        bool ok = pImpl->tcp_svr->listen(pImpl->host, pImpl->port);
         if (!ok) {
             Diskerror::logger::error(std::format(ragger::lang::ERR_LISTEN_TCP, std::to_string(errno)));
         }
@@ -749,7 +798,7 @@ void Server::run() {
 
     // If TCP was on its own thread, stop it and join before returning.
     if (tcp_thread.joinable()) {
-        pImpl->tcp_svr.stop();
+        if (pImpl->tcp_svr) pImpl->tcp_svr->stop();
         tcp_thread.join();
     }
 
@@ -763,7 +812,7 @@ void Server::stop() {
     if (pImpl->summarizer_) pImpl->summarizer_->stop();
     pImpl->stop_housekeeping_timer();
     pImpl->unix_svr.stop();
-    pImpl->tcp_svr.stop();
+    if (pImpl->tcp_svr) pImpl->tcp_svr->stop();
 }
 
 } // namespace ragger

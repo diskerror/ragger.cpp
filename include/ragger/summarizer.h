@@ -1,7 +1,6 @@
 /**
- * Conversation summarization — shared by the CLI chat (orphan-turn recovery)
- * and the HTTP server (idle-session housekeeping), which previously each
- * inlined their own transcript build + (drifted) summary prompt + model call.
+ * Conversation summarization — used by the HTTP server's daemon-resident
+ * summarizer (L2 turn / L3 session, idle-triggered housekeeping).
  */
 #pragma once
 

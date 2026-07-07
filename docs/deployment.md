@@ -14,7 +14,6 @@ Ragger installs per-user. The executable lives on `PATH` under
 ~/.ragger/formats/          # inference API format definitions
 ~/.ragger/recipes/          # build_context recipes (JSON)
 ~/.ragger/token             # bearer token for remote HTTP
-~/.ragger/SOUL.md           # persona file injected into chats
 ```
 
 No `sudo`, no system user, no `/etc/` or `/var/` paths. The daemon
@@ -64,7 +63,6 @@ ragger start         # bring the daemon up
 - Writes a user service unit:
   - **macOS:** `~/Library/LaunchAgents/com.diskerror.ragger.plist`
   - **Linux:** `~/.config/systemd/user/ragger.service` (+ `systemctl --user enable ragger.service`)
-- Installs the default `SOUL.md` to `~/.ragger/` if you don't already have one
 - Copies bundled formats under `~/.ragger/`
 - Removes a legacy `~/.ragger/bin/` directory if present (old install layout)
 

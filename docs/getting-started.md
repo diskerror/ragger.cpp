@@ -29,14 +29,7 @@ most modern shells); everything else under `~/.ragger/`:
 | Recipes              | `~/.ragger/recipes/`        |
 | Inference formats    | `~/.ragger/formats/`        |
 | Log                  | `~/.ragger/activity.log`    |
-| Persona              | `~/.ragger/SOUL.md`         |
 | Bearer token         | `~/.ragger/token`           |
-
-Every path above is hardcoded relative to `~/.ragger` — none of it is
-independently configurable in `settings.ini`. The only override is a
-hidden `--ragger-base <path>` CLI flag (testing only, not shown in
-`--help`); symlink `~/.ragger` elsewhere if you need the data on a
-different disk.
 
 `install.sh` is idempotent — re-run it after any rebuild to refresh the
 binary, service unit, and shipped recipes. Your config, database, and

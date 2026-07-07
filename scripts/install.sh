@@ -104,12 +104,6 @@ else
     info "Keeping existing $CONF_FILE"
 fi
 
-# Default SOUL.md (user persona) if missing
-if [ ! -f "$RAGGER_BASE/SOUL.md" ] && [ -f "$SRC/SOUL.md" ]; then
-    info "Installing default SOUL.md"
-    cp "$SRC/SOUL.md" "$RAGGER_BASE/SOUL.md"
-fi
-
 # Agent memory-usage instructions (served by `ragger mcp` via the MCP
 # initialize `instructions` field). Install if missing — preserves user edits.
 if [ ! -f "$RAGGER_BASE/agent-memory-instructions.md" ] && \
