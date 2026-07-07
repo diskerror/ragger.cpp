@@ -234,7 +234,16 @@ int main(int argc, char **argv) {
             ("tags", Diskerror::po::value<std::string>()->default_value(""), CLI_TAGS)
             // `import conversations` filters & inputs
             ("format", Diskerror::po::value<std::string>()->default_value(""),
-                "Conversation source format: code | web")
+                "Conversation source format: code | web | telegram")
+            ("self", Diskerror::po::value<std::string>()->default_value(""),
+                "Telegram format only: your display name, to split user/assistant turns")
+            ("all", "import-conversations: treat a directory, or a file with sibling export "
+                "files (memories.json, projects/), as one multi-file import unit")
+            ("fdate", "import-conversations: use each input file's mtime as the timestamp "
+                "for rows with no derivable date (e.g. memories.json)")
+            ("date", Diskerror::po::value<std::string>()->default_value(""),
+                "import-conversations: explicit timestamp override "
+                "([CC]YYMMDD or YYYY-MM-DD) for rows with no derivable date")
             ("since", Diskerror::po::value<std::string>()->default_value(""),
                 "Only turns on/after this date (YYYY-MM-DD)")
             ("until", Diskerror::po::value<std::string>()->default_value(""),
@@ -426,86 +435,45 @@ int main(int argc, char **argv) {
             std::cout << count << "\n";
 
         }
-        else if (command == "import") {
+        else if (command == "import-docs") {
             auto args = opts.getParams("args");
             if (args.empty()) {
                 Diskerror::logger::error(ragger::lang::CLI_USAGE_IMPORT);
                 return 1;
             }
+            // Markdown/text (and now JSON, auto-extracted to prose) → L5
+            // documents. This is the old bare `ragger import <file>` path,
+            // given its own verb name so it's no longer an implicit
+            // fallthrough default.
+            std::string imp_title = opts["title"].as<std::string>();
+            int         imp_year  = opts["year"].as<int>();
+            std::string imp_tags  = opts["tags"].as<std::string>();
+            ragger::RaggerMemory memory(db_path);
+            for (auto &filepath: args) {
+                do_import(memory, filepath, min_chunk_size,
+                          imp_title, imp_year, imp_tags);
+            }
+        }
+        else if (command == "import-conversations") {
+            auto args = opts.getParams("args");
+            if (args.empty()) {
+                Diskerror::logger::error(ragger::lang::CLI_USAGE_IMPORT_CONVERSATIONS);
+                return 1;
+            }
 
             // ISO-8601 (or already-db) timestamp → "YYYY-MM-DD HH:MM:SS".
-            // Tolerant: keeps the first 10 chars of a date and the time
-            // portion if present; drops fractional seconds and zone.
             auto to_db_ts = [](std::string s) -> std::string {
                 if (s.empty()) return s;
-                // 'T' separator → space
                 for (auto& c : s) if (c == 'T') c = ' ';
-                // Cut at fractional / zone marker
                 auto cut = s.find_first_of(".Z+");
                 if (cut != std::string::npos) s.erase(cut);
-                // Date-only input: pad with midnight
                 if (s.size() == 10) s += " 00:00:00";
                 return s;
             };
 
-            // Subcommand: "conversations" or "summaries" — anything else is
-            // the legacy document import.
-            const std::string& sub = args[0];
-
-            if (sub == "conversations") {
-                const std::string fmt = opts["format"].as<std::string>();
-                if (fmt != "code" && fmt != "web") {
-                    Diskerror::logger::error(
-                        "import conversations: --format=code|web is required");
-                    return 1;
-                }
-                if (args.size() < 2) {
-                    Diskerror::logger::error(
-                        "import conversations: path to JSONL file or directory required");
-                    return 1;
-                }
-                std::string src = ragger::expand_path(args[1]);
-
-                ragger::TurnFilter f;
-                f.session = opts["session"].as<std::string>();
-                f.since   = opts["since"].as<std::string>();
-                f.until   = opts["until"].as<std::string>();
-
-                auto turns = (fmt == "code") ? ragger::parse_claude_code(src)
-                                              : ragger::parse_claude_web(src);
-                turns = ragger::filter_turns(turns, f);
-                if (turns.empty()) {
-                    std::println("No turns matched.");
-                    return 0;
-                }
-
-                ragger::RaggerMemory memory(db_path);
-                int n = 0;
-                for (const auto& t : turns) {
-                    std::string text = "User: " + t.user_text;
-                    if (!t.assistant_text.empty())
-                        text += "\n\nAssistant: " + t.assistant_text;
-                    // Land at level="turn" so imports cluster with L2 turn
-                    // summaries rather than polluting the session-summary
-                    // bucket. tags carry provenance (source + session id).
-                    std::string tags = t.source;
-                    if (!t.session_id.empty()) tags += "," + t.session_id;
-                    nlohmann::json meta = {
-                        {"level", "turn"},
-                        {"tags",  tags},
-                    };
-                    std::string ts = to_db_ts(t.timestamp);
-                    if (!ts.empty()) meta["timestamp"] = ts;
-                    memory.store(text, meta);
-                    if (++n % 25 == 0) {
-                        std::println(std::cerr, "  imported {} turns...", n);
-                    }
-                }
-                std::println("Imported {} conversation turns.", n);
-                return 0;
-            }
-
-            if (sub == "summaries") {
+            // `summaries` sub-verb unchanged, just reachable from the new
+            // top-level name (hand-authored L4 project summaries).
+            if (args[0] == "summaries") {
                 std::vector<ragger::SummaryImport> items;
                 const std::string jsonl = opts["jsonl"].as<std::string>();
                 if (!jsonl.empty()) {
@@ -516,7 +484,7 @@ int main(int argc, char **argv) {
                     items = ragger::load_summary_files(files);
                 } else {
                     Diskerror::logger::error(
-                        "import summaries: provide files or --jsonl=FILE");
+                        "import-conversations summaries: provide files or --jsonl=FILE");
                     return 1;
                 }
                 if (items.empty()) {
@@ -524,20 +492,356 @@ int main(int argc, char **argv) {
                     return 0;
                 }
                 ragger::RaggerMemory memory(db_path);
-                int n = 0;
+                int n = 0, n_skip = 0;
                 for (const auto& s : items) {
+                    std::string ts = to_db_ts(s.timestamp);
+                    if (!ts.empty() && memory.summary_exists_exact(s.text, ts)) {
+                        ++n_skip;
+                        continue;
+                    }
                     memory.store_summary(s.text, "project", "complete",
                                          /*model_name=*/"",
                                          /*session_guid=*/"",
-                                         /*source_timestamp=*/to_db_ts(s.timestamp),
+                                         /*source_timestamp=*/ts,
                                          /*tags=*/s.tags);
                     ++n;
                 }
-                std::println("Imported {} L4 summaries.", n);
+                std::println("Imported {} L4 summaries ({} duplicates skipped).", n, n_skip);
                 return 0;
             }
 
-            // Legacy: ragger import <file> [file...] — markdown/text chunks
+            std::string raw_src = ragger::expand_path(args[0]);
+            bool all_flag = opts.count("all") > 0;
+            bool is_dir = fs::is_directory(raw_src);
+
+            // Special case: the input file itself IS memories.json (not
+            // conversations.json with a memories.json sibling). This is a
+            // standalone import of just that one file — no siblings to
+            // pull in, no "point at conversations.json instead" detour.
+            // Handle it here and return, before the sibling-detection
+            // logic below (which is about conversations.json's siblings,
+            // not about being handed memories.json directly).
+            if (!is_dir && fs::path(raw_src).filename() == "memories.json") {
+                bool fdate = opts.count("fdate") > 0;
+                std::string date_override = opts["date"].as<std::string>();
+                std::string mem_ts;
+                if (!date_override.empty()) {
+                    mem_ts = to_db_ts(date_override);
+                } else if (fdate) {
+                    auto ftime = fs::last_write_time(raw_src);
+                    auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                        ftime - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+                    std::time_t tt = std::chrono::system_clock::to_time_t(sctp);
+                    char buf[32];
+                    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&tt));
+                    mem_ts = buf;
+                }
+                if (mem_ts.empty()) {
+                    Diskerror::logger::error(
+                        "import-conversations: " + raw_src + " has no derivable date — "
+                        "pass --fdate (use the file's mtime) or --date=DATE, or import it via "
+                        "import-docs instead");
+                    return 1;
+                }
+                std::string raw = ragger::read_file_to_string(raw_src);
+                std::string text = ragger::extract_text_from_json(raw);
+                if (text.empty()) {
+                    std::println("Nothing to import.");
+                    return 0;
+                }
+                ragger::RaggerMemory memory(db_path);
+                if (memory.decision_exists_exact(text, mem_ts)) {
+                    std::println("memories.json already imported (dated {}) — skipped.", mem_ts);
+                    return 0;
+                }
+                // TODO: LLM-driven split into discrete claims. For now,
+                // store the narrative as one decision row.
+                memory.store_decision(text, "active", "claude-memory", mem_ts);
+                std::println("Imported memories.json as 1 decision (dated {}).", mem_ts);
+                return 0;
+            }
+
+            // Directory input, or a file with export siblings, both need
+            // --all: it's the single "yes, treat this as one multi-file
+            // import unit" switch. No implicit default either way.
+            if (is_dir && !all_flag) {
+                Diskerror::logger::error(
+                    "import-conversations: " + raw_src + " is a directory (looks like a "
+                    "multi-file export) — pass --all to import it as one unit");
+                return 1;
+            }
+
+            // Resolve the actual conversations.json to parse, plus any
+            // sibling files (memories.json, projects/*.json) --all pulls in.
+            std::string conv_path;
+            std::string memories_path;
+            std::vector<std::string> project_paths;
+            if (is_dir) {
+                conv_path = raw_src + "/conversations.json";
+                if (!fs::exists(conv_path)) {
+                    Diskerror::logger::error(
+                        "import-conversations: " + raw_src + " has no conversations.json");
+                    return 1;
+                }
+                std::string cand_mem = raw_src + "/memories.json";
+                if (fs::exists(cand_mem)) memories_path = cand_mem;
+                std::string proj_dir = raw_src + "/projects";
+                if (fs::is_directory(proj_dir)) {
+                    for (auto& e : fs::directory_iterator(proj_dir)) {
+                        if (e.is_regular_file() && e.path().extension() == ".json")
+                            project_paths.push_back(e.path().string());
+                    }
+                }
+            } else {
+                conv_path = raw_src;
+                if (all_flag) {
+                    std::string dir = fs::path(raw_src).parent_path().string();
+                    if (dir.empty()) dir = ".";
+                    std::string cand_mem = dir + "/memories.json";
+                    if (fs::exists(cand_mem)) memories_path = cand_mem;
+                    std::string proj_dir = dir + "/projects";
+                    if (fs::is_directory(proj_dir)) {
+                        for (auto& e : fs::directory_iterator(proj_dir)) {
+                            if (e.is_regular_file() && e.path().extension() == ".json")
+                                project_paths.push_back(e.path().string());
+                        }
+                    }
+                } else {
+                    // Single file, no --all: if it has export siblings
+                    // sitting right next to it, say so rather than
+                    // silently ignoring them.
+                    std::string dir = fs::path(raw_src).parent_path().string();
+                    if (dir.empty()) dir = ".";
+                    bool has_siblings = fs::exists(dir + "/memories.json") ||
+                                       fs::is_directory(dir + "/projects");
+                    if (has_siblings) {
+                        Diskerror::logger::error(
+                            "import-conversations: " + raw_src + " has sibling export files "
+                            "(memories.json / projects/) — pass --all to import them together, "
+                            "or point at just this file to import only conversations");
+                        return 1;
+                    }
+                }
+            }
+
+            // Auto-detect the conversation file's shape; --format overrides
+            // when the sniff is wrong or the file is ambiguous.
+            std::string fmt = opts["format"].as<std::string>();
+            if (fmt.empty()) {
+                switch (ragger::detect_conversation_format(conv_path)) {
+                    case ragger::ConversationFormat::ClaudeWeb:      fmt = "web"; break;
+                    case ragger::ConversationFormat::ClaudeCode:     fmt = "code"; break;
+                    case ragger::ConversationFormat::Telegram:       fmt = "telegram"; break;
+                    case ragger::ConversationFormat::ClaudeMemories:
+                        Diskerror::logger::error(
+                            "import-conversations: " + conv_path + " looks like a Claude "
+                            "memories.json (no per-message timestamps) — point --all at the "
+                            "export directory so dates come from conversations.json, or import "
+                            "it directly with --fdate/--date=DATE, or use import-docs instead");
+                        return 1;
+                    case ragger::ConversationFormat::Unknown:
+                        Diskerror::logger::error(
+                            "import-conversations: could not detect the format of " + conv_path +
+                            " — pass --format=code|web|telegram to override");
+                        return 1;
+                }
+            }
+            if (fmt != "code" && fmt != "web" && fmt != "telegram") {
+                Diskerror::logger::error(
+                    "import-conversations: --format must be code|web|telegram");
+                return 1;
+            }
+
+            ragger::TurnFilter f;
+            f.session = opts["session"].as<std::string>();
+            f.since   = opts["since"].as<std::string>();
+            f.until   = opts["until"].as<std::string>();
+
+            std::vector<ragger::ImportTurn> turns;
+            if (fmt == "code") {
+                turns = ragger::parse_claude_code(conv_path);
+            } else if (fmt == "web") {
+                turns = ragger::parse_claude_web(conv_path);
+            } else { // telegram
+                std::string self_name = opts["self"].as<std::string>();
+                if (self_name.empty()) {
+                    Diskerror::logger::error(
+                        "import-conversations --format=telegram: --self=\"Your Display Name\" is required");
+                    return 1;
+                }
+                turns = ragger::parse_telegram(conv_path, self_name);
+            }
+            turns = ragger::filter_turns(turns, f);
+            if (turns.empty() && memories_path.empty() && project_paths.empty()) {
+                std::println("No turns matched.");
+                return 0;
+            }
+
+            ragger::RaggerMemory memory(db_path);
+            int n = 0, n_skip = 0, n_merged = 0;
+            std::vector<std::pair<int, std::string>> inserted;  // telegram backfill scope
+            bool is_telegram = (fmt == "telegram");
+            for (const auto& t : turns) {
+                std::string ts = to_db_ts(t.timestamp);
+                if (!ts.empty() && !t.user_text.empty() &&
+                    memory.turn_exists_fuzzy(t.user_text, ts, 30)) {
+                    ++n_skip;
+                    continue;
+                }
+                if (!is_telegram && !t.user_text.empty()) {
+                    auto existing = memory.find_turn_by_text(t.user_text);
+                    if (existing) {
+                        if (ragger::is_synthetic_session_guid(existing->session_guid) &&
+                            !t.session_id.empty()) {
+                            memory.update_turn_meta(existing->turn_id, /*timestamp=*/"",
+                                                    /*session_guid=*/t.session_id);
+                            ++n_merged;
+                        } else {
+                            ++n_skip;
+                        }
+                        continue;
+                    }
+                }
+                int new_id = memory.store_turn(t.user_text, t.assistant_text,
+                                  /*model_name=*/t.source + "-import",
+                                  /*defer_embedding=*/false,
+                                  /*session_guid=*/t.session_id,
+                                  /*source_timestamp=*/ts);
+                if (is_telegram) inserted.emplace_back(new_id, t.user_text);
+                if (++n % 25 == 0) {
+                    std::println(std::cerr, "  imported {} turns...", n);
+                }
+            }
+            int n_backfilled = 0;
+            if (is_telegram && !inserted.empty()) {
+                std::println(std::cerr, "Backfilling session ids for {} imported turns...",
+                             inserted.size());
+                for (const auto& [id, user_text] : inserted) {
+                    if (user_text.empty()) continue;
+                    auto match = memory.find_turn_by_text(user_text);
+                    if (match && match->turn_id != id &&
+                        !ragger::is_synthetic_session_guid(match->session_guid)) {
+                        memory.update_turn_meta(id, /*timestamp=*/"",
+                                                /*session_guid=*/match->session_guid);
+                        ++n_backfilled;
+                    }
+                }
+            }
+            std::println("Imported {} conversation turns ({} duplicates skipped, {} session ids merged, {} backfilled).",
+                         n, n_skip, n_merged, n_backfilled);
+
+            // Per-conversation `summary` field (claude-web only) → one L3
+            // session-summary row each, dated by that conversation's own
+            // created_at (already real, no --fdate/--date needed).
+            if (fmt == "web") {
+                std::ifstream in(conv_path);
+                nlohmann::json doc;
+                try { in >> doc; } catch (...) { doc = nullptr; }
+                nlohmann::json convs;
+                if (doc.is_array()) convs = doc;
+                else if (doc.is_object() && doc.contains("conversations")) convs = doc["conversations"];
+                int n_sessions = 0, n_sessions_skip = 0;
+                for (const auto& conv : convs) {
+                    if (!conv.is_object()) continue;
+                    std::string summary = conv.value("summary", "");
+                    std::string sid = conv.value("uuid", "");
+                    std::string ts = to_db_ts(conv.value("created_at", ""));
+                    if (summary.empty() || ts.empty()) continue;
+                    if (memory.summary_exists_exact(summary, ts)) { ++n_sessions_skip; continue; }
+                    memory.store_summary(summary, "session", "complete",
+                                         /*model_name=*/"claude",
+                                         /*session_guid=*/sid,
+                                         /*source_timestamp=*/ts,
+                                         /*tags=*/"session");
+                    ++n_sessions;
+                }
+                if (n_sessions || n_sessions_skip) {
+                    std::println("Imported {} session summaries ({} duplicates skipped).",
+                                 n_sessions, n_sessions_skip);
+                }
+            }
+
+            // memories.json → L5/decisions. No derivable per-claim date —
+            // requires --fdate (file mtime) or --date=DATE.
+            if (!memories_path.empty()) {
+                bool fdate = opts.count("fdate") > 0;
+                std::string date_override = opts["date"].as<std::string>();
+                std::string mem_ts;
+                if (!date_override.empty()) {
+                    mem_ts = to_db_ts(date_override);
+                } else if (fdate) {
+                    auto ftime = fs::last_write_time(memories_path);
+                    auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+                        ftime - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+                    std::time_t tt = std::chrono::system_clock::to_time_t(sctp);
+                    char buf[32];
+                    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&tt));
+                    mem_ts = buf;
+                }
+                if (mem_ts.empty()) {
+                    Diskerror::logger::error(
+                        "import-conversations: " + memories_path + " has no derivable date — "
+                        "pass --fdate (use the file's mtime) or --date=DATE, or import it via "
+                        "import-docs instead");
+                } else {
+                    std::string raw = ragger::read_file_to_string(memories_path);
+                    std::string text = ragger::extract_text_from_json(raw);
+                    if (!text.empty()) {
+                        if (memory.decision_exists_exact(text, mem_ts)) {
+                            std::println("memories.json already imported (dated {}) — skipped.", mem_ts);
+                        } else {
+                            // TODO: LLM-driven split into discrete claims.
+                            // For now, store the narrative as one decision
+                            // row — still searchable, still dated, just
+                            // not yet broken into separate atomic claims.
+                            memory.store_decision(text, "active", "claude-memory", mem_ts);
+                            std::println("Imported memories.json as 1 decision (dated {}).", mem_ts);
+                        }
+                    }
+                }
+            }
+
+            // Project files (L4): name + description → one summary row,
+            // dated by the project's own created_at (real, no flag needed).
+            if (!project_paths.empty()) {
+                int n_proj = 0, n_proj_skip = 0;
+                for (auto& pp : project_paths) {
+                    std::ifstream pin(pp);
+                    nlohmann::json pdoc;
+                    try { pin >> pdoc; } catch (...) { continue; }
+                    if (!pdoc.is_object()) continue;
+                    std::string name = pdoc.value("name", "");
+                    std::string desc = pdoc.value("description", "");
+                    std::string ts = to_db_ts(pdoc.value("created_at", ""));
+                    if (name.empty() || ts.empty()) continue;
+                    std::string text = desc.empty() ? name : (name + "\n\n" + desc);
+                    if (memory.summary_exists_exact(text, ts)) { ++n_proj_skip; continue; }
+                    memory.store_summary(text, "project", "complete",
+                                         /*model_name=*/"claude",
+                                         /*session_guid=*/"",
+                                         /*source_timestamp=*/ts,
+                                         /*tags=*/"claude-project");
+                    ++n_proj;
+                }
+                if (n_proj || n_proj_skip) {
+                    std::println("Imported {} project summaries ({} duplicates skipped).",
+                                 n_proj, n_proj_skip);
+                }
+            }
+
+            return 0;
+        }
+        else if (command == "import") {
+            // Deprecated alias for import-docs (the old implicit-fallthrough
+            // behavior). Kept working so existing scripts don't break.
+            auto args = opts.getParams("args");
+            if (args.empty()) {
+                Diskerror::logger::error(ragger::lang::CLI_USAGE_IMPORT);
+                return 1;
+            }
+            Diskerror::logger::warn(
+                "\"ragger import\" is deprecated — use \"ragger import-docs\" "
+                "(docs) or \"ragger import-conversations\" (conversations/memories/projects)");
             std::string imp_title = opts["title"].as<std::string>();
             int         imp_year  = opts["year"].as<int>();
             std::string imp_tags  = opts["tags"].as<std::string>();
@@ -546,7 +850,6 @@ int main(int argc, char **argv) {
                 do_import(memory, filepath, min_chunk_size,
                           imp_title, imp_year, imp_tags);
             }
-
         }
         else if (command == "export") {
             auto args = opts.getParams("args");

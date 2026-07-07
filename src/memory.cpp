@@ -133,9 +133,10 @@ int RaggerMemory::store_document(const DocumentChunk& chunk, bool defer_embeddin
 int RaggerMemory::store_turn(const std::string& user_text,
                              const std::string& assistant_text,
                              const std::string& model_name, bool defer_embedding,
-                             const std::string& session_guid) {
+                             const std::string& session_guid,
+                             const std::string& source_timestamp) {
     return backend_->store_turn(user_text, assistant_text, model_name,
-                                defer_embedding, session_guid);
+                                defer_embedding, session_guid, source_timestamp);
 }
 
 bool RaggerMemory::finalize_turn(int turn_id, const std::string& assistant_text,
@@ -205,6 +206,28 @@ std::vector<std::string> RaggerMemory::recent_summaries(const std::string& level
 
 std::vector<std::string> RaggerMemory::current_decisions(int limit) {
     return backend_->current_decisions(limit);
+}
+
+bool RaggerMemory::summary_exists_exact(const std::string& text, const std::string& created_at) {
+    return backend_->summary_exists_exact(text, created_at);
+}
+
+bool RaggerMemory::decision_exists_exact(const std::string& text, const std::string& created_at) {
+    return backend_->decision_exists_exact(text, created_at);
+}
+
+bool RaggerMemory::turn_exists_fuzzy(const std::string& user_text, const std::string& ts,
+                                     int window_seconds) {
+    return backend_->turn_exists_fuzzy(user_text, ts, window_seconds);
+}
+
+std::optional<TurnRecord> RaggerMemory::find_turn_by_text(const std::string& user_text) {
+    return backend_->find_turn_by_text(user_text);
+}
+
+bool RaggerMemory::update_turn_meta(int turn_id, const std::string& timestamp,
+                                    const std::string& session_guid) {
+    return backend_->update_turn_meta(turn_id, timestamp, session_guid);
 }
 
 bool RaggerMemory::update_text(int memory_id, const std::string& text, json metadata,

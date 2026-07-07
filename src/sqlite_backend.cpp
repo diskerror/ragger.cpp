@@ -203,6 +203,11 @@ struct SqliteBackend::Impl {
 
         exec("PRAGMA journal_mode=WAL");
         exec("PRAGMA foreign_keys = ON");
+        // Wait up to 10s on a locked DB instead of failing instantly —
+        // WAL allows concurrent readers, but two writers (daemon +
+        // import CLI) still serialize; without this any collision is an
+        // immediate "database is locked" error.
+        sqlite3_busy_timeout(db, 10000);
         create_schema();
     }
 
@@ -223,6 +228,7 @@ struct SqliteBackend::Impl {
 
         exec("PRAGMA journal_mode=WAL");
         exec("PRAGMA foreign_keys = ON");
+        sqlite3_busy_timeout(db, 10000);  // see main constructor
         // Only ensure users + session tables exist (skip memory tables/FTS).
         create_user_schema();
     }
@@ -1237,9 +1243,13 @@ struct SqliteBackend::Impl {
     // (assistant + embedding NULL) for the prompt-arrival/finalize flow;
     // otherwise the exchange is embedded unless defer_embedding. FTS5 sync
     // triggers index user_text/assistant_text. Returns turn_id.
+    // `source_timestamp` (non-empty, db format) overrides created_at for
+    // historical imports; the regeneration-dedup window is skipped in that
+    // case (it reasons about "now", which is meaningless for old turns).
     int store_turn(const std::string& user_text, const std::string& assistant_text,
                    const std::string& model_name, bool defer_embedding,
-                   const std::string& session_guid) {
+                   const std::string& session_guid,
+                   const std::string& source_timestamp = "") {
         std::string u = normalize_path(user_text);
         std::string a = normalize_path(assistant_text);
         int model_id   = get_or_create_model(model_name);
@@ -1256,7 +1266,8 @@ struct SqliteBackend::Impl {
         // row's assistant_text (+ re-embed) in place rather than inserting a
         // duplicate. The FTS au-trigger keeps the index consistent. Empty
         // assistant_text (partial/prompt-arrival rows) never dedups.
-        if (!a.empty()) {
+        // Skipped entirely for historical imports (source_timestamp set).
+        if (!a.empty() && source_timestamp.empty()) {
             Stmt p(db,
                 "SELECT turn_id, user_text, created_at FROM turns "
                 "ORDER BY turn_id DESC LIMIT 1");
@@ -1315,7 +1326,7 @@ struct SqliteBackend::Impl {
             bind_embedding(s.raw(), 5, emb);
         else s.bind_null(5);
         s.bind(6, phonize(a.empty() ? u : (u + " " + a)));
-        s.bind(7, local_timestamp());
+        s.bind(7, source_timestamp.empty() ? local_timestamp() : source_timestamp);
 
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
@@ -1820,6 +1831,120 @@ struct SqliteBackend::Impl {
             if (!t.empty()) out.push_back(std::move(t));
         }
         return out;
+    }
+
+    // Exact-match existence check for import idempotency: same text +
+    // same created_at timestamp already present in summaries. Used by
+    // `ragger import conversations`/`import summaries` so re-running an
+    // import (or feeding overlapping exports) doesn't duplicate rows.
+    bool summary_exists_exact(const std::string& text, const std::string& created_at) {
+        Stmt s(db, "SELECT 1 FROM summaries WHERE text = ? AND created_at = ? LIMIT 1");
+        s.bind(1, text);
+        s.bind(2, created_at);
+        return s.step();
+    }
+
+    // Mirrors summary_exists_exact for the decisions table.
+    bool decision_exists_exact(const std::string& text, const std::string& created_at) {
+        Stmt s(db, "SELECT 1 FROM decisions WHERE text = ? AND created_at = ? LIMIT 1");
+        s.bind(1, text);
+        s.bind(2, created_at);
+        return s.step();
+    }
+
+    // Fuzzy dedup against live-captured turns: exact user_text, timestamp
+    // within ±window_seconds. Catches import overlap with turns Ragger
+    // captured live (identical content, a few seconds of clock skew —
+    // message send time vs. capture time, plus any tz-conversion rounding).
+    bool turn_exists_fuzzy(const std::string& user_text, const std::string& ts,
+                           int window_seconds) {
+        Stmt s(db,
+            "SELECT 1 FROM turns WHERE user_text = ? "
+            "AND created_at BETWEEN datetime(?, ?) AND datetime(?, ?) LIMIT 1");
+        std::string neg = "-" + std::to_string(window_seconds) + " seconds";
+        std::string pos = "+" + std::to_string(window_seconds) + " seconds";
+        s.bind(1, user_text);
+        s.bind(2, ts).bind(3, neg);
+        s.bind(4, ts).bind(5, pos);
+        return s.step();
+    }
+
+    // Collapse whitespace, drop zero-width/variation-selector/control
+    // characters, and case-fold so the same exchange pasted through two
+    // different clients (Telegram markdown escaping vs. Claude.ai's raw
+    // text) compares equal. Comparison-only — never used for storage.
+    static std::string normalize_for_compare(const std::string& s) {
+        std::string out;
+        out.reserve(s.size());
+        bool prev_space = false;
+        for (unsigned char c : s) {
+            // Drop ASCII control chars outright (keep the rest of UTF-8
+            // multibyte sequences as-is; this is a coarse cross-source
+            // comparison, not a full Unicode normalizer).
+            if (c < 0x20 && c != '\n') continue;
+            if (c == '\n' || c == '\t' || c == ' ') {
+                if (!prev_space && !out.empty()) out.push_back(' ');
+                prev_space = true;
+                continue;
+            }
+            prev_space = false;
+            out.push_back(static_cast<char>(std::tolower(c)));
+        }
+        while (!out.empty() && out.back() == ' ') out.pop_back();
+        return out;
+    }
+
+    // Cross-source overlap lookup: scan turns for a user_text that
+    // normalizes-equal (see normalize_for_compare), ignoring timestamp
+    // entirely. Used to reconcile the same exchange captured from two
+    // different importers whose timestamps have no reason to agree.
+    std::optional<TurnRecord> find_turn_by_text(const std::string& user_text) {
+        std::string target = normalize_for_compare(user_text);
+        if (target.empty()) return std::nullopt;
+        Stmt s(db,
+            "SELECT t.turn_id, t.user_text, t.assistant_text, m.name, "
+            "t.created_at, ss.guid "
+            "FROM turns t "
+            "LEFT JOIN models m ON t.model_id = m.model_id "
+            "LEFT JOIN sessions ss ON t.session_id = ss.session_id "
+            "WHERE t.user_text LIKE '%' || substr(?, 1, 40) || '%'");
+        // Narrow with a cheap substring prefilter (avoids a full table
+        // scan through normalize_for_compare on every row), then confirm
+        // with the real normalized comparison in C++.
+        s.bind(1, user_text.substr(0, 40));
+        while (s.step()) {
+            std::string cand = s.column_text(1);
+            if (normalize_for_compare(cand) == target) {
+                return TurnRecord{
+                    s.column_int(0), cand, s.column_text(2),
+                    s.column_text(3), s.column_text(4), s.column_text(5)
+                };
+            }
+        }
+        return std::nullopt;
+    }
+
+    // Upgrade an existing turn's timestamp/session_guid in place. Empty
+    // args leave that field untouched. session_guid resolves/creates a
+    // sessions row same as store_turn.
+    bool update_turn_meta(int turn_id, const std::string& timestamp,
+                          const std::string& session_guid) {
+        if (timestamp.empty() && session_guid.empty()) return true;
+        std::string sql = "UPDATE turns SET ";
+        bool first = true;
+        if (!timestamp.empty()) { sql += "created_at = ?"; first = false; }
+        if (!session_guid.empty()) {
+            if (!first) sql += ", ";
+            sql += "session_id = ?";
+        }
+        sql += " WHERE turn_id = ?";
+        Stmt s(db, sql);
+        int idx = 1;
+        if (!timestamp.empty()) s.bind(idx++, timestamp);
+        if (!session_guid.empty())
+            s.bind(idx++, get_or_create_session(session_guid));
+        s.bind(idx, turn_id);
+        return s.exec() && sqlite3_changes(db) > 0;
     }
 
     // All complete L3 (session) summary texts, oldest-first.
@@ -2578,10 +2703,11 @@ int SqliteBackend::store_document(const DocumentChunk& chunk, bool defer_embeddi
 int SqliteBackend::store_turn(const std::string& user_text,
                               const std::string& assistant_text,
                               const std::string& model_name, bool defer_embedding,
-                              const std::string& session_guid) {
+                              const std::string& session_guid,
+                              const std::string& source_timestamp) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->store_turn(user_text, assistant_text, model_name,
-                             defer_embedding, session_guid);
+                             defer_embedding, session_guid, source_timestamp);
 }
 
 std::vector<TurnRecord> SqliteBackend::turns_by_session(
@@ -2622,6 +2748,33 @@ std::vector<std::string>
 SqliteBackend::l2_summary_texts(const std::string& session_guid) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->l2_summary_texts(session_guid);
+}
+
+bool SqliteBackend::summary_exists_exact(const std::string& text, const std::string& created_at) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->summary_exists_exact(text, created_at);
+}
+
+bool SqliteBackend::decision_exists_exact(const std::string& text, const std::string& created_at) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->decision_exists_exact(text, created_at);
+}
+
+bool SqliteBackend::turn_exists_fuzzy(const std::string& user_text, const std::string& ts,
+                                      int window_seconds) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->turn_exists_fuzzy(user_text, ts, window_seconds);
+}
+
+std::optional<TurnRecord> SqliteBackend::find_turn_by_text(const std::string& user_text) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->find_turn_by_text(user_text);
+}
+
+bool SqliteBackend::update_turn_meta(int turn_id, const std::string& timestamp,
+                                     const std::string& session_guid) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->update_turn_meta(turn_id, timestamp, session_guid);
 }
 
 std::vector<std::string>

@@ -24,13 +24,48 @@ constexpr const char* CLI_USAGE_USERMOD       = "Usage: ragger usermod <username
 constexpr const char* CLI_USAGE_USERDEL       = "Usage: ragger userdel <username>";
 constexpr const char* CLI_USAGE_PASSWD        = "Usage: ragger passwd <username>";
 constexpr const char* CLI_USAGE_IMPORT        =
+    "Usage: ragger import-docs <file> [file...]      # markdown/text → L5 documents\n"
+    "       [--title T] [--year YYYY] [--tags a,b,c]\n"
+    "Deprecated alias: ragger import <file> [file...] (same behavior, warns)\n"
+    "\n"
+    "See also: ragger import-conversations --help, ragger import-conversations summaries";
+constexpr const char* CLI_USAGE_IMPORT_CONVERSATIONS =
     "Usage:\n"
-    "  ragger import <file> [file...]                  # markdown/text → L5 documents\n"
-    "  ragger import conversations --format=code|web PATH\n"
-    "                                                  # Claude Code JSONL or claude.ai export\n"
-    "                                                  # [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--session ID]\n"
-    "  ragger import summaries <file> [file...]        # one L4 project summary per file\n"
-    "  ragger import summaries --jsonl=FILE            # {text, tags?, timestamp?} per line";
+    "  ragger import-conversations PATH\n"
+    "      Import Claude/Telegram/Claude-Code conversation history into turns\n"
+    "      (L1/L2), session summaries (L3/L4), and memories (L5/L6 decisions).\n"
+    "      Format is auto-detected from PATH's JSON structure.\n"
+    "\n"
+    "  Options:\n"
+    "    --all                     Required when PATH is a directory, or a file\n"
+    "                              with sibling export files (memories.json,\n"
+    "                              projects/) next to it — treats the whole set\n"
+    "                              as one import unit.\n"
+    "    --format=code|web|telegram\n"
+    "                              Override auto-detection (rarely needed).\n"
+    "    --self=\"Name\"             Required for --format=telegram: your display\n"
+    "                              name, to split user/assistant turns.\n"
+    "    --since=YYYY-MM-DD        Only turns on/after this date.\n"
+    "    --until=YYYY-MM-DD        Only turns strictly before this date.\n"
+    "    --session=ID              Restrict to one session id.\n"
+    "    --fdate                   Standalone memories.json only: use the file's\n"
+    "                              mtime as the timestamp (no derivable date\n"
+    "                              otherwise). Ignored when --all is used with\n"
+    "                              conversations.json present.\n"
+    "    --date=[CC]YYMMDD         Standalone memories.json only: explicit\n"
+    "                              timestamp override. Same --all exception.\n"
+    "\n"
+    "  ragger import-conversations summaries <file> [file...]\n"
+    "      One hand-authored L4 project summary per file.\n"
+    "  ragger import-conversations summaries --jsonl=FILE\n"
+    "      {text, tags?, timestamp?} per line.\n"
+    "\n"
+    "Examples:\n"
+    "  ragger import-conversations ~/.claude/projects/-my-project --format=code\n"
+    "  ragger import-conversations ~/Downloads/claude-export/conversations.json\n"
+    "  ragger import-conversations ~/Downloads/claude-export --all\n"
+    "  ragger import-conversations tg_export.json --format=telegram --self=\"Jane Doe\"\n"
+    "  ragger import-conversations ~/Downloads/memories.json --fdate";
 constexpr const char* CLI_USAGE_EXPORT        = "Usage: ragger export <all|table> [-e|--embeddings] [--output file]";
 constexpr const char* CLI_USAGE_EMBED           = "Usage: ragger embed";
 constexpr const char* CLI_UNKNOWN_COMMAND     = "Unknown command: {}";
@@ -191,7 +226,17 @@ Commands:
   search <query>     Search memories by meaning
   store <text>       Store a new memory
   count              Show number of stored memories
-  import <file...>   Import files (paragraph-aware chunking)
+  import <file...>   Deprecated alias for import-docs (warns, same behavior)
+  import-docs <file...>
+                     Import markdown/text files (paragraph-aware chunking) → L5 documents
+                       --title <T>  --year <YYYY>  --tags a,b,c
+  import-conversations <PATH> [--all]
+                     Import Claude web/Claude Code/Telegram conversation history
+                     (format auto-detected) into turns, session summaries, and
+                     memories/decisions. See `ragger import-conversations` with
+                     no args for full option list.
+                     Subcommand: import-conversations summaries <file...>
+                       one hand-authored L4 project summary per file
   export <all|table> Dump database as SQL (like mysqldump)
                        -e, --embeddings  include embedding blobs
                        --output <file>   write to file instead of stdout

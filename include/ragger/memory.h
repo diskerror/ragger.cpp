@@ -49,7 +49,8 @@ public:
                    const std::string& assistant_text = "",
                    const std::string& model_name = "",
                    bool defer_embedding = false,
-                   const std::string& session_guid = "");
+                   const std::string& session_guid = "",
+                   const std::string& source_timestamp = "");
     /// Finalize a partial turn (set assistant_text + embed + model).
     bool finalize_turn(int turn_id,
                        const std::string& assistant_text,
@@ -90,6 +91,29 @@ public:
     bool set_summary_status(int summary_id, const std::string& status);
     std::vector<std::string> recent_summaries(const std::string& level, int limit);
     std::vector<std::string> current_decisions(int limit);
+
+    /// Exact-match idempotency check for bulk importers: does a summaries
+    /// row already exist with this text and created_at timestamp?
+    bool summary_exists_exact(const std::string& text, const std::string& created_at);
+
+    /// Exact-match idempotency check for the decisions table. Mirrors
+    /// summary_exists_exact.
+    bool decision_exists_exact(const std::string& text, const std::string& created_at);
+
+    /// Fuzzy overlap check for conversation importers: does a live-captured
+    /// turn already exist with this exact user_text within ±window_seconds?
+    bool turn_exists_fuzzy(const std::string& user_text, const std::string& ts,
+                           int window_seconds);
+
+    /// Cross-source overlap lookup (ignores timestamp) — see
+    /// StorageBackend::find_turn_by_text.
+    std::optional<TurnRecord> find_turn_by_text(const std::string& user_text);
+
+    /// Upgrade an existing turn's timestamp/session_guid in place — see
+    /// StorageBackend::update_turn_meta.
+    bool update_turn_meta(int turn_id,
+                          const std::string& timestamp = "",
+                          const std::string& session_guid = "");
 
     /// Replace text + metadata of an existing memory (re-embeds unless
     /// `defer_embedding`, FTS5 triggers reindex, preserves id and original

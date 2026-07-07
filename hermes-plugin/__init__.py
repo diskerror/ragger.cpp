@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import http.client
+import socket
 import urllib.error
 import urllib.request
 from configparser import ConfigParser
@@ -37,13 +39,52 @@ _CIRCUIT_COOLDOWN = 120.0   # seconds before auto-reset
 
 
 # ---------------------------------------------------------------------------
+# Unix domain socket HTTP transport
+# ---------------------------------------------------------------------------
+
+class _UnixSocketHTTPConnection(http.client.HTTPConnection):
+    """http.client.HTTPConnection that dials a Unix domain socket instead of TCP."""
+
+    def __init__(self, socket_path: str, timeout: float = 5.0):
+        super().__init__("localhost", timeout=timeout)
+        self._socket_path = socket_path
+
+    def connect(self):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect(self._socket_path)
+        self.sock = sock
+
+
+# ---------------------------------------------------------------------------
 # Config reader
 # ---------------------------------------------------------------------------
 
 def _load_ragger_config() -> dict:
-    """Read host/port/auth_token from ~/.ragger/settings.ini."""
-    cfg = {"host": "127.0.0.1", "port": "8432", "auth_token": ""}
-    cfg_path = Path.home() / ".ragger" / "settings.ini"
+    """Read host/port/auth_token/auto_recall from ~/.ragger/settings.ini.
+
+    auto_recall (bool, default True) gates the *recall/injection* side only
+    (queue_prefetch/prefetch → the <memory-context> block stuffed into every
+    prompt). It never touches sync_turn/post_turn_finalized — turn capture
+    stays always-on regardless of this setting, by design (Reid: "ragger-
+    memory must always be capturing turns").
+
+    Ragger now defaults to a Unix domain socket at <ragger_base>/ragger.sock
+    (settings.ini [server] socket_enable=true, the default since the
+    --ragger-base refactor). TCP (host/port, gated by [server] bind=) is now
+    opt-in. Prefer the socket when socket_enable is true; only fall back to
+    TCP when the server was explicitly configured for it (bind= set).
+    """
+    ragger_base = Path.home() / ".ragger"
+    cfg = {
+        "host": "127.0.0.1",
+        "port": "8432",
+        "auth_token": "",
+        "auto_recall": True,
+        "socket_enable": True,
+        "socket_path": str(ragger_base / "ragger.sock"),
+    }
+    cfg_path = ragger_base / "settings.ini"
     if cfg_path.exists():
         parser = ConfigParser()
         try:
@@ -58,6 +99,14 @@ def _load_ragger_config() -> dict:
                     cfg["host"] = raw_bind
                 raw_token = srv.get("auth_token", "").split("#")[0].strip()
                 cfg["auth_token"] = raw_token
+                raw_recall = srv.get("auto_recall", "").split("#")[0].strip().lower()
+                if raw_recall in ("false", "0", "no", "off"):
+                    cfg["auto_recall"] = False
+                raw_socket_enable = srv.get("socket_enable", "").split("#")[0].strip().lower()
+                if raw_socket_enable in ("false", "0", "no", "off"):
+                    cfg["socket_enable"] = False
+                elif raw_socket_enable in ("true", "1", "yes", "on"):
+                    cfg["socket_enable"] = True
         except Exception as exc:
             logger.debug("Could not parse ~/.ragger/settings.ini: %s", exc)
     return cfg
@@ -127,6 +176,9 @@ class RaggerMemoryProvider(MemoryProvider):
     def __init__(self):
         self._base_url = "http://127.0.0.1:8432"
         self._auth_token = ""
+        self._auto_recall = True
+        self._socket_enable = True
+        self._socket_path = str(Path.home() / ".ragger" / "ragger.sock")
         self._prefetch_result = ""
         self._model = ""
         self._prefetch_lock = threading.Lock()
@@ -177,6 +229,8 @@ class RaggerMemoryProvider(MemoryProvider):
         return h
 
     def _get(self, path: str, timeout: float = 3.0) -> Optional[dict]:
+        if self._socket_enable:
+            return self._request_unix("GET", path, None, timeout)
         url = self._base_url + path
         req = urllib.request.Request(url, headers=self._headers())
         try:
@@ -187,6 +241,8 @@ class RaggerMemoryProvider(MemoryProvider):
             return None
 
     def _post(self, path: str, payload: dict, timeout: float = 5.0) -> Optional[dict]:
+        if self._socket_enable:
+            return self._request_unix("POST", path, payload, timeout)
         url = self._base_url + path
         data = json.dumps(payload).encode()
         req = urllib.request.Request(url, data=data, headers=self._headers(), method="POST")
@@ -197,6 +253,24 @@ class RaggerMemoryProvider(MemoryProvider):
             logger.debug("Ragger POST %s: %s", path, exc)
             return None
 
+    def _request_unix(self, method: str, path: str, payload: Optional[dict], timeout: float) -> Optional[dict]:
+        """Send a request over the Ragger Unix domain socket."""
+        conn = _UnixSocketHTTPConnection(self._socket_path, timeout=timeout)
+        try:
+            body = json.dumps(payload).encode() if payload is not None else None
+            conn.request(method, path, body=body, headers=self._headers())
+            resp = conn.getresponse()
+            data = resp.read()
+            if resp.status >= 400:
+                logger.debug("Ragger %s %s: HTTP %d %s", method, path, resp.status, data[:200])
+                return None
+            return json.loads(data)
+        except Exception as exc:
+            logger.debug("Ragger %s %s (socket): %s", method, path, exc)
+            return None
+        finally:
+            conn.close()
+
     # ------------------------------------------------------------------
     # MemoryProvider interface
     # ------------------------------------------------------------------
@@ -204,6 +278,20 @@ class RaggerMemoryProvider(MemoryProvider):
     def is_available(self) -> bool:
         """Return True if the Ragger daemon is reachable."""
         cfg = _load_ragger_config()
+        if cfg["socket_enable"]:
+            conn = _UnixSocketHTTPConnection(cfg["socket_path"], timeout=2.0)
+            try:
+                headers = {}
+                if cfg["auth_token"]:
+                    headers["Authorization"] = f"Bearer {cfg['auth_token']}"
+                conn.request("GET", "/health", headers=headers)
+                resp = conn.getresponse()
+                data = json.loads(resp.read())
+                return data.get("status") == "ok"
+            except Exception:
+                return False
+            finally:
+                conn.close()
         url = f"http://{cfg['host']}:{cfg['port']}/health"
         req = urllib.request.Request(url)
         if cfg["auth_token"]:
@@ -219,6 +307,9 @@ class RaggerMemoryProvider(MemoryProvider):
         cfg = _load_ragger_config()
         self._base_url = f"http://{cfg['host']}:{cfg['port']}"
         self._auth_token = cfg["auth_token"]
+        self._auto_recall = cfg["auto_recall"]
+        self._socket_enable = cfg["socket_enable"]
+        self._socket_path = cfg["socket_path"]
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
         """Capture the live conversing model so sync_turn can record it.
@@ -241,8 +332,13 @@ class RaggerMemoryProvider(MemoryProvider):
         )
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
-        """Kick off a background search to warm the prefetch cache."""
-        if self._breaker_open():
+        """Kick off a background search to warm the prefetch cache.
+
+        No-op when auto_recall is disabled (~/.ragger/settings.ini
+        [server] auto_recall = false) — turn capture (sync_turn /
+        post_turn_finalized) is unaffected by this flag.
+        """
+        if not self._auto_recall or self._breaker_open():
             return
 
         def _run():

@@ -1,5 +1,5 @@
 # Build
-build/
+build*/
 cmake-build-*/
 CMakeCache.txt
 CMakeFiles/
@@ -11,6 +11,7 @@ CTestTestfile.cmake
 Makefile
 cmake_install.cmake
 Testing/
+test-db-copy/
 .cmake/
 .claude/
 .cache/
@@ -30,8 +31,4 @@ models/model.onnx
 # OS
 .DS_Store
 scripts/deploy.sh
-
-AI_reference/
-AGENT_MEMORY_TRIGGERS_REPORT.md
-CODE_REVIEW.md
-build-stats/
+scripts/import/*.session

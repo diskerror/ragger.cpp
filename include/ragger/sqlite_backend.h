@@ -45,7 +45,8 @@ public:
                    const std::string& assistant_text,
                    const std::string& model_name = "",
                    bool defer_embedding = false,
-                   const std::string& session_guid = "") override;
+                   const std::string& session_guid = "",
+                   const std::string& source_timestamp = "") override;
     std::vector<TurnRecord> turns_by_session(
         const std::string& session_guid) override;
     bool finalize_turn(int turn_id,
@@ -84,6 +85,18 @@ public:
         current_project_summary() override;
     std::vector<std::string>
         l2_summary_texts(const std::string& session_guid) override;
+    bool summary_exists_exact(const std::string& text,
+                              const std::string& created_at) override;
+    bool decision_exists_exact(const std::string& text,
+                               const std::string& created_at) override;
+    bool turn_exists_fuzzy(const std::string& user_text,
+                           const std::string& ts,
+                           int window_seconds) override;
+    std::optional<TurnRecord> find_turn_by_text(
+        const std::string& user_text) override;
+    bool update_turn_meta(int turn_id,
+                          const std::string& timestamp = "",
+                          const std::string& session_guid = "") override;
     std::vector<std::string>
         complete_l3_summary_texts() override;
     bool update_summary_text(int summary_id, const std::string& text,

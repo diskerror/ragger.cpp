@@ -77,12 +77,28 @@ void SummarizerService::enqueue_turn(int turn_id,
 void SummarizerService::enqueue_catch_up() {
     auto* backend = &backend_;
 
+    // Re-entrancy guard: if the queue still has work from the previous
+    // catch-up, don't rescan — with a large backlog (e.g. a bulk import
+    // of thousands of turns) the periodic mop-up tick would otherwise
+    // re-enqueue the same unsummarized turns every cycle, exploding the
+    // queue with duplicates while the worker is still draining it.
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        if (!queue_.empty()) return;
+    }
+
+    // Per-tick batch cap. Bounds memory and keeps each catch-up pass
+    // short; the mop-up timer picks up the next slice once the queue
+    // drains. Normal live operation never gets near this.
+    constexpr size_t kCatchUpBatchCap = 200;
+
     size_t turn_n = 0, draft_n = 0, sess_n = 0;
 
-    // L2 catch-up: every unsummarized turn (oldest first).
+    // L2 catch-up: unsummarized turns (oldest first), capped per tick.
     // `session_guid` is empty for anonymous turns (turns.session_id NULL);
     // we still summarize them — the L2 row just lands without a session.
     for (const auto& t : backend->unsummarized_turns()) {
+        if (turn_n >= kCatchUpBatchCap) break;
         if (t.assistant_text.empty()) continue;  // partial turn, skip
         Job j{JobKind::L2Turn, t.turn_id, -1,
               t.user_text, t.assistant_text, t.model_name,
@@ -94,8 +110,9 @@ void SummarizerService::enqueue_catch_up() {
         ++turn_n;
     }
 
-    // Draft retry: every draft-tagged row (housekeeping retry).
+    // Draft retry: draft-tagged rows (housekeeping retry), same cap.
     for (const auto& d : backend->draft_summaries()) {
+        if (draft_n >= kCatchUpBatchCap) break;
         Job j{JobKind::DraftRetry, -1, d.summary_id,
               {}, {}, {}, d.session_guid, d.timestamp};
         std::lock_guard<std::mutex> lk(mutex_);

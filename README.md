@@ -1,15 +1,5 @@
 # Ragger
 
-> **Natural memory with super-natural powers.**
-> 
-> **Human-like memory with in-human skills.**
-> 
-> **Continuous context summaries as you work.**
-> 
-> **Forgets gracefully. Recalls perfectly.**
-> 
-> **Compaction that doesn't forget.**
-
 Ragger is local-first semantic memory for AI agents — and for the humans
 working with them. Think of it as **running compaction with tiered
 recall**: every turn your agent has gets captured and summarized in the
@@ -65,7 +55,7 @@ and any custom recipe files are preserved.
 ```bash
 ragger store "The deploy script needs Node 18+"
 ragger search "deployment requirements"
-ragger import notes.md
+ragger import-docs notes.md
 
 ragger recipe                # interactive picker over available recipes
 ragger recipe reconnect      # set the active recipe (persisted in the DB)

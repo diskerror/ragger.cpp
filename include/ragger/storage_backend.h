@@ -65,11 +65,14 @@ public:
     /// prompt-arrival/finalize flow. `model_name` resolves/creates a models
     /// row (turns.model_id). `session_guid` resolves/creates a sessions row
     /// (turns.session_id) — empty leaves it NULL. Returns the new turn_id.
+    /// `source_timestamp` (db format) overrides created_at for historical
+    /// imports (also skips the regeneration-dedup window).
     virtual int store_turn(const std::string& user_text,
                            const std::string& assistant_text,
                            const std::string& model_name = "",
                            bool defer_embedding = false,
-                           const std::string& session_guid = "") = 0;
+                           const std::string& session_guid = "",
+                           const std::string& source_timestamp = "") = 0;
 
     /// All raw turns belonging to a session GUID, oldest first. Empty if the
     /// session is unknown. Grouping primitive for session summaries/recipes.
@@ -133,6 +136,52 @@ public:
     /// Input corpus for L3 summarization.
     virtual std::vector<std::string>
         l2_summary_texts(const std::string& session_guid) = 0;
+
+    /// Exact-match existence check on the `summaries` table: does a row
+    /// already exist with this text and created_at timestamp? Used by
+    /// bulk importers (conversation/summary import) to make re-running an
+    /// import idempotent — safe to feed the same export file (or an
+    /// overlapping one) twice without duplicating rows.
+    virtual bool summary_exists_exact(const std::string& text,
+                                      const std::string& created_at) = 0;
+
+    /// Exact-match existence check on the `decisions` table: same text +
+    /// same created_at already present? Mirrors summary_exists_exact —
+    /// used by importers (e.g. memories.json → decisions) to stay
+    /// idempotent across re-runs.
+    virtual bool decision_exists_exact(const std::string& text,
+                                       const std::string& created_at) = 0;
+
+    /// Fuzzy existence check on the `turns` table: does a live-captured
+    /// turn already exist with this exact user_text and a created_at
+    /// within ±window_seconds of `ts`? Used by conversation importers to
+    /// skip exchanges Ragger already captured live — the text content is
+    /// identical but timestamps skew by a few seconds (message send time
+    /// vs. capture time) so an exact timestamp match would miss them.
+    virtual bool turn_exists_fuzzy(const std::string& user_text,
+                                   const std::string& ts,
+                                   int window_seconds) = 0;
+
+    /// Cross-source overlap lookup: does a turn already exist whose
+    /// user_text normalizes-equal to `user_text` (whitespace collapsed,
+    /// control/zero-width/variation-selector chars stripped, case-folded)?
+    /// Unlike turn_exists_fuzzy (same-source dedup, timestamp-windowed),
+    /// this ignores timestamp entirely — it's for reconciling the *same*
+    /// exchange captured from two different sources (e.g. pasted into
+    /// Telegram vs. the original Claude.ai session) whose timestamps have
+    /// no reason to agree. Returns the existing row so the caller can
+    /// decide whether to upgrade its metadata via update_turn_meta().
+    virtual std::optional<TurnRecord> find_turn_by_text(
+        const std::string& user_text) = 0;
+
+    /// Upgrade an existing turn's timestamp and/or session_guid in place
+    /// (e.g. a Telegram-import row gets corrected to the authoritative
+    /// timestamp/session from a later Claude-export import, or vice versa
+    /// if run in the other order). Empty `timestamp`/`session_guid` leaves
+    /// that field untouched. Returns false if the turn_id doesn't exist.
+    virtual bool update_turn_meta(int turn_id,
+                                  const std::string& timestamp = "",
+                                  const std::string& session_guid = "") = 0;
 
     /// All complete L3 session summary texts, oldest-first.
     /// Input corpus for L4 summarization.
