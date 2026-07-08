@@ -1837,17 +1837,24 @@ struct SqliteBackend::Impl {
     // same created_at timestamp already present in summaries. Used by
     // `ragger import conversations`/`import summaries` so re-running an
     // import (or feeding overlapping exports) doesn't duplicate rows.
+    // Normalizes `text` the same way store_summary() does before storing
+    // (absolute home-dir paths -> "~/") — otherwise a chunk containing
+    // e.g. "/Users/reid/..." never matches what's actually in the table
+    // (already normalized to "~/...") and gets re-inserted on every run.
     bool summary_exists_exact(const std::string& text, const std::string& created_at) {
+        std::string t = normalize_path(text);
         Stmt s(db, "SELECT 1 FROM summaries WHERE text = ? AND created_at = ? LIMIT 1");
-        s.bind(1, text);
+        s.bind(1, t);
         s.bind(2, created_at);
         return s.step();
     }
 
-    // Mirrors summary_exists_exact for the decisions table.
+    // Mirrors summary_exists_exact for the decisions table (same
+    // normalize-before-compare fix applies here too).
     bool decision_exists_exact(const std::string& text, const std::string& created_at) {
+        std::string t = normalize_path(text);
         Stmt s(db, "SELECT 1 FROM decisions WHERE text = ? AND created_at = ? LIMIT 1");
-        s.bind(1, text);
+        s.bind(1, t);
         s.bind(2, created_at);
         return s.step();
     }

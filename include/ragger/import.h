@@ -64,9 +64,15 @@ std::vector<MemoryChunk> split_memory_narrative(const std::string& text);
 /// "context"/"top of mind"/"preference" → decision-like), then falls back
 /// to a verb/keyword scan of `text` (stative "prefers"/"is a"/"uses X as"
 /// → decision-like; episodic "worked on"/"explored"/"set up"/"asked about"
-/// → session-like) when the heading gives no signal.
+/// → session-like) when the heading gives no signal. If neither signal
+/// fires, returns `default_decision_like` — true for Claude's
+/// memories.json (a narrative that really does skew toward standing
+/// facts/preferences), false for flat daily-log-style memory files
+/// (dated entries are episodes-without-a-session-id by construction, so
+/// the safer unsignaled default there is session-like, not decision-like).
 bool memory_chunk_is_decision_like(const std::string& heading_path,
-                                   const std::string& text);
+                                   const std::string& text,
+                                   bool default_decision_like = true);
 
 
 /// Auto-detected shape of a conversation-import source, from sniffing its
@@ -88,6 +94,55 @@ enum class ConversationFormat {
 /// shape; JSONL formats peek at the first non-blank line). Returns
 /// Unknown for non-JSON or unrecognized JSON.
 ConversationFormat detect_conversation_format(const std::string& path);
+
+/// Extract a leading "YYYY-MM-DD" date from a filename, e.g.
+/// "2026-03-26.md" -> "2026-03-26", "2026-04-13-http-400-foo.md" ->
+/// "2026-04-13". Returns empty string if the filename has no such
+/// prefix. Used by import-conversations' flat-Markdown-memory-log path
+/// (OpenClaw/nanobot-style daily notes and MEMORY.md snapshots), where
+/// the filename is frequently the only date signal available.
+std::string extract_date_from_filename(const std::string& filename);
+
+/// Basenames (case-insensitive) that are agent persona/scaffolding files,
+/// not memory content — SOUL.md, USER.md, AGENTS.md, TOOLS.md,
+/// IDENTITY.md, HEARTBEAT.md, BOOTSTRAP.md. import-conversations' flat-
+/// Markdown-memory path skips these automatically when walking a
+/// directory, since they're prompt boilerplate repeated verbatim across
+/// every agent workspace, not conversational memory.
+bool is_agent_scaffolding_filename(const std::string& filename);
+
+/// One heading-aware chunk lifted from a flat OpenClaw/nanobot/zeroclaw-
+/// style Markdown memory file (dated daily log like "2026-03-26.md", or
+/// a curated "MEMORY.md" snapshot) — plain `#`/`##`/`###` headings, no
+/// JSON wrapper. `date` is "YYYY-MM-DD" only (never a full timestamp):
+/// dated daily logs carry no time-of-day signal beyond what's in their
+/// own heading text (which is prose, not parsed), and MEMORY.md snapshots
+/// are dated by file mtime, which is itself just "whenever this snapshot
+/// happened to be saved" — not a real moment worth pretending to
+/// second-granularity precision.
+struct FlatMemoryChunk {
+    std::string text;
+    std::string heading_path;   // e.g. "Ragger Architecture Simplification"
+    std::string date;           // "YYYY-MM-DD"
+    bool is_decision_like;
+};
+
+/// Parse one flat Markdown memory file into heading-aware chunks, classify
+/// each via memory_chunk_is_decision_like, and date every chunk the same
+/// way: filename-embedded "YYYY-MM-DD" prefix if present (daily logs),
+/// else the file's mtime truncated to a date (MEMORY.md snapshots with no
+/// date in their name). Returns an empty vector for scaffolding filenames
+/// (see is_agent_scaffolding_filename) or files with no headings/content.
+/// `min_chunk_chars` drops any final chunk shorter than this after
+/// chunk_markdown's merge pass — chunk_markdown's own min_chunk_size only
+/// governs *merge* boundaries, not a guaranteed final size (the very last
+/// paragraph in a file, or one that starts its own chunk immediately, can
+/// still come out tiny — e.g. a bare "please continue" reply, or a
+/// stand-alone "Session Key: ..." metadata line). Those aren't worth a
+/// DB row on their own.
+std::vector<FlatMemoryChunk> parse_flat_markdown_memory(const std::string& path,
+                                                        int min_chunk_size = 200,
+                                                        int min_chunk_chars = 120);
 
 
 // -------------------------------------------------------------------------

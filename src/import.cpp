@@ -6,6 +6,7 @@
 #include "nlohmann_json.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <regex>
@@ -274,7 +275,8 @@ std::vector<MemoryChunk> split_memory_narrative(const std::string& text) {
 }
 
 bool memory_chunk_is_decision_like(const std::string& heading_path,
-                                   const std::string& text) {
+                                   const std::string& text,
+                                   bool default_decision_like) {
     std::string h = heading_path;
     for (char& c : h) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     // Heading signal first.
@@ -303,10 +305,75 @@ bool memory_chunk_is_decision_like(const std::string& heading_path,
     for (auto& k : session_verbs)  if (t.find(k) != std::string::npos) ++session_hits;
     for (auto& k : decision_verbs) if (t.find(k) != std::string::npos) ++decision_hits;
     if (session_hits != decision_hits) return decision_hits > session_hits;
-    // No signal either way: default to decision-like (standing fact) —
-    // the safer assumption for a memory blob, which skews toward stable
-    // facts about the user more often than one-off episodes.
-    return true;
+    // No signal either way: fall back to the caller's default. For
+    // Claude's memories.json narrative this stays decision-like (a
+    // curated memory blob skews toward stable facts). For flat daily-log
+    // memory files this is false — a dated log entry with no other
+    // signal is an episode that never got a session id, not a standing
+    // fact, so it belongs with session summaries.
+    return default_decision_like;
+}
+
+std::string extract_date_from_filename(const std::string& filename) {
+    static const std::regex date_re(R"(^(\d{4}-\d{2}-\d{2}))");
+    std::smatch m;
+    if (std::regex_search(filename, m, date_re)) return m[1].str();
+    return "";
+}
+
+bool is_agent_scaffolding_filename(const std::string& filename) {
+    std::string lower = filename;
+    for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    static const std::vector<std::string> scaffolding = {
+        "soul.md", "user.md", "agents.md", "tools.md",
+        "identity.md", "heartbeat.md", "bootstrap.md"
+    };
+    for (auto& s : scaffolding) if (lower == s) return true;
+    return false;
+}
+
+std::vector<FlatMemoryChunk> parse_flat_markdown_memory(const std::string& path,
+                                                        int min_chunk_size,
+                                                        int min_chunk_chars) {
+    std::vector<FlatMemoryChunk> out;
+    namespace fs = std::filesystem;
+    fs::path p(path);
+    std::string filename = p.filename().string();
+    if (is_agent_scaffolding_filename(filename)) return out;
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return out;
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    std::string text = ss.str();
+    if (text.empty()) return out;
+
+    std::string date = extract_date_from_filename(filename);
+    if (date.empty()) {
+        // No date in the filename (e.g. a MEMORY.md snapshot) — fall back
+        // to the file's mtime, truncated to a bare date. No time-of-day
+        // component: we don't actually know one, so don't invent it.
+        auto ftime = fs::last_write_time(path);
+        auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+            ftime - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+        std::time_t tt = std::chrono::system_clock::to_time_t(sctp);
+        char buf[16];
+        std::strftime(buf, sizeof(buf), "%Y-%m-%d", std::localtime(&tt));
+        date = buf;
+    }
+
+    for (auto& chunk : chunk_markdown(text, min_chunk_size)) {
+        if (chunk.text.empty()) continue;
+        if ((int)chunk.text.size() < min_chunk_chars) continue;
+        FlatMemoryChunk fc;
+        fc.text = chunk.text;
+        fc.heading_path = chunk.section;
+        fc.date = date;
+        fc.is_decision_like = memory_chunk_is_decision_like(chunk.section, chunk.text,
+                                                            /*default_decision_like=*/false);
+        out.push_back(std::move(fc));
+    }
+    return out;
 }
 
 ConversationFormat detect_conversation_format(const std::string& path) {

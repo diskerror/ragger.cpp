@@ -514,6 +514,91 @@ int main(int argc, char **argv) {
             bool all_flag = opts.count("all") > 0;
             bool is_dir = fs::is_directory(raw_src);
 
+            // Flat Markdown memory files (OpenClaw/nanobot/zeroclaw-style
+            // daily logs and MEMORY.md snapshots) — plain `#` headings,
+            // no JSON wrapper, dated by filename prefix or file mtime.
+            // Handled as its own path, entirely separate from the
+            // Claude/Telegram JSON formats below: a single .md file needs
+            // no --all (nothing to pull in alongside it), while a
+            // directory of them does, same as any other multi-file
+            // import.
+            bool looks_like_flat_md_dir = is_dir && !fs::exists(raw_src + "/conversations.json");
+            if (looks_like_flat_md_dir) {
+                bool has_md = false;
+                for (auto& e : fs::directory_iterator(raw_src)) {
+                    if (e.is_regular_file() && e.path().extension() == ".md") { has_md = true; break; }
+                }
+                if (has_md && !all_flag) {
+                    Diskerror::logger::error(
+                        "import-conversations: " + raw_src + " is a directory of Markdown "
+                        "memory files — pass --all to import them all as one unit");
+                    return 1;
+                }
+                if (has_md) {
+                    ragger::RaggerMemory memory(db_path);
+                    int n_dec = 0, n_dec_skip = 0, n_sum = 0, n_sum_skip = 0, n_files = 0;
+                    for (auto& e : fs::directory_iterator(raw_src)) {
+                        if (!e.is_regular_file() || e.path().extension() != ".md") continue;
+                        auto chunks = ragger::parse_flat_markdown_memory(e.path().string());
+                        if (chunks.empty()) continue;
+                        ++n_files;
+                        for (auto& c : chunks) {
+                            std::string ts = to_db_ts(c.date);
+                            if (c.is_decision_like) {
+                                if (memory.decision_exists_exact(c.text, ts)) { ++n_dec_skip; continue; }
+                                memory.store_decision(c.text, "active", "flat-memory-import", ts);
+                                ++n_dec;
+                            } else {
+                                if (memory.summary_exists_exact(c.text, ts)) { ++n_sum_skip; continue; }
+                                memory.store_summary(c.text, "session", "complete",
+                                                     /*model_name=*/"", /*session_guid=*/"",
+                                                     /*source_timestamp=*/ts,
+                                                     /*tags=*/"flat-memory-import");
+                                ++n_sum;
+                            }
+                        }
+                    }
+                    std::println(
+                        "Imported {} Markdown memory files: {} session summaries ({} duplicates "
+                        "skipped), {} decisions ({} duplicates skipped).",
+                        n_files, n_sum, n_sum_skip, n_dec, n_dec_skip);
+                    return 0;
+                }
+                // Directory has neither conversations.json nor any .md
+                // files — fall through to the conversations.json-required
+                // error path below, which gives the right message for an
+                // unrecognized directory.
+            }
+            if (!is_dir && fs::path(raw_src).extension() == ".md") {
+                auto chunks = ragger::parse_flat_markdown_memory(raw_src);
+                if (chunks.empty()) {
+                    std::println("Nothing to import (empty file or recognized as agent scaffolding).");
+                    return 0;
+                }
+                ragger::RaggerMemory memory(db_path);
+                int n_dec = 0, n_dec_skip = 0, n_sum = 0, n_sum_skip = 0;
+                for (auto& c : chunks) {
+                    std::string ts = to_db_ts(c.date);
+                    if (c.is_decision_like) {
+                        if (memory.decision_exists_exact(c.text, ts)) { ++n_dec_skip; continue; }
+                        memory.store_decision(c.text, "active", "flat-memory-import", ts);
+                        ++n_dec;
+                    } else {
+                        if (memory.summary_exists_exact(c.text, ts)) { ++n_sum_skip; continue; }
+                        memory.store_summary(c.text, "session", "complete",
+                                             /*model_name=*/"", /*session_guid=*/"",
+                                             /*source_timestamp=*/ts,
+                                             /*tags=*/"flat-memory-import");
+                        ++n_sum;
+                    }
+                }
+                std::println(
+                    "Imported {} session summaries ({} duplicates skipped), "
+                    "{} decisions ({} duplicates skipped).",
+                    n_sum, n_sum_skip, n_dec, n_dec_skip);
+                return 0;
+            }
+
             // Special case: the input file itself IS memories.json (not
             // conversations.json with a memories.json sibling). This is a
             // standalone import of just that one file — no siblings to
