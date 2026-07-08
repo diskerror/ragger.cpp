@@ -498,17 +498,32 @@ std::string trim(std::string s) {
     return s;
 }
 
+/// Strip inline tool-call trace lines that some Claude clients/hooks render
+/// as literal text inside an assistant text block — lines like
+/// `⚙️ ragger_search: "..."` or `🔍 session_search: "..."`. These are
+/// UI chrome for a tool invocation, not conversational content, and
+/// duplicate what the actual tool_use/tool_result blocks already carry
+/// (which extract_claude_text already excludes). Matched by the leading
+/// glyph + "name: " shape rather than a fixed tool-name list, so it covers
+/// any current or future tool without needing updates here.
+std::string strip_tool_trace_lines(const std::string& text) {
+    static const std::regex trace_line(
+        R"(^[ \t]*(?:⚙️|🔍|🔧|🛠️)[ \t]*[A-Za-z0-9_]+:.*$\n?)",
+        std::regex::multiline);
+    return std::regex_replace(text, trace_line, "");
+}
+
 /// Extract text from a Claude message body. The body may be a raw string or
-/// an array of content blocks; only `type=="text"` blocks contribute (tool
+/// an array of content blocks; only type=="text" blocks contribute (tool
 /// blocks / thinking blocks aren't conversational and would pollute search).
 std::string extract_claude_text(const json& content) {
-    if (content.is_string()) return trim(content.get<std::string>());
+    if (content.is_string()) return trim(strip_tool_trace_lines(content.get<std::string>()));
     if (!content.is_array()) return "";
     std::vector<std::string> parts;
     for (const auto& block : content) {
         if (!block.is_object()) continue;
         if (block.value("type", "") == "text") {
-            auto t = trim(block.value("text", ""));
+            auto t = trim(strip_tool_trace_lines(block.value("text", "")));
             if (!t.empty()) parts.push_back(t);
         }
     }
@@ -655,13 +670,27 @@ std::string extract_telegram_text(const json& text_field) {
     return trim(out);
 }
 
+/// True if `text` is a bare control command that should never be stored as
+/// conversation content: a slash-command (e.g. "/stop", "/model", "/reset",
+/// with or without trailing arguments) or one of the bare no-slash keywords
+/// users type as an interrupt ("stop", "wait" — case-insensitive, exact
+/// match only, so "please wait" or "stopwatch" are NOT treated as commands).
+bool is_bare_command(const std::string& text) {
+    if (text.empty()) return false;
+    if (text[0] == '/') return true;
+    std::string lower = text;
+    for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return lower == "stop" || lower == "wait";
+}
+
 /// Parse one chat object (has "messages"; may or may not have "name")
 /// into ImportTurns, appending onto `out`. Session identity: Telegram has
 /// no session concept, but the user's `/new` command messages mark exact
 /// boundaries where the live agent minted a fresh session. We mint
 /// synthetic GUIDs (telegram-import-0001, -0002, ...) and roll to the
 /// next on every `/new`. The `/new` message itself is a command, not
-/// conversation — it is dropped.
+/// conversation — it is dropped. Other bare commands (/stop, /model, plain
+/// "stop"/"wait", etc.) are dropped too but do NOT roll the session.
 void parse_telegram_chat(const json& chat, const std::string& self_name,
                           std::vector<ImportTurn>& out) {
     if (!chat.is_object() || !chat.contains("messages")) return;
@@ -690,6 +719,11 @@ void parse_telegram_chat(const json& chat, const std::string& self_name,
             ++session_no;
             continue;  // command, not conversation
         }
+
+        // Other bare commands (/stop, /model, /reset, plain "stop"/"wait",
+        // etc.) are control chatter, not conversation content — drop them
+        // without touching session numbering.
+        if (is_self && is_bare_command(text)) continue;
 
         // Merge consecutive same-sender bubbles — but never across a
         // session boundary (sid mismatch breaks the merge naturally).
