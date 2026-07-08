@@ -208,6 +208,14 @@ std::vector<std::string> RaggerMemory::current_decisions(int limit) {
     return backend_->current_decisions(limit);
 }
 
+bool RaggerMemory::set_decision_status(int decision_id, const std::string& status) {
+    return backend_->set_decision_status(decision_id, status);
+}
+
+std::vector<std::string> RaggerMemory::decisions_by_status(const std::string& status, int limit) {
+    return backend_->decisions_by_status(status, limit);
+}
+
 bool RaggerMemory::summary_exists_exact(const std::string& text, const std::string& created_at) {
     return backend_->summary_exists_exact(text, created_at);
 }

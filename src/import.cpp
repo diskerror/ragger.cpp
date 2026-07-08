@@ -364,12 +364,44 @@ std::vector<FlatMemoryChunk> parse_flat_markdown_memory(const std::string& path,
 
     for (auto& chunk : chunk_markdown(text, min_chunk_size)) {
         if (chunk.text.empty()) continue;
-        if ((int)chunk.text.size() < min_chunk_chars) continue;
+        // chunk_markdown() bakes heading lines (e.g. "# Session: 2026-04-13
+        // 21:43:46 UTC" / "## Conversation Summary") into the literal text
+        // — not just a leading block, but also mid-chunk whenever its
+        // merge pass stitches paragraphs from different sub-sections
+        // together. Useful for chunk_markdown's own general-purpose
+        // callers, but here it's pure duplication: the row's created_at
+        // already carries the date, and the section breadcrumb is kept
+        // separately below. Strip every '#'-prefixed heading line
+        // (anywhere in the chunk) so none of this gets embedded/FTS-
+        // indexed as content — repeated across every chunk in a file,
+        // it would dilute search.
+        std::string body;
+        body.reserve(chunk.text.size());
+        {
+            std::istringstream ls(chunk.text);
+            std::string line;
+            bool first_line = true;
+            while (std::getline(ls, line)) {
+                if (heading_level(line) > 0) continue;
+                if (!first_line) body += "\n";
+                body += line;
+                first_line = false;
+            }
+        }
+        // Collapse any now-consecutive blank lines left behind by removed
+        // headings, and trim.
+        body = std::regex_replace(body, std::regex(R"(\n{3,})"), "\n\n");
+        while (!body.empty() && (body.front() == '\n' || body.front() == ' '))
+            body.erase(body.begin());
+        while (!body.empty() && (body.back() == '\n' || body.back() == ' '))
+            body.pop_back();
+        if (body.empty()) continue;
+        if ((int)body.size() < min_chunk_chars) continue;
         FlatMemoryChunk fc;
-        fc.text = chunk.text;
+        fc.text = body;
         fc.heading_path = chunk.section;
         fc.date = date;
-        fc.is_decision_like = memory_chunk_is_decision_like(chunk.section, chunk.text,
+        fc.is_decision_like = memory_chunk_is_decision_like(chunk.section, body,
                                                             /*default_decision_like=*/false);
         out.push_back(std::move(fc));
     }

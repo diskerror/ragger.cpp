@@ -60,8 +60,13 @@ public:
     bool update_document_embedding(int document_id, const std::vector<float>& emb);
 
     /// Store a curated L6 decision/lesson. Embeds text unless deferred.
+    /// `status` defaults to "current" — the only status current_decisions()
+    /// (the recall-pipeline layer) actually surfaces. Other recognized
+    /// values: "roadmap" (planned/future work — deliberately excluded from
+    /// the recall layer so every session isn't cluttered with unfinished
+    /// plans; query it explicitly instead), "superseded", "deprecated".
     int store_decision(const std::string& text,
-                       const std::string& status = "active",
+                       const std::string& status = "current",
                        const std::string& tags = "",
                        const std::string& source_timestamp = "",
                        bool defer_embedding = false);
@@ -91,6 +96,16 @@ public:
     bool set_summary_status(int summary_id, const std::string& status);
     std::vector<std::string> recent_summaries(const std::string& level, int limit);
     std::vector<std::string> current_decisions(int limit);
+
+    /// Set a decision's status (e.g. promote "roadmap" -> "current" once
+    /// planned work is done, or mark a stale one "superseded"/"deprecated").
+    /// Mirrors set_summary_status. Returns false if no row matched.
+    bool set_decision_status(int decision_id, const std::string& status);
+
+    /// Decisions with the given status, most recent first. Use this for
+    /// anything other than the recall pipeline's "current" default —
+    /// e.g. status="roadmap" to list planned/future work explicitly.
+    std::vector<std::string> decisions_by_status(const std::string& status, int limit);
 
     /// Exact-match idempotency check for bulk importers: does a summaries
     /// row already exist with this text and created_at timestamp?

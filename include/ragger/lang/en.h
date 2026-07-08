@@ -19,6 +19,19 @@ constexpr const char* CLI_COMMAND             = "Command";
 constexpr const char* CLI_ARGS                = "Command arguments";
 constexpr const char* CLI_USAGE_SEARCH        = "Usage: ragger search <query>";
 constexpr const char* CLI_USAGE_STORE         = "Usage: ragger store <text>";
+constexpr const char* CLI_USAGE_DECISION      =
+    "Usage:\n"
+    "  ragger decision add <text> [--status=current|roadmap] [--tags=a,b,c]\n"
+    "      Store a curated L6 decision/lesson. --status defaults to\n"
+    "      \"current\" (the only status the recall pipeline surfaces).\n"
+    "      Use --status=roadmap for planned/future work you want tracked\n"
+    "      but don't want cluttering every session's recall until it's\n"
+    "      actually done.\n"
+    "  ragger decision list [--status=current|roadmap|superseded|deprecated] [-n N]\n"
+    "      List decisions by status, newest first. Defaults to \"current\".\n"
+    "  ragger decision set-status <decision_id> <status>\n"
+    "      Change a decision's status (e.g. promote a roadmap item to\n"
+    "      \"current\" once it's done, or mark one \"superseded\"/\"deprecated\").";
 constexpr const char* CLI_USAGE_USERADD       = "Usage: ragger useradd <username>";
 constexpr const char* CLI_USAGE_USERMOD       = "Usage: ragger usermod <username>";
 constexpr const char* CLI_USAGE_USERDEL       = "Usage: ragger userdel <username>";
@@ -225,6 +238,11 @@ Commands:
   serve              Run the server in the foreground (what the daemon invokes)
   search <query>     Search memories by meaning
   store <text>       Store a new memory
+  decision <sub>      Curated L6 decisions/lessons (see `ragger decision`
+                     with no args for full option list)
+                       add <text> [--status=current|roadmap] [--tags=a,b,c]
+                       list [--status=current|roadmap|...] [-n N]
+                       set-status <decision_id> <status>
   count              Show number of stored memories
   import <file...>   Deprecated alias for import-docs (warns, same behavior)
   import-docs <file...>

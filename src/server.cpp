@@ -452,7 +452,12 @@ struct Server::Impl {
         std::string category = metadata.value("category", "");
         if (category == "decision") {
             std::string tags = metadata.value("tags", "");
-            int did = mem.store_decision(text, /*status=*/"active", tags);
+            // Default "current" (the only status the recall pipeline
+            // surfaces). Callers can pass metadata.status="roadmap" for
+            // planned/future work that shouldn't clutter every session's
+            // recall until it's actually done.
+            std::string status = metadata.value("status", "current");
+            int did = mem.store_decision(text, status, tags);
             Diskerror::logger::debug("POST /store 200 (decision)");
             res.set_content(json{{"id", std::to_string(did)},
                                  {"status", "stored"},

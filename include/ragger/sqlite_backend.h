@@ -59,7 +59,7 @@ public:
 
     /// Store a curated L6 decision/lesson. Returns decision_id.
     int store_decision(const std::string& text,
-                       const std::string& status = "active",
+                       const std::string& status = "current",
                        const std::string& tags = "",
                        const std::string& source_timestamp = "",
                        bool defer_embedding = false) override;
@@ -112,6 +112,8 @@ public:
     bool set_summary_tags(int summary_id, const std::string& tags) override;
     std::vector<std::string> recent_summaries(const std::string& level, int limit) override;
     std::vector<std::string> current_decisions(int limit) override;
+    bool set_decision_status(int decision_id, const std::string& status) override;
+    std::vector<std::string> decisions_by_status(const std::string& status, int limit) override;
     std::vector<TurnRecord> unsummarized_turns(int limit = 0) override;
     bool turn_summary_exists(const std::string& session_guid,
                              const std::string& source_timestamp) override;

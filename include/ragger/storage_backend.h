@@ -91,10 +91,15 @@ public:
                                            const std::vector<float>& emb) = 0;
 
     /// Store a curated L6 decision/lesson (decisions table). `status` defaults
-    /// to "active"; `tags` stored verbatim; `source_timestamp` overrides the
-    /// row timestamp when non-empty. Returns the new decision_id.
+    /// to "current" — the only status current_decisions() (the recall-
+    /// pipeline layer) actually surfaces. Other recognized values:
+    /// "roadmap" (planned/future work — deliberately excluded from the
+    /// recall layer so every session isn't cluttered with unfinished plans;
+    /// query it via decisions_by_status instead), "superseded", "deprecated".
+    /// `tags` stored verbatim; `source_timestamp` overrides the row
+    /// timestamp when non-empty. Returns the new decision_id.
     virtual int store_decision(const std::string& text,
-                               const std::string& status = "active",
+                               const std::string& status = "current",
                                const std::string& tags = "",
                                const std::string& source_timestamp = "",
                                bool defer_embedding = false) = 0;
@@ -215,6 +220,17 @@ public:
                                                       int limit) = 0;
     /// Current (active) decisions, newest first.
     virtual std::vector<std::string> current_decisions(int limit) = 0;
+
+    /// Set a decision's status (e.g. promote "roadmap" -> "current" once
+    /// planned work is done, or mark a stale one "superseded"/"deprecated").
+    /// Mirrors set_summary_status. Returns false if no row matched.
+    virtual bool set_decision_status(int decision_id, const std::string& status) = 0;
+
+    /// Decisions with the given status, most recent first. Use this for
+    /// anything other than the recall pipeline's "current" default —
+    /// e.g. status="roadmap" to list planned/future work explicitly.
+    virtual std::vector<std::string> decisions_by_status(const std::string& status,
+                                                         int limit) = 0;
 
     /// Turns that don't yet have a matching L2 ('turn') summary —
     /// LEFT JOIN summaries ON (session_id, timestamp) WHERE summary_id IS NULL.

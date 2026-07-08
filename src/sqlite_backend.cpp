@@ -26,6 +26,7 @@
 #include <iomanip>
 #include <filesystem>
 #include <numeric>
+#include <regex>
 #include <set>
 #include <mutex>
 #include <iostream>
@@ -716,6 +717,46 @@ struct SqliteBackend::Impl {
         while ((pos = out.find(prefix, pos)) != std::string::npos) {
             out.replace(pos, prefix.size(), "~/");
             pos += 2;
+        }
+        return out;
+    }
+
+    // Strip a leading "Decision #NNN", "Design Decision #NNN", or
+    // "Decision Log #NNN" label (optionally with a "(context)" aside
+    // and/or the word "Logged") from decision text, e.g.
+    // "Decision #122 (Vienna, June 2026): Ragger adds ..." ->
+    // "Ragger adds ...". The row's own decision_id + created_at already
+    // carry this information — a hand/agent-authored numeric label baked
+    // into the text is pure duplication that dilutes embedding/FTS search
+    // (and drifts out of sync with the real decision_id over time).
+    // Markdown emphasis markers ("**"/"*") wrapping the label are also
+    // consumed. No-op if the text doesn't start with this pattern.
+    static std::string strip_decision_number_prefix(const std::string& text) {
+        static const std::regex prefix_re(
+            R"(^\s*\*{0,2}(?:Design\s+)?Decision(?:\s+Log)?\s*#\d+\s*)"
+            R"((?:Logged)?\s*(?:\([^)]*\))?\s*\*{0,2}\s*:\s*\*{0,2}\s*)",
+            std::regex::icase);
+        std::smatch m;
+        if (!std::regex_search(text, m, prefix_re) || m.position(0) != 0)
+            return text;
+        std::string out = text.substr(m.length(0));
+        // If the consumed prefix opened with "**"/"*" (bold/italic wrapping
+        // the whole label), the matching close marker sits at the very end
+        // of the string, past what the prefix regex could reach — trim it
+        // too so we don't leave a dangling "**"/"*" behind.
+        std::string opened = m.str(0);
+        size_t nstars = 0;
+        for (char c : opened) {
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') continue;
+            if (c == '*') { ++nstars; continue; }
+            break;
+        }
+        if (nstars > 0) {
+            while (!out.empty() && (out.back() == '\n' || out.back() == '\r' || out.back() == ' '))
+                out.pop_back();
+            size_t trailing = 0;
+            for (size_t i = out.size(); i > 0 && out[i - 1] == '*'; --i) ++trailing;
+            if (trailing >= nstars) out.erase(out.size() - nstars);
         }
         return out;
     }
@@ -1447,7 +1488,7 @@ struct SqliteBackend::Impl {
                        const std::string& tags,
                        const std::string& source_timestamp,
                        bool defer_embedding) {
-        std::string t = normalize_path(text);
+        std::string t = normalize_path(strip_decision_number_prefix(text));
 
         Stmt s(db,
             "INSERT INTO decisions (text, embedding, phon, status, tags, created_at) "
@@ -1460,7 +1501,7 @@ struct SqliteBackend::Impl {
             bind_embedding(s.raw(), 2, emb);
         }
         s.bind(3, phonize(t));
-        s.bind(4, status.empty() ? "active" : status);
+        s.bind(4, status.empty() ? "current" : status);
         s.bind(5, tags);
         s.bind(6, source_timestamp.empty() ? local_timestamp() : source_timestamp);
         if (!s.exec())
@@ -1850,9 +1891,11 @@ struct SqliteBackend::Impl {
     }
 
     // Mirrors summary_exists_exact for the decisions table (same
-    // normalize-before-compare fix applies here too).
+    // normalize-before-compare fix applies here too — plus the
+    // decision-number-prefix strip, since store_decision() strips that
+    // before storing too).
     bool decision_exists_exact(const std::string& text, const std::string& created_at) {
-        std::string t = normalize_path(text);
+        std::string t = normalize_path(strip_decision_number_prefix(text));
         Stmt s(db, "SELECT 1 FROM decisions WHERE text = ? AND created_at = ? LIMIT 1");
         s.bind(1, t);
         s.bind(2, created_at);
@@ -1993,6 +2036,37 @@ struct SqliteBackend::Impl {
             "SELECT text FROM decisions WHERE status = 'current' "
             "ORDER BY created_at DESC, decision_id DESC LIMIT ?");
         s.bind(1, limit);
+        while (s.step()) {
+            auto text = s.column_text(0);
+            if (!text.empty()) out.push_back(std::move(text));
+        }
+        return out;
+    }
+
+    // Set a decision's status (e.g. "roadmap" -> "current" once planned
+    // work is done, or -> "superseded"/"deprecated" once stale). Mirrors
+    // set_summary_status.
+    bool set_decision_status(int decision_id, const std::string& status) {
+        Stmt s(db, "UPDATE decisions SET status = ? WHERE decision_id = ?");
+        s.bind(1, status).bind(2, decision_id);
+        bool ok = s.exec() && sqlite3_changes(db) > 0;
+        if (ok) invalidate_dec_cache();
+        return ok;
+    }
+
+    // Decisions with an arbitrary status, most recent first — e.g.
+    // status="roadmap" to list planned/future work explicitly (roadmap
+    // entries are deliberately excluded from current_decisions()'s
+    // recall-pipeline query so unfinished plans don't clutter every
+    // session's context).
+    std::vector<std::string> decisions_by_status(const std::string& status, int limit) {
+        std::vector<std::string> out;
+        if (limit <= 0) return out;
+        Stmt s(db,
+            "SELECT text FROM decisions WHERE status = ? "
+            "ORDER BY created_at DESC, decision_id DESC LIMIT ?");
+        s.bind(1, status);
+        s.bind(2, limit);
         while (s.step()) {
             auto text = s.column_text(0);
             if (!text.empty()) out.push_back(std::move(text));
@@ -2831,6 +2905,16 @@ std::vector<std::string> SqliteBackend::recent_summaries(const std::string& leve
 std::vector<std::string> SqliteBackend::current_decisions(int limit) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->current_decisions(limit);
+}
+
+bool SqliteBackend::set_decision_status(int decision_id, const std::string& status) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->set_decision_status(decision_id, status);
+}
+
+std::vector<std::string> SqliteBackend::decisions_by_status(const std::string& status, int limit) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->decisions_by_status(status, limit);
 }
 
 std::vector<TurnRecord> SqliteBackend::unsummarized_turns(int limit) {

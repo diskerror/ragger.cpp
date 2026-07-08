@@ -232,6 +232,8 @@ int main(int argc, char **argv) {
             ("title", Diskerror::po::value<std::string>()->default_value(""), CLI_TITLE)
             ("year", Diskerror::po::value<int>()->default_value(0), CLI_YEAR)
             ("tags", Diskerror::po::value<std::string>()->default_value(""), CLI_TAGS)
+            ("status", Diskerror::po::value<std::string>()->default_value(""),
+                "decision: status to store/filter by (current|roadmap|superseded|deprecated)")
             // `import conversations` filters & inputs
             ("format", Diskerror::po::value<std::string>()->default_value(""),
                 "Conversation source format: code | web | telegram")
@@ -417,6 +419,69 @@ int main(int argc, char **argv) {
             std::cout << std::format(ragger::lang::MSG_STORED_WITH_ID, id) << "\n";
 
         }
+        else if (command == "decision") {
+            auto args = opts.getParams("args");
+            if (args.empty()) {
+                Diskerror::logger::error(ragger::lang::CLI_USAGE_DECISION);
+                return 1;
+            }
+            std::string sub = args[0];
+            ragger::RaggerMemory memory(db_path);
+
+            if (sub == "add") {
+                if (args.size() < 2) {
+                    Diskerror::logger::error(ragger::lang::CLI_USAGE_DECISION);
+                    return 1;
+                }
+                std::string text;
+                for (size_t i = 1; i < args.size(); ++i) {
+                    if (i > 1) text += " ";
+                    text += args[i];
+                }
+                std::string status = opts["status"].as<std::string>();
+                if (status.empty()) status = "current";
+                std::string tags = opts["tags"].as<std::string>();
+                int id = memory.store_decision(text, status, tags);
+                std::println("Stored decision {} (status: {}).", id, status);
+                return 0;
+            }
+            if (sub == "list") {
+                std::string status = opts["status"].as<std::string>();
+                if (status.empty()) status = "current";
+                int limit = opts.count("num") ? opts["num"].as<int>() : 20;
+                if (limit < 1) limit = 1;
+                auto items = memory.decisions_by_status(status, limit);
+                if (items.empty()) {
+                    std::println("No decisions with status \"{}\".", status);
+                    return 0;
+                }
+                for (auto& text : items) {
+                    std::println("- {}", text);
+                }
+                return 0;
+            }
+            if (sub == "set-status") {
+                if (args.size() < 3) {
+                    Diskerror::logger::error(ragger::lang::CLI_USAGE_DECISION);
+                    return 1;
+                }
+                int decision_id = 0;
+                try { decision_id = std::stoi(args[1]); } catch (...) {
+                    Diskerror::logger::error("decision set-status: <decision_id> must be a number");
+                    return 1;
+                }
+                std::string status = args[2];
+                if (!memory.set_decision_status(decision_id, status)) {
+                    Diskerror::logger::error(
+                        "decision set-status: no decision with id " + args[1]);
+                    return 1;
+                }
+                std::println("Decision {} set to status \"{}\".", decision_id, status);
+                return 0;
+            }
+            Diskerror::logger::error(ragger::lang::CLI_USAGE_DECISION);
+            return 1;
+        }
         else if (command == "count") {
 
             // Try daemon first (thin client — no model loading)
@@ -546,7 +611,7 @@ int main(int argc, char **argv) {
                             std::string ts = to_db_ts(c.date);
                             if (c.is_decision_like) {
                                 if (memory.decision_exists_exact(c.text, ts)) { ++n_dec_skip; continue; }
-                                memory.store_decision(c.text, "active", "flat-memory-import", ts);
+                                memory.store_decision(c.text, "current", "flat-memory-import", ts);
                                 ++n_dec;
                             } else {
                                 if (memory.summary_exists_exact(c.text, ts)) { ++n_sum_skip; continue; }
@@ -581,7 +646,7 @@ int main(int argc, char **argv) {
                     std::string ts = to_db_ts(c.date);
                     if (c.is_decision_like) {
                         if (memory.decision_exists_exact(c.text, ts)) { ++n_dec_skip; continue; }
-                        memory.store_decision(c.text, "active", "flat-memory-import", ts);
+                        memory.store_decision(c.text, "current", "flat-memory-import", ts);
                         ++n_dec;
                     } else {
                         if (memory.summary_exists_exact(c.text, ts)) { ++n_sum_skip; continue; }
@@ -641,7 +706,7 @@ int main(int argc, char **argv) {
                 }
                 // TODO: LLM-driven split into discrete claims. For now,
                 // store the narrative as one decision row.
-                memory.store_decision(text, "active", "claude-memory", mem_ts);
+                memory.store_decision(text, "current", "claude-memory", mem_ts);
                 std::println("Imported memories.json as 1 decision (dated {}).", mem_ts);
                 return 0;
             }
@@ -879,7 +944,7 @@ int main(int argc, char **argv) {
                             // For now, store the narrative as one decision
                             // row — still searchable, still dated, just
                             // not yet broken into separate atomic claims.
-                            memory.store_decision(text, "active", "claude-memory", mem_ts);
+                            memory.store_decision(text, "current", "claude-memory", mem_ts);
                             std::println("Imported memories.json as 1 decision (dated {}).", mem_ts);
                         }
                     }
