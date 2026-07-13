@@ -185,6 +185,84 @@ int main() {
     }
     std::println(" OK");
 
+    // 11. Constructor creates a missing containing directory (e.g. ~/.ragger/logs)
+    std::println("  test_creates_missing_directory...");
+    {
+        fs::remove_all("/tmp/ragger_test_logdir");
+        std::string nested = "/tmp/ragger_test_logdir/nested/activity.log";
+        assert(!fs::exists("/tmp/ragger_test_logdir"));
+        {
+            Diskerror::logger log(nested, "info");
+            Diskerror::logger::info("dir autocreate check");
+        }
+        assert(fs::exists(nested));
+        content = read_file(nested);
+        assert(content.find("dir autocreate check") != std::string::npos);
+        fs::remove_all("/tmp/ragger_test_logdir");
+    }
+    std::println(" OK");
+
+    // 12. Size-based rotation: once the file crosses max_size, it's renamed
+    // to a timestamped backup and a fresh empty file continues at the same path.
+    std::println("  test_size_based_rotation...");
+    {
+        std::string dir = "/tmp/ragger_test_rotate";
+        std::string path = dir + "/activity.log";
+        fs::remove_all(dir);
+        fs::create_directories(dir);
+        // Seed the file past the 1MB threshold so the logger's very first
+        // append (which checks size after writing) triggers rotation.
+        {
+            std::ofstream seed(path);
+            seed << std::string(1024 * 1024 + 10, 'x');  // > 1MB
+        }
+        {
+            Diskerror::logger log(path, "info", /*maxSizeMb=*/1, /*maxAgeDays=*/0);
+            Diskerror::logger::info("triggers rotation");
+        }
+        int backups = 0;
+        for (const auto& e : fs::directory_iterator(dir)) {
+            if (e.path().filename().string().rfind("activity.log.", 0) == 0) ++backups;
+        }
+        assert(backups == 1);
+        content = read_file(path);
+        assert(content.find("triggers rotation") != std::string::npos);
+        assert(content.size() < 1024 * 1024);  // fresh file, not the seeded giant one
+        fs::remove_all(dir);
+    }
+    std::println(" OK");
+
+    // 13. Age-based cleanup: a backup older than max_age_days is deleted on
+    // the next rotation; one younger than the cutoff survives.
+    std::println("  test_age_based_cleanup...");
+    {
+        std::string dir = "/tmp/ragger_test_agesweep";
+        std::string path = dir + "/activity.log";
+        fs::remove_all(dir);
+        fs::create_directories(dir);
+
+        std::string old_backup = dir + "/activity.log.20200101-000000";
+        std::string young_backup = dir + "/activity.log.20990101-000000";  // far future, never "old"
+        { std::ofstream f(old_backup); f << "old"; }
+        { std::ofstream f(young_backup); f << "young"; }
+
+        // Backdate old_backup's mtime well past the 1-day cutoff used below.
+        auto ancient = std::chrono::file_clock::now() - std::chrono::hours(24 * 30);
+        fs::last_write_time(old_backup, ancient);
+
+        {
+            std::ofstream seed(path);
+            seed << std::string(1024 * 1024 + 10, 'x');
+        }
+        Diskerror::logger log(path, "info", /*maxSizeMb=*/1, /*maxAgeDays=*/1);
+        Diskerror::logger::info("triggers rotation + sweep");
+
+        assert(!fs::exists(old_backup));    // swept (30 days old, cutoff is 1 day)
+        assert(fs::exists(young_backup));   // untouched (2099 mtime, not old)
+        fs::remove_all(dir);
+    }
+    std::println(" OK");
+
     cleanup();
     std::println("test_logger: all passed");
     return 0;

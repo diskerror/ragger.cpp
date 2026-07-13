@@ -58,7 +58,7 @@ public:
                       const std::string& session_guid,
                       const std::string& source_timestamp);
 
-    /// One-shot scan: enqueue every un-summarized turn (oldest first),
+    /// One-shot scan: enqueue every un-summarized turn (newest first),
     /// every draft row, and any session ready to close. Called by start(),
     /// by the pause timer, and by the housekeeping pass (SIGUSR1).
     void enqueue_catch_up();

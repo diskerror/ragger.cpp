@@ -1513,7 +1513,13 @@ struct SqliteBackend::Impl {
     // ---- catch-up / recipe helpers ------------------------------------
     // Turns lacking an L2 summary, linked by (session_id, timestamp).
     // LEFT JOIN keeps turns whose summary row doesn't exist; ordered
-    // oldest-first so the worker processes in capture order.
+    // newest-first so the summarizer works on the most recently active
+    // turns first. This matters most for a manual resummarize (nulling
+    // model_id on a batch of `summaries` rows via direct SQL): the turns
+    // the user actually cares about right now are usually the recent
+    // ones, and with catch_up_batch_size capping each tick, newest-first
+    // means those show up with real summaries soonest instead of waiting
+    // behind a long tail of old backlog.
     std::vector<TurnRecord> unsummarized_turns(int limit) {
         std::vector<TurnRecord> out;
         std::string sql =
@@ -1529,7 +1535,7 @@ struct SqliteBackend::Impl {
             "LEFT JOIN sessions ss ON t.session_id = ss.session_id "
             "WHERE s.summary_id IS NULL "
             "  AND t.assistant_text IS NOT NULL "
-            "ORDER BY t.created_at ASC, t.turn_id ASC";
+            "ORDER BY t.created_at DESC, t.turn_id DESC";
         if (limit > 0) sql += " LIMIT ?";
         Stmt s(db, sql);
         if (limit > 0) s.bind(1, limit);

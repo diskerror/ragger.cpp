@@ -28,7 +28,7 @@ most modern shells); everything else under `~/.ragger/`:
 | Embedding model      | `~/.ragger/models/`         |
 | Recipes              | `~/.ragger/recipes/`        |
 | Inference formats    | `~/.ragger/formats/`        |
-| Log                  | `~/.ragger/activity.log`    |
+| Log                  | `~/.ragger/logs/activity.log`    |
 | Bearer token         | `~/.ragger/token`           |
 
 `install.sh` is idempotent — re-run it after any rebuild to refresh the

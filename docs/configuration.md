@@ -50,7 +50,7 @@ The tables below cover every key currently recognized by the parser.
 | `bind`           | `(empty)`       | TCP bind address. Empty = unix socket only. Must be a valid IPv4/IPv6 literal or hostname — a malformed value fails at startup. |
 | `port`           | `8432`          | TCP port (only meaningful when `bind` is set). |
 | `server_name`    | `(empty)`       | Hostname used by cpp-httplib (e.g. `ragger.local`). |
-| `cert`           | `(empty)`       | Path to a TLS certificate chain (PEM). Both `cert` and `key` must be set and load successfully to enable native TLS — once active, the TCP listener serves HTTPS only. Any problem (only one set, unloadable pair) is logged as a warning (stderr + `~/.ragger/activity.log`) and the daemon falls back to plain HTTP rather than refusing to start. |
+| `cert`           | `(empty)`       | Path to a TLS certificate chain (PEM). Both `cert` and `key` must be set and load successfully to enable native TLS — once active, the TCP listener serves HTTPS only. Any problem (only one set, unloadable pair) is logged as a warning (stderr + `~/.ragger/logs/activity.log`) and the daemon falls back to plain HTTP rather than refusing to start. |
 | `key`            | `(empty)`       | Path to a TLS private key (PEM). |
 | `capture_turns`  | `true`          | **Write side.** When `true`, `capture_turn` (MCP) / `POST /turn` ingests agent-pushed turns into the `turns` table. Set `false` to make the call a no-op. |
 | `build_context`  | `false`         | **Read side.** When `true`, `build_context` / `GET /session/<id>` assembles a recipe-shaped payload. Only meaningful when `capture_turns` is also on. Agent-driven `search`/`store` work either way. Not currently documented in `example-settings.ini` — code and default (`false`) remain intact if you want to opt back in by hand. |
@@ -150,6 +150,7 @@ available — no manual catch-up needed.
 | `housekeeping_interval` | `60`    | Seconds between background passes. `0` disables; values under 10 are clamped to 10.|
 | `episode_idle_minutes`  | `15`    | Idle gap (minutes) that closes an episode of work within a session, and drives session/project rollups. Any positive integer. |
 | `summary_pause_minutes` | `20`    | Deprecated alias for `episode_idle_minutes` — honored only when `episode_idle_minutes` is unset. |
+| `catch_up_batch_size`   | `10`    | Per-tick cap on unsummarized turns (and, separately, draft-tagged retries) enqueued at once. Keeps a manual resummarize (nulling `model_id` on a batch of `summaries` rows via direct SQL) to a small, deliberate slice per housekeeping tick instead of redoing hundreds of inference calls at once. Any positive integer. |
 
 The same housekeeping loop catches turns that landed without a
 summary (e.g. captured via MCP while the daemon was down) and rewrites
@@ -168,15 +169,23 @@ model.
 
 ## `[logging]`
 
-| Key         | Default                  | Description                                                              |
-|-------------|--------------------------|----------------------------------------------------------------------------|
-| `log_level` | `warn`                   | One of `trace`, `debug`, `info`, `warn`, `error`, `critical`.            |
+| Key                | Default | Description                                                              |
+|--------------------|---------|----------------------------------------------------------------------------|
+| `log_level`        | `warn`  | One of `trace`, `debug`, `info`, `warn`, `error`, `critical`.            |
+| `log_max_size_mb`  | `1`     | Rotate `activity.log` → `activity.log.<timestamp>` once it reaches this size (MB). `0` disables size-based rotation. Built into Ragger itself — no external tool (logrotate/newsyslog) or root privilege needed; behaves identically on macOS, Linux, and Windows. |
+| `log_max_age_days` | `14`    | Delete rotated backups older than this many days. Never touches the live `activity.log`. `0` disables age-based cleanup (backups accumulate forever). Checked right after each rotation. |
 
 Everything — queries, HTTP, MCP, general daemon activity — goes to one
-log file, hardcoded at `~/.ragger/activity.log`. There are no separate
-per-stream log files or toggles (older versions had `log_dir`,
+log file, hardcoded at `~/.ragger/logs/activity.log`. There are no
+separate per-stream log files or toggles (older versions had `log_dir`,
 `query_log`, `http_log`, `mcp_log`, `debug_log` — all removed; a single
-unified log replaces them).
+unified log replaces them). The `logs/` directory and the log file
+itself are created automatically at daemon startup if missing.
+
+Each log call opens the file, appends its line, and closes it again —
+rather than holding the file open for the daemon's entire life — so
+rotation can safely rename the file out from under the process at any
+time without special coordination (no SIGHUP-triggered reopen needed).
 
 ## `[paths]`
 

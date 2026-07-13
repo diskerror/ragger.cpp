@@ -10,7 +10,7 @@ socket are pre-authenticated.
 successfully.** Once active, the TCP listener serves HTTPS only —
 plain HTTP on that port stops working. If only one of `cert`/`key` is
 set, or the pair can't be loaded, the daemon logs a clear warning
-(stderr and `~/.ragger/activity.log`) and falls back to plain HTTP
+(stderr and `~/.ragger/logs/activity.log`) and falls back to plain HTTP
 rather than refusing to start — a working insecure daemon beats one
 that won't come up. Check the log after any cert change if you expect
 TLS to be active.
@@ -53,7 +53,7 @@ key  = ~/.ragger/tls/key.pem
 Restart the daemon (`ragger restart`). Access via
 `https://192.168.0.166:8432` (HTTPS works on any port — 443 is just
 the convention). Plain HTTP on that port stops responding once TLS is
-active; check `~/.ragger/activity.log` for a warning if it doesn't.
+active; check `~/.ragger/logs/activity.log` for a warning if it doesn't.
 
 ### Trust the certificate
 

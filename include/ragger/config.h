@@ -112,8 +112,18 @@ struct Config {
     std::string summarizer_prompt = "";
 
     // --- Logging ---
-    std::string log_file;   //  hardcoded to ~/.ragger/activity.log
+    std::string log_file;   //  hardcoded to ~/.ragger/logs/activity.log
     std::string log_level   = "warn";   //  trace, debug, info, warn, error, and critical
+    // Built-in log rotation (no external tool/root needed, cross-platform).
+    // Checked on every append: once activity.log reaches this size it is
+    // renamed to activity.log.<timestamp> and a fresh empty file is started.
+    // 0 disables size-based rotation entirely.
+    long log_max_size_mb    = 1;
+    // Rotated backups (activity.log.<timestamp>) older than this many days
+    // are deleted. Swept opportunistically (throttled, not on every append).
+    // Never touches the live activity.log itself. 0 disables age cleanup
+    // (rotated backups accumulate forever).
+    int  log_max_age_days   = 14;
 
     // --- Paths ---
     bool normalize_home_path   = true;
@@ -152,6 +162,14 @@ struct Config {
     // modelling the walk-away-and-return rhythm. Supersedes summary_pause_minutes,
     // which is accepted as a deprecated alias when this key is unset.
     int   episode_idle_minutes   = 15;
+    // Per-housekeeping-tick cap on how many unsummarized L2 turns (and,
+    // separately, how many draft-tagged retry rows) get enqueued in one
+    // pass. Was a hardcoded constexpr of 200; made configurable so a manual
+    // resummarize (nulling model_id on a batch of `summaries` rows via
+    // direct SQL) can be throttled to a small, deliberate slice per tick
+    // instead of redoing hundreds of inference calls at once. Any positive
+    // integer; default 10.
+    int   catch_up_batch_size    = 10;
 
     // --- System ceilings (0 = no limit) ---
     int  max_search_limit             = 0;

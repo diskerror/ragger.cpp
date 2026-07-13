@@ -234,7 +234,7 @@ public:
 
     /// Turns that don't yet have a matching L2 ('turn') summary —
     /// LEFT JOIN summaries ON (session_id, timestamp) WHERE summary_id IS NULL.
-    /// Returned oldest-first, capped at `limit` (0 = unbounded). Powers the
+    /// Returned newest-first, capped at `limit` (0 = unbounded). Powers the
     /// summarizer's startup catch-up and housekeeping retry pass.
     virtual std::vector<TurnRecord> unsummarized_turns(int limit = 0) = 0;
 

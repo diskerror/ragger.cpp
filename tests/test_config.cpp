@@ -105,12 +105,87 @@ void test_housekeeping_section_parsing() {
         f << "[server]\nport = 8432\n"
           << "[housekeeping]\n"
           << "cleanup_max_age_hours = 168\n"
-          << "housekeeping_interval = 30\n";
+          << "housekeeping_interval = 30\n"
+          << "catch_up_batch_size = 25\n";
     }
 
     ragger::Config cfg = ragger::load_config(path).value();
     assert(cfg.cleanup_max_age_hours == 168.0f);
     assert(cfg.housekeeping_interval == 30);
+    assert(cfg.catch_up_batch_size == 25);
+
+    fs::remove(path);
+    std::println(" OK");
+}
+
+void test_catch_up_batch_size_default() {
+    std::print("  test_catch_up_batch_size_default...");
+
+    std::string path = "/tmp/ragger_test_catchup_default.ini";
+    {
+        std::ofstream f(path);
+        f << "[server]\nport = 8432\n";  // no [housekeeping] section at all
+    }
+
+    ragger::Config cfg = ragger::load_config(path).value();
+    assert(cfg.catch_up_batch_size == 10);  // shipped default
+
+    fs::remove(path);
+    std::println(" OK");
+}
+
+void test_catch_up_batch_size_ignores_nonpositive() {
+    std::print("  test_catch_up_batch_size_ignores_nonpositive...");
+
+    std::string path = "/tmp/ragger_test_catchup_zero.ini";
+    {
+        std::ofstream f(path);
+        f << "[server]\nport = 8432\n"
+          << "[housekeeping]\ncatch_up_batch_size = 0\n";
+    }
+
+    ragger::Config cfg = ragger::load_config(path).value();
+    assert(cfg.catch_up_batch_size == 10);  // 0 rejected, default retained
+
+    fs::remove(path);
+    std::println(" OK");
+}
+
+void test_logging_section_parsing() {
+    std::print("  test_logging_section_parsing...");
+
+    std::string path = "/tmp/ragger_test_logging.ini";
+    {
+        std::ofstream f(path);
+        f << "[server]\nport = 8432\n"
+          << "[logging]\n"
+          << "log_level = debug\n"
+          << "log_max_size_mb = 5\n"
+          << "log_max_age_days = 30\n";
+    }
+
+    ragger::Config cfg = ragger::load_config(path).value();
+    assert(cfg.log_level == "debug");
+    assert(cfg.log_max_size_mb == 5);
+    assert(cfg.log_max_age_days == 30);
+
+    fs::remove(path);
+    std::println(" OK");
+}
+
+void test_logging_section_defaults() {
+    std::print("  test_logging_section_defaults...");
+
+    std::string path = "/tmp/ragger_test_logging_default.ini";
+    {
+        std::ofstream f(path);
+        f << "[server]\nport = 8432\n";  // no [logging] section at all
+    }
+
+    ragger::Config cfg = ragger::load_config(path).value();
+    assert(cfg.log_level == "warn");
+    assert(cfg.log_max_size_mb == 1);
+    assert(cfg.log_max_age_days == 14);
 
     fs::remove(path);
     std::println(" OK");
@@ -313,6 +388,10 @@ int main() {
     test_system_ceilings();
     test_ceiling_zero_means_no_limit();
     test_housekeeping_section_parsing();
+    test_catch_up_batch_size_default();
+    test_catch_up_batch_size_ignores_nonpositive();
+    test_logging_section_parsing();
+    test_logging_section_defaults();
     test_inference_endpoint_parsing();
     test_socket_bind_config();
     test_bool_parsing_variants();

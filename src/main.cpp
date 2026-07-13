@@ -315,7 +315,8 @@ int main(int argc, char **argv) {
     const auto &cfg = ragger::config();
 
     //  Initialize static logging system.
-    Diskerror::logger log(cfg.log_file, cfg.log_level);
+    Diskerror::logger log(cfg.log_file, cfg.log_level,
+                           cfg.log_max_size_mb, cfg.log_max_age_days);
 
     // CLI overrides
     std::string host = opts.count("host") ? opts["host"].as<std::string>() : cfg.bind_address;

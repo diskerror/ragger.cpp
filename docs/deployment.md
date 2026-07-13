@@ -9,7 +9,7 @@ Ragger installs per-user. The executable lives on `PATH` under
 ~/.ragger/settings.ini      # config
 ~/.ragger/memories.db       # SQLite database
 ~/.ragger/ragger.sock       # unix socket (daemon)
-~/.ragger/activity.log      # daemon log (unified — no separate per-stream logs)
+~/.ragger/logs/activity.log # daemon log (unified — no separate per-stream logs)
 ~/.ragger/models/           # embedding models
 ~/.ragger/formats/          # inference API format definitions
 ~/.ragger/recipes/          # build_context recipes (JSON)
@@ -105,7 +105,7 @@ and it's optional.
 
 ### Logs
 
-`~/.ragger/activity.log` — one unified log for daemon startup,
+`~/.ragger/logs/activity.log` — one unified log for daemon startup,
 queries, HTTP, and MCP activity. There are no separate stdout/stderr
 files or per-stream logs; the LaunchAgent/systemd unit points both
 stdout and stderr at this same file.
@@ -175,7 +175,7 @@ mv ~/.local/bin/ragger-cpp ~/.local/bin/ragger
 ## Troubleshooting
 
 **Daemon won't start:**
-Check `~/.ragger/activity.log`. Common causes: port 8432 already
+Check `~/.ragger/logs/activity.log`. Common causes: port 8432 already
 in use, missing embedding model in `~/.ragger/models/`, invalid
 `settings.ini` (run `ragger serve` in the foreground to see the
 parse error).

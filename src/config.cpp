@@ -75,7 +75,7 @@ std::string Config::resolved_agent_instructions_path() const {
 }
 
 std::string Config::resolved_log_file_path() const {
-    return ragger_base_dir() + "/activity.log";
+    return ragger_base_dir() + "/logs/activity.log";
 }
 
 std::string Config::resolved_socket_path() const {
@@ -380,6 +380,14 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
         }
         else if (section == "logging") {
             if (key == "log_level") cfg.log_level = val;
+            else if (key == "log_max_size_mb") {
+                long v = std::stol(val);
+                if (v >= 0) cfg.log_max_size_mb = v;
+            }
+            else if (key == "log_max_age_days") {
+                int v = std::stoi(val);
+                if (v >= 0) cfg.log_max_age_days = v;
+            }
         }
         else if (section == "paths") {
             if (key == "normalize_home") cfg.normalize_home_path = parse_bool(val);
@@ -411,6 +419,10 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "episode_idle_minutes") {
                 int v = std::stoi(val);
                 if (v > 0) { cfg.episode_idle_minutes = v; episode_idle_set = true; }
+            }
+            else if (key == "catch_up_batch_size") {
+                int v = std::stoi(val);
+                if (v > 0) cfg.catch_up_batch_size = v;
             }
         }
         else if (section == "llama") {
@@ -633,6 +645,7 @@ int reload_config() {
     RELOAD(housekeeping_interval);
     RELOAD(summary_pause_minutes);
     RELOAD(episode_idle_minutes);
+    RELOAD(catch_up_batch_size);
     RELOAD(capture_turns);
     RELOAD(build_context);
     RELOAD(default_recipe);

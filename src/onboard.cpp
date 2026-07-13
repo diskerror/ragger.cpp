@@ -357,7 +357,7 @@ int run_onboard(const std::vector<std::string>& /*args*/,
     std::println("Next steps:");
     std::println("  • Wire Ragger into Claude Code:  ./scripts/install-claude-code.sh");
     std::println("  • Wire into Claude Desktop:      ./scripts/install-claude-desktop.sh");
-    std::println("  • Tail what the daemon is doing: tail -f ~/.ragger/activity.log");
+    std::println("  • Tail what the daemon is doing: tail -f ~/.ragger/logs/activity.log");
     std::println("");
     return 0;
 }

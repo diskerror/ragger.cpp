@@ -10,7 +10,8 @@
 #     ~/.local/bin/ragger         executable (on PATH)
 #
 #     ~/.ragger/settings.ini      config
-#     ~/.ragger/activity.log      logs
+#     ~/.ragger/logs/activity.log logs (auto-rotated: see log_max_size_mb /
+#                                 log_max_age_days in settings.ini)
 #     ~/.ragger/models/           embedding models
 #     ~/.ragger/formats/          inference format definitions
 #     ~/.ragger/recipes/          build_context recipes (layered assembly)
@@ -61,7 +62,7 @@ fi
 # --- Paths (single source of truth) ---
 RAGGER_BASE="$HOME/.ragger"
 BIN_DIR="$HOME/.local/bin"          # XDG user executables
-LOG_DIR="$RAGGER_BASE"
+LOG_DIR="$RAGGER_BASE/logs"
 MODEL_DIR="$RAGGER_BASE/models"
 FORMATS_DIR="$RAGGER_BASE/formats"
 RECIPES_DIR="$RAGGER_BASE/recipes"
@@ -225,6 +226,15 @@ if [ "$OS" = "Darwin" ]; then
     PLIST="$AGENT_DIR/com.diskerror.ragger.plist"
     mkdir -p "$AGENT_DIR"
     info "Writing $PLIST"
+    # StandardOutPath/StandardErrorPath point at the same fixed path Ragger
+    # itself rotates (see log_max_size_mb/log_max_age_days in settings.ini).
+    # Ragger writes its own log lines by opening/appending/closing the file
+    # on every call (not via this stdout/stderr redirect) so its content is
+    # unaffected by rotation; only the launchd-level duplicate of ERROR/
+    # CRITICAL lines Ragger also echoes to stderr keeps writing to whatever
+    # inode this fd was opened against, so after a rotation those stderr
+    # echoes trail into the rotated-out backup until the next daemon
+    # restart. Harmless — the authoritative copy is always the live file.
     cat > "$PLIST" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"

@@ -47,15 +47,20 @@ def is_index_file(text: str) -> bool:
 
 
 def slug_from_project_dir(name: str) -> str:
-    """Turn the filesystem-encoded project dir name into a readable slug."""
-    # e.g. "-Volumes-WDBlack2-CLionProjects-Ragger" → "CLionProjects-Ragger"
+    """Turn the filesystem-encoded project dir name into a readable slug.
+
+    Claude Code encodes a project's absolute path into a directory name by
+    replacing every path separator (and '.') with '-' — e.g. a project at
+    "$HOME/CLionProjects/Ragger" becomes "-Volumes-WDBlack2-CLionProjects-
+    Ragger" on this machine, or "-home-alice-CLionProjects-Ragger" on a
+    typical Linux box. We strip the home-directory prefix in that same
+    encoded form (derived from Path.home() at runtime) rather than matching
+    a hardcoded machine-specific segment, so this works on any machine/user.
+    """
+    encoded_home_parts = re.sub(r"[/.]", "-", str(Path.home())).strip("-").split("-")
     parts = name.lstrip("-").split("-")
-    # drop leading path segments (Volumes, WDBlack2)
-    try:
-        idx = parts.index("WDBlack2")
-        parts = parts[idx + 1:]
-    except ValueError:
-        pass
+    if parts[:len(encoded_home_parts)] == encoded_home_parts:
+        parts = parts[len(encoded_home_parts):]
     slug = "-".join(parts) if parts else name
     return slug[:50]
 

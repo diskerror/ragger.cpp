@@ -87,7 +87,7 @@ elsewhere if you need the data on a different disk.
 | Embedding model | `~/.ragger/models/` |
 | Recipes | `~/.ragger/recipes/` |
 | Inference formats | `~/.ragger/formats/` |
-| Log | `~/.ragger/activity.log` |
+| Log | `~/.ragger/logs/activity.log` |
 | Bearer token | `~/.ragger/token` |
 | Unix socket | `~/.ragger/ragger.sock` |
 | Retrieval stats (opt-in build) | `~/.ragger/stats.db` |
