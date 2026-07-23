@@ -273,42 +273,44 @@ struct SqliteBackend::Impl {
         //      See scripts/schema_v2_fading_memory.sql for the reference DDL.
         //      Pre-v2 data is exported out-of-band, not migrated in place.
 
-        // models — lookup table; turns + summaries reference it.
+        // models — lookup table; turns + summaries reference it. v4 adds
+        // created_at (see scripts/schema_v4.sql). The column sits at the end so
+        // it maps cleanly to the canonical (id, keys, data, timestamps) order.
         exec(R"(
             CREATE TABLE IF NOT EXISTS models (
-                model_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name     TEXT NOT NULL UNIQUE
+                model_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                name       TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         )");
 
         // sessions — lookup table; turns + summaries reference it. Normalizes
         // the long conversation GUID (from the agent turn hook) to a compact
         // integer id, mirroring `models`. Grouping key for session summaries.
+        // v4 adds created_at.
         exec(R"(
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guid       TEXT NOT NULL UNIQUE
+                guid       TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         )");
 
         // turns (L1) — raw verbatim exchanges. embedding nullable for the
         // deferred-embedding path (partial row written, backfilled later).
+        // v4 column order: keys/data, then created_at, then embedding + phon.
         exec(R"(
             CREATE TABLE IF NOT EXISTS turns (
                 turn_id        INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_text      TEXT NOT NULL,
                 assistant_text TEXT,
-                embedding      BLOB,
-                phon           TEXT,
                 model_id       INTEGER REFERENCES models(model_id) ON DELETE SET NULL,
                 session_id     INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
-                created_at     TEXT NOT NULL
+                created_at     TEXT NOT NULL,
+                embedding      BLOB,
+                phon           TEXT
             )
         )");
-        // NOTE: the created_at index is intentionally NOT created here. On an
-        // existing (pre-migration) DB the column is still named `timestamp` at
-        // this point, so indexing created_at would error. It (and the summaries
-        // created_at index) is created after migrate_created_at_columns() below.
 
         // summaries (L2/L3/L4) — level discriminates turn/session/project.
         // Lean per scripts/schema_v2_fading_memory.sql (the reference DDL).
@@ -326,10 +328,10 @@ struct SqliteBackend::Impl {
                 tags       TEXT NOT NULL DEFAULT '',
                 session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                 model_id   INTEGER REFERENCES models(model_id),
-                embedding  BLOB,
-                phon       TEXT,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                embedding  BLOB,
+                phon       TEXT
             )
         )");
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_level      ON summaries(level)");
@@ -349,16 +351,16 @@ struct SqliteBackend::Impl {
         exec("CREATE INDEX IF NOT EXISTS idx_turns_session     ON turns(session_id)");
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_session ON summaries(session_id)");
 
-        // decisions (L6).
+        // decisions (L6). v4 column order: keys/data, created_at, embedding, phon.
         exec(R"(
             CREATE TABLE IF NOT EXISTS decisions (
                 decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 text        TEXT NOT NULL,
-                embedding   BLOB,
-                phon        TEXT,
                 status      TEXT NOT NULL,
                 tags        TEXT NOT NULL DEFAULT '',
-                created_at  TEXT NOT NULL
+                created_at  TEXT NOT NULL,
+                embedding   BLOB,
+                phon        TEXT
             )
         )");
         exec("CREATE INDEX IF NOT EXISTS idx_decisions_status ON decisions(status)");
@@ -367,18 +369,19 @@ struct SqliteBackend::Impl {
         // Lean per the reference DDL: title identifies the publication, tags
         // group/describe (subject), year is the publish year, path is the
         // origin. Only `text` is embedded. Keyword search via documents_fts.
+        // v4 column order: keys/data, imported_at, embedding, phon.
         exec(R"(
             CREATE TABLE IF NOT EXISTS documents (
                 document_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 text        TEXT NOT NULL,
-                embedding   BLOB,
-                phon        TEXT,
                 path        TEXT,
                 title       TEXT,
                 tags        TEXT NOT NULL DEFAULT '',
                 year        INTEGER,
                 chunk_index INTEGER,
-                imported_at TEXT NOT NULL
+                imported_at TEXT NOT NULL,
+                embedding   BLOB,
+                phon        TEXT
             )
         )");
         exec("CREATE INDEX IF NOT EXISTS idx_documents_imported_at ON documents(imported_at)");
@@ -397,128 +400,219 @@ struct SqliteBackend::Impl {
         if (!column_exists("documents", "phon"))
             exec("ALTER TABLE documents ADD COLUMN phon TEXT");
 
-        // One-time migration to the canonical time columns: rename
-        // `timestamp` -> `created_at` on turns/decisions, and rebuild
-        // `summaries` into the new column order with created_at + updated_at
-        // both NOT NULL. No-op on a fresh DB (already in the new shape) and on
-        // an already-migrated DB. Must run AFTER all CREATE TABLE IF NOT EXISTS
-        // (so a fresh DB skips it) and BEFORE create_fts_schema() (the summaries
-        // rebuild drops+recreates that table, so its FTS is rebuilt after).
-        migrate_created_at_columns();
+        // v3 → v4 one-time schema migration: reorder columns into the
+        // canonical (id, keys, data, timestamps, embedding, phon) layout and
+        // add created_at to the models/sessions lookup tables. Gated on
+        // settings['db_version'] (absent ⇒ pre-v4). No-op on a DB already at
+        // v4. Must run AFTER all CREATE TABLE IF NOT EXISTS (so a fresh DB is
+        // built directly in v4 shape) and BEFORE create_fts_schema() (the
+        // table rebuilds drop+recreate the base tables, so FTS is rebuilt after).
+        migrate_schema_to_v4();
 
-        // created_at indexes — created here (after migration) so the column is
-        // guaranteed to be named created_at whether this is a fresh DB or a
-        // just-migrated one. IF NOT EXISTS makes it idempotent with the index
-        // the summaries rebuild path may have already created.
-        exec("CREATE INDEX IF NOT EXISTS idx_turns_created_at     ON turns(created_at)");
-        exec("CREATE INDEX IF NOT EXISTS idx_summaries_created_at ON summaries(created_at)");
+        // Indexes — (re)created here, after migration, so a table rebuild
+        // (which drops the table and with it every index) can't leave them
+        // missing. All IF NOT EXISTS, so fresh / migrated / already-current
+        // DBs all converge to the same set.
+        exec("CREATE INDEX IF NOT EXISTS idx_turns_created_at      ON turns(created_at)");
+        exec("CREATE INDEX IF NOT EXISTS idx_turns_session         ON turns(session_id)");
+        exec("CREATE INDEX IF NOT EXISTS idx_summaries_level       ON summaries(level)");
+        exec("CREATE INDEX IF NOT EXISTS idx_summaries_status      ON summaries(status)");
+        exec("CREATE INDEX IF NOT EXISTS idx_summaries_created_at  ON summaries(created_at)");
+        exec("CREATE INDEX IF NOT EXISTS idx_summaries_session     ON summaries(session_id)");
+        exec("CREATE INDEX IF NOT EXISTS idx_decisions_status      ON decisions(status)");
+        exec("CREATE INDEX IF NOT EXISTS idx_documents_imported_at ON documents(imported_at)");
 
         // FTS5 — external-content virtual tables + sync triggers replace
         // the old hand-rolled bm25_* sidecars (issue #49).
         create_fts_schema();
 
-        // The summaries rebuild above (if it ran) recreated the base table with
-        // fresh rowids matching the old summary_id values, but the external-
-        // content summaries_fts / summaries_phon_fts indexes were dropped with
-        // it and recreated EMPTY by create_fts_schema(). Resync them to the
-        // repopulated base. (phon self-heals via its docsize probe, but we
-        // rebuild both explicitly for determinism.) No-op flag on fresh DBs.
-        if (summaries_rebuilt_) {
+        // If the v3→v4 reshape ran, every base table was rebuilt and its
+        // external-content text-FTS index was dropped + recreated EMPTY by
+        // create_fts_schema(). Repopulate the four text indexes. (The four
+        // phon indexes self-heal via create_phon_fts_schema()'s docsize probe.)
+        if (schema_reshaped_v4_) {
+            exec("INSERT INTO turns_fts(turns_fts)         VALUES('rebuild')");
             exec("INSERT INTO summaries_fts(summaries_fts) VALUES('rebuild')");
-            exec("INSERT INTO summaries_phon_fts(summaries_phon_fts) VALUES('rebuild')");
-            summaries_rebuilt_ = false;
+            exec("INSERT INTO decisions_fts(decisions_fts) VALUES('rebuild')");
+            exec("INSERT INTO documents_fts(documents_fts) VALUES('rebuild')");
+            schema_reshaped_v4_ = false;
         }
     }
 
-    // True for the duration of one open when migrate_created_at_columns()
-    // rebuilt the summaries table, so create_schema() knows to resync its FTS.
-    bool summaries_rebuilt_ = false;
-
-    /// One-time migration to canonical time columns.
-    ///  * turns / decisions: `timestamp` -> `created_at` via RENAME COLUMN
-    ///    (cheap, in place; FTS is over text/phon columns so it's untouched;
-    ///    RENAME COLUMN auto-updates index definitions).
-    ///  * summaries: full table rebuild into the new column order, with
-    ///    created_at (= old timestamp) and updated_at (= COALESCE(old
-    ///    updated_at, old timestamp)) both NOT NULL.
-    /// Guarded on the presence of the legacy `timestamp` column, so it runs at
-    /// most once and never on a fresh DB.
-    void migrate_created_at_columns() {
-        // --- turns / decisions: simple rename ---
-        if (column_exists("turns", "timestamp")) {
-            exec("DROP INDEX IF EXISTS idx_turns_timestamp");
-            exec("ALTER TABLE turns RENAME COLUMN timestamp TO created_at");
-            exec("CREATE INDEX IF NOT EXISTS idx_turns_created_at ON turns(created_at)");
+    // ---- schema version --------------------------------------------------
+    // The DB's schema version lives in settings['db_version']. An ABSENT row
+    // means "pre-v4" — the version key was introduced with v4, so any DB
+    // without it is either a legacy v3 store or a fresh v4 store (told apart
+    // by whether models.created_at already exists; see migrate_schema_to_v4).
+    int db_version() {
+        Stmt s(db, "SELECT value FROM settings WHERE key = 'db_version'");
+        if (s.step()) {
+            try { return std::stoi(s.column_text(0)); }
+            catch (...) { return 0; }
         }
-        if (column_exists("decisions", "timestamp")) {
-            exec("ALTER TABLE decisions RENAME COLUMN timestamp TO created_at");
+        return 0;  // absent ⇒ pre-v4
+    }
+
+    void set_db_version(int v) {
+        Stmt s(db,
+            "INSERT INTO settings (key, value) VALUES ('db_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+        s.bind(1, std::to_string(v));
+        s.exec();
+    }
+
+    // True for the duration of one open when migrate_schema_to_v4() rebuilt
+    // the base tables, so create_schema() knows to repopulate their FTS.
+    bool schema_reshaped_v4_ = false;
+
+    /// One-time v3 → v4 schema migration. v4 (see scripts/schema_v4.sql and the
+    /// standalone scripts/migrate_to_v4.py this mirrors):
+    ///   * reorders every content table into (id, keys, data, timestamps,
+    ///     embedding, phon) — SQLite can't reorder in place, so each table is
+    ///     rebuilt;
+    ///   * adds created_at to the models + sessions lookup tables.
+    /// Gated on settings['db_version']: >= 4 ⇒ already current (no-op). When the
+    /// version row is absent we tell a fresh v4 DB (models already has
+    /// created_at, built that way by create_schema just now) from a legacy v3
+    /// DB (models lacks it) via column_exists, and only reshape the latter.
+    /// Either way we stamp db_version = 4 so subsequent opens short-circuit.
+    void migrate_schema_to_v4() {
+        if (db_version() >= 4) return;  // already current
+
+        if (!column_exists("models", "created_at")) {
+            rebuild_tables_v3_to_v4();
+            schema_reshaped_v4_ = true;
         }
+        set_db_version(4);
+    }
 
-        // --- summaries: reorder columns + created_at/updated_at NOT NULL ---
-        // SQLite cannot reorder columns in place, so rebuild the table. The old
-        // schema may have either `timestamp` alone (pre-Phase-1) or `timestamp`
-        // + nullable `updated_at` (Phase 1). Both are handled by COALESCE.
-        if (!column_exists("summaries", "timestamp")) return;  // already migrated
+    /// Drop all FTS objects (text + phon virtual tables and their sync
+    /// triggers) for the four searchable content tables. The triggers fire on
+    /// writes to the base tables, so they must be gone before a base-table
+    /// rebuild; create_fts_schema() recreates them (empty) afterwards.
+    void drop_all_fts_objects() {
+        for (const char* b : {"turns", "summaries", "decisions", "documents"}) {
+            exec(std::format("DROP TRIGGER IF EXISTS {}_ai",  b));
+            exec(std::format("DROP TRIGGER IF EXISTS {}_ad",  b));
+            exec(std::format("DROP TRIGGER IF EXISTS {}_au",  b));
+            exec(std::format("DROP TRIGGER IF EXISTS {}_pai", b));
+            exec(std::format("DROP TRIGGER IF EXISTS {}_pad", b));
+            exec(std::format("DROP TRIGGER IF EXISTS {}_pau", b));
+            exec(std::format("DROP TABLE   IF EXISTS {}_fts",      b));
+            exec(std::format("DROP TABLE   IF EXISTS {}_phon_fts", b));
+        }
+    }
 
-        const bool had_updated =
-            column_exists("summaries", "updated_at");
-        const std::string updated_expr =
-            had_updated ? "COALESCE(updated_at, timestamp)" : "timestamp";
+    /// The v3 → v4 table reshape proper. Rebuilds each base table into the
+    /// canonical column order (preserving primary keys so FTS rowids + FK
+    /// references stay valid) and appends created_at to models/sessions,
+    /// backfilling it with the migration-run timestamp per Reid's spec ("the
+    /// timestamp for when the code is executed"). local_timestamp() keeps the
+    /// backfill consistent with how every other created_at in the DB is written.
+    /// Wrapped in one transaction with foreign_keys OFF (a no-op inside a
+    /// transaction, so it's set first) so a failure rolls back cleanly.
+    void rebuild_tables_v3_to_v4() {
+        const std::string now = local_timestamp();
 
-        // Toggle FK enforcement off around the rebuild (PRAGMA foreign_keys is
-        // a no-op inside a transaction, so set it, then BEGIN). summaries is a
-        // child of models/sessions; rebuilding it with a rename dance keeps the
-        // rowids (= summary_id) stable so no child references break.
         exec("PRAGMA foreign_keys = OFF");
         exec("BEGIN");
         try {
-            // Drop dependent FTS objects (they are content='summaries' and its
-            // triggers fire on writes to the base table we're about to move).
-            exec("DROP TRIGGER IF EXISTS summaries_ai");
-            exec("DROP TRIGGER IF EXISTS summaries_ad");
-            exec("DROP TRIGGER IF EXISTS summaries_au");
-            exec("DROP TRIGGER IF EXISTS summaries_pai");
-            exec("DROP TRIGGER IF EXISTS summaries_pad");
-            exec("DROP TRIGGER IF EXISTS summaries_pau");
-            exec("DROP TABLE IF EXISTS summaries_fts");
-            exec("DROP TABLE IF EXISTS summaries_phon_fts");
+            // FTS triggers reference the base tables we're about to move.
+            drop_all_fts_objects();
 
-            // New table in the canonical order.
-            exec(R"(
-                CREATE TABLE summaries_new (
-                    summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    text       TEXT NOT NULL,
-                    level      TEXT NOT NULL,
-                    status     TEXT NOT NULL,
-                    tags       TEXT NOT NULL DEFAULT '',
-                    session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
-                    model_id   INTEGER REFERENCES models(model_id),
-                    embedding  BLOB,
-                    phon       TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-            )");
-
-            // Copy, preserving summary_id (so FTS rowids + any external
-            // references stay valid). created_at = old timestamp; updated_at =
-            // COALESCE(old updated_at, old timestamp) → NOT NULL guaranteed.
+            // --- models: append created_at (backfill = migration time) ---
+            exec("CREATE TABLE models_new ("
+                 "model_id   INTEGER PRIMARY KEY AUTOINCREMENT,"
+                 "name       TEXT NOT NULL UNIQUE,"
+                 "created_at TEXT NOT NULL DEFAULT (datetime('now')))");
             exec(std::format(
-                "INSERT INTO summaries_new "
-                "(summary_id, text, level, status, tags, session_id, model_id, "
-                " embedding, phon, created_at, updated_at) "
-                "SELECT summary_id, text, level, status, tags, session_id, model_id, "
-                "       embedding, phon, timestamp, {} "
-                "FROM summaries", updated_expr));
+                "INSERT INTO models_new (model_id, name, created_at) "
+                "SELECT model_id, name, '{}' FROM models", now));
+            exec("DROP TABLE models");
+            exec("ALTER TABLE models_new RENAME TO models");
 
+            // --- sessions: append created_at (backfill = migration time) ---
+            exec("CREATE TABLE sessions_new ("
+                 "session_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                 "guid       TEXT NOT NULL UNIQUE,"
+                 "created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+            exec(std::format(
+                "INSERT INTO sessions_new (session_id, guid, created_at) "
+                "SELECT session_id, guid, '{}' FROM sessions", now));
+            exec("DROP TABLE sessions");
+            exec("ALTER TABLE sessions_new RENAME TO sessions");
+
+            // --- turns: created_at moves before embedding/phon ---
+            exec("CREATE TABLE turns_new ("
+                 "turn_id        INTEGER PRIMARY KEY AUTOINCREMENT,"
+                 "user_text      TEXT NOT NULL,"
+                 "assistant_text TEXT,"
+                 "model_id       INTEGER REFERENCES models(model_id) ON DELETE SET NULL,"
+                 "session_id     INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,"
+                 "created_at     TEXT NOT NULL,"
+                 "embedding      BLOB,"
+                 "phon           TEXT)");
+            exec("INSERT INTO turns_new "
+                 "(turn_id, user_text, assistant_text, model_id, session_id, created_at, embedding, phon) "
+                 "SELECT turn_id, user_text, assistant_text, model_id, session_id, created_at, embedding, phon "
+                 "FROM turns");
+            exec("DROP TABLE turns");
+            exec("ALTER TABLE turns_new RENAME TO turns");
+
+            // --- summaries: created_at/updated_at move before embedding/phon ---
+            exec("CREATE TABLE summaries_new ("
+                 "summary_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                 "text       TEXT NOT NULL,"
+                 "level      TEXT NOT NULL,"
+                 "status     TEXT NOT NULL,"
+                 "tags       TEXT NOT NULL DEFAULT '',"
+                 "session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,"
+                 "model_id   INTEGER REFERENCES models(model_id),"
+                 "created_at TEXT NOT NULL,"
+                 "updated_at TEXT NOT NULL,"
+                 "embedding  BLOB,"
+                 "phon       TEXT)");
+            exec("INSERT INTO summaries_new "
+                 "(summary_id, text, level, status, tags, session_id, model_id, created_at, updated_at, embedding, phon) "
+                 "SELECT summary_id, text, level, status, tags, session_id, model_id, created_at, updated_at, embedding, phon "
+                 "FROM summaries");
             exec("DROP TABLE summaries");
             exec("ALTER TABLE summaries_new RENAME TO summaries");
 
-            // Recreate indexes (old ones vanished with the dropped table).
-            exec("CREATE INDEX IF NOT EXISTS idx_summaries_level      ON summaries(level)");
-            exec("CREATE INDEX IF NOT EXISTS idx_summaries_status     ON summaries(status)");
-            exec("CREATE INDEX IF NOT EXISTS idx_summaries_created_at ON summaries(created_at)");
-            exec("CREATE INDEX IF NOT EXISTS idx_summaries_session    ON summaries(session_id)");
+            // --- decisions: created_at moves before embedding/phon ---
+            exec("CREATE TABLE decisions_new ("
+                 "decision_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                 "text        TEXT NOT NULL,"
+                 "status      TEXT NOT NULL,"
+                 "tags        TEXT NOT NULL DEFAULT '',"
+                 "created_at  TEXT NOT NULL,"
+                 "embedding   BLOB,"
+                 "phon        TEXT)");
+            exec("INSERT INTO decisions_new "
+                 "(decision_id, text, status, tags, created_at, embedding, phon) "
+                 "SELECT decision_id, text, status, tags, created_at, embedding, phon "
+                 "FROM decisions");
+            exec("DROP TABLE decisions");
+            exec("ALTER TABLE decisions_new RENAME TO decisions");
+
+            // --- documents: imported_at moves before embedding/phon ---
+            exec("CREATE TABLE documents_new ("
+                 "document_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                 "text        TEXT NOT NULL,"
+                 "path        TEXT,"
+                 "title       TEXT,"
+                 "tags        TEXT NOT NULL DEFAULT '',"
+                 "year        INTEGER,"
+                 "chunk_index INTEGER,"
+                 "imported_at TEXT NOT NULL,"
+                 "embedding   BLOB,"
+                 "phon        TEXT)");
+            exec("INSERT INTO documents_new "
+                 "(document_id, text, path, title, tags, year, chunk_index, imported_at, embedding, phon) "
+                 "SELECT document_id, text, path, title, tags, year, chunk_index, imported_at, embedding, phon "
+                 "FROM documents");
+            exec("DROP TABLE documents");
+            exec("ALTER TABLE documents_new RENAME TO documents");
 
             exec("COMMIT");
         } catch (...) {
@@ -527,8 +621,6 @@ struct SqliteBackend::Impl {
             throw;
         }
         exec("PRAGMA foreign_keys = ON");
-
-        summaries_rebuilt_ = true;
     }
 
 
