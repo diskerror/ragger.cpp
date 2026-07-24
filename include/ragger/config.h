@@ -170,6 +170,11 @@ struct Config {
     // instead of redoing hundreds of inference calls at once. Any positive
     // integer; default 10.
     int   catch_up_batch_size    = 10;
+    // Maximum consecutive inference failures on a single turn before it is
+    // stamped with model "bad" (model_id 1) and removed from the unsummarized
+    // queue. Prevents one poison turn from blocking the entire pipeline.
+    // Default 3; set 0 to disable (retry forever — old behaviour).
+    int   max_turn_failures      = 3;
 
     // --- System ceilings (0 = no limit) ---
     int  max_search_limit             = 0;

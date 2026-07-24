@@ -18,11 +18,6 @@ diverged at v0.9.4 — now the sole focus.
   closes session summaries on idle, all without blocking the agent. If
   the summarizer model is unreachable, a draft is stored and rewritten
   later — the agent never waits on inference it didn't ask for.
-- **Recipes for the recall payload.** Instead of dumping a raw
-  transcript, `build_context` walks back from the latest prompt and
-  assembles a token-budgeted mix of raw turns, turn-summaries, session
-  summaries, project summaries, and decisions. Five recipes ship; users
-  can drop more JSON into `~/.ragger/recipes/`.
 - **Hybrid search.** BM25/FTS5 keyword search blended with dense vector
   cosine via Eigen3, plus an optional phonetic ("sounds-like") signal.
   Configurable weights; all signals normalized before blending.

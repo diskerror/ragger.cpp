@@ -289,9 +289,32 @@ bool SummarizerService::handle_l2(const Job& j) {
     const std::string  display_guid = guid.empty() ? "-" : guid;
 
     if (summary.empty()) {
-        // Inference unreachable. Leave the raw NULL-model placeholder in
-        // place — it already makes the turn searchable, and the next catch-up
-        // pass retries summarization. No draft row needed.
+        // Inference unreachable or returned garbage. Track failures so one
+        // poison turn can't block the queue forever.
+        const int max_fails = config().max_turn_failures;
+        if (max_fails > 0) {
+            const std::string fkey = guid + "\x1F" + ts;
+            int n;
+            {
+                std::lock_guard<std::mutex> lk(mutex_);
+                n = ++turn_failures_[fkey];
+            }
+            if (n >= max_fails) {
+                // Abandon: stamp with model "bad" (model_id 1) to remove
+                // from unsummarized_turns() permanently.
+                backend_.mark_turn_summarized(guid, ts, "bad");
+                {
+                    std::lock_guard<std::mutex> lk(mutex_);
+                    turn_failures_.erase(fkey);
+                }
+                Diskerror::logger::warn(std::format(
+                    "[summarizer] abandoned turn after {} failures "
+                    "(session={}, ts={})", n, display_guid, ts));
+                return true;  // consumed — won't retry
+            }
+        }
+        // Leave the raw NULL-model placeholder in place — it already makes
+        // the turn searchable, and the next catch-up pass retries.
         Diskerror::logger::info(std::format(
             lang::MSG_SUMMARIZER_DRAFT, display_guid, ts));
         return false;
@@ -299,6 +322,12 @@ bool SummarizerService::handle_l2(const Job& j) {
 
     // Promote the placeholder in place: real summary text + summarizer model.
     backend_.finalize_turn_summary(guid, ts, summary, summarizer_model);
+    {
+        // Clear any prior failure count for this turn.
+        const std::string fkey = guid + "\x1F" + ts;
+        std::lock_guard<std::mutex> lk(mutex_);
+        turn_failures_.erase(fkey);
+    }
     Diskerror::logger::info(std::format(
         lang::MSG_SUMMARIZER_L2, display_guid, ts));
 

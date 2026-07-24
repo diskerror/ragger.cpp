@@ -28,6 +28,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 namespace ragger {
 
@@ -103,6 +104,10 @@ private:
     std::atomic<bool>          running_{false};
     std::thread                worker_thread_;
     std::thread                pause_timer_thread_;
+
+    // Per-turn failure counter keyed by "session_guid\x1F timestamp".
+    // Guarded by mutex_. Entries are removed on success or abandonment.
+    std::unordered_map<std::string, int> turn_failures_;
 };
 
 } // namespace ragger
