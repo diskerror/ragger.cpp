@@ -13,6 +13,7 @@
  */
 #pragma once
 
+#include <cstdint>
 #include <ctime>
 #include <optional>
 #include <string>
@@ -22,6 +23,18 @@ namespace ragger {
 /// Current local time as "YYYY-MM-DD HH:MM:SS" (strftime "%F %T").
 /// The canonical format for every timestamp stored in the database.
 std::string db_timestamp();
+
+/// Current time as Unix epoch seconds -- for INTEGER timestamp columns
+/// (turns.created_at, summaries.created_at/updated_at, decisions.created_at,
+/// models.created_at, sessions.created_at, users.created_at/updated_at).
+/// See db_timestamp() for the TEXT-formatted equivalent used in
+/// logging/display contexts -- the two are NOT interchangeable.
+int64_t db_epoch();
+
+/// Convert an already-resolved instant (e.g. from parse_db_timestamp) to
+/// epoch seconds, for callers binding a specific historical timestamp
+/// rather than "now".
+int64_t db_epoch(std::time_t when);
 
 /// Format an explicit instant as local "YYYY-MM-DD HH:MM:SS".
 std::string db_timestamp(std::time_t when);

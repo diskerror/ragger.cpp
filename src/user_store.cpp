@@ -38,12 +38,12 @@ struct UserStore::Impl {
             username      TEXT NOT NULL UNIQUE,
             token_hash    TEXT NOT NULL,
             password_hash TEXT,
-            created       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime')),
-            modified      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime'))
+            created_at    INTEGER NOT NULL DEFAULT (unixepoch()),
+            updated_at    INTEGER NOT NULL DEFAULT (unixepoch())
         ))");
         exec(R"(CREATE TRIGGER IF NOT EXISTS users_modified
             AFTER UPDATE ON users BEGIN
-                UPDATE users SET modified = strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime')
+                UPDATE users SET updated_at = unixepoch()
                 WHERE id = NEW.id;
             END)");
         exec(R"(CREATE TABLE IF NOT EXISTS settings (
@@ -85,9 +85,9 @@ void UserStore::update_user_token(const std::string& username, const std::string
 }
 
 int UserStore::create_user(const std::string& username, const std::string& token_hash) {
-    std::string ts = db_timestamp();
+    int64_t ts = db_epoch();
     Stmt s(pImpl->db,
-           "INSERT INTO users (username, token_hash, created, modified) VALUES (?,?,?,?)");
+           "INSERT INTO users (username, token_hash, created_at, updated_at) VALUES (?,?,?,?)");
     s.bind(1, username).bind(2, token_hash).bind(3, ts).bind(4, ts).step();
     return sqlite3_changes(pImpl->db) > 0
         ? static_cast<int>(sqlite3_last_insert_rowid(pImpl->db))

@@ -101,13 +101,6 @@ public:
         complete_l3_summary_texts() override;
     bool update_summary_text(int summary_id, const std::string& text,
                              const std::string& model_name = "") override;
-    bool finalize_turn_summary(const std::string& session_guid,
-                               const std::string& source_timestamp,
-                               const std::string& text,
-                               const std::string& model_name = "") override;
-    bool mark_turn_summarized(const std::string& session_guid,
-                              const std::string& source_timestamp,
-                              const std::string& model_name) override;
     bool set_summary_status(int summary_id, const std::string& status) override;
     bool set_summary_tags(int summary_id, const std::string& tags) override;
     std::vector<std::string> recent_summaries(const std::string& level, int limit) override;
@@ -115,8 +108,14 @@ public:
     bool set_decision_status(int decision_id, const std::string& status) override;
     std::vector<std::string> decisions_by_status(const std::string& status, int limit) override;
     std::vector<TurnRecord> unsummarized_turns(int limit = 0) override;
-    bool turn_summary_exists(const std::string& session_guid,
-                             const std::string& source_timestamp) override;
+
+    // --- v0.12.0 turn_id-based turn-summary methods (schema migration) ---
+    bool turn_summary_exists(int turn_id) override;
+    bool finalize_turn_summary(int turn_id, const std::string& text,
+                               const std::string& summary_model_name) override;
+    bool upsert_turn_summary_placeholder(int turn_id) override;
+    bool mark_turn_summarized(int turn_id, const std::string& model_name) override;
+
     std::vector<DraftSummary> draft_summaries(int limit = 0) override;
     std::vector<std::string> sessions_needing_close(int pause_minutes) override;
     std::string last_episode_end(const std::string& session_guid) override;

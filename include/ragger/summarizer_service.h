@@ -105,9 +105,10 @@ private:
     std::thread                worker_thread_;
     std::thread                pause_timer_thread_;
 
-    // Per-turn failure counter keyed by "session_guid\x1F timestamp".
-    // Guarded by mutex_. Entries are removed on success or abandonment.
-    std::unordered_map<std::string, int> turn_failures_;
+    // Per-turn failure counter keyed by turn_id (real FK, replaces the old
+    // "session_guid\x1F timestamp" compound-string key). Guarded by mutex_.
+    // Entries are removed on success or abandonment.
+    std::unordered_map<int, int> turn_failures_;
 };
 
 } // namespace ragger

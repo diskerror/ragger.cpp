@@ -33,6 +33,25 @@ struct TurnRecord {
     std::string session_guid;
 };
 
+/// One row of the v0.12.0 `turn_summaries` table (turn_id-FK based, epoch
+/// timestamps). Replaces the old (session_guid, source_timestamp)-keyed
+/// linkage. `*_null` flags distinguish "0/absent" from a real 0 value for
+/// nullable FK/int columns (turn_id is 0/absent if NULL — pruned turn).
+struct TurnSummaryRecord {
+    int turn_summary_id;
+    std::string text;
+    int turn_id;           // 0/absent if NULL (pruned)
+    bool turn_id_null;
+    int session_id;
+    bool session_id_null;
+    int turn_model_id;
+    bool turn_model_id_null;
+    int summary_model_id;
+    bool summary_model_id_null;
+    int64_t turn_datetime;   // epoch seconds
+    int64_t summarized_on;   // epoch seconds
+};
+
 /**
  * Abstract base class for storage backends.
  *
@@ -195,20 +214,6 @@ public:
     /// Replace a summary's text + embedding (and model). False if absent.
     virtual bool update_summary_text(int summary_id, const std::string& text,
                                      const std::string& model_name = "") = 0;
-    /// Summarizer write-back: replace a turn placeholder's raw text with the
-    /// real summary and stamp the summarizer model, matched by (guid, ts).
-    /// A NULL-model placeholder is the "raw, not yet summarized" sentinel;
-    /// this promotes it to a real summary. False if no such row exists.
-    virtual bool finalize_turn_summary(const std::string& session_guid,
-                                       const std::string& source_timestamp,
-                                       const std::string& text,
-                                       const std::string& model_name = "") = 0;
-    /// Mark a trivial turn's placeholder done by stamping its model_id
-    /// without rewriting the raw text — keeps it out of unsummarized_turns()
-    /// so it isn't re-enqueued forever. False if absent.
-    virtual bool mark_turn_summarized(const std::string& session_guid,
-                                      const std::string& source_timestamp,
-                                      const std::string& model_name) = 0;
     /// Set a summary's status (e.g. mark a session summary 'complete').
     virtual bool set_summary_status(int summary_id, const std::string& status) = 0;
     /// Replace a summary's `tags` column (used to clear "draft" once the
@@ -238,14 +243,17 @@ public:
     /// summarizer's startup catch-up and housekeeping retry pass.
     virtual std::vector<TurnRecord> unsummarized_turns(int limit = 0) = 0;
 
-    /// True if a level='turn' summary already exists for the (session,
-    /// timestamp) pair — the same linkage unsummarized_turns() joins on.
-    /// Lets the summarizer skip a turn that was already summarized, making
-    /// L2 writes idempotent when the live enqueue path and the catch-up
-    /// scan both queue the same turn (the worker is single-threaded, so a
-    /// check here is race-free against a concurrent duplicate job).
-    virtual bool turn_summary_exists(const std::string& session_guid,
-                                     const std::string& source_timestamp) = 0;
+    // --- v0.12.0 turn_id-based turn-summary methods (schema migration) ---
+    // NOTE: unsummarized_turns(int) is intentionally NOT a new overload here.
+    // Per the migration plan, unsummarized_turns() keeps its EXISTING
+    // signature/return type (std::vector<TurnRecord>) unchanged — only its
+    // SQL body changes (JOIN against turn_summaries instead of summaries,
+    // implemented in sqlite_backend.cpp). No interface change needed for it.
+    virtual bool turn_summary_exists(int turn_id) = 0;
+    virtual bool finalize_turn_summary(int turn_id, const std::string& text,
+                                        const std::string& summary_model_name) = 0;
+    virtual bool upsert_turn_summary_placeholder(int turn_id) = 0;
+    virtual bool mark_turn_summarized(int turn_id, const std::string& model_name) = 0;
 
     /// Summary rows tagged 'draft' (heuristic fallback writes that the
     /// summarizer should rewrite when inference is back). Returned

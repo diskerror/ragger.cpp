@@ -9,11 +9,15 @@
 #include "ragger/sqlite_backend.h"
 #include "ragger/user_store.h"
 #include "ragger/auth.h"
+#include "ragger/util/time.h"
 #include <sqlite3.h>
 #include <cassert>
 #include <filesystem>
 #include <iostream>
 #include <print>
+#include <thread>
+#include <chrono>
+#include <ctime>
 
 namespace fs = std::filesystem;
 
@@ -482,14 +486,20 @@ void test_timestamp_format(ragger::Embedder& emb) {
     auto all = db.load_all();
     assert(all.size() == 1);
 
-    // Verify local-time "YYYY-MM-DD HH:MM:SS" pattern
+    // `summaries.created_at` is now an INTEGER epoch (v0.12.0 migration),
+    // not the old "YYYY-MM-DD HH:MM:SS" TEXT format. load_all() reads the
+    // column via column_text() on a raw INTEGER, which SQLite renders back
+    // as plain base-10 digits (no separators) -- confirm that shape and
+    // that it's a plausible "recent" epoch value, rather than asserting the
+    // old fixed-19-char formatted-string length.
     auto& ts = all[0].timestamp;
-    assert(ts.length() == 19);
-    assert(ts[4] == '-');
-    assert(ts[7] == '-');
-    assert(ts[10] == ' ');
-    assert(ts[13] == ':');
-    assert(ts[16] == ':');
+    assert(!ts.empty());
+    assert(ts.find_first_not_of("0123456789") == std::string::npos);
+    int64_t epoch_val = std::stoll(ts);
+    int64_t now_epoch = static_cast<int64_t>(std::time(nullptr));
+    assert(epoch_val > 0);
+    assert(epoch_val <= now_epoch + 5);       // not in the future
+    assert(now_epoch - epoch_val < 300);      // stored "just now"
 
     db.close();
     cleanup();
@@ -662,14 +672,21 @@ void test_store_turn(ragger::Embedder& emb) {
 // prompts is itself a breakage signal (TUI crash-restart minting fresh GUIDs).
 void test_store_turn_dedup(ragger::Embedder& emb) {
     cleanup();
+    int t1 = 0;
     {
         ragger::SqliteBackend db(emb, TEMP_DB);
 
         // First answer to a prompt, in session A.
-        int t1 = db.store_turn("Explain the general_search recipe.",
+        t1 = db.store_turn("Explain the general_search recipe.",
                                "It searches summaries.", "model-a",
                                /*defer_embedding=*/false, "sessionA");
         assert(t1 > 0);
+
+        // Sleep across a second boundary: local_timestamp() has second-level
+        // resolution, so without a real gap here old_ts would trivially equal
+        // new_ts and this test would not exercise the drift this guards
+        // against (a dedup that lands in the same second as the original).
+        std::this_thread::sleep_for(std::chrono::milliseconds(1100));
 
         // Same prompt re-answered — DIFFERENT session (sessionB), different
         // assistant text. Must update t1 in place, not insert a new row.
@@ -677,6 +694,13 @@ void test_store_turn_dedup(ragger::Embedder& emb) {
                                "It searches summaries, documents, and decisions.",
                                "model-b", /*defer_embedding=*/false, "sessionB");
         assert(t2 == t1);  // same row id returned — keep-latest
+
+        // Cross a second boundary before the next insert: local_timestamp()
+        // has second-level resolution, and turn3 landing in the same second
+        // as t1's dedup-updated created_at is itself a separate known
+        // same-second collision (harmless for the summarizer's matching, but
+        // it would otherwise make this assertion block conflate two issues).
+        std::this_thread::sleep_for(std::chrono::milliseconds(1100));
 
         // A genuinely different prompt still inserts a fresh row.
         int t3 = db.store_turn("What about decisions?", "They are first-class.",
@@ -720,9 +744,271 @@ void test_store_turn_dedup(ragger::Embedder& emb) {
     assert(sqlite3_column_int(st, 0) == 1);
     sqlite3_finalize(st);
 
+    // Regression: a dedup that moves the turn's created_at must not strand
+    // the old-slot placeholder. Exactly one turn_summaries row should exist
+    // for the deduped turn (keyed by turn_id, not level='turn' — that was
+    // the pre-v0.12.0 `summaries` table linkage), and its turn_datetime must
+    // match the turn's *current* created_at (not some earlier value from
+    // before the regeneration collapsed onto it).
+    sqlite3_prepare_v2(raw,
+        "SELECT COUNT(*) FROM turn_summaries ts "
+        "WHERE ts.turn_id = ? "
+        "  AND ts.turn_datetime = (SELECT created_at FROM turns WHERE turn_id=?)",
+        -1, &st, nullptr);
+    sqlite3_bind_int(st, 1, t1);
+    sqlite3_bind_int(st, 2, t1);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int(st, 0) == 1);
+    sqlite3_finalize(st);
+
+    // No stray leftover turn_summaries row for this turn_id sitting at any
+    // *other* turn_datetime (the old, pre-dedup slot).
+    sqlite3_prepare_v2(raw,
+        "SELECT COUNT(*) FROM turn_summaries ts WHERE ts.turn_id = ?",
+        -1, &st, nullptr);
+    sqlite3_bind_int(st, 1, t1);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int(st, 0) == 1);
+    sqlite3_finalize(st);
+
     sqlite3_close(raw);
     cleanup();
 }
+
+// --- v0.12.0 turn_summaries regression tests -------------------------------
+// The turn_id-FK-based turn_summaries table replaces the old
+// (session_guid, source_timestamp)-keyed linkage. Placeholders are created
+// automatically by store_turn() for complete turns; finalize/mark methods
+// upsert against the unique partial index on turn_id.
+
+// store_turn() with a non-empty assistant_text must create a NULL-text
+// turn_summaries placeholder row with the correct turn_id/turn_datetime/
+// turn_model_id linkage.
+void test_turn_summary_placeholder_created_on_store_turn(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    int t1 = db.store_turn("What is the capital of Spain?",
+                           "The capital of Spain is Madrid.", "test-model");
+    assert(t1 > 0);
+    assert(db.turn_summary_exists(t1));
+
+    sqlite3* raw = nullptr;
+    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(raw,
+        "SELECT ts.text, ts.turn_id, ts.turn_datetime, t.created_at, "
+        "       ts.turn_model_id, t.model_id "
+        "FROM turn_summaries ts JOIN turns t ON t.turn_id = ts.turn_id "
+        "WHERE ts.turn_id = ?", -1, &st, nullptr);
+    sqlite3_bind_int(st, 1, t1);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_type(st, 0) == SQLITE_NULL);   // text IS NULL
+    assert(sqlite3_column_int(st, 1) == t1);
+    assert(sqlite3_column_int64(st, 2) == sqlite3_column_int64(st, 3)); // turn_datetime == turns.created_at
+    assert(sqlite3_column_int(st, 4) == sqlite3_column_int(st, 5));     // turn_model_id == turns.model_id
+    sqlite3_finalize(st);
+    sqlite3_close(raw);
+
+    db.close();
+    cleanup();
+}
+
+// A partial turn (no assistant_text yet) must NOT get a turn_summaries
+// placeholder — there's nothing to summarize until finalize_turn() lands.
+void test_turn_summary_placeholder_skipped_for_partial_turn(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    int t1 = db.store_turn("Tell me about volcanoes.", "", "test-model",
+                          /*defer_embedding=*/true);
+    assert(t1 > 0);
+    assert(!db.turn_summary_exists(t1));
+
+    db.close();
+    cleanup();
+}
+
+// finalize_turn_summary() upserts against the unique turn_id index: calling
+// it twice on the same turn_id must not create a duplicate row, and must
+// leave the SECOND text in place.
+void test_finalize_turn_summary_upserts(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    int t1 = db.store_turn("Summarize this exchange.",
+                           "First finalize target.", "test-model");
+    assert(t1 > 0);
+
+    assert(db.finalize_turn_summary(t1, "First summary text.", "summarizer-model"));
+    assert(db.finalize_turn_summary(t1, "Second summary text.", "summarizer-model"));
+
+    sqlite3* raw = nullptr;
+    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM turn_summaries WHERE turn_id = ?",
+                       -1, &st, nullptr);
+    sqlite3_bind_int(st, 1, t1);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int(st, 0) == 1);   // no duplicate row
+    sqlite3_finalize(st);
+
+    sqlite3_prepare_v2(raw, "SELECT text FROM turn_summaries WHERE turn_id = ?",
+                       -1, &st, nullptr);
+    sqlite3_bind_int(st, 1, t1);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    {
+        const char* txt = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+        assert(txt && std::string(txt) == "Second summary text.");
+    }
+    sqlite3_finalize(st);
+    sqlite3_close(raw);
+
+    db.close();
+    cleanup();
+}
+
+// finalize_turn_summary() against a turn_id that doesn't exist in `turns`
+// must fail cleanly (false) and must not insert a row.
+void test_finalize_turn_summary_missing_turn_returns_false(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    const int missing_turn_id = 999999;
+    assert(!db.finalize_turn_summary(missing_turn_id, "orphan text", "test-model"));
+
+    sqlite3* raw = nullptr;
+    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM turn_summaries WHERE turn_id = ?",
+                       -1, &st, nullptr);
+    sqlite3_bind_int(st, 1, missing_turn_id);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int(st, 0) == 0);
+    sqlite3_finalize(st);
+    sqlite3_close(raw);
+
+    db.close();
+    cleanup();
+}
+
+// Deleting the parent `turns` row must SET NULL on turn_summaries.turn_id
+// (ON DELETE SET NULL FK), not cascade-delete the summary row, and must
+// leave text/turn_datetime unchanged.
+void test_turn_summary_survives_turn_deletion(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    int t1 = db.store_turn("A turn destined for deletion.",
+                           "Its summary should survive.", "test-model");
+    assert(t1 > 0);
+    assert(db.finalize_turn_summary(t1, "Survivor summary text.", "summarizer-model"));
+
+    sqlite3* raw = nullptr;
+    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+
+    int64_t turn_datetime_before = 0;
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(raw, "SELECT turn_datetime FROM turn_summaries WHERE turn_id = ?",
+                       -1, &st, nullptr);
+    sqlite3_bind_int(st, 1, t1);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    turn_datetime_before = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+
+    // Raw delete of the parent turns row -- exercises the FK trigger, not a
+    // backend method (there's no public "delete_turn" primitive to call).
+    sqlite3_prepare_v2(raw, "PRAGMA foreign_keys = ON", -1, &st, nullptr);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+    sqlite3_prepare_v2(raw, "DELETE FROM turns WHERE turn_id = ?", -1, &st, nullptr);
+    sqlite3_bind_int(st, 1, t1);
+    assert(sqlite3_step(st) == SQLITE_DONE);
+    sqlite3_finalize(st);
+
+    // The turn_summaries row still exists, turn_id is now NULL, and the
+    // text/turn_datetime are unchanged from before the deletion.
+    sqlite3_prepare_v2(raw,
+        "SELECT text, turn_id, turn_datetime FROM turn_summaries "
+        "WHERE turn_datetime = ?", -1, &st, nullptr);
+    sqlite3_bind_int64(st, 1, turn_datetime_before);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    {
+        const char* txt = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+        assert(txt && std::string(txt) == "Survivor summary text.");
+    }
+    assert(sqlite3_column_type(st, 1) == SQLITE_NULL);   // turn_id now NULL
+    assert(sqlite3_column_int64(st, 2) == turn_datetime_before);
+    sqlite3_finalize(st);
+    sqlite3_close(raw);
+
+    db.close();
+    cleanup();
+}
+
+// unsummarized_turns() must exclude a turn that already has a finalized
+// turn_summaries row and include one that doesn't.
+void test_unsummarized_turns_excludes_summarized(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    int t_summarized = db.store_turn("This turn will be summarized.",
+                                     "Summarized turn's reply.", "test-model");
+    assert(t_summarized > 0);
+    int t_pending = db.store_turn("This turn stays unsummarized.",
+                                  "Pending turn's reply.", "test-model");
+    assert(t_pending > 0);
+
+    assert(db.finalize_turn_summary(t_summarized, "Already done.", "summarizer-model"));
+
+    auto pending = db.unsummarized_turns(0);
+    bool found_pending = false, found_summarized = false;
+    for (auto& t : pending) {
+        if (t.turn_id == t_pending) found_pending = true;
+        if (t.turn_id == t_summarized) found_summarized = true;
+    }
+    assert(found_pending);
+    assert(!found_summarized);
+
+    db.close();
+    cleanup();
+}
+
+// mark_turn_summarized() marks a trivial/skip-worthy turn as done WITHOUT
+// real summary text -- text must remain NULL while summary_model_id gets
+// resolved to the given model name.
+void test_mark_turn_summarized_trivial_turn(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    // store_turn() with non-empty assistant_text auto-creates the placeholder.
+    int t1 = db.store_turn("ok", "ok", "test-model");
+    assert(t1 > 0);
+    assert(db.turn_summary_exists(t1));
+
+    assert(db.mark_turn_summarized(t1, "trivial-skip-model"));
+
+    sqlite3* raw = nullptr;
+    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(raw,
+        "SELECT ts.text, m.name FROM turn_summaries ts "
+        "JOIN models m ON m.model_id = ts.summary_model_id "
+        "WHERE ts.turn_id = ?", -1, &st, nullptr);
+    sqlite3_bind_int(st, 1, t1);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_type(st, 0) == SQLITE_NULL);   // text stays NULL
+    {
+        const char* model = reinterpret_cast<const char*>(sqlite3_column_text(st, 1));
+        assert(model && std::string(model) == "trivial-skip-model");
+    }
+    sqlite3_finalize(st);
+    sqlite3_close(raw);
+
+    db.close();
+    cleanup();
+}
+
 // L2/L3 summary primitives (issue #22): store_summary, current_session_summary,
 // update_summary_text, set_summary_status — the deterministic backbone the
 // forked summarization pipeline drives.
@@ -808,10 +1094,15 @@ void test_episode_rollup_no_dup(ragger::Embedder& emb) {
     assert(db.episode_texts(G).empty());
 
     // Two L2 turn summaries land (distinct timestamps → distinct rows).
-    db.store_summary("Turn one: discussed knowledge graphs.", "turn", "complete",
-                     "memo", G, "2026-01-01 10:00:00");
-    db.store_summary("Turn two: phonetic pun edges.", "turn", "complete",
-                     "memo", G, "2026-01-01 10:00:02");
+    // Turn-level summaries now live in turn_summaries, keyed by a real
+    // turn_id -- create the underlying turns first, then finalize each
+    // one's summary, rather than writing level='turn' rows into
+    // `summaries` directly (that path no longer exists post-db_version
+    // 0.12; see l2_summaries_since's redirect to turn_summaries).
+    int t1 = db.store_turn("Q1", "A1", "memo", false, G, "2026-01-01 10:00:00");
+    int t2 = db.store_turn("Q2", "A2", "memo", false, G, "2026-01-01 10:00:02");
+    assert(db.finalize_turn_summary(t1, "Turn one: discussed knowledge graphs.", "memo"));
+    assert(db.finalize_turn_summary(t2, "Turn two: phonetic pun edges.", "memo"));
 
     // Before any episode, l2_summaries_since(all) returns both.
     assert(db.l2_summaries_since(G, "").size() == 2);
@@ -843,8 +1134,8 @@ void test_episode_rollup_no_dup(ragger::Embedder& emb) {
     assert(row2.has_value() && row2->first == sess);   // <-- the fix
 
     // Second episode + rollup: update in place, must NOT insert a new row.
-    db.store_summary("Turn three: curated fiction corpus.", "turn", "complete",
-                     "memo", G, "2026-01-01 11:00:00");
+    int t3 = db.store_turn("Q3", "A3", "memo", false, G, "2026-01-01 11:00:00");
+    assert(db.finalize_turn_summary(t3, "Turn three: curated fiction corpus.", "memo"));
     db.store_episode("Episode 2: curated corpus bet.", "memo", G,
                      "2026-01-01 11:00:00", "2026-01-01 11:00:00");
     assert(db.episode_texts(G).size() == 2);
@@ -875,13 +1166,20 @@ void test_episode_rollup_no_dup(ragger::Embedder& emb) {
     sqlite3_finalize(st);
 
     // updated_at was stamped (non-NULL) on the running row; timestamp fixed.
+    // created_at is now an INTEGER epoch column (db_version 0.12) -- compare
+    // against the epoch equivalent of the original TEXT literal rather than
+    // a formatted string.
     sqlite3_prepare_v2(raw,
         "SELECT created_at, updated_at FROM summaries WHERE level='session' "
         "AND session_id=(SELECT session_id FROM sessions WHERE guid='phase2-session')",
         -1, &st, nullptr);
     assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(std::string(reinterpret_cast<const char*>(sqlite3_column_text(st, 0)))
-           == "2026-01-01 10:00:03");                        // create time fixed
+    {
+        auto expected_ep = ragger::parse_db_timestamp("2026-01-01 10:00:03");
+        assert(expected_ep.has_value());
+        assert(sqlite3_column_int64(st, 0) ==
+               static_cast<int64_t>(*expected_ep));           // create time fixed
+    }
     assert(sqlite3_column_type(st, 1) != SQLITE_NULL);       // updated_at set
     sqlite3_finalize(st);
 
@@ -1026,6 +1324,13 @@ int main() {
     test_search_merges_three_corpora(emb);
     test_store_turn(emb);
     test_store_turn_dedup(emb);
+    test_turn_summary_placeholder_created_on_store_turn(emb);
+    test_turn_summary_placeholder_skipped_for_partial_turn(emb);
+    test_finalize_turn_summary_upserts(emb);
+    test_finalize_turn_summary_missing_turn_returns_false(emb);
+    test_turn_summary_survives_turn_deletion(emb);
+    test_unsummarized_turns_excludes_summarized(emb);
+    test_mark_turn_summarized_trivial_turn(emb);
     test_summary_primitives(emb);
     test_episode_rollup_no_dup(emb);
     test_path_normalization(emb);

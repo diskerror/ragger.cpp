@@ -255,12 +255,11 @@ bool SummarizerService::handle_l2(const Job& j) {
             const std::string summarizer_model =
                 inference_ ? inference_->memory_model : "";
             if (!summarizer_model.empty())
-                backend_.mark_turn_summarized(j.session_guid, j.source_timestamp,
-                                              summarizer_model);
+                backend_.mark_turn_summarized(j.turn_id, summarizer_model);
             Diskerror::logger::info(std::format(
-                "[summarizer] skipping trivial turn (session={}, ts={}, "
+                "[summarizer] skipping trivial turn (turn_id={}, session={}, ts={}, "
                 "combined_chars={})",
-                j.session_guid.empty() ? "-" : j.session_guid,
+                j.turn_id, j.session_guid.empty() ? "-" : j.session_guid,
                 j.source_timestamp, combined));
             return true;
         }
@@ -271,7 +270,7 @@ bool SummarizerService::handle_l2(const Job& j) {
     // only counts *summarized* rows (model_id NOT NULL) — the raw placeholder
     // does not block its own summarization. The worker is single-threaded, so
     // by the time a duplicate job runs the first has already promoted the row.
-    if (backend_.turn_summary_exists(j.session_guid, j.source_timestamp))
+    if (backend_.turn_summary_exists(j.turn_id))
         return true;
 
     const std::string summarizer_model =
@@ -293,23 +292,22 @@ bool SummarizerService::handle_l2(const Job& j) {
         // poison turn can't block the queue forever.
         const int max_fails = config().max_turn_failures;
         if (max_fails > 0) {
-            const std::string fkey = guid + "\x1F" + ts;
             int n;
             {
                 std::lock_guard<std::mutex> lk(mutex_);
-                n = ++turn_failures_[fkey];
+                n = ++turn_failures_[j.turn_id];
             }
             if (n >= max_fails) {
                 // Abandon: stamp with model "bad" (model_id 1) to remove
                 // from unsummarized_turns() permanently.
-                backend_.mark_turn_summarized(guid, ts, "bad");
+                backend_.mark_turn_summarized(j.turn_id, "bad");
                 {
                     std::lock_guard<std::mutex> lk(mutex_);
-                    turn_failures_.erase(fkey);
+                    turn_failures_.erase(j.turn_id);
                 }
                 Diskerror::logger::warn(std::format(
                     "[summarizer] abandoned turn after {} failures "
-                    "(session={}, ts={})", n, display_guid, ts));
+                    "(turn_id={}, session={}, ts={})", n, j.turn_id, display_guid, ts));
                 return true;  // consumed — won't retry
             }
         }
@@ -321,12 +319,17 @@ bool SummarizerService::handle_l2(const Job& j) {
     }
 
     // Promote the placeholder in place: real summary text + summarizer model.
-    backend_.finalize_turn_summary(guid, ts, summary, summarizer_model);
+    bool ok = backend_.finalize_turn_summary(j.turn_id, summary, summarizer_model);
+    if (!ok) {
+        Diskerror::logger::warn(std::format(
+            "[summarizer] finalize_turn_summary failed for turn_id={} "
+            "(session={}, ts={})", j.turn_id, display_guid, ts));
+        return false;
+    }
     {
         // Clear any prior failure count for this turn.
-        const std::string fkey = guid + "\x1F" + ts;
         std::lock_guard<std::mutex> lk(mutex_);
-        turn_failures_.erase(fkey);
+        turn_failures_.erase(j.turn_id);
     }
     Diskerror::logger::info(std::format(
         lang::MSG_SUMMARIZER_L2, display_guid, ts));

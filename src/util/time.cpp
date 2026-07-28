@@ -31,6 +31,15 @@ std::optional<std::time_t> parse_db_timestamp(const std::string& s) {
     return std::mktime(&tm);
 }
 
+int64_t db_epoch(std::time_t when) {
+    return static_cast<int64_t>(when);
+}
+
+int64_t db_epoch() {
+    return db_epoch(
+        std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
+}
+
 std::string file_stamp() {
     auto now = std::chrono::system_clock::now();
     auto tt  = std::chrono::system_clock::to_time_t(now);
