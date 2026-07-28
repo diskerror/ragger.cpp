@@ -65,7 +65,7 @@ public:
     void enqueue_catch_up();
 
 private:
-    enum class JobKind { L2Turn, L3CloseSession, DraftRetry, L3UpdateSession, L4UpdateProject, EpisodeClose };
+    enum class JobKind { L2Turn, DraftRetry, SessionClose, ProjectClose, EpisodeClose };
 
     struct Job {
         JobKind     kind;
@@ -76,6 +76,8 @@ private:
         std::string model_name;
         std::string session_guid;
         std::string source_timestamp;
+        int64_t     first_ts = 0;
+        int64_t     last_ts  = 0;
     };
 
     void worker_loop();
@@ -83,9 +85,8 @@ private:
 
     /// Handlers — each returns true on success, false on retryable error.
     bool handle_l2(const Job& j);
-    bool handle_l3_update(const Job& j);   // upsert running L3 from L2 summaries
-    bool handle_l3_close(const Job& j);    // finalize running L3 → complete
-    bool handle_l4_update(const Job& j);   // upsert running L4 from complete L3s
+    bool handle_session_close(const Job& j); // housekeeping-only: closed session-boundary run -> immutable rollup
+    bool handle_project_close(const Job& j); // housekeeping-only: closed project-boundary run -> immutable rollup
     bool handle_episode_close(const Job& j); // close open episode → immutable L3a row
     bool handle_draft(const Job& j);
 

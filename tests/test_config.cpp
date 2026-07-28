@@ -151,6 +151,56 @@ void test_catch_up_batch_size_ignores_nonpositive() {
     std::println(" OK");
 }
 
+void test_project_gap_days_parsing() {
+    std::print("  test_project_gap_days_parsing...");
+
+    std::string path = "/tmp/ragger_test_project_gap.ini";
+    {
+        std::ofstream f(path);
+        f << "[server]\nport = 8432\n"
+          << "[housekeeping]\nproject_gap_days = 14\n";
+    }
+
+    ragger::Config cfg = ragger::load_config(path).value();
+    assert(cfg.project_gap_days == 14);
+
+    fs::remove(path);
+    std::println(" OK");
+}
+
+void test_project_gap_days_default() {
+    std::print("  test_project_gap_days_default...");
+
+    std::string path = "/tmp/ragger_test_project_gap_default.ini";
+    {
+        std::ofstream f(path);
+        f << "[server]\nport = 8432\n";  // no [housekeeping] section at all
+    }
+
+    ragger::Config cfg = ragger::load_config(path).value();
+    assert(cfg.project_gap_days == 7);  // shipped default
+
+    fs::remove(path);
+    std::println(" OK");
+}
+
+void test_project_gap_days_ignores_nonpositive() {
+    std::print("  test_project_gap_days_ignores_nonpositive...");
+
+    std::string path = "/tmp/ragger_test_project_gap_zero.ini";
+    {
+        std::ofstream f(path);
+        f << "[server]\nport = 8432\n"
+          << "[housekeeping]\nproject_gap_days = 0\n";
+    }
+
+    ragger::Config cfg = ragger::load_config(path).value();
+    assert(cfg.project_gap_days == 7);  // 0 rejected, default retained
+
+    fs::remove(path);
+    std::println(" OK");
+}
+
 void test_logging_section_parsing() {
     std::print("  test_logging_section_parsing...");
 
@@ -390,6 +440,9 @@ int main() {
     test_housekeeping_section_parsing();
     test_catch_up_batch_size_default();
     test_catch_up_batch_size_ignores_nonpositive();
+    test_project_gap_days_parsing();
+    test_project_gap_days_default();
+    test_project_gap_days_ignores_nonpositive();
     test_logging_section_parsing();
     test_logging_section_defaults();
     test_inference_endpoint_parsing();

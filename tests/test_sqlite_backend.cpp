@@ -744,31 +744,17 @@ void test_store_turn_dedup(ragger::Embedder& emb) {
     assert(sqlite3_column_int(st, 0) == 1);
     sqlite3_finalize(st);
 
-    // Regression: a dedup that moves the turn's created_at must not strand
-    // the old-slot placeholder. Exactly one turn_summaries row should exist
-    // for the deduped turn (keyed by turn_id, not level='turn' — that was
-    // the pre-v0.12.0 `summaries` table linkage), and its turn_datetime must
-    // match the turn's *current* created_at (not some earlier value from
-    // before the regeneration collapsed onto it).
-    sqlite3_prepare_v2(raw,
-        "SELECT COUNT(*) FROM turn_summaries ts "
-        "WHERE ts.turn_id = ? "
-        "  AND ts.turn_datetime = (SELECT created_at FROM turns WHERE turn_id=?)",
-        -1, &st, nullptr);
-    sqlite3_bind_int(st, 1, t1);
-    sqlite3_bind_int(st, 2, t1);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_int(st, 0) == 1);
-    sqlite3_finalize(st);
-
-    // No stray leftover turn_summaries row for this turn_id sitting at any
-    // *other* turn_datetime (the old, pre-dedup slot).
+    // Regression: a dedup that moves the turn's created_at must not leave a
+    // stray turn_summaries row for this turn. Since placeholders no longer
+    // exist (per Reid's design decision — no placeholder mechanism), the
+    // deduped turn should have ZERO turn_summaries rows until explicitly
+    // finalized.
     sqlite3_prepare_v2(raw,
         "SELECT COUNT(*) FROM turn_summaries ts WHERE ts.turn_id = ?",
         -1, &st, nullptr);
     sqlite3_bind_int(st, 1, t1);
     assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_int(st, 0) == 1);
+    assert(sqlite3_column_int(st, 0) == 0);
     sqlite3_finalize(st);
 
     sqlite3_close(raw);
@@ -777,36 +763,34 @@ void test_store_turn_dedup(ragger::Embedder& emb) {
 
 // --- v0.12.0 turn_summaries regression tests -------------------------------
 // The turn_id-FK-based turn_summaries table replaces the old
-// (session_guid, source_timestamp)-keyed linkage. Placeholders are created
-// automatically by store_turn() for complete turns; finalize/mark methods
-// upsert against the unique partial index on turn_id.
+// (session_guid, source_timestamp)-keyed linkage. Per Reid's explicit design
+// decision, there is no placeholder-row mechanism: store_turn() never
+// creates a turn_summaries row. finalize_turn_summary()/mark_turn_summarized()
+// are plain INSERTs (no upsert) — the unique partial index on turn_id
+// guards against an accidental duplicate insert for the same turn_id.
+// unsummarized_turns() finds turns to process via a LEFT JOIN "no matching
+// row" check, not a NULL-text sentinel.
 
-// store_turn() with a non-empty assistant_text must create a NULL-text
-// turn_summaries placeholder row with the correct turn_id/turn_datetime/
-// turn_model_id linkage.
-void test_turn_summary_placeholder_created_on_store_turn(ragger::Embedder& emb) {
+// store_turn() must NOT create any turn_summaries row, even for a complete
+// (non-partial) turn — the row only appears once finalize_turn_summary() or
+// mark_turn_summarized() is explicitly called.
+void test_store_turn_creates_no_turn_summaries_row(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
 
     int t1 = db.store_turn("What is the capital of Spain?",
                            "The capital of Spain is Madrid.", "test-model");
     assert(t1 > 0);
-    assert(db.turn_summary_exists(t1));
+    assert(!db.turn_summary_exists(t1));
 
     sqlite3* raw = nullptr;
     assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
     sqlite3_stmt* st = nullptr;
-    sqlite3_prepare_v2(raw,
-        "SELECT ts.text, ts.turn_id, ts.turn_datetime, t.created_at, "
-        "       ts.turn_model_id, t.model_id "
-        "FROM turn_summaries ts JOIN turns t ON t.turn_id = ts.turn_id "
-        "WHERE ts.turn_id = ?", -1, &st, nullptr);
+    sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM turn_summaries WHERE turn_id = ?",
+                       -1, &st, nullptr);
     sqlite3_bind_int(st, 1, t1);
     assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_type(st, 0) == SQLITE_NULL);   // text IS NULL
-    assert(sqlite3_column_int(st, 1) == t1);
-    assert(sqlite3_column_int64(st, 2) == sqlite3_column_int64(st, 3)); // turn_datetime == turns.created_at
-    assert(sqlite3_column_int(st, 4) == sqlite3_column_int(st, 5));     // turn_model_id == turns.model_id
+    assert(sqlite3_column_int(st, 0) == 0);
     sqlite3_finalize(st);
     sqlite3_close(raw);
 
@@ -814,9 +798,9 @@ void test_turn_summary_placeholder_created_on_store_turn(ragger::Embedder& emb) 
     cleanup();
 }
 
-// A partial turn (no assistant_text yet) must NOT get a turn_summaries
-// placeholder — there's nothing to summarize until finalize_turn() lands.
-void test_turn_summary_placeholder_skipped_for_partial_turn(ragger::Embedder& emb) {
+// A partial turn (no assistant_text yet) also gets no turn_summaries row —
+// same as a complete turn, since store_turn() never creates one at all now.
+void test_store_turn_partial_turn_creates_no_turn_summaries_row(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
 
@@ -829,10 +813,11 @@ void test_turn_summary_placeholder_skipped_for_partial_turn(ragger::Embedder& em
     cleanup();
 }
 
-// finalize_turn_summary() upserts against the unique turn_id index: calling
-// it twice on the same turn_id must not create a duplicate row, and must
-// leave the SECOND text in place.
-void test_finalize_turn_summary_upserts(ragger::Embedder& emb) {
+// finalize_turn_summary() is a plain INSERT now (no upsert): calling it
+// twice on the same turn_id must fail on the second call (unique partial
+// index on turn_id rejects the duplicate), leaving exactly ONE row with the
+// FIRST call's text in place — not the second.
+void test_finalize_turn_summary_rejects_duplicate(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
 
@@ -841,7 +826,7 @@ void test_finalize_turn_summary_upserts(ragger::Embedder& emb) {
     assert(t1 > 0);
 
     assert(db.finalize_turn_summary(t1, "First summary text.", "summarizer-model"));
-    assert(db.finalize_turn_summary(t1, "Second summary text.", "summarizer-model"));
+    assert(!db.finalize_turn_summary(t1, "Second summary text.", "summarizer-model"));
 
     sqlite3* raw = nullptr;
     assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
@@ -859,7 +844,7 @@ void test_finalize_turn_summary_upserts(ragger::Embedder& emb) {
     assert(sqlite3_step(st) == SQLITE_ROW);
     {
         const char* txt = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
-        assert(txt && std::string(txt) == "Second summary text.");
+        assert(txt && std::string(txt) == "First summary text.");
     }
     sqlite3_finalize(st);
     sqlite3_close(raw);
@@ -981,10 +966,10 @@ void test_mark_turn_summarized_trivial_turn(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
 
-    // store_turn() with non-empty assistant_text auto-creates the placeholder.
+    // store_turn() no longer creates any turn_summaries row automatically.
     int t1 = db.store_turn("ok", "ok", "test-model");
     assert(t1 > 0);
-    assert(db.turn_summary_exists(t1));
+    assert(!db.turn_summary_exists(t1));
 
     assert(db.mark_turn_summarized(t1, "trivial-skip-model"));
 
@@ -1088,9 +1073,8 @@ void test_episode_rollup_no_dup(ragger::Embedder& emb) {
 
     const std::string G = "phase2-session";
 
-    // No episodes / no session row yet.
+    // No episodes yet.
     assert(db.last_episode_end(G).empty());
-    assert(!db.session_summary_row(G).has_value());
     assert(db.episode_texts(G).empty());
 
     // Two L2 turn summaries land (distinct timestamps → distinct rows).
@@ -1117,73 +1101,17 @@ void test_episode_rollup_no_dup(ragger::Embedder& emb) {
     // No L2 past the episode end now.
     assert(db.l2_summaries_since(G, db.last_episode_end(G)).empty());
 
-    // First session rollup: insert (no existing row).
-    assert(!db.session_summary_row(G).has_value());
-    int sess = db.store_summary("Session rollup v1.", "session", "current",
-                                "memo", G, "2026-01-01 10:00:03");
-    assert(sess > 0);
-    auto row = db.session_summary_row(G);
-    assert(row.has_value() && row->first == sess);
-
-    // Simulate the OLD close behaviour: flip to 'complete'. The bloat bug was
-    // that the next find-existing (which matched status='current') then MISSED
-    // this row and INSERTed a duplicate. session_summary_row IGNORES status, so
-    // it must still find exactly this row.
-    assert(db.set_summary_status(sess, "complete"));
-    auto row2 = db.session_summary_row(G);
-    assert(row2.has_value() && row2->first == sess);   // <-- the fix
-
-    // Second episode + rollup: update in place, must NOT insert a new row.
+    // Second episode.
     int t3 = db.store_turn("Q3", "A3", "memo", false, G, "2026-01-01 11:00:00");
     assert(db.finalize_turn_summary(t3, "Turn three: curated fiction corpus.", "memo"));
     db.store_episode("Episode 2: curated corpus bet.", "memo", G,
                      "2026-01-01 11:00:00", "2026-01-01 11:00:00");
     assert(db.episode_texts(G).size() == 2);
 
-    auto existing = db.session_summary_row(G);
-    assert(existing.has_value());
-    assert(db.update_summary_text(existing->first, "Session rollup v2.", "memo"));
-    assert(db.set_summary_updated_at(existing->first));
-
-    // Run the upsert cycle several more times (mimics repeated housekeeping
-    // ticks + an inference-outage catch-up storm) — the invariant holds.
-    for (int i = 0; i < 10; ++i) {
-        auto e = db.session_summary_row(G);
-        assert(e.has_value());
-        db.update_summary_text(e->first, "Session rollup iter.", "memo");
-        db.set_summary_updated_at(e->first);
-    }
-
-    // INVARIANT: exactly one level='session' row for this session.
+    // Episode rows are immutable: timestamp=first, updated_at=last (span).
     sqlite3* raw = nullptr;
     assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
     sqlite3_stmt* st = nullptr;
-    sqlite3_prepare_v2(raw,
-        "SELECT COUNT(*) FROM summaries WHERE level='session' "
-        "AND session_id=(SELECT session_id FROM sessions WHERE guid='phase2-session')",
-        -1, &st, nullptr);
-    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1);
-    sqlite3_finalize(st);
-
-    // updated_at was stamped (non-NULL) on the running row; timestamp fixed.
-    // created_at is now an INTEGER epoch column (db_version 0.12) -- compare
-    // against the epoch equivalent of the original TEXT literal rather than
-    // a formatted string.
-    sqlite3_prepare_v2(raw,
-        "SELECT created_at, updated_at FROM summaries WHERE level='session' "
-        "AND session_id=(SELECT session_id FROM sessions WHERE guid='phase2-session')",
-        -1, &st, nullptr);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    {
-        auto expected_ep = ragger::parse_db_timestamp("2026-01-01 10:00:03");
-        assert(expected_ep.has_value());
-        assert(sqlite3_column_int64(st, 0) ==
-               static_cast<int64_t>(*expected_ep));           // create time fixed
-    }
-    assert(sqlite3_column_type(st, 1) != SQLITE_NULL);       // updated_at set
-    sqlite3_finalize(st);
-
-    // Episode rows are immutable: timestamp=first, updated_at=last (span).
     sqlite3_prepare_v2(raw,
         "SELECT COUNT(*) FROM summaries WHERE level='episode' "
         "AND session_id=(SELECT session_id FROM sessions WHERE guid='phase2-session')",
@@ -1192,16 +1120,94 @@ void test_episode_rollup_no_dup(ragger::Embedder& emb) {
     sqlite3_finalize(st);
     sqlite3_close(raw);
 
-    // Project rollup input: newest session text per session_id.
-    auto proj_input = db.latest_session_summary_texts();
-    assert(proj_input.size() == 1);
-    assert(proj_input[0] == "Session rollup iter.");
+    // --- Boundary-detection session/project rollup (new design) ---------
+    // A run closes on session_id edge (session) or a >= gap_days time gap
+    // (project). Both are immutable-insert-per-closed-run, no upsert. We
+    // exercise the raw store_session_summary/store_project_summary +
+    // bounded_*_rollup_texts primitives directly here (the housekeeping
+    // scan itself -- sessions_needing_close_boundary/watermark advance --
+    // is exercised functionally in the summarizer smoke test, not here).
 
-    // A second session contributes its own latest row to the project corpus.
-    const std::string G2 = "phase2-session-b";
-    db.store_summary("Other session rollup.", "session", "current",
-                     "memo", G2, "2026-01-02 09:00:00");
-    assert(db.latest_session_summary_texts().size() == 2);
+    // bounded_session_rollup_texts pulls in episodes + trailing turn
+    // summaries whose span falls entirely within [first_ts, last_ts] for
+    // this session_guid -- both episodes above qualify for a run spanning
+    // the whole session.
+    auto first_ep = ragger::parse_db_timestamp("2026-01-01 10:00:00");
+    auto last_ep  = ragger::parse_db_timestamp("2026-01-01 11:00:00");
+    assert(first_ep.has_value() && last_ep.has_value());
+    auto sess_texts = db.bounded_session_rollup_texts(
+        G, static_cast<int64_t>(*first_ep), static_cast<int64_t>(*last_ep));
+    assert(sess_texts.size() == 2);  // both episode texts, oldest-first
+    assert(sess_texts[0] == "Episode 1: KG design + phonetic edges.");
+    assert(sess_texts[1] == "Episode 2: curated corpus bet.");
+
+    // A LATER run of the SAME session_guid must not leak into an EARLIER
+    // run's bounded query -- add a third episode outside [first_ep,last_ep]
+    // and confirm it's excluded.
+    int t4 = db.store_turn("Q4", "A4", "memo", false, G, "2026-01-02 09:00:00");
+    assert(db.finalize_turn_summary(t4, "Turn four: unrelated later topic.", "memo"));
+    db.store_episode("Episode 3: later unrelated run.", "memo", G,
+                     "2026-01-02 09:00:00", "2026-01-02 09:00:00");
+    auto sess_texts2 = db.bounded_session_rollup_texts(
+        G, static_cast<int64_t>(*first_ep), static_cast<int64_t>(*last_ep));
+    assert(sess_texts2.size() == 2);  // unchanged -- later episode excluded
+
+    // store_session_summary: one immutable insert per closed run. Two
+    // separate closes of the SAME session_guid produce TWO rows (unlike
+    // the old running-upsert model, which kept exactly one).
+    int sess1 = db.store_session_summary("Session run 1 rollup.", "memo", G,
+                                         static_cast<int64_t>(*first_ep),
+                                         static_cast<int64_t>(*last_ep));
+    assert(sess1 > 0);
+    auto later_ep = ragger::parse_db_timestamp("2026-01-02 09:00:00");
+    assert(later_ep.has_value());
+    int sess2 = db.store_session_summary("Session run 2 rollup.", "memo", G,
+                                         static_cast<int64_t>(*later_ep),
+                                         static_cast<int64_t>(*later_ep));
+    assert(sess2 > 0);
+    assert(sess1 != sess2);
+
+    raw = nullptr;
+    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    sqlite3_prepare_v2(raw,
+        "SELECT COUNT(*) FROM summaries WHERE level='session' "
+        "AND session_id=(SELECT session_id FROM sessions WHERE guid='phase2-session')",
+        -1, &st, nullptr);
+    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 2);
+    sqlite3_finalize(st);
+    sqlite3_close(raw);
+
+    // bounded_project_rollup_texts: gathers level='session' rows (produced
+    // above) whose span falls entirely within [first_ts, last_ts],
+    // session-unscoped.
+    auto proj_texts = db.bounded_project_rollup_texts(
+        static_cast<int64_t>(*first_ep), static_cast<int64_t>(*later_ep));
+    assert(proj_texts.size() == 2);
+    assert(proj_texts[0] == "Session run 1 rollup.");
+    assert(proj_texts[1] == "Session run 2 rollup.");
+
+    // store_project_summary: one immutable insert per closed project run.
+    int proj1 = db.store_project_summary("Project run 1 rollup.", "memo",
+                                         static_cast<int64_t>(*first_ep),
+                                         static_cast<int64_t>(*later_ep));
+    assert(proj1 > 0);
+
+    raw = nullptr;
+    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    sqlite3_prepare_v2(raw,
+        "SELECT COUNT(*), session_id FROM summaries WHERE level='project'",
+        -1, &st, nullptr);
+    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1);
+    assert(sqlite3_column_type(st, 1) == SQLITE_NULL);  // session-unscoped
+    sqlite3_finalize(st);
+    sqlite3_close(raw);
+
+    // watermark advance is idempotent / monotonic bookkeeping -- exercised
+    // via advance_session_boundary_watermark + a fresh
+    // sessions_needing_close_boundary() call. With everything already
+    // consumed above, calling it now with a turn_id shouldn't throw.
+    db.advance_session_boundary_watermark(t4);
+    db.advance_project_boundary_watermark(t4);
 
     db.close();
     cleanup();
@@ -1324,9 +1330,9 @@ int main() {
     test_search_merges_three_corpora(emb);
     test_store_turn(emb);
     test_store_turn_dedup(emb);
-    test_turn_summary_placeholder_created_on_store_turn(emb);
-    test_turn_summary_placeholder_skipped_for_partial_turn(emb);
-    test_finalize_turn_summary_upserts(emb);
+    test_store_turn_creates_no_turn_summaries_row(emb);
+    test_store_turn_partial_turn_creates_no_turn_summaries_row(emb);
+    test_finalize_turn_summary_rejects_duplicate(emb);
     test_finalize_turn_summary_missing_turn_returns_false(emb);
     test_turn_summary_survives_turn_deletion(emb);
     test_unsummarized_turns_excludes_summarized(emb);

@@ -81,10 +81,6 @@ public:
                       const std::string& tags = "") override;
     std::optional<std::pair<int, std::string>>
         current_session_summary(const std::string& session_guid = "") override;
-    std::optional<std::pair<int, std::string>>
-        current_project_summary() override;
-    std::vector<std::string>
-        l2_summary_texts(const std::string& session_guid) override;
     bool summary_exists_exact(const std::string& text,
                               const std::string& created_at) override;
     bool decision_exists_exact(const std::string& text,
@@ -97,8 +93,6 @@ public:
     bool update_turn_meta(int turn_id,
                           const std::string& timestamp = "",
                           const std::string& session_guid = "") override;
-    std::vector<std::string>
-        complete_l3_summary_texts() override;
     bool update_summary_text(int summary_id, const std::string& text,
                              const std::string& model_name = "") override;
     bool set_summary_status(int summary_id, const std::string& status) override;
@@ -113,7 +107,6 @@ public:
     bool turn_summary_exists(int turn_id) override;
     bool finalize_turn_summary(int turn_id, const std::string& text,
                                const std::string& summary_model_name) override;
-    bool upsert_turn_summary_placeholder(int turn_id) override;
     bool mark_turn_summarized(int turn_id, const std::string& model_name) override;
 
     std::vector<DraftSummary> draft_summaries(int limit = 0) override;
@@ -128,10 +121,20 @@ public:
                       const std::string& last_ts) override;
     std::vector<std::string> episodes_needing_close(int idle_minutes) override;
     std::vector<std::string> episode_texts(const std::string& session_guid) override;
-    std::optional<std::pair<int, std::string>>
-        session_summary_row(const std::string& session_guid) override;
     bool set_summary_updated_at(int summary_id) override;
-    std::vector<std::string> latest_session_summary_texts() override;
+    std::vector<ClosedRun> sessions_needing_close_boundary() override;
+    std::vector<ClosedRun> projects_needing_close_boundary(int gap_days) override;
+    void advance_session_boundary_watermark(int turn_id) override;
+    void advance_project_boundary_watermark(int turn_id) override;
+    std::vector<std::string> bounded_session_rollup_texts(
+        const std::string& session_guid, int64_t first_ts, int64_t last_ts) override;
+    std::vector<std::string> bounded_project_rollup_texts(
+        int64_t first_ts, int64_t last_ts) override;
+    int store_session_summary(const std::string& text, const std::string& model_name,
+                              const std::string& session_guid,
+                              int64_t first_ts, int64_t last_ts) override;
+    int store_project_summary(const std::string& text, const std::string& model_name,
+                              int64_t first_ts, int64_t last_ts) override;
     std::vector<TurnRecord> turns_by_session_desc(
         const std::string& session_guid, int limit = 0) override;
     std::vector<SummaryRecord> turn_summaries_by_session_desc(

@@ -162,6 +162,11 @@ struct Config {
     // modelling the walk-away-and-return rhythm. Supersedes summary_pause_minutes,
     // which is accepted as a deprecated alias when this key is unset.
     int   episode_idle_minutes   = 15;
+    // Minimum time-gap (days) between two consecutive turns that triggers a
+    // project-boundary close, per the session/project boundary-detection
+    // design (edge-detected on the gap, not an idle-scan like episodes).
+    // Any positive integer; default 7.
+    int   project_gap_days       = 7;
     // Per-housekeeping-tick cap on how many unsummarized L2 turns (and,
     // separately, how many draft-tagged retry rows) get enqueued in one
     // pass. Was a hardcoded constexpr of 200; made configurable so a manual

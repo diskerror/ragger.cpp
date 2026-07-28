@@ -151,6 +151,7 @@ available — no manual catch-up needed.
 | `episode_idle_minutes`  | `15`    | Idle gap (minutes) that closes an episode of work within a session, and drives session/project rollups. Any positive integer. |
 | `summary_pause_minutes` | `20`    | Deprecated alias for `episode_idle_minutes` — honored only when `episode_idle_minutes` is unset. |
 | `catch_up_batch_size`   | `10`    | Per-tick cap on unsummarized turns (and, separately, draft-tagged retries) enqueued at once. Keeps a manual resummarize (nulling `model_id` on a batch of `summaries` rows via direct SQL) to a small, deliberate slice per housekeeping tick instead of redoing hundreds of inference calls at once. Any positive integer. |
+| `project_gap_days`      | `7`     | Minimum time-gap (days) between two consecutive turns that triggers a project-boundary close. Any positive integer. |
 
 The same housekeeping loop catches turns that landed without a
 summary (e.g. captured via MCP while the daemon was down) and rewrites
