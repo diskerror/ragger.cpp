@@ -1098,9 +1098,13 @@ struct SqliteBackend::Impl {
             meta["source"] = "turn_summary";
             if (!s.is_null(3)) meta["turn_id"] = s.column_int(3);
             if (!s.is_null(4)) meta["session_id"] = s.column_int(4);
+            // Human-readable datetime (mirrors turns.created_at) for temporal
+            // ordering; kept alongside turn_id (raw-turn lookup key).
+            std::string ts = col_text(5);
+            if (!ts.empty()) meta["datetime"] = ts;
             turn_metadata.push_back(std::move(meta));
 
-            turn_timestamps.push_back(col_text(5));
+            turn_timestamps.push_back(std::move(ts));
         }
 
         int n = static_cast<int>(emb_rows.size());

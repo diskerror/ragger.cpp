@@ -1332,6 +1332,51 @@ void test_search_merges_three_corpora(ragger::Embedder& emb) {
     cleanup();
 }
 
+// A turn_summary (L2) hit carries metadata source="turn_summary", a
+// human-readable "datetime" (mirrors turns.created_at), the session_id,
+// and the turn_id (raw-turn lookup key). datetime is the addition; keeping
+// turn_id follows the "more data is fine, too little is bad" principle.
+// The result's primary id is the turn_summary_id.
+void test_turn_summary_search_metadata(ragger::Embedder& emb) {
+    cleanup();
+    {
+        ragger::SqliteBackend db(emb, TEMP_DB);
+
+        const std::string G = "meta-shape-session";
+        const std::string when = "2026-04-15 09:30:00";
+        int t1 = db.store_turn("Q1", "A1", "memo", false, G, when);
+        assert(t1 > 0);
+        assert(db.finalize_turn_summary(
+            t1, "Discussed the migration to a columnar store.", "memo"));
+
+        auto resp = db.search("columnar store migration", 5, 0.0f, {});
+        assert(!resp.results.empty());
+
+        // Find the turn_summary hit among results.
+        const ragger::SearchResult* hit = nullptr;
+        for (const auto& r : resp.results) {
+            if (r.metadata.value("source", std::string()) == "turn_summary") {
+                hit = &r;
+                break;
+            }
+        }
+        assert(hit && "expected a turn_summary result");
+
+        // datetime present and mirrors the stored turn timestamp.
+        assert(hit->metadata.contains("datetime"));
+        assert(hit->metadata["datetime"] == when);
+        // The top-level result timestamp is also populated (not blanked).
+        assert(hit->timestamp == when);
+        // session_id and turn_id both present.
+        assert(hit->metadata.contains("session_id"));
+        assert(hit->metadata.contains("turn_id"));
+        assert(hit->metadata["turn_id"] == t1);
+
+        db.close();
+    }
+    cleanup();
+}
+
 // -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
@@ -1369,6 +1414,7 @@ int main() {
     test_v2_summaries_backing(emb);
     test_store_document(emb);
     test_search_merges_three_corpora(emb);
+    test_turn_summary_search_metadata(emb);
     test_store_turn(emb);
     test_store_turn_dedup(emb);
     test_store_turn_creates_no_turn_summaries_row(emb);
