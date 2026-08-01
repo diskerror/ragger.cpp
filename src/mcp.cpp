@@ -130,6 +130,13 @@ static nlohmann::json tools_list() {
                                     {"description", "Model that produced the reply."}}},
                     {"session_id", {{"type", "string"},
                                     {"description", "Conversation/session GUID grouping the turn."}}},
+                    {"session_name", {{"type", "string"},
+                                    {"description", "Human-readable session/conversation title. "
+                                                    "Framework-specific: Hermes passes its session title, "
+                                                    "others may derive from context."}}},
+                    {"name_source", {{"type", "string"},
+                                    {"description", "Origin of session_name: 'hermes_title', 'openclaw', "
+                                                    "'derived', etc. Omit if no session_name."}}},
                     {"metadata",   {{"type", "object"},
                                     {"description", "Optional metadata (source, hook, etc.). Reserved."}}}
                 }},
@@ -215,7 +222,10 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         const auto assistant = arguments.value("assistant", "");
         const auto model     = arguments.value("model", "");
         const auto session   = arguments.value("session_id", "");
-        const auto result    = capture_turn(memory, user, assistant, model, session);
+        const auto sess_name = arguments.value("session_name", "");
+        const auto n_source  = arguments.value("name_source", "");
+        const auto result    = capture_turn(memory, user, assistant, model, session,
+                                            sess_name, n_source);
         return text_result(nlohmann::json({
             {"status",  result.captured ? "captured" : "disabled"},
             {"turn_id", result.turn_id}

@@ -79,13 +79,16 @@ FROM models;
 CREATE TABLE sessions (
     session_id INTEGER PRIMARY KEY AUTOINCREMENT,
     guid       TEXT NOT NULL UNIQUE,
+    name       TEXT,
+    name_source TEXT,
     created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
 CREATE VIEW IF NOT EXISTS sessions_view AS
-SELECT session_id, guid,
+SELECT session_id, guid, name, name_source,
        datetime(created_at, 'unixepoch', 'localtime') AS created_at
 FROM sessions;
+CREATE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name);
 
 -- ---------------------------------------------------------------------------
 -- turns (L1)  -- raw verbatim exchanges
@@ -170,7 +173,6 @@ CREATE TABLE summaries (
     summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
     text       TEXT            NOT NULL,
     level      TEXT            NOT NULL, -- 'episode' | 'session' | 'project'
-    status     TEXT            NOT NULL, -- 'current' | 'complete'
     tags       TEXT DEFAULT '' NOT NULL,
     session_id INTEGER REFERENCES sessions(session_id),
     model_id   INTEGER REFERENCES models(model_id),
@@ -180,12 +182,11 @@ CREATE TABLE summaries (
     phon       TEXT            -- phonize(text): Double Metaphone "sounds-like"
 );
 CREATE INDEX idx_summaries_level ON summaries(level);
-CREATE INDEX idx_summaries_status ON summaries(status);
 CREATE INDEX idx_summaries_created_at ON summaries(created_at);
 CREATE INDEX idx_summaries_session ON summaries(session_id);
 
 CREATE VIEW IF NOT EXISTS summaries_view AS
-SELECT summary_id, text, level, status, tags, session_id, model_id,
+SELECT summary_id, text, level, tags, session_id, model_id,
        datetime(created_at, 'unixepoch', 'localtime') AS created_at,
        datetime(updated_at, 'unixepoch', 'localtime') AS updated_at,
        CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding,

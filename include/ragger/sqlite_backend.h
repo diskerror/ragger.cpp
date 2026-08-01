@@ -46,7 +46,9 @@ public:
                    const std::string& model_name = "",
                    bool defer_embedding = false,
                    const std::string& session_guid = "",
-                   const std::string& source_timestamp = "") override;
+                   const std::string& source_timestamp = "",
+                   const std::string& session_name = "",
+                   const std::string& name_source = "") override;
     std::vector<TurnRecord> turns_by_session(
         const std::string& session_guid) override;
     bool finalize_turn(int turn_id,
@@ -74,13 +76,10 @@ public:
 
     // --- summaries (L2/L3) pipeline (issue #22) ---
     int store_summary(const std::string& text, const std::string& level,
-                      const std::string& status,
                       const std::string& model_name = "",
                       const std::string& session_guid = "",
                       const std::string& source_timestamp = "",
                       const std::string& tags = "") override;
-    std::optional<std::pair<int, std::string>>
-        current_session_summary(const std::string& session_guid = "") override;
     bool summary_exists_exact(const std::string& text,
                               const std::string& created_at) override;
     bool decision_exists_exact(const std::string& text,
@@ -95,7 +94,6 @@ public:
                           const std::string& session_guid = "") override;
     bool update_summary_text(int summary_id, const std::string& text,
                              const std::string& model_name = "") override;
-    bool set_summary_status(int summary_id, const std::string& status) override;
     bool set_summary_tags(int summary_id, const std::string& tags) override;
     std::vector<std::string> recent_summaries(const std::string& level, int limit) override;
     std::vector<std::string> current_decisions(int limit) override;

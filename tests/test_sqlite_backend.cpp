@@ -55,10 +55,11 @@ void test_store_with_metadata(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
 
-    // Lean v2 summaries: tags (comma-joined) + level/status round-trip.
+    // Lean v2 summaries: tags (comma-joined) + level round-trip.
+    // status was removed from summaries in v0.12.0; any status key in
+    // metadata is silently dropped.
     ragger::json meta = {
         {"level", "session"},
-        {"status", "complete"},
         {"tags", {"test", "unit"}}
     };
     std::string id = db.store("Metadata round-trip test.", meta);
@@ -67,7 +68,6 @@ void test_store_with_metadata(ragger::Embedder& emb) {
     auto all = db.load_all();
     assert(all.size() == 1);
     assert(all[0].metadata["level"] == "session");
-    assert(all[0].metadata["status"] == "complete");
     // Tags stored as comma-separated string in the tags column.
     assert(all[0].metadata["tags"] == "test,unit");
 
@@ -342,9 +342,9 @@ void test_search_by_metadata(ragger::Embedder& emb) {
     ragger::SqliteBackend db(emb, TEMP_DB);
 
     // Lean v2: filterable columns are level / status / tags (+ time window).
-    db.store("Apple note.",  {{"level", "turn"},    {"status", "complete"}, {"tags", {"fruit"}}});
-    db.store("Banana note.", {{"level", "turn"},    {"status", "current"},  {"tags", {"fruit"}}});
-    db.store("Car note.",    {{"level", "session"}, {"status", "complete"}, {"tags", {"vehicle"}}});
+    db.store("Apple note.",  {{"level", "turn"},    {"tags", {"fruit"}}});
+    db.store("Banana note.", {{"level", "turn"},    {"tags", {"fruit", "tropical"}}});
+    db.store("Car note.",    {{"level", "session"}, {"tags", {"vehicle"}}});
 
     // Filter by level
     auto results = db.search_by_metadata({{"level", "turn"}});
@@ -357,12 +357,12 @@ void test_search_by_metadata(ragger::Embedder& emb) {
     assert(results[0].text == "Car note.");
 
     // AND across columns
-    results = db.search_by_metadata({{"level", "turn"}, {"status", "current"}});
+    results = db.search_by_metadata({{"level", "turn"}, {"tags", "tropical"}});
     assert(results.size() == 1);
     assert(results[0].text == "Banana note.");
 
     // Limit respected
-    results = db.search_by_metadata({{"status", "complete"}}, 1);
+    results = db.search_by_metadata({{"level", "turn"}}, 1);
     assert(results.size() == 1);
 
     // No matches → empty
@@ -507,18 +507,18 @@ void test_timestamp_format(ragger::Embedder& emb) {
 
 // Guards the v2 read-path wiring: the generic store/read API operates on the
 // lean `summaries` table (issue #33 split), not the dropped pre-v2 `memories`
-// table. level/status/tags round-trip; there is no metadata blob.
+// table. level/tags round-trip; there is no metadata blob.
+// status was removed from summaries in v0.12.0.
 void test_v2_summaries_backing(ragger::Embedder& emb) {
     cleanup();
     {
         ragger::SqliteBackend db(emb, TEMP_DB);
         db.store("v2 summaries backing check.",
-                 {{"level", "session"}, {"status", "complete"}, {"tags", {"note"}}});
+                 {{"level", "session"}, {"tags", {"note"}}});
 
         auto all = db.load_all();
         assert(all.size() == 1);
         assert(all[0].metadata["level"] == "session");
-        assert(all[0].metadata["status"] == "complete");
         assert(all[0].metadata["tags"] == "note");
         db.close();
     }
@@ -994,39 +994,28 @@ void test_mark_turn_summarized_trivial_turn(ragger::Embedder& emb) {
     cleanup();
 }
 
-// L2/L3 summary primitives (issue #22): store_summary, current_session_summary,
-// update_summary_text, set_summary_status — the deterministic backbone the
-// forked summarization pipeline drives.
+// Summary primitives (issue #22): store_summary, update_summary_text —
+// the deterministic backbone the summarization pipeline drives.
+// current_session_summary and set_summary_status were removed when
+// summaries.status was dropped (v0.12.0 boundary-detection rework).
 void test_summary_primitives(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
 
-    assert(!db.current_session_summary().has_value());
-
     int l2 = db.store_summary("User asked about France; capital is Paris.",
-                              "turn", "complete", "memo-model");
+                              "turn", "memo-model");
     assert(l2 > 0);
 
     int l3 = db.store_summary("Discussed European capitals.",
-                              "session", "current", "memo-model");
+                              "session", "memo-model");
     assert(l3 > 0);
-    auto cur = db.current_session_summary();
-    assert(cur.has_value());
-    assert(cur->first == l3);
-    assert(cur->second == "Discussed European capitals.");
 
     assert(db.update_summary_text(l3, "Discussed European capitals, focus France.",
                                   "memo-model"));
-    cur = db.current_session_summary();
-    assert(cur->second == "Discussed European capitals, focus France.");
 
-    // Topic shift: complete the old, start a new current.
-    assert(db.set_summary_status(l3, "complete"));
-    assert(!db.current_session_summary().has_value());
     int l3b = db.store_summary("Switched to cooking techniques.",
-                               "session", "current", "memo-model");
-    auto cur2 = db.current_session_summary();
-    assert(cur2->first == l3b);
+                               "session", "memo-model");
+    assert(l3b > 0);
 
     sqlite3* raw = nullptr;
     assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
@@ -1036,9 +1025,9 @@ void test_summary_primitives(ragger::Embedder& emb) {
     assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1);
     sqlite3_finalize(st);
     sqlite3_prepare_v2(raw,
-        "SELECT COUNT(*) FROM summaries WHERE level='session' AND status='complete'",
+        "SELECT COUNT(*) FROM summaries WHERE level='session'",
         -1, &st, nullptr);
-    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1);
+    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 2);
     sqlite3_finalize(st);
     sqlite3_prepare_v2(raw,
         "SELECT COUNT(*) FROM summaries s JOIN models m ON m.model_id=s.model_id "
@@ -1048,13 +1037,12 @@ void test_summary_primitives(ragger::Embedder& emb) {
     sqlite3_close(raw);
 
     assert(!db.update_summary_text(99999, "x", "memo-model"));
-    assert(!db.set_summary_status(99999, "complete"));
 
     // Recipe ingredients (issue #23): recency-based fetch.
     auto turns = db.recent_summaries("turn", 5);
     assert(turns.size() == 1);
     auto sessions = db.recent_summaries("session", 5);
-    assert(sessions.size() == 2);                 // l3 (complete) + l3b (current)
+    assert(sessions.size() == 2);
     assert(db.recent_summaries("project", 5).empty());
     assert(db.recent_summaries("turn", 0).empty());
     assert(db.current_decisions(5).empty());      // none created
@@ -1213,6 +1201,59 @@ void test_episode_rollup_no_dup(ragger::Embedder& emb) {
     cleanup();
 }
 
+// Regression: sessions_needing_close_boundary() must NOT re-close a run
+// that already has a session summary covering it, even when the boundary
+// watermark is zero/unset (e.g. right after a schema migration that never
+// stamped the watermark key -- get_watermark() then defaults to 0).
+//
+// Reid's invariant: "there should not be an automatic lookback to do any
+// session summary before the last session summary." The watermark is a
+// belt-and-suspenders optimization; correctness must come structurally
+// from the summaries that already exist, not from the watermark value.
+//
+// Pre-fix behavior (the bug): watermark=0 -> every historical closed run
+// (last_turn_id > 0) re-qualifies -> the housekeeping scan re-summarizes
+// all of session history, one duplicate level='session' row per tick.
+void test_session_close_no_lookback_before_existing_summary(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    const std::string G1 = "already-summarized-session";
+    const std::string G2 = "later-session";
+
+    // A closed run for G1: two consecutive turns, then a turn in a DIFFERENT
+    // session (G2) which edge-closes G1's run and becomes the open tail.
+    int t1 = db.store_turn("Q1", "A1", "memo", false, G1, "2026-03-01 10:00:00");
+    int t2 = db.store_turn("Q2", "A2", "memo", false, G1, "2026-03-01 10:00:05");
+    assert(db.finalize_turn_summary(t1, "Turn one.", "memo"));
+    assert(db.finalize_turn_summary(t2, "Turn two.", "memo"));
+    (void)db.store_turn("Q3", "A3", "memo", false, G2, "2026-03-01 11:00:00");
+
+    auto first_ts = ragger::parse_db_timestamp("2026-03-01 10:00:00");
+    auto last_ts  = ragger::parse_db_timestamp("2026-03-01 10:00:05");
+    assert(first_ts.has_value() && last_ts.has_value());
+
+    // G1's run has already been summarized once (the normal, correct close).
+    int s1 = db.store_session_summary("G1 run rollup.", "memo", G1,
+                                      static_cast<int64_t>(*first_ts),
+                                      static_cast<int64_t>(*last_ts));
+    assert(s1 > 0);
+
+    // Simulate the post-migration state: watermark is 0 (never stamped).
+    db.advance_session_boundary_watermark(0);
+
+    // The scan must NOT return G1's already-summarized run. (G2's run is the
+    // open tail -- excluded by the MAX(grp) rule regardless.)
+    auto runs = db.sessions_needing_close_boundary();
+    for (const auto& r : runs) {
+        assert(r.session_guid != G1 &&
+               "already-summarized run re-closed with zeroed watermark (lookback bug)");
+    }
+
+    db.close();
+    cleanup();
+}
+
 void test_path_normalization(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
@@ -1339,6 +1380,7 @@ int main() {
     test_mark_turn_summarized_trivial_turn(emb);
     test_summary_primitives(emb);
     test_episode_rollup_no_dup(emb);
+    test_session_close_no_lookback_before_existing_summary(emb);
     test_path_normalization(emb);
 
     std::println("test_sqlite_backend: all passed");

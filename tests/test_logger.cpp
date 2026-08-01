@@ -219,14 +219,25 @@ int main() {
         {
             Diskerror::logger log(path, "info", /*maxSizeMb=*/1, /*maxAgeDays=*/0);
             Diskerror::logger::info("triggers rotation");
+            // Second write lands in the fresh post-rotation file.
+            Diskerror::logger::info("post rotation");
         }
         int backups = 0;
+        std::string backup_path;
         for (const auto& e : fs::directory_iterator(dir)) {
-            if (e.path().filename().string().rfind("activity.log.", 0) == 0) ++backups;
+            if (e.path().filename().string().rfind("activity.log.", 0) == 0) {
+                ++backups;
+                backup_path = e.path().string();
+            }
         }
         assert(backups == 1);
+        // The pre-rotation content (seeded data + "triggers rotation") is in
+        // the backup; the fresh file has only "post rotation".
+        auto backup_content = read_file(backup_path);
+        assert(backup_content.find("triggers rotation") != std::string::npos);
         content = read_file(path);
-        assert(content.find("triggers rotation") != std::string::npos);
+        assert(content.find("post rotation") != std::string::npos);
+        assert(content.find("triggers rotation") == std::string::npos);
         assert(content.size() < 1024 * 1024);  // fresh file, not the seeded giant one
         fs::remove_all(dir);
     }

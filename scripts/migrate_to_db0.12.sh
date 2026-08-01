@@ -200,8 +200,8 @@ ATTACH DATABASE '${DB}' AS old;
 INSERT INTO models (model_id, name, created_at)
 SELECT model_id, name, unixepoch(created_at, 'utc') FROM old.models;
 
-INSERT INTO sessions (session_id, guid, created_at)
-SELECT session_id, guid, unixepoch(created_at, 'utc') FROM old.sessions;
+INSERT INTO sessions (session_id, guid, name, name_source, created_at)
+SELECT session_id, guid, NULL, NULL, unixepoch(created_at, 'utc') FROM old.sessions;
 
 INSERT INTO decisions (decision_id, text, status, tags, created_at, embedding, phon)
 SELECT decision_id, text, status, tags, unixepoch(created_at, 'utc'), embedding, phon
@@ -236,9 +236,9 @@ FROM old.turns;
 
 -- summaries: episode/session/project rows only (level='turn' rows go to
 -- turn_summaries below instead).
-INSERT INTO summaries (summary_id, text, level, status, tags, session_id,
+INSERT INTO summaries (summary_id, text, level, tags, session_id,
                         model_id, created_at, updated_at, embedding, phon)
-SELECT summary_id, text, level, status, tags, session_id,
+SELECT summary_id, text, level, tags, session_id,
        model_id, unixepoch(created_at, 'utc'), unixepoch(updated_at, 'utc'), embedding, phon
 FROM old.summaries
 WHERE level != 'turn';
@@ -388,6 +388,20 @@ echo "Integrity check: ok"
 
 sqlite3 "$NEW_DB" "INSERT OR REPLACE INTO settings (key, value) VALUES ('db_version', '${NEW_VERSION}');"
 echo "Stamped db_version = ${NEW_VERSION}"
+
+# Seed the boundary-detection watermarks to the highest existing turn_id so
+# the first post-migration housekeeping scan does NOT treat the entire
+# imported history as unclosed and re-summarize every past session/project
+# run (that would peg the summarizer model for hours and pile up thousands
+# of duplicate level='session'/'project' rows). get_watermark() defaults to
+# 0 when the key is absent, which is exactly the state that triggered the
+# runaway re-summarization the 0.12->fix cycle addressed. The binary also
+# has a structural NOT-EXISTS guard against re-closing already-summarized
+# runs, but stamping here keeps the very first scan cheap regardless.
+MAX_TURN="$(sqlite3 "$NEW_DB" "SELECT COALESCE(MAX(turn_id), 0) FROM turns;")"
+sqlite3 "$NEW_DB" "INSERT OR REPLACE INTO settings (key, value) VALUES ('session_boundary_watermark_turn_id', '${MAX_TURN}');"
+sqlite3 "$NEW_DB" "INSERT OR REPLACE INTO settings (key, value) VALUES ('project_boundary_watermark_turn_id', '${MAX_TURN}');"
+echo "Stamped boundary watermarks = ${MAX_TURN} (max turn_id)"
 
 # ---------------------------------------------------------------------------
 # 8. Everything checked out. Move the original aside as a timestamped

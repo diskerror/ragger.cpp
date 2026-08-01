@@ -565,7 +565,7 @@ int main(int argc, char **argv) {
                         ++n_skip;
                         continue;
                     }
-                    memory.store_summary(s.text, "project", "complete",
+                    memory.store_summary(s.text, "project",
                                          /*model_name=*/"",
                                          /*session_guid=*/"",
                                          /*source_timestamp=*/ts,
@@ -616,7 +616,7 @@ int main(int argc, char **argv) {
                                 ++n_dec;
                             } else {
                                 if (memory.summary_exists_exact(c.text, ts)) { ++n_sum_skip; continue; }
-                                memory.store_summary(c.text, "session", "complete",
+                                memory.store_summary(c.text, "session",
                                                      /*model_name=*/"", /*session_guid=*/"",
                                                      /*source_timestamp=*/ts,
                                                      /*tags=*/"flat-memory-import");
@@ -651,7 +651,7 @@ int main(int argc, char **argv) {
                         ++n_dec;
                     } else {
                         if (memory.summary_exists_exact(c.text, ts)) { ++n_sum_skip; continue; }
-                        memory.store_summary(c.text, "session", "complete",
+                        memory.store_summary(c.text, "session",
                                              /*model_name=*/"", /*session_guid=*/"",
                                              /*source_timestamp=*/ts,
                                              /*tags=*/"flat-memory-import");
@@ -899,7 +899,7 @@ int main(int argc, char **argv) {
                     std::string ts = to_db_ts(conv.value("created_at", ""));
                     if (summary.empty() || ts.empty()) continue;
                     if (memory.summary_exists_exact(summary, ts)) { ++n_sessions_skip; continue; }
-                    memory.store_summary(summary, "session", "complete",
+                    memory.store_summary(summary, "session",
                                          /*model_name=*/"claude",
                                          /*session_guid=*/sid,
                                          /*source_timestamp=*/ts,
@@ -967,7 +967,7 @@ int main(int argc, char **argv) {
                     if (name.empty() || ts.empty()) continue;
                     std::string text = desc.empty() ? name : (name + "\n\n" + desc);
                     if (memory.summary_exists_exact(text, ts)) { ++n_proj_skip; continue; }
-                    memory.store_summary(text, "project", "complete",
+                    memory.store_summary(text, "project",
                                          /*model_name=*/"claude",
                                          /*session_guid=*/"",
                                          /*source_timestamp=*/ts,

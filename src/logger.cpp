@@ -41,28 +41,37 @@ std::function<void(std::string const&)> logger::critical = kNoop;
 
 logger::logger(const std::string &logFileName_, const std::string &level,
                long maxSizeMb, int maxAgeDays_) {
-    instanceCount++;
-    if (instanceCount > 1) return; // Don't do anything if one already exists.
-
-    logFileName  = logFileName_;
-    maxSizeBytes = maxSizeMb  > 0 ? maxSizeMb * 1024L * 1024L : 0;
-    maxAgeDays   = maxAgeDays_ > 0 ? maxAgeDays_ : 0;
+    // Validate the path BEFORE incrementing instanceCount. If the
+    // constructor throws, the destructor never runs (C++ rule), so an
+    // early increment would leave the count permanently inflated — making
+    // every subsequent logger construction a silent no-op (the
+    // instanceCount > 1 guard fires). By deferring the increment until
+    // after the throwing region, a failed construction is invisible to
+    // later instances.
 
     // Create the containing directory (e.g. ~/.ragger/logs) if it doesn't
     // exist yet, then create the log file itself if missing. Fail fast if
     // the path is genuinely unwritable (permission denied, etc.) rather
     // than silently dropping every log line for the rest of the process.
     std::error_code ec;
-    fs::path path(logFileName);
+    fs::path path(logFileName_);
     if (path.has_parent_path()) {
         fs::create_directories(path.parent_path(), ec);
     }
     {
-        std::ofstream probe(logFileName, std::ios::app);
+        std::ofstream probe(logFileName_, std::ios::app);
         if (probe.fail()) {
-            throw std::runtime_error(std::format(ragger::lang::ERR_LOG_OPEN, logFileName));
+            throw std::runtime_error(std::format(ragger::lang::ERR_LOG_OPEN, logFileName_));
         }
     }
+
+    // Past the throwing region — safe to commit.
+    instanceCount++;
+    if (instanceCount > 1) return; // Don't do anything if one already exists.
+
+    logFileName  = logFileName_;
+    maxSizeBytes = maxSizeMb  > 0 ? maxSizeMb * 1024L * 1024L : 0;
+    maxAgeDays   = maxAgeDays_ > 0 ? maxAgeDays_ : 0;
 
     trace = [](std::string const &) {};
     debug = [](std::string const &) {};

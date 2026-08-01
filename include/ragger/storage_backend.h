@@ -103,7 +103,9 @@ public:
                            const std::string& model_name = "",
                            bool defer_embedding = false,
                            const std::string& session_guid = "",
-                           const std::string& source_timestamp = "") = 0;
+                           const std::string& source_timestamp = "",
+                           const std::string& session_name = "",
+                           const std::string& name_source = "") = 0;
 
     /// All raw turns belonging to a session GUID, oldest first. Empty if the
     /// session is unknown. Grouping primitive for session summaries/recipes.
@@ -145,8 +147,8 @@ public:
                                        const std::vector<float>& emb) = 0;
 
     // --- summaries (L2/L3) pipeline (issue #22) ---
-    /// Insert a summary (level 'turn'|'session'|'project', status
-    /// 'current'|'complete'); embeds text, records model. Returns summary_id.
+    /// Insert a summary (level 'turn'|'session'|'project'); embeds text,
+    /// records model. Returns summary_id.
     /// `source_timestamp` (when non-empty) overrides the row's timestamp —
     /// L2 turn summaries inherit the source turn's timestamp so chronology
     /// is the linkage between turn and its summary (no FK column needed) and
@@ -154,15 +156,10 @@ public:
     /// on the row (used to mark drafts: "draft" → housekeeping re-summarizes
     /// it when inference becomes available again).
     virtual int store_summary(const std::string& text, const std::string& level,
-                              const std::string& status,
                               const std::string& model_name = "",
                               const std::string& session_guid = "",
                               const std::string& source_timestamp = "",
                               const std::string& tags = "") = 0;
-    /// The current running L3 session summary, if any: (summary_id, text).
-    /// Scoped to `session_guid` when given; legacy global when empty.
-    virtual std::optional<std::pair<int, std::string>>
-        current_session_summary(const std::string& session_guid = "") = 0;
 
     /// Exact-match existence check on the `summaries` table: does a row
     /// already exist with this text and created_at timestamp? Used by
@@ -213,8 +210,6 @@ public:
     /// Replace a summary's text + embedding (and model). False if absent.
     virtual bool update_summary_text(int summary_id, const std::string& text,
                                      const std::string& model_name = "") = 0;
-    /// Set a summary's status (e.g. mark a session summary 'complete').
-    virtual bool set_summary_status(int summary_id, const std::string& status) = 0;
     /// Replace a summary's `tags` column (used to clear "draft" once the
     /// row has been rewritten with a real summary).
     virtual bool set_summary_tags(int summary_id, const std::string& tags) = 0;
@@ -227,7 +222,7 @@ public:
 
     /// Set a decision's status (e.g. promote "roadmap" -> "current" once
     /// planned work is done, or mark a stale one "superseded"/"deprecated").
-    /// Mirrors set_summary_status. Returns false if no row matched.
+    /// Returns false if no row matched.
     virtual bool set_decision_status(int decision_id, const std::string& status) = 0;
 
     /// Decisions with the given status, most recent first. Use this for

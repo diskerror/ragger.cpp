@@ -323,6 +323,8 @@ struct SqliteBackend::Impl {
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guid       TEXT NOT NULL UNIQUE,
+                name       TEXT,
+                name_source TEXT,
                 created_at INTEGER NOT NULL DEFAULT (unixepoch())
             )
         )");
@@ -355,7 +357,6 @@ struct SqliteBackend::Impl {
                 summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 text       TEXT NOT NULL,
                 level      TEXT NOT NULL,
-                status     TEXT NOT NULL,
                 tags       TEXT NOT NULL DEFAULT '',
                 session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                 model_id   INTEGER REFERENCES models(model_id),
@@ -366,7 +367,6 @@ struct SqliteBackend::Impl {
             )
         )");
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_level      ON summaries(level)");
-        exec("CREATE INDEX IF NOT EXISTS idx_summaries_status     ON summaries(status)");
         // idx_summaries_created_at created after migration (see note above).
 
         // turn_summaries (L2) -- NEW at db_version 0.12. One row per
@@ -492,7 +492,6 @@ struct SqliteBackend::Impl {
         exec("CREATE INDEX IF NOT EXISTS idx_turns_created_at      ON turns(created_at)");
         exec("CREATE INDEX IF NOT EXISTS idx_turns_session         ON turns(session_id)");
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_level       ON summaries(level)");
-        exec("CREATE INDEX IF NOT EXISTS idx_summaries_status      ON summaries(status)");
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_created_at  ON summaries(created_at)");
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_session     ON summaries(session_id)");
         exec("CREATE INDEX IF NOT EXISTS idx_decisions_status      ON decisions(status)");
@@ -758,10 +757,11 @@ struct SqliteBackend::Impl {
         )");
         exec(R"(
             CREATE VIEW IF NOT EXISTS sessions_view AS
-            SELECT session_id, guid,
+            SELECT session_id, guid, name, name_source,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at
             FROM sessions
         )");
+        exec("CREATE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name)");
         exec(R"(
             CREATE VIEW IF NOT EXISTS turns_view AS
             SELECT turn_id, user_text, assistant_text, model_id, session_id,
@@ -782,7 +782,7 @@ struct SqliteBackend::Impl {
         )");
         exec(R"(
             CREATE VIEW IF NOT EXISTS summaries_view AS
-            SELECT summary_id, text, level, status, tags, session_id, model_id,
+            SELECT summary_id, text, level, tags, session_id, model_id,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
                    datetime(updated_at, 'unixepoch', 'localtime') AS updated_at,
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding,
@@ -902,7 +902,7 @@ struct SqliteBackend::Impl {
         cached_timestamps.clear();
 
         Stmt s(db,
-            "SELECT summary_id, text, embedding, level, status, tags, "
+            "SELECT summary_id, text, embedding, level, tags, "
             "       datetime(created_at,'unixepoch','localtime') "
             "FROM summaries");
 
@@ -922,17 +922,16 @@ struct SqliteBackend::Impl {
                 cached_ids.back(), blob_warned);
             emb_rows.push_back(std::move(emb));
 
-            // Lean v2 summaries: surface level/status/tags as metadata so the
+            // Lean v2 summaries: surface level/tags as metadata so the
             // generic API and keep-protection (via tags) have what they need.
             json meta = json::object();
             meta["source"] = "summary";
             meta["level"]  = col_text(3);
-            meta["status"] = col_text(4);
-            std::string tags = col_text(5);
+            std::string tags = col_text(4);
             if (!tags.empty()) meta["tags"] = tags;
             cached_metadata.push_back(std::move(meta));
 
-            cached_timestamps.push_back(col_text(6));
+            cached_timestamps.push_back(col_text(5));
         }
 
         // Pack into Eigen matrix (rows × dims). Every row is padded/zeroed to
@@ -1270,7 +1269,6 @@ struct SqliteBackend::Impl {
         if (metadata.is_null()) metadata = json::object();
 
         std::string level  = metadata.value("level",  std::string("session"));
-        std::string status = metadata.value("status", std::string("complete"));
 
         // Optional historical timestamp override (imports of past
         // conversations). Must be an ISO-8601 UTC string; else falls to now.
@@ -1305,8 +1303,8 @@ struct SqliteBackend::Impl {
         // *_phon_fts triggers index it. Always computed (cheap), even when the
         // embedding is deferred.
         Stmt s(db,
-            "INSERT INTO summaries (text, embedding, phon, level, status, tags, created_at, model_id, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)");
+            "INSERT INTO summaries (text, embedding, phon, level, tags, created_at, model_id, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)");
 
         s.bind(1, text);
         if (defer_embedding) {
@@ -1315,9 +1313,9 @@ struct SqliteBackend::Impl {
             bind_embedding(s.raw(), 2, emb);
         }
         s.bind(3, phonize(text));
-        s.bind(4, level).bind(5, status).bind(6, tags_str).bind(7, ts);
-        if (model_id) s.bind(8, model_id); else s.bind_null(8);
-        s.bind(9, ts);  // updated_at == created_at on insert
+        s.bind(4, level).bind(5, tags_str).bind(6, ts);
+        if (model_id) s.bind(7, model_id); else s.bind_null(7);
+        s.bind(8, ts);  // updated_at == created_at on insert
 
         if (!s.exec()) {
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
@@ -1398,17 +1396,37 @@ struct SqliteBackend::Impl {
 
     /// Resolve a session GUID to its compact integer id, inserting on first
     /// sighting. Empty guid → 0 (NULL session_id), mirroring get_or_create_model.
-    int get_or_create_session(const std::string& guid) {
+    /// If session_name is non-empty, sets sessions.name (and name_source) on
+    /// first sighting or updates it if the title has changed since last capture.
+    int get_or_create_session(const std::string& guid,
+                              const std::string& session_name = "",
+                              const std::string& name_source = "") {
         if (guid.empty()) return 0;
         Stmt s(db, "SELECT session_id FROM sessions WHERE guid = ?");
         s.bind(1, guid);
         int id = 0;
         if (s.step()) id = s.column_int(0);
-        if (id) return id;
-        Stmt ins(db, "INSERT INTO sessions (guid) VALUES (?)");
-        ins.bind(1, guid);
-        ins.step();
-        return static_cast<int>(sqlite3_last_insert_rowid(db));
+        if (!id) {
+            Stmt ins(db, "INSERT INTO sessions (guid, name, name_source) VALUES (?, ?, ?)");
+            ins.bind(1, guid);
+            if (session_name.empty()) ins.bind_null(2);
+            else                     ins.bind(2, session_name);
+            if (session_name.empty()) ins.bind_null(3);
+            else                      ins.bind(3, name_source);
+            ins.step();
+            id = static_cast<int>(sqlite3_last_insert_rowid(db));
+        } else if (!session_name.empty()) {
+            // Update name if changed (retitled session, or first time a name
+            // is available for a previously-unnamed session).
+            Stmt u(db, "UPDATE sessions SET name = ?, name_source = ? "
+                       "WHERE session_id = ? AND (name IS NULL OR name != ?)");
+            u.bind(1, session_name);
+            u.bind(2, name_source);
+            u.bind(3, id);
+            u.bind(4, session_name);
+            u.exec();
+        }
+        return id;
     }
 
     // Embedding for a turn is over the joined exchange (user + assistant),
@@ -1427,11 +1445,13 @@ struct SqliteBackend::Impl {
     int store_turn(const std::string& user_text, const std::string& assistant_text,
                    const std::string& model_name, bool defer_embedding,
                    const std::string& session_guid,
-                   const std::string& source_timestamp = "") {
+                   const std::string& source_timestamp = "",
+                   const std::string& session_name = "",
+                   const std::string& name_source = "") {
         std::string u = normalize_path(user_text);
         std::string a = normalize_path(assistant_text);
         int model_id   = get_or_create_model(model_name);
-        int session_id = get_or_create_session(session_guid);
+        int session_id = get_or_create_session(session_guid, session_name, name_source);
 
         // Retry/regeneration dedup. When the agent re-answers the *same* user
         // prompt without an intervening new prompt, we get a second turn whose
@@ -1583,13 +1603,13 @@ struct SqliteBackend::Impl {
 
     // ---- summaries (L2/L3) pipeline primitives (issue #22) ------------
     // Insert a summary row. level: 'turn' (L2) | 'session' (L3) | 'project'.
-    // status: 'current' (running L3) | 'complete'. Embeds text, records model.
+    // Embeds text, records model.
     // source_timestamp (non-empty) overrides the row's timestamp: L2 turn
     // summaries inherit the source turn's timestamp so the (session_id,
     // timestamp) pair links a turn to its summary (no FK column needed) and
     // stays stable across embedding-model changes.
     int store_summary(const std::string& text, const std::string& level,
-                      const std::string& status, const std::string& model_name,
+                      const std::string& model_name,
                       const std::string& session_guid,
                       const std::string& source_timestamp,
                       const std::string& tags) {
@@ -1599,18 +1619,18 @@ struct SqliteBackend::Impl {
         auto emb = embedder->encode(t);
 
         Stmt s(db,
-            "INSERT INTO summaries (model_id, session_id, text, embedding, phon, level, status, tags, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)");
+            "INSERT INTO summaries (model_id, session_id, text, embedding, phon, level, tags, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
         if (session_id) s.bind(2, session_id); else s.bind_null(2);
         s.bind(3, t);
         bind_embedding(s.raw(), 4, emb);
         s.bind(5, phonize(t));
-        s.bind(6, level).bind(7, status).bind(8, tags);
+        s.bind(6, level).bind(7, tags);
         {
             const int64_t ts = resolve_epoch(source_timestamp);
-            s.bind(9, ts);
-            s.bind(10, ts);  // updated_at == created_at on insert
+            s.bind(8, ts);
+            s.bind(9, ts);  // updated_at == created_at on insert
         }
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
@@ -1816,8 +1836,7 @@ struct SqliteBackend::Impl {
             "        WHERE t.session_id = ss.session_id) < " + cutoff + " "
             "  AND NOT EXISTS (SELECT 1 FROM summaries s "
             "                   WHERE s.session_id = ss.session_id "
-            "                     AND s.level = 'session' "
-            "                     AND s.status = 'complete') "
+            "                     AND s.level = 'session') "
             "ORDER BY ss.session_id ASC";
         Stmt s(db, sql);
         while (s.step()) {
@@ -1887,17 +1906,17 @@ struct SqliteBackend::Impl {
 
         Stmt s(db,
             "INSERT INTO summaries (model_id, session_id, text, embedding, phon, "
-            "level, status, tags, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)");
+            "level, tags, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
         if (session_id) s.bind(2, session_id); else s.bind_null(2);
         s.bind(3, t);
         bind_embedding(s.raw(), 4, emb);
         s.bind(5, phonize(t));
-        s.bind(6, std::string("episode")).bind(7, std::string("complete"))
-         .bind(8, std::string(""));
-        s.bind(9, resolve_epoch(first_ts));
-        s.bind(10, resolve_epoch(last_ts.empty() ? first_ts : last_ts));
+        s.bind(6, std::string("episode"))
+         .bind(7, std::string(""));
+        s.bind(8, resolve_epoch(first_ts));
+        s.bind(9, resolve_epoch(last_ts.empty() ? first_ts : last_ts));
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_cache();
@@ -1990,6 +2009,18 @@ struct SqliteBackend::Impl {
     std::vector<ClosedRun> sessions_needing_close_boundary() {
         std::vector<ClosedRun> out;
         int64_t watermark = get_watermark(std::string(kSessionBoundaryWatermarkKey));
+        // Structural floor (Reid's invariant: "no automatic lookback to do
+        // any session summary before the last session summary"). A run is
+        // eligible only if NO level='session' summary already covers it --
+        // i.e. none exists for this session whose stored span end
+        // (updated_at == the run's last_ts at store time) reaches this run's
+        // last turn timestamp. This makes correctness independent of the
+        // watermark: even with watermark=0 (e.g. a migration that never
+        // stamped the key -> get_watermark() defaults to 0), an
+        // already-summarized run is never re-closed. The watermark remains as
+        // a cheap first-pass filter (`last_turn_id > ?`) so the common
+        // steady-state scan stays bounded, but it is no longer the sole
+        // guard against re-summarizing history.
         Stmt s(db, R"(
             WITH lagged AS (
                 SELECT t.turn_id, t.session_id, t.created_at,
@@ -2015,6 +2046,12 @@ struct SqliteBackend::Impl {
             WHERE r.session_id IS NOT NULL
               AND r.last_turn_id > ?
               AND r.grp < (SELECT MAX(grp) FROM numbered)
+              AND NOT EXISTS (
+                  SELECT 1 FROM summaries sm
+                  WHERE sm.level = 'session'
+                    AND sm.session_id = r.session_id
+                    AND sm.updated_at >= r.last_ts
+              )
             ORDER BY r.first_turn_id ASC
         )");
         s.bind(1, watermark);
@@ -2162,17 +2199,17 @@ struct SqliteBackend::Impl {
 
         Stmt s(db,
             "INSERT INTO summaries (model_id, session_id, text, embedding, phon, "
-            "level, status, tags, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)");
+            "level, tags, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
         if (session_id) s.bind(2, session_id); else s.bind_null(2);
         s.bind(3, t);
         bind_embedding(s.raw(), 4, emb);
         s.bind(5, phonize(t));
-        s.bind(6, std::string("session")).bind(7, std::string("closed"))
-         .bind(8, std::string(""));
-        s.bind(9, first_ts);
-        s.bind(10, last_ts);
+        s.bind(6, std::string("session"))
+         .bind(7, std::string(""));
+        s.bind(8, first_ts);
+        s.bind(9, last_ts);
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_cache();
@@ -2189,17 +2226,17 @@ struct SqliteBackend::Impl {
 
         Stmt s(db,
             "INSERT INTO summaries (model_id, session_id, text, embedding, phon, "
-            "level, status, tags, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)");
+            "level, tags, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
         s.bind_null(2);
         s.bind(3, t);
         bind_embedding(s.raw(), 4, emb);
         s.bind(5, phonize(t));
-        s.bind(6, std::string("project")).bind(7, std::string("closed"))
-         .bind(8, std::string(""));
-        s.bind(9, first_ts);
-        s.bind(10, last_ts);
+        s.bind(6, std::string("project"))
+         .bind(7, std::string(""));
+        s.bind(8, first_ts);
+        s.bind(9, last_ts);
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_cache();
@@ -2217,7 +2254,7 @@ struct SqliteBackend::Impl {
         std::vector<SummaryRecord> out;
         if (session_guid.empty()) return out;
         std::string sql =
-            "SELECT s.summary_id, s.text, s.status, s.created_at "
+            "SELECT s.summary_id, s.text, s.created_at "
             "FROM summaries s "
             "JOIN sessions ss ON s.session_id = ss.session_id "
             "WHERE ss.guid = ? AND s.level = ? "
@@ -2228,7 +2265,7 @@ struct SqliteBackend::Impl {
         if (limit > 0) s.bind(3, limit);
         while (s.step()) {
             out.push_back({s.column_int(0), s.column_text(1),
-                           s.column_text(2), s.column_text(3)});
+                           std::string(), s.column_text(2)});
         }
         return out;
     }
@@ -2243,26 +2280,6 @@ struct SqliteBackend::Impl {
     std::vector<SummaryRecord> session_summaries_desc(
             const std::string& session_guid, int limit) {
         return summaries_by_level_desc(session_guid, "session", limit);
-    }
-
-    // The current running L3 session summary, if any: (summary_id, text).
-    std::optional<std::pair<int, std::string>> current_session_summary(
-            const std::string& session_guid) {
-        // Per-session when a guid is given; legacy global when empty.
-        std::string sql =
-            "SELECT summary_id, text FROM summaries "
-            "WHERE level='session' AND status='current'";
-        if (!session_guid.empty())
-            sql += " AND session_id = (SELECT session_id FROM sessions WHERE guid = ?)";
-        sql += " ORDER BY summary_id DESC LIMIT 1";
-        Stmt s(db, sql);
-        if (!session_guid.empty()) s.bind(1, session_guid);
-        std::optional<std::pair<int, std::string>> out;
-        if (s.step()) {
-            int id = s.column_int(0);
-            out = std::make_pair(id, s.column_text(1));
-        }
-        return out;
     }
 
     // Exact-match existence check for import idempotency: same text +
@@ -2420,8 +2437,7 @@ struct SqliteBackend::Impl {
     }
 
     // Set a decision's status (e.g. "roadmap" -> "current" once planned
-    // work is done, or -> "superseded"/"deprecated" once stale). Mirrors
-    // set_summary_status.
+    // work is done, or -> "superseded"/"deprecated" once stale).
     bool set_decision_status(int decision_id, const std::string& status) {
         Stmt s(db, "UPDATE decisions SET status = ? WHERE decision_id = ?");
         s.bind(1, status).bind(2, decision_id);
@@ -2468,14 +2484,6 @@ struct SqliteBackend::Impl {
         bool ok = s.exec() && sqlite3_changes(db) > 0;
         if (ok) invalidate_cache();
         return ok;
-    }
-
-    // Set a summary's status (e.g. mark a session summary 'complete').
-    bool set_summary_status(int summary_id, const std::string& status) {
-        Stmt s(db,
-            "UPDATE summaries SET status = ? WHERE summary_id = ?");
-        s.bind(1, status).bind(2, summary_id);
-        return s.exec() && sqlite3_changes(db) > 0;
     }
 
     // Replace a summary's tags column. Used by the summarizer to clear
@@ -2743,20 +2751,18 @@ struct SqliteBackend::Impl {
     std::vector<SearchResult> load_all(const std::string& /*collection*/) {
         std::vector<SearchResult> results;
         Stmt s(db,
-            "SELECT summary_id, text, level, status, tags, created_at "
+            "SELECT summary_id, text, level, tags, created_at "
             "FROM summaries ORDER BY summary_id");
 
         while (s.step()) {
             int id        = s.column_int(0);
             auto text     = s.column_text(1);
             auto lvl      = s.column_text(2);
-            auto st       = s.column_text(3);
-            auto tag      = s.column_text(4);
-            auto ts       = s.column_text(5);
+            auto tag      = s.column_text(3);
+            auto ts       = s.column_text(4);
 
             json meta = json::object();
             if (!lvl.empty()) meta["level"]  = lvl;
-            if (!st.empty())  meta["status"] = st;
             if (!tag.empty()) meta["tags"]   = tag;
 
             results.push_back({id, std::move(text), 0.0f, std::move(meta), std::move(ts)});
@@ -3019,17 +3025,17 @@ struct SqliteBackend::Impl {
                                                  const std::string& before = "") {
         std::vector<SearchResult> results;
 
-        // Lean v2 summaries expose level / status / tags / timestamp. Filter
+        // Lean v2 summaries expose level / tags / timestamp. Filter
         // on those columns; any other requested key matches nothing (there is
         // no free-form metadata blob in the lean schema).
-        std::string sql = "SELECT summary_id, text, level, status, tags, created_at "
+        std::string sql = "SELECT summary_id, text, level, tags, created_at "
                           "FROM summaries";
         std::string where;
         std::vector<std::string> binds;
 
         for (auto it = metadata_filter.begin(); it != metadata_filter.end(); ++it) {
             const std::string& k = it.key();
-            if (k == "level" || k == "status") {
+            if (k == "level") {
                 where += (where.empty() ? " WHERE " : " AND ") + k + " = ?";
                 binds.push_back(it.value().get<std::string>());
             } else if (k == "tags") {
@@ -3062,13 +3068,11 @@ struct SqliteBackend::Impl {
             int id        = stmt.column_int(0);
             auto text     = stmt.column_text(1);
             auto lvl      = stmt.column_text(2);
-            auto st       = stmt.column_text(3);
-            auto tag      = stmt.column_text(4);
-            auto ts       = stmt.column_text(5);
+            auto tag      = stmt.column_text(3);
+            auto ts       = stmt.column_text(4);
 
             json metadata = json::object();
             if (!lvl.empty()) metadata["level"]  = lvl;
-            if (!st.empty())  metadata["status"] = st;
             if (!tag.empty()) metadata["tags"]   = tag;
 
             results.push_back({id, std::move(text), 0.0f, std::move(metadata), std::move(ts)});
@@ -3111,10 +3115,13 @@ int SqliteBackend::store_turn(const std::string& user_text,
                               const std::string& assistant_text,
                               const std::string& model_name, bool defer_embedding,
                               const std::string& session_guid,
-                              const std::string& source_timestamp) {
+                              const std::string& source_timestamp,
+                              const std::string& session_name,
+                              const std::string& name_source) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->store_turn(user_text, assistant_text, model_name,
-                             defer_embedding, session_guid, source_timestamp);
+                             defer_embedding, session_guid, source_timestamp,
+                             session_name, name_source);
 }
 
 std::vector<TurnRecord> SqliteBackend::turns_by_session(
@@ -3130,19 +3137,13 @@ bool SqliteBackend::finalize_turn(int turn_id, const std::string& assistant_text
 }
 
 int SqliteBackend::store_summary(const std::string& text, const std::string& level,
-                                 const std::string& status, const std::string& model_name,
+                                 const std::string& model_name,
                                  const std::string& session_guid,
                                  const std::string& source_timestamp,
                                  const std::string& tags) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->store_summary(text, level, status, model_name, session_guid,
+    return pImpl->store_summary(text, level, model_name, session_guid,
                                 source_timestamp, tags);
-}
-
-std::optional<std::pair<int, std::string>>
-SqliteBackend::current_session_summary(const std::string& session_guid) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->current_session_summary(session_guid);
 }
 
 bool SqliteBackend::summary_exists_exact(const std::string& text, const std::string& created_at) {
@@ -3192,11 +3193,6 @@ bool SqliteBackend::finalize_turn_summary(int turn_id, const std::string& text,
 bool SqliteBackend::mark_turn_summarized(int turn_id, const std::string& model_name) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->mark_turn_summarized(turn_id, model_name);
-}
-
-bool SqliteBackend::set_summary_status(int summary_id, const std::string& status) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->set_summary_status(summary_id, status);
 }
 
 bool SqliteBackend::set_summary_tags(int summary_id, const std::string& tags) {

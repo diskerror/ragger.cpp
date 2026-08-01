@@ -134,9 +134,12 @@ int RaggerMemory::store_turn(const std::string& user_text,
                              const std::string& assistant_text,
                              const std::string& model_name, bool defer_embedding,
                              const std::string& session_guid,
-                             const std::string& source_timestamp) {
+                             const std::string& source_timestamp,
+                             const std::string& session_name,
+                             const std::string& name_source) {
     return backend_->store_turn(user_text, assistant_text, model_name,
-                                defer_embedding, session_guid, source_timestamp);
+                                defer_embedding, session_guid, source_timestamp,
+                                session_name, name_source);
 }
 
 bool RaggerMemory::finalize_turn(int turn_id, const std::string& assistant_text,
@@ -177,26 +180,17 @@ int RaggerMemory::cleanup_old_conversations(float max_age_hours) {
 }
 
 int RaggerMemory::store_summary(const std::string& text, const std::string& level,
-                                const std::string& status, const std::string& model_name,
+                                const std::string& model_name,
                                 const std::string& session_guid,
                                 const std::string& source_timestamp,
                                 const std::string& tags) {
-    return backend_->store_summary(text, level, status, model_name, session_guid,
+    return backend_->store_summary(text, level, model_name, session_guid,
                                    source_timestamp, tags);
-}
-
-std::optional<std::pair<int, std::string>>
-RaggerMemory::current_session_summary(const std::string& session_guid) {
-    return backend_->current_session_summary(session_guid);
 }
 
 bool RaggerMemory::update_summary_text(int summary_id, const std::string& text,
                                        const std::string& model_name) {
     return backend_->update_summary_text(summary_id, text, model_name);
-}
-
-bool RaggerMemory::set_summary_status(int summary_id, const std::string& status) {
-    return backend_->set_summary_status(summary_id, status);
 }
 
 std::vector<std::string> RaggerMemory::recent_summaries(const std::string& level,
@@ -307,7 +301,9 @@ CaptureResult capture_turn(RaggerMemory& memory,
                            const std::string& user,
                            const std::string& assistant,
                            const std::string& model,
-                           const std::string& session_id) {
+                           const std::string& session_id,
+                           const std::string& session_name,
+                           const std::string& name_source) {
     // Gate: turn capture is opt-in. Agent-driven store/search are unaffected.
     if (!config().capture_turns) return {false, -1};
 
@@ -325,7 +321,9 @@ CaptureResult capture_turn(RaggerMemory& memory,
     if (clean_user.empty() && assistant.empty()) return {false, -1};
 
     int turn_id = memory.store_turn(clean_user, assistant, model,
-                                    /*defer_embedding=*/false, session_id);
+                                    /*defer_embedding=*/false, session_id,
+                                    /*source_timestamp=*/"",
+                                    session_name, name_source);
     return {true, turn_id};
 }
 

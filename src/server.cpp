@@ -503,6 +503,8 @@ struct Server::Impl {
         std::string assistant  = body.value("assistant", "");
         std::string model      = body.value("model", "");
         std::string session_id = body.value("session_id", "");
+        std::string session_name = body.value("session_name", "");
+        std::string name_source  = body.value("name_source", "");
         if (user_text.empty()) {
             Diskerror::logger::debug("POST /turn 400");
             res.status = 400;
@@ -511,7 +513,8 @@ struct Server::Impl {
             return;
         }
         auto& mem = _get_memory(user.username);
-        auto result = capture_turn(mem, user_text, assistant, model, session_id);
+        auto result = capture_turn(mem, user_text, assistant, model, session_id,
+                                   session_name, name_source);
         // Raw text is written to both turns and summaries (as a NULL-model_id
         // placeholder) by capture_turn. The summarizer picks it up on the next
         // housekeeping tick (every 60s) via enqueue_catch_up — no immediate

@@ -50,7 +50,9 @@ public:
                    const std::string& model_name = "",
                    bool defer_embedding = false,
                    const std::string& session_guid = "",
-                   const std::string& source_timestamp = "");
+                   const std::string& source_timestamp = "",
+                   const std::string& session_name = "",
+                   const std::string& name_source = "");
     /// Finalize a partial turn (set assistant_text + embed + model).
     bool finalize_turn(int turn_id,
                        const std::string& assistant_text,
@@ -85,21 +87,18 @@ public:
     /// pair links a turn to its summary (no FK column). `tags`="draft" marks
     /// a heuristic-fallback summary that should be re-summarized later.
     int store_summary(const std::string& text, const std::string& level,
-                      const std::string& status, const std::string& model_name = "",
+                      const std::string& model_name = "",
                       const std::string& session_guid = "",
                       const std::string& source_timestamp = "",
                       const std::string& tags = "");
-    std::optional<std::pair<int, std::string>>
-        current_session_summary(const std::string& session_guid = "");
     bool update_summary_text(int summary_id, const std::string& text,
                              const std::string& model_name = "");
-    bool set_summary_status(int summary_id, const std::string& status);
     std::vector<std::string> recent_summaries(const std::string& level, int limit);
     std::vector<std::string> current_decisions(int limit);
 
     /// Set a decision's status (e.g. promote "roadmap" -> "current" once
     /// planned work is done, or mark a stale one "superseded"/"deprecated").
-    /// Mirrors set_summary_status. Returns false if no row matched.
+    /// Returns false if no row matched.
     bool set_decision_status(int decision_id, const std::string& status);
 
     /// Decisions with the given status, most recent first. Use this for
@@ -210,7 +209,9 @@ CaptureResult capture_turn(RaggerMemory& memory,
                            const std::string& user,
                            const std::string& assistant,
                            const std::string& model,
-                           const std::string& session_id);
+                           const std::string& session_id,
+                           const std::string& session_name = "",
+                           const std::string& name_source = "");
 
 /// One assembled chunk in a recipe-built context, ordered oldest-first
 /// (chronological) when emitted so an agent can inject them as-is. `kind`
