@@ -162,6 +162,18 @@ struct Config {
     // modelling the walk-away-and-return rhythm. Supersedes summary_pause_minutes,
     // which is accepted as a deprecated alias when this key is unset.
     int   episode_idle_minutes   = 15;
+
+    // ---- Episode boundary: sliding average-similarity threshold ----
+    // Mid-session episode boundaries are detected by comparing the average
+    // of turn-embedding similarity and turn-summary-embedding similarity
+    // against a threshold that rises with idle time between turns.
+    //   threshold = min(cap, base + step * int(gap_minutes / step_minutes))
+    //   boundary fires when  avg(turn_sim, summary_sim) <= threshold
+    // Session starts are always implicit episode boundaries.
+    float episode_threshold_base     = 0.2f;   // starting threshold
+    float episode_threshold_cap      = 0.5f;   // maximum threshold
+    float episode_threshold_step     = 0.01f;  // threshold increment per step
+    float episode_step_minutes       = 1.0f;   // minutes of idle per increment
     // Minimum time-gap (days) between two consecutive turns that triggers a
     // project-boundary close, per the session/project boundary-detection
     // design (edge-detected on the gap, not an idle-scan like episodes).

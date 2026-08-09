@@ -112,6 +112,8 @@ public:
     std::string last_episode_end(const std::string& session_guid) override;
     std::vector<SummaryRecord> l2_summaries_since(
         const std::string& session_guid, const std::string& since_ts) override;
+    std::vector<EpisodeCandidateTurn> episode_candidate_turns(
+        const std::string& session_guid, const std::string& since_ts) override;
     int store_episode(const std::string& text,
                       const std::string& model_name,
                       const std::string& session_guid,

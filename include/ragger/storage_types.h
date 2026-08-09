@@ -82,5 +82,18 @@ struct SummaryRecord {
     std::string timestamp;
 };
 
+/// A candidate turn for similarity-based episode boundary detection.
+/// Carries the raw turn embedding and turn-summary embedding alongside the
+/// summary text so the caller can compute cosine similarities and split
+/// into episodes without a second round-trip to the DB.
+struct EpisodeCandidateTurn {
+    int                turn_summary_id;
+    std::string        summary_text;     // L2 turn-summary text
+    std::string        timestamp;        // "%F %T" local-time string for store_episode
+    int64_t            epoch;            // created_at epoch seconds (for gap math)
+    std::vector<float> turn_embedding;   // from turns.embedding
+    std::vector<float> summary_embedding;// from turn_summaries.embedding
+};
+
 
 } // namespace ragger

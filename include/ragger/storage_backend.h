@@ -275,6 +275,13 @@ public:
     virtual std::vector<SummaryRecord> l2_summaries_since(
         const std::string& session_guid, const std::string& since_ts) = 0;
 
+    /// Candidate turns for similarity-based episode detection: joins
+    /// turn_summaries against turns to fetch both embeddings plus the
+    /// turn-summary text, for all turns after the last episode's end.
+    /// Oldest-first, skipping rows where either embedding is NULL.
+    virtual std::vector<EpisodeCandidateTurn> episode_candidate_turns(
+        const std::string& session_guid, const std::string& since_ts) = 0;
+
     /// Insert one immutable `level='episode'` row for a session. `first_ts`
     /// becomes the row `timestamp`; `last_ts` is stored in `updated_at` (the
     /// span end). Mirrors store_summary (embed, phon, cache invalidation).

@@ -420,6 +420,18 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
                 int v = std::stoi(val);
                 if (v > 0) { cfg.episode_idle_minutes = v; episode_idle_set = true; }
             }
+            else if (key == "episode_threshold_base") {
+                cfg.episode_threshold_base = std::stof(val);
+            }
+            else if (key == "episode_threshold_cap") {
+                cfg.episode_threshold_cap = std::stof(val);
+            }
+            else if (key == "episode_threshold_step") {
+                cfg.episode_threshold_step = std::stof(val);
+            }
+            else if (key == "episode_step_minutes") {
+                cfg.episode_step_minutes = std::stof(val);
+            }
             else if (key == "catch_up_batch_size") {
                 int v = std::stoi(val);
                 if (v > 0) cfg.catch_up_batch_size = v;

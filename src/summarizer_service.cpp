@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <format>
 
@@ -27,6 +28,20 @@ constexpr size_t kDraftSideCap = 300;
 std::string trim_to(const std::string& s, size_t cap) {
     if (s.size() <= cap) return s;
     return s.substr(0, cap) + "...";
+}
+
+/// Cosine similarity between two float vectors of equal length.
+/// Returns 0 if either vector has zero magnitude.
+float cosine_similarity(const std::vector<float>& a, const std::vector<float>& b) {
+    if (a.size() != b.size() || a.empty()) return 0.0f;
+    float dot = 0.0f, ma = 0.0f, mb = 0.0f;
+    for (size_t i = 0; i < a.size(); ++i) {
+        dot += a[i] * b[i];
+        ma  += a[i] * a[i];
+        mb  += b[i] * b[i];
+    }
+    float denom = std::sqrt(ma) * std::sqrt(mb);
+    return (denom > 0.0f) ? dot / denom : 0.0f;
 }
 
 } // namespace
@@ -437,41 +452,119 @@ bool SummarizerService::handle_project_close(const Job& j) {
 }
 
 // --------------------------------------------------------------------
-// Episode close (EPISODE_PLAN Phase 1): summarize the run of L2 turn
-// summaries accumulated since this session's previous episode end into a
-// single immutable level='episode' row, spanning first→last turn. On
-// inference failure, leave the turns unclosed (retry next catch-up) —
-// same pattern as L2 draft handling.
+// Episode close (EPISODE_PLAN Phase 1): close the open episode for a
+// session, splitting it into multiple episodes where the sliding
+// average-similarity threshold detects a topic break.
+//
+// Algorithm: walk the candidate turns in order. For each turn (index > 0)
+// compute the average of its turn-embedding cosine similarity and its
+// summary-embedding cosine similarity vs the previous turn. If that
+// average is <= a time-scaled threshold, a new episode starts here.
+//
+// Threshold = min(cap, base + step * int(gap_minutes / step_minutes))
+// where gap_minutes is the idle time between consecutive turns. Longer
+// gaps make the threshold easier to trigger, because a gap is itself
+// evidence of a topic break.
+//
+// Each segment (span of turns between boundaries) gets its own
+// level='episode' row in the DB. On inference failure for ANY segment,
+// the whole close is aborted (retried next pass) — partial writes within
+// one session's close are avoided.
 // --------------------------------------------------------------------
 bool SummarizerService::handle_episode_close(const Job& j) {
     if (j.session_guid.empty()) return true;
 
     const std::string since = backend_.last_episode_end(j.session_guid);
-    auto rows = backend_.l2_summaries_since(j.session_guid, since);
-    if (rows.empty()) return true;  // nothing new to close
+    auto candidates = backend_.episode_candidate_turns(j.session_guid, since);
+    if (candidates.empty()) return true;  // nothing new to close
 
-    std::vector<std::string> texts;
-    texts.reserve(rows.size());
-    for (const auto& r : rows)
-        if (!r.text.empty()) texts.push_back(r.text);
-    if (texts.empty()) return true;
+    // Config for the sliding threshold.
+    const auto& cfg = config();
+    const float th_base = cfg.episode_threshold_base;
+    const float th_cap  = cfg.episode_threshold_cap;
+    const float th_step = cfg.episode_threshold_step;
+    const float step_min = cfg.episode_step_minutes;
 
-    const std::string first_ts = rows.front().timestamp;
-    const std::string last_ts  = rows.back().timestamp;
+    // Find episode boundaries via sliding average-similarity threshold.
+    // boundary_indices[k] means candidate[k] starts a new episode.
+    // Index 0 is always an implicit boundary (start of unclosed turns).
+    std::vector<size_t> boundary_indices;
+    boundary_indices.push_back(0);
 
+    for (size_t i = 1; i < candidates.size(); ++i) {
+        const auto& prev = candidates[i - 1];
+        const auto& curr = candidates[i];
+
+        float turn_sim = cosine_similarity(curr.turn_embedding, prev.turn_embedding);
+        float summ_sim = cosine_similarity(curr.summary_embedding, prev.summary_embedding);
+        float avg_sim  = (turn_sim + summ_sim) / 2.0f;
+
+        // Compute time-scaled threshold.
+        float gap_minutes = static_cast<float>(curr.epoch - prev.epoch) / 60.0f;
+        float threshold = th_base;
+        if (step_min > 0.0f)
+            threshold += th_step * static_cast<float>(
+                static_cast<int>(gap_minutes / step_min));
+        threshold = std::min(threshold, th_cap);
+
+        if (avg_sim <= threshold)
+            boundary_indices.push_back(i);
+    }
+
+    // Summarize each segment.
     const std::string summarizer_model =
         inference_ ? inference_->memory_model : "";
 
-    std::string summary;
-    if (inference_)
-        summary = summarize_texts(*inference_, texts);
-    if (summary.empty()) return false;  // inference down — retry next pass
+    struct EpisodeSegment {
+        std::string summary;
+        std::string first_ts;
+        std::string last_ts;
+        size_t      turn_count;
+    };
+    std::vector<EpisodeSegment> segments;
+    segments.reserve(boundary_indices.size());
 
-    backend_.store_episode(summary, summarizer_model, j.session_guid,
-                           first_ts, last_ts);
-    Diskerror::logger::info(std::format(
-        "[summarizer] episode closed for session {} ({} turns, {} → {})",
-        j.session_guid, texts.size(), first_ts, last_ts));
+    for (size_t b = 0; b < boundary_indices.size(); ++b) {
+        size_t start = boundary_indices[b];
+        size_t end   = (b + 1 < boundary_indices.size())
+                     ? boundary_indices[b + 1]
+                     : candidates.size();
+
+        std::vector<std::string> texts;
+        texts.reserve(end - start);
+        for (size_t k = start; k < end; ++k)
+            if (!candidates[k].summary_text.empty())
+                texts.push_back(candidates[k].summary_text);
+        if (texts.empty()) continue;
+
+        std::string summary;
+        if (inference_)
+            summary = summarize_texts(*inference_, texts);
+        if (summary.empty()) return false;  // inference down — retry ALL next pass
+
+        segments.push_back({
+            std::move(summary),
+            candidates[start].timestamp,
+            candidates[end - 1].timestamp,
+            texts.size()
+        });
+    }
+
+    if (segments.empty()) return true;
+
+    // Commit all segments — inference succeeded for each.
+    for (const auto& seg : segments) {
+        backend_.store_episode(seg.summary, summarizer_model, j.session_guid,
+                               seg.first_ts, seg.last_ts);
+        Diskerror::logger::info(std::format(
+            "[summarizer] episode closed for session {} ({} turns, {} → {})",
+            j.session_guid, seg.turn_count, seg.first_ts, seg.last_ts));
+    }
+
+    if (segments.size() > 1)
+        Diskerror::logger::info(std::format(
+            "[summarizer] session {} split into {} episodes by similarity threshold",
+            j.session_guid, segments.size()));
 
     // Session/project rollups no longer cascade off episode close -- they
     // close on their own boundary logic (session_id edge / time gap),

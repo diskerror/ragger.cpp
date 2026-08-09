@@ -1898,6 +1898,51 @@ struct SqliteBackend::Impl {
         return out;
     }
 
+    // Candidate turns for similarity-based episode detection: joins
+    // turn_summaries against turns to fetch both embeddings (turn + summary)
+    // plus the turn-summary text. Rows where EITHER embedding is NULL are
+    // skipped (boundary detection requires both signals).
+    std::vector<EpisodeCandidateTurn> episode_candidate_turns(
+            const std::string& session_guid, const std::string& since_ts) {
+        std::vector<EpisodeCandidateTurn> out;
+        if (session_guid.empty()) return out;
+        const int dims = config().embedding_dimensions;
+
+        std::string sql =
+            "SELECT ts.turn_summary_id, ts.text, "
+            "       datetime(ts.turn_datetime,'unixepoch','localtime'), "
+            "       ts.turn_datetime, "
+            "       t.embedding,  "  // raw turn embedding
+            "       ts.embedding "   // turn-summary embedding
+            "FROM turn_summaries ts "
+            "JOIN turns t ON ts.turn_id = t.turn_id "
+            "JOIN sessions ss ON ts.session_id = ss.session_id "
+            "WHERE ss.guid = ? "
+            "  AND t.embedding IS NOT NULL "
+            "  AND ts.embedding IS NOT NULL ";
+        if (!since_ts.empty()) sql += "AND ts.turn_datetime > ? ";
+        sql += "ORDER BY ts.turn_datetime ASC, ts.turn_summary_id ASC";
+
+        Stmt s(db, sql);
+        s.bind(1, session_guid);
+        if (!since_ts.empty()) s.bind(2, resolve_epoch(since_ts));
+
+        bool warned = false;
+        while (s.step()) {
+            EpisodeCandidateTurn ct;
+            ct.turn_summary_id   = s.column_int(0);
+            ct.summary_text      = s.column_text(1);
+            ct.timestamp         = s.column_text(2);
+            ct.epoch             = s.column_int64(3);
+            ct.turn_embedding    = decode_embedding_blob(
+                s.column_blob(4), s.column_bytes(4), dims, "turns", ct.turn_summary_id, warned);
+            ct.summary_embedding = decode_embedding_blob(
+                s.column_blob(5), s.column_bytes(5), dims, "turn_summaries", ct.turn_summary_id, warned);
+            out.push_back(std::move(ct));
+        }
+        return out;
+    }
+
     // Insert one immutable level='episode' row: timestamp=first_ts (span
     // start), updated_at=last_ts (span end). Mirrors store_summary.
     int store_episode(const std::string& text, const std::string& model_name,
@@ -3249,6 +3294,12 @@ std::vector<SummaryRecord> SqliteBackend::l2_summaries_since(
         const std::string& session_guid, const std::string& since_ts) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->l2_summaries_since(session_guid, since_ts);
+}
+
+std::vector<EpisodeCandidateTurn> SqliteBackend::episode_candidate_turns(
+        const std::string& session_guid, const std::string& since_ts) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->episode_candidate_turns(session_guid, since_ts);
 }
 
 int SqliteBackend::store_episode(const std::string& text,
