@@ -2,6 +2,7 @@
  * Configuration loader — INI file parser
  */
 #include "ragger/config.h"
+#include "ragger/config_access.h"
 #include "ragger/lang.h"
 #include "ragger/util/fs.h"
 
@@ -321,6 +322,7 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
         if (section == "server") {
             if      (key == "socket_enable") cfg.socket_enabled = parse_bool(val);
             else if (key == "socket") cfg.socket_enabled = !strip_quotes(val).empty();  // legacy key, back-compat
+            else if (key == "tcp_enable") cfg.tcp_enabled = parse_bool(val);
             else if (key == "bind") cfg.bind_address = strip_quotes(val);
             else if (key == "port") cfg.port = std::stoi(val);
             else if (key == "server_name" || key == "hostname") cfg.server_name = val;
@@ -466,10 +468,10 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
     }
 
     // Fallback: if neither listener is configured, bring up TCP on loopback
-    // so the daemon always has at least one listener. Both can be set at
-    // once — the server runs each in its own thread.
-    if (!cfg.socket_enabled && cfg.bind_address.empty()) {
-        cfg.bind_address = "127.0.0.1";
+    // so the daemon always has at least one listener.
+    if (!cfg.socket_enabled && !cfg.tcp_enabled) {
+        cfg.tcp_enabled = true;
+        if (cfg.bind_address.empty()) cfg.bind_address = "127.0.0.1";
     }
 
     // Expand bind_address if it starts with ~ (rare, but historically
@@ -545,6 +547,11 @@ void init_config(const std::string& cli_config_path) {
 
     cfg.log_file = cfg.resolved_log_file_path();
 
+    // DB is the source of truth for user config: overlay any rows present in
+    // the settings table on top of the INI-seeded values. No-op if the DB
+    // doesn't exist yet (first run before serve creates it).
+    overlay_settings_from_db(cfg, cfg.resolved_db_path());
+
     g_config = &cfg;
 }
 
@@ -591,6 +598,7 @@ int reload_config() {
     };
     warn_restart("port", fresh.port != cfg.port);
     warn_restart("socket_enabled", fresh.socket_enabled != cfg.socket_enabled);
+    warn_restart("tcp_enabled", fresh.tcp_enabled != cfg.tcp_enabled);
     warn_restart("bind_address", fresh.bind_address != cfg.bind_address);
     warn_restart("tls_cert", fresh.tls_cert != cfg.tls_cert);
     warn_restart("tls_key", fresh.tls_key != cfg.tls_key);
@@ -696,5 +704,15 @@ const std::string& executable_path() {
     static const std::string fallback = "ragger";  // resolved via PATH
     return g_executable_path.empty() ? fallback : g_executable_path;
 }
+
+// --- full argv (for in-place re-exec / restart) ------------------------
+static std::vector<std::string> g_full_argv;
+
+void set_full_argv(int argc, char** argv) {
+    g_full_argv.clear();
+    for (int i = 0; i < argc; ++i) g_full_argv.emplace_back(argv[i]);
+}
+
+const std::vector<std::string>& full_argv() { return g_full_argv; }
 
 } // namespace ragger

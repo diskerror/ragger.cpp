@@ -6,6 +6,9 @@
  */
 #pragma once
 
+#include "ragger/config_schema.h"
+#include <array>
+
 namespace ragger::lang {
 
 // --- CLI options ---
@@ -427,5 +430,189 @@ constexpr const char* MSG_WARNING               = "Warning";
 // --- Main.cpp specific (daemon control) ---
 constexpr const char* ERR_DAEMON_PID_NOT_RUNNING= "Daemon not running (pid {} not found)";
 constexpr const char* ERR_PERMISSION_DENIED_SIGNAL= "Permission denied: cannot send signal to daemon process";
+
+// =====================================================================
+// Config schema — single source of truth for CLI + dashboard.
+// One entry per user-editable setting. See config_schema.h for field
+// meanings. Keys match the DB `settings` rows and the Config struct.
+// Sections drive the dashboard's left-hand tabs (server, embedding,
+// search, summarizer, logging, housekeeping, import).
+// =====================================================================
+inline constexpr std::array<ConfigMeta, 49> kConfigSchema = {{
+    // ---- server ----
+    {"socket_enable", "server", "Socket Enable", CfgType::Boolean, CfgEdit::RestartRequired,
+     "true", "",
+     "Unix domain socket at ~/.ragger/ragger.sock. If disabled and no TCP bind is set, the daemon falls back to 127.0.0.1 so there is always at least one listener."},
+    {"tcp_enable", "server", "TCP Enable", CfgType::Boolean, CfgEdit::RestartRequired,
+     "true", "",
+     "TCP listener on bind_address:port. If disabled and socket is also disabled, the daemon forces TCP on as a fallback."},
+    {"bind", "server", "TCP Bind Address", CfgType::String, CfgEdit::RestartRequired,
+     "127.0.0.1", "",
+     "TCP bind address. Empty = no TCP listener. Both socket and TCP can run at once. A malformed value is a startup error."},
+    {"port", "server", "TCP Port", CfgType::Integer, CfgEdit::Locked,
+     "8432", "",
+     "The port the running daemon is bound to. Read-only — set 'Desired Port' and restart to change it."},
+    {"desired_port", "server", "Desired Port", CfgType::Integer, CfgEdit::RestartRequired,
+     "", "",
+     "The TCP port to bind on the next restart. When it differs from the running port the Server tab shows 'restart required'. Any restart (dashboard, service manager, or 'ragger serve') adopts it."},
+    {"server_name", "server", "Server Name", CfgType::String, CfgEdit::RestartRequired,
+     "", "",
+     "Hostname for cpp-httplib (optional)."},
+    {"cert", "server", "TLS Certificate", CfgType::Path, CfgEdit::RestartRequired,
+     "", "",
+     "TLS certificate chain (PEM). Only relevant when exposing Ragger beyond localhost. Both cert and key must be set to enable HTTPS; leave both unset for plain HTTP."},
+    {"key", "server", "TLS Private Key", CfgType::Path, CfgEdit::RestartRequired,
+     "", "",
+     "TLS private key (PEM). Paired with the TLS certificate."},
+    {"capture_turns", "server", "Capture Turns", CfgType::Boolean, CfgEdit::Live,
+     "true", "",
+     "Accept agent-pushed turns (capture_turn tool / POST /turn) into the turns table. Agent-driven search/store are always available regardless."},
+    {"build_context", "server", "Build Context", CfgType::Boolean, CfgEdit::Live,
+     "false", "",
+     "Enable the build_context entry point (GET /session/<id>) to assemble a session's turns into a context payload. Only meaningful when capture_turns is also true."},
+    {"default_recipe", "server", "Default Recipe", CfgType::String, CfgEdit::Live,
+     "natural_fading", "",
+     "Recipe name applied when the caller doesn't specify one. Recipes are loaded from ~/.ragger/recipes."},
+
+    // ---- embedding (+ embed subprocess) ----
+    // Current identity: what the stored vectors ARE. Read-only display; the
+    // drift guard / rebuild owns these. Editing happens on the desired_* keys.
+    {"embedding_model", "embedding", "Current Model", CfgType::String, CfgEdit::Locked,
+     "all-MiniLM-L6-v2", "",
+     "The embedding model the stored vectors were built with. Read-only — change the desired model below and re-embed to switch."},
+    {"embedding_dimensions", "embedding", "Current Dimensions", CfgType::Integer, CfgEdit::Locked,
+     "384", "",
+     "Vector dimensionality of the stored vectors. Read-only; model-determined."},
+    {"embedding_vector_type", "embedding", "Current Vector Type", CfgType::Enum, CfgEdit::Locked,
+     "f16", "f16,f32",
+     "On-disk precision of the stored vectors. Read-only. In-memory math is always f32; this only affects the stored blob."},
+    // Desired identity: the editable target. When it differs from current the
+    // DB needs re-embedding; use 'Update now' (dashboard) or rebuild-embeddings.
+    {"desired_embedding_model", "embedding", "Desired Model", CfgType::Enum, CfgEdit::RebuildRequired,
+     "", "",
+     "The embedding model to switch to. Choices come from ~/.ragger/models/. Changing this stages a re-embed; nothing happens until you update."},
+    {"desired_embedding_vector_type", "embedding", "Desired Vector Type", CfgType::Enum, CfgEdit::RebuildRequired,
+     "", "f16,f32",
+     "Target on-disk vector precision: f16 (half) or f32."},
+    {"desired_embedding_dimensions", "embedding", "Desired Dimensions", CfgType::Integer, CfgEdit::RebuildRequired,
+     "", "",
+     "Target vector dimensionality. Model-determined; usually leave as the model's native size."},
+    {"embed_timeout_ms", "embedding", "Embed Timeout (ms)", CfgType::Integer, CfgEdit::Live,
+     "10000", "",
+     "Per-embed subprocess timeout in milliseconds."},
+    {"embed_retries", "embedding", "Embed Retries", CfgType::Integer, CfgEdit::Live,
+     "1", "",
+     "Retries on a failed or timed-out embed."},
+    {"embed_max_workers", "embedding", "Max Workers", CfgType::Integer, CfgEdit::Live,
+     "8", "",
+     "Cap on concurrent embed subprocesses."},
+
+    // ---- search ----
+    {"default_limit", "search", "Default Limit", CfgType::Integer, CfgEdit::Live,
+     "5", "",
+     "Number of search results returned by default."},
+    {"default_min_score", "search", "Default Min Score", CfgType::Float, CfgEdit::Live,
+     "0.4", "",
+     "Minimum similarity score for results (0.0 - 1.0)."},
+    {"bm25_enabled", "search", "BM25 Enabled", CfgType::Boolean, CfgEdit::Live,
+     "true", "",
+     "Enable BM25 keyword matching alongside vector search."},
+    {"bm25_weight", "search", "BM25 Weight", CfgType::Float, CfgEdit::Live,
+     "4", "",
+     "Weight for keyword matching. Weights are ratios and need not sum to 1.0 (\"3 and 7\" == \"0.3 and 0.7\")."},
+    {"vector_weight", "search", "Vector Weight", CfgType::Float, CfgEdit::Live,
+     "8", "",
+     "Weight for semantic (vector) similarity."},
+    {"phon_weight", "search", "Phonetic Weight", CfgType::Float, CfgEdit::Live,
+     "1", "",
+     "\"Sounds-like\" (dolphining) weight — matches on how a phrase sounds (Double Metaphone) alongside meaning and keywords. 0 disables."},
+    {"max_search_limit", "search", "Max Search Limit", CfgType::Integer, CfgEdit::Locked,
+     "0", "",
+     "System ceiling on default_limit (0 = no ceiling)."},
+
+    // ---- summarizer ----
+    {"summarizer_model", "summarizer", "Model", CfgType::String, CfgEdit::Live,
+     "qwen3-4b-instruct-2507", "",
+     "Model used for L2/L3 summarization."},
+    {"summarizer_api_url", "summarizer", "API URL", CfgType::String, CfgEdit::Live,
+     "http://localhost:1234/v1", "",
+     "Inference endpoint. Default follows the LM Studio convention."},
+    {"summarizer_api_key", "summarizer", "API Key", CfgType::String, CfgEdit::Live,
+     "", "",
+     "API key for the summarizer endpoint, if required."},
+    {"summarizer_max_tokens", "summarizer", "Max Tokens", CfgType::Integer, CfgEdit::Live,
+     "1024", "",
+     "Maximum tokens for a summary generation. 0 inherits the global inference default."},
+    {"summarizer_target_pct", "summarizer", "Target %", CfgType::Integer, CfgEdit::Live,
+     "40", "",
+     "Target summary length as % of raw turn; 0 = 30%."},
+    {"summarizer_max_pct", "summarizer", "Max %", CfgType::Integer, CfgEdit::Live,
+     "60", "",
+     "Hard cap as % of raw turn; 0 = 60%. Always >= target %."},
+    {"summarizer_prompt", "summarizer", "Prompt", CfgType::Text, CfgEdit::Live,
+     "", "",
+     "System prompt sent to the summarizer. Empty uses the built-in default. A single space suppresses the system prompt entirely. Two {} placeholders are required (target chars, hard cap)."},
+
+    // ---- logging ----
+    {"log_level", "logging", "Log Level", CfgType::Enum, CfgEdit::Live,
+     "warn", "trace,debug,info,warn,error,critical",
+     "Verbosity of the single activity log. Everything (query/HTTP/MCP/general) goes to one log."},
+    {"log_max_size_mb", "logging", "Log Max Size (MB)", CfgType::Integer, CfgEdit::Live,
+     "1", "",
+     "Rotate activity.log once it reaches this size (MB). 0 disables size-based rotation. Built in — no external tool or root needed."},
+    {"log_max_age_days", "logging", "Log Max Age (days)", CfgType::Integer, CfgEdit::Live,
+     "14", "",
+     "Delete rotated backups older than this many days. Never touches the live log. 0 disables age-based cleanup."},
+
+    // ---- housekeeping ----
+    {"cleanup_max_age_hours", "housekeeping", "Cleanup Max Age (hrs)", CfgType::Float, CfgEdit::Live,
+     "0", "",
+     "Raw-turn lifetime (0 = keep forever). Set to hours to auto-purge."},
+    {"housekeeping_interval", "housekeeping", "Housekeeping Interval (sec)", CfgType::Integer, CfgEdit::Live,
+     "60", "",
+     "Seconds between housekeeping passes (0 disables; values <10 clamp to 10)."},
+    {"episode_idle_minutes", "housekeeping", "Episode Idle Minutes", CfgType::Integer, CfgEdit::Live,
+     "15", "",
+     "Idle gap (minutes) that closes an episode of work within a session. Also drives session/project rollups."},
+    {"episode_threshold_base", "housekeeping", "Episode Threshold Base", CfgType::Float, CfgEdit::Live,
+     "0.2", "",
+     "Starting similarity threshold for mid-session episode boundaries. boundary fires when avg(turn_sim, summary_sim) <= threshold; threshold rises with idle time."},
+    {"episode_threshold_cap", "housekeeping", "Episode Threshold Cap", CfgType::Float, CfgEdit::Live,
+     "0.5", "",
+     "Maximum threshold after time scaling."},
+    {"episode_threshold_step", "housekeeping", "Episode Threshold Step", CfgType::Float, CfgEdit::Live,
+     "0.01", "",
+     "Threshold increment per step of idle time."},
+    {"episode_step_minutes", "housekeeping", "Episode Step Minutes", CfgType::Float, CfgEdit::Live,
+     "1.0", "",
+     "Minutes of idle per threshold increment."},
+    {"catch_up_batch_size", "housekeeping", "Catch-up Batch Size", CfgType::Integer, CfgEdit::Live,
+     "8", "",
+     "Per-tick cap on unsummarized turns / draft retries enqueued at once. Keeps a manual resummarize to a small deliberate slice per tick."},
+    {"project_gap_days", "housekeeping", "Project Gap Days", CfgType::Integer, CfgEdit::Live,
+     "7", "",
+     "Minimum time-gap (days) between consecutive turns that triggers a project-boundary close."},
+    {"max_turn_failures", "housekeeping", "Max Turn Failures", CfgType::Integer, CfgEdit::Live,
+     "3", "",
+     "Consecutive inference failures on a single turn before marking it 'bad' and removing it from the unsummarized queue. 0 = retry forever (old behaviour)."},
+
+    // ---- import (+ paths) ----
+    {"minimum_chunk_size", "import", "Minimum Chunk Size", CfgType::Integer, CfgEdit::Live,
+     "300", "",
+     "Minimum size of an imported document chunk."},
+    {"normalize_home", "import", "Normalize Home", CfgType::Boolean, CfgEdit::Live,
+     "true", "",
+     "Replace /Users/<you> or /home/<user> with ~ in stored paths."},
+}};
+
+inline std::span<const ConfigMeta> config_schema() {
+    return {kConfigSchema.data(), kConfigSchema.size()};
+}
+
+inline const ConfigMeta* config_meta(std::string_view key) {
+    for (const auto& m : kConfigSchema)
+        if (m.key == key) return &m;
+    return nullptr;
+}
 
 } // namespace ragger::lang

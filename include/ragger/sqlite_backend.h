@@ -159,6 +159,8 @@ public:
     /// Number of stored memories.
     int count() const override;
 
+    std::vector<std::pair<std::string, int64_t>> table_row_counts() const override;
+
     /// True if any table holds a non-NULL embedding.
     bool has_embeddings() const override;
 

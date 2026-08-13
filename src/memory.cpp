@@ -6,6 +6,7 @@
 #include "ragger/sqlite_backend.h"
 #include "ragger/embedder.h"
 #include "ragger/config.h"
+#include "ragger/util/fs.h"
 #include "diskerror/logger.h"
 #include "ragger/lang.h"
 #include "ragger/recipe.h"
@@ -241,6 +242,20 @@ SearchResponse RaggerMemory::search(const std::string& query,
                                     int limit,
                                     float min_score,
                                     std::vector<std::string> collections) {
+    // While a re-embed is in progress the vectors are being rewritten, so a
+    // query would mix old/new spaces or hit half-updated rows. Short-circuit
+    // with a single explanatory record instead.
+    if (is_reembedding()) {
+        SearchResponse busy;
+        busy.results.push_back(SearchResult{
+            /*id*/ 0,
+            /*text*/ "Search not available. Re-embedding in progress.",
+            /*score*/ 0.0f,
+            /*metadata*/ json::object(),
+            /*timestamp*/ ""});
+        busy.timing = json{{"reembedding", true}};
+        return busy;
+    }
     SearchResponse resp = backend_->search(query, limit, min_score, std::move(collections));
 #ifdef RAGGER_STATS
     if (stats_ && stats_->enabled()) {
@@ -265,6 +280,76 @@ std::vector<SearchResult> RaggerMemory::load_all(const std::string& collection) 
 
 int RaggerMemory::rebuild_embeddings() {
     return backend_->rebuild_embeddings(*embedder_);
+}
+
+RaggerMemory::EmbeddingStatus RaggerMemory::embedding_status() {
+    EmbeddingStatus s;
+    // Current = what the stored vectors are (drift-guard settings keys).
+    s.current_model = user_store_->get_setting("embedding_model")
+                          .value_or(config().resolve_model(config().embedding_model));
+    s.current_vtype = user_store_->get_setting("vector_type")
+                          .value_or(config().embedding_vector_type);
+    s.current_dims  = std::stoi(user_store_->get_setting("dimensions")
+                          .value_or(std::to_string(config().embedding_dimensions)));
+    // Desired = staged config target (seeded from current when unset).
+    s.desired_model = config().desired_embedding_model.empty()
+                          ? s.current_model
+                          : config().resolve_model(config().desired_embedding_model);
+    s.desired_vtype = config().desired_embedding_vector_type.empty()
+                          ? s.current_vtype : config().desired_embedding_vector_type;
+    s.desired_dims  = config().desired_embedding_dimensions == 0
+                          ? s.current_dims : config().desired_embedding_dimensions;
+    s.needs_update = (s.current_model != s.desired_model) ||
+                     (s.current_vtype != s.desired_vtype) ||
+                     (s.current_dims  != s.desired_dims);
+    s.reembedding = is_reembedding();
+    return s;
+}
+
+bool RaggerMemory::is_reembedding() {
+    auto v = user_store_->get_setting("reembedding");
+    return v.has_value() && *v == "true";
+}
+
+int RaggerMemory::update_embeddings() {
+    // Guard: the flag is persisted so a crash mid-update is visible on
+    // restart, and search short-circuits for anyone reading concurrently.
+    user_store_->set_setting("reembedding", "true");
+    try {
+        const std::string desired_model_name =
+            config().desired_embedding_model.empty()
+                ? config().embedding_model
+                : config().desired_embedding_model;
+        const std::string desired_model_dir =
+            ragger_base_dir() + "/models/" + config().resolve_model(desired_model_name);
+
+        // Build an embedder for the DESIRED model and re-encode every row on
+        // the existing backend (no second backend -> no write contention).
+        auto desired_embedder = std::make_unique<Embedder>(desired_model_dir);
+        int count = backend_->rebuild_embeddings(*desired_embedder);
+
+        // Promote current := desired in the drift-guard settings keys.
+        const std::string vtype = config().desired_embedding_vector_type.empty()
+            ? config().embedding_vector_type : config().desired_embedding_vector_type;
+        const int dims = config().desired_embedding_dimensions == 0
+            ? desired_embedder->dimensions() : config().desired_embedding_dimensions;
+        user_store_->set_setting("embedding_model", config().resolve_model(desired_model_name));
+        user_store_->set_setting("vector_type", vtype == "f32" ? "f32" : "f16");
+        user_store_->set_setting("dimensions", std::to_string(dims));
+
+        // Swap the live embedder so subsequent queries use the new model.
+        embedder_ = std::move(desired_embedder);
+        // Keep the live config's current identity in sync with what we promoted.
+        mutable_config().embedding_model = desired_model_name;
+        mutable_config().embedding_vector_type = (vtype == "f32" ? "f32" : "f16");
+        mutable_config().embedding_dimensions = dims;
+
+        user_store_->set_setting("reembedding", "false");
+        return count;
+    } catch (...) {
+        user_store_->set_setting("reembedding", "false");
+        throw;
+    }
 }
 
 int RaggerMemory::backfill_embeddings() {

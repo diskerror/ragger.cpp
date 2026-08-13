@@ -10,12 +10,18 @@
 #include "diskerror/logger.h"
 #include "ragger/auth.h"
 #include "ragger/config.h"
+#include "ragger/config_access.h"
+#include "ragger/util/fs.h"
 #include "ragger/inference.h"
 #include "ragger/summarizer.h"
 #include "ragger/summarizer_service.h"
 #include "nlohmann_json.hpp"
 
 #include "httplib.h"
+
+// Dashboard HTML/JS, embedded at build time (web/dashboard.html -> generated
+// dashboard_html.inc). Provides `static const char* DASHBOARD_HTML`.
+#include "dashboard_html.inc"
 
 #include <chrono>
 #include <condition_variable>
@@ -46,6 +52,9 @@ using json = nlohmann::json;
 static std::atomic<bool> g_housekeeping_requested{false};
 static std::atomic<bool> g_config_reload_requested{false};
 static std::atomic<bool> g_shutdown_requested{false};
+// Set by POST /restart: like shutdown, but main() re-execs the daemon in
+// place afterward (rebinding listeners — the only way a port change takes).
+static std::atomic<bool> g_restart_requested{false};
 
 static void sigusr1_handler(int) {
     g_housekeeping_requested.store(true, std::memory_order_relaxed);
@@ -95,6 +104,9 @@ struct Server::Impl {
     // Per-user memory cache (username → RaggerMemory)
     std::unordered_map<std::string, std::unique_ptr<RaggerMemory>> user_memories_;
     std::mutex user_memories_mutex_;
+
+    // SSE activity-log tailing: byte offset already streamed to /events.
+    std::uintmax_t activity_log_offset_ = 0;
 
     // Housekeeping timer
     std::atomic<bool> timer_running_{false};
@@ -294,12 +306,17 @@ struct Server::Impl {
             while (timer_running_) {
                 for (int i = 0; i < interval && timer_running_; ++i) {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
-                    // Check for shutdown
-                    if (g_shutdown_requested.load(std::memory_order_relaxed)) {
-                        Diskerror::logger::info("Shutdown signal received; stopping listeners");
+                    // Check for shutdown (or restart, which stops listeners
+                    // the same way — main() re-execs afterward).
+                    if (g_shutdown_requested.load(std::memory_order_relaxed) ||
+                        g_restart_requested.load(std::memory_order_relaxed)) {
+                        Diskerror::logger::info(
+                            g_restart_requested.load(std::memory_order_relaxed)
+                                ? "Restart signal received; stopping listeners to re-exec"
+                                : "Shutdown signal received; stopping listeners");
                         timer_running_ = false;
-                        unix_svr.stop();
-                        if (tcp_svr) tcp_svr->stop();
+                        if (unix_svr.is_running()) unix_svr.stop();
+                        if (tcp_svr && tcp_svr->is_running()) tcp_svr->stop();
                         break;
                     }
                     // Check for signal-triggered housekeeping
@@ -400,10 +417,17 @@ struct Server::Impl {
         // Parse "Bearer <token>" from the Authorization header.
         auto auth_header = req.get_header_value("Authorization");
         const std::string bearer_prefix = "Bearer ";
-        if (auth_header.substr(0, bearer_prefix.size()) != bearer_prefix) {
+        std::string token;
+        if (auth_header.substr(0, bearer_prefix.size()) == bearer_prefix) {
+            token = auth_header.substr(bearer_prefix.size());
+        } else if (req.has_param("token")) {
+            // Browser navigation / EventSource can't set headers — accept the
+            // token as a query parameter (?token=...) for the dashboard and
+            // its SSE stream. Same trust model: holding the token = authorized.
+            token = req.get_param_value("token");
+        } else {
             return std::nullopt;
         }
-        std::string token = auth_header.substr(bearer_prefix.size());
 
         // Hash and lookup in database
         std::string token_hash = hash_token(token);
@@ -655,6 +679,304 @@ struct Server::Impl {
             res.set_content(json{{"token", token}, {"username", user.username}}.dump(),
                             "application/json");
         }));
+
+        // ---- Dashboard (embedded HTML/JS) --------------------------------
+        // GET /dashboard[?token=...] -> the single-page control panel. The
+        // page then talks to /config and /events with the same token.
+        svr.Get("/dashboard", guarded([this](const UserInfo&, const httplib::Request&,
+                                             httplib::Response& res) {
+            res.set_content(DASHBOARD_HTML, "text/html; charset=utf-8");
+            Diskerror::logger::debug("GET /dashboard 200");
+        }));
+
+        // ---- Config API (dashboard + programmatic) -----------------------
+        // GET /config          -> all settings as {key: {value, ...schema}}
+        // GET /config/<key>    -> one setting
+        // PUT /config/<key>    -> set one setting (body: {"value": "..."})
+        //                         empty value reverts to schema default.
+        svr.Get("/config", guarded([this](const UserInfo&, const httplib::Request&,
+                                          httplib::Response& res) {
+            res.set_content(build_config_json().dump(), "application/json");
+            Diskerror::logger::debug("GET /config 200");
+        }));
+
+        svr.Get(R"(/config/([A-Za-z0-9_]+))", guarded([this](const UserInfo&,
+                const httplib::Request& req, httplib::Response& res) {
+            std::string key = req.matches[1];
+            const auto* meta = lang::config_meta(key);
+            if (!meta) { res.status = 404; res.set_content(R"({"error":"unknown key"})", "application/json"); return; }
+            auto v = get_config_value(config(), key);
+            res.set_content(config_entry_json(*meta, v.value_or("")).dump(), "application/json");
+        }));
+
+        svr.Put(R"(/config/([A-Za-z0-9_]+))", guarded([this](const UserInfo&,
+                const httplib::Request& req, httplib::Response& res) {
+            std::string key = req.matches[1];
+            std::string value;
+            if (!req.body.empty()) {
+                auto body = json::parse(req.body);
+                value = body.value("value", "");
+            }
+            auto r = set_config_persisted(key, value);
+            if (!r) {
+                switch (r.error()) {
+                    case ConfigSetError::UnknownKey:
+                        res.status = 404; res.set_content(R"({"error":"unknown key"})", "application/json"); break;
+                    case ConfigSetError::Locked:
+                        res.status = 403; res.set_content(R"({"error":"key is locked"})", "application/json"); break;
+                    case ConfigSetError::InvalidValue:
+                        res.status = 400; res.set_content(R"({"error":"invalid value"})", "application/json"); break;
+                }
+                Diskerror::logger::debug(std::format("PUT /config/{} {}", key, res.status));
+                return;
+            }
+            // Echo the resolved (post-default) value plus apply flags.
+            auto v = get_config_value(config(), key);
+            json out = {{"key", key}, {"value", v.value_or("")},
+                        {"restart_required", r->restart_required},
+                        {"rebuild_required", r->rebuild_required}};
+            res.set_content(out.dump(), "application/json");
+            Diskerror::logger::debug(std::format("PUT /config/{} 200", key));
+        }));
+
+        // GET /stats -> one-shot status snapshot (server + table sizes).
+        svr.Get("/stats", guarded([this](const UserInfo&, const httplib::Request&,
+                                         httplib::Response& res) {
+            res.set_content(build_stats_json().dump(), "application/json");
+        }));
+
+        // GET /models -> embedding model choices (contents of ~/.ragger/models).
+        svr.Get("/models", guarded([this](const UserInfo&, const httplib::Request&,
+                                          httplib::Response& res) {
+            json arr = json::array();
+            std::error_code ec;
+            const std::string dir = ragger_base_dir() + "/models";
+            for (auto& e : std::filesystem::directory_iterator(dir, ec)) {
+                if (!e.is_directory(ec)) continue;                 // model = a subdir
+                std::string name = e.path().filename().string();
+                if (!name.empty() && name[0] == '.') continue;     // skip dotfiles
+                arr.push_back(name);
+            }
+            res.set_content(json{{"models", arr}}.dump(), "application/json");
+        }));
+
+        // GET /embedding/status -> current vs desired identity + flags.
+        svr.Get("/embedding/status", guarded([this](const UserInfo&, const httplib::Request&,
+                                                    httplib::Response& res) {
+            auto s = memory.embedding_status();
+            res.set_content(json{
+                {"current", {{"model", s.current_model}, {"vector_type", s.current_vtype},
+                             {"dimensions", s.current_dims}}},
+                {"desired", {{"model", s.desired_model}, {"vector_type", s.desired_vtype},
+                             {"dimensions", s.desired_dims}}},
+                {"needs_update", s.needs_update},
+                {"reembedding",  s.reembedding},
+            }.dump(), "application/json");
+        }));
+
+        // POST /embedding/update -> run the staged re-embed now. Runs in a
+        // detached thread so the request returns immediately; progress is
+        // reflected via /embedding/status (reembedding flag) and SSE stats.
+        svr.Post("/embedding/update", guarded([this](const UserInfo&, const httplib::Request&,
+                                                     httplib::Response& res) {
+            if (memory.is_reembedding()) {
+                res.status = 409;
+                res.set_content(R"({"error":"re-embedding already in progress"})", "application/json");
+                return;
+            }
+            auto s = memory.embedding_status();
+            if (!s.needs_update) {
+                res.set_content(R"({"status":"up-to-date","reembedding":false})", "application/json");
+                return;
+            }
+            std::thread([this]() {
+                try { memory.update_embeddings(); }
+                catch (const std::exception& e) {
+                    Diskerror::logger::critical(std::format("re-embed failed: {}", e.what()));
+                }
+            }).detach();
+            res.set_content(R"({"status":"started","reembedding":true})", "application/json");
+        }));
+
+        // GET /restart/status -> bound (current) vs configured (desired) port
+        // and whether a restart is needed to apply it. Same current-vs-desired
+        // shape as embedding, but "current" is the port bound at startup and
+        // "desired" is the live config port (no separate desired_port key).
+        svr.Get("/restart/status", guarded([this](const UserInfo&, const httplib::Request&,
+                                                  httplib::Response& res) {
+            const bool tls = !config().tls_cert.empty() && !config().tls_key.empty();
+            // "current" = the port bound at startup (Impl::port). "desired" =
+            // the editable desired_port the dashboard writes (falls back to the
+            // committed port when unset). needs_restart when they differ — the
+            // startup rectify will adopt desired_port on the next restart.
+            int desired = config().desired_port != 0 ? config().desired_port
+                                                     : config().port;
+            res.set_content(json{
+                {"bound_port",      port},
+                {"configured_port", desired},
+                {"bound_bind",      host},
+                {"configured_bind", config().bind_address},
+                {"needs_restart",   (port != desired) ||
+                                    (host != config().bind_address &&
+                                     !(host == "127.0.0.1" && config().bind_address.empty()))},
+                {"scheme",          tls ? "https" : "http"},
+            }.dump(), "application/json");
+        }));
+
+        // POST /restart -> re-exec the daemon in place. Returns immediately
+        // with the URL the dashboard should reconnect to (new port/scheme),
+        // then the listeners tear down and main() re-execs. The dashboard
+        // polls that URL and redirects the browser once it answers.
+        svr.Post("/restart", guarded([this](const UserInfo&, const httplib::Request&,
+                                            httplib::Response& res) {
+            const bool tls = !config().tls_cert.empty() && !config().tls_key.empty();
+            std::string h = config().bind_address.empty() ? "127.0.0.1" : config().bind_address;
+            if (h == "0.0.0.0" || h == "::") h = "127.0.0.1";
+            // Reconnect on the port the restart will bind: desired_port (which
+            // the startup rectify adopts), falling back to the committed port.
+            int new_port = config().desired_port != 0 ? config().desired_port
+                                                       : config().port;
+            std::string url = std::format("{}://{}:{}/dashboard",
+                                          tls ? "https" : "http", h, new_port);
+            res.set_content(json{{"status", "restarting"},
+                                 {"reconnect_url", url},
+                                 {"port", new_port}}.dump(), "application/json");
+            Diskerror::logger::info("POST /restart -> re-exec requested");
+            // Trigger after the response flushes; the timer loop stops the
+            // listeners and run() returns true so main() re-execs.
+            g_restart_requested.store(true, std::memory_order_relaxed);
+        }));
+
+        // GET /events -> Server-Sent Events stream. Pushes a "stats" event
+        // (server status + table sizes) and any new activity-log lines every
+        // few seconds. One-directional; the dashboard subscribes with
+        // EventSource. Config writes go through PUT /config, not this stream.
+        svr.Get("/events", guarded([this](const UserInfo&, const httplib::Request&,
+                                          httplib::Response& res) {
+            res.set_header("Cache-Control", "no-cache");
+            res.set_header("Connection", "keep-alive");
+            res.set_chunked_content_provider(
+                "text/event-stream",
+                [this](size_t /*offset*/, httplib::DataSink& sink) {
+                    // Emit a stats frame.
+                    std::string frame = "event: stats\ndata: " +
+                                        build_stats_json().dump() + "\n\n";
+                    if (!sink.write(frame.data(), frame.size())) return false;
+
+                    // Emit any new activity-log lines as "activity" events.
+                    for (auto& line : drain_activity_lines()) {
+                        std::string a = "event: activity\ndata: " +
+                                        json{{"line", line}}.dump() + "\n\n";
+                        if (!sink.write(a.data(), a.size())) return false;
+                    }
+
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    return true;   // keep the stream open
+                });
+        }));
+    }
+
+    // ---- Config/stats helpers ---------------------------------------------
+
+    // JSON for a single config entry: current value + schema metadata so the
+    // dashboard can render the right control without a second lookup.
+    json config_entry_json(const lang::ConfigMeta& m, const std::string& value) {
+        const char* type = "string";
+        switch (m.type) {
+            case lang::CfgType::Boolean: type = "boolean"; break;
+            case lang::CfgType::Integer: type = "integer"; break;
+            case lang::CfgType::Float:   type = "float";   break;
+            case lang::CfgType::Enum:    type = "enum";    break;
+            case lang::CfgType::String:  type = "string";  break;
+            case lang::CfgType::Path:    type = "path";    break;
+            case lang::CfgType::Text:    type = "text";    break;
+        }
+        const char* edit = "live";
+        switch (m.edit) {
+            case lang::CfgEdit::Live:            edit = "live";    break;
+            case lang::CfgEdit::RestartRequired: edit = "restart"; break;
+            case lang::CfgEdit::RebuildRequired: edit = "rebuild"; break;
+            case lang::CfgEdit::Locked:          edit = "locked";  break;
+        }
+        json j = {
+            {"key",     std::string(m.key)},
+            {"section", std::string(m.section)},
+            {"label",   std::string(m.pretty)},
+            {"type",    type},
+            {"edit",    edit},
+            {"default", std::string(m.default_value)},
+            {"help",    std::string(m.help)},
+            {"value",   value},
+        };
+        if (m.type == lang::CfgType::Enum) {
+            json opts = json::array();
+            std::string_view o = m.options;
+            size_t pos = 0;
+            while (pos <= o.size()) {
+                size_t c = o.find(',', pos);
+                std::string_view tok = (c == std::string_view::npos)
+                    ? o.substr(pos) : o.substr(pos, c - pos);
+                if (!tok.empty()) opts.push_back(std::string(tok));
+                if (c == std::string_view::npos) break;
+                pos = c + 1;
+            }
+            j["options"] = opts;
+        }
+        return j;
+    }
+
+    // Full config: array of entries in schema (dashboard tab) order.
+    json build_config_json() {
+        json arr = json::array();
+        const auto& cfg = config();
+        for (const auto& m : lang::config_schema()) {
+            auto v = get_config_value(cfg, m.key);
+            arr.push_back(config_entry_json(m, v.value_or("")));
+        }
+        return json{{"config", arr}};
+    }
+
+    // Server status + table sizes for the top status pane.
+    json build_stats_json() {
+        json tables = json::object();
+        try {
+            for (auto& [name, n] : memory.backend()->table_row_counts())
+                tables[name] = n;
+        } catch (...) { /* backend unavailable — empty tables */ }
+        return json{
+            {"status",   "running"},
+            {"version",  RAGGER_VERSION},
+            {"memories", memory.count()},
+            {"tables",   tables},
+        };
+    }
+
+    // Return activity-log lines appended since the last drain. Best-effort:
+    // tracks a byte offset into the live activity.log and reads the tail.
+    std::vector<std::string> drain_activity_lines() {
+        std::vector<std::string> out;
+        const std::string path = config().resolved_log_file_path();
+        std::error_code ec;
+        auto size = std::filesystem::file_size(path, ec);
+        if (ec) return out;
+        if (activity_log_offset_ == 0 && size > 0) {
+            // First read: start at EOF so we only stream NEW activity.
+            activity_log_offset_ = size;
+            return out;
+        }
+        if (size < activity_log_offset_) activity_log_offset_ = 0;  // rotated
+        if (size == activity_log_offset_) return out;
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return out;
+        f.seekg(static_cast<std::streamoff>(activity_log_offset_));
+        std::string line;
+        while (std::getline(f, line)) {
+            if (!line.empty()) out.push_back(line);
+        }
+        activity_log_offset_ = size;
+        // Cap to the last ~20 lines so a burst doesn't flood the client.
+        if (out.size() > 20) out.erase(out.begin(), out.end() - 20);
+        return out;
     }
 };
 
@@ -686,10 +1008,10 @@ static bool is_port_available(const std::string& host, int port) {
     return result == 0;
 }
 
-void Server::run() {
+bool Server::run() {
     const auto& cfg = config();
     const bool want_unix = cfg.socket_enabled;
-    const bool want_tcp  = !pImpl->host.empty();
+    const bool want_tcp  = cfg.tcp_enabled && !pImpl->host.empty();
 
     if (want_tcp && !is_port_available(pImpl->host, pImpl->port)) {
         Diskerror::logger::critical(std::format(lang::ERR_PORT_IN_USE, pImpl->port));
@@ -804,9 +1126,12 @@ void Server::run() {
         run_tcp();
     }
 
-    // If TCP was on its own thread, stop it and join before returning.
+    // If TCP was on its own thread, join it before returning. The listeners
+    // were already stopped above (timer loop on shutdown/restart, or
+    // Server::stop from a signal) — calling stop() again here races httplib's
+    // shutdown (is_running_ still true while svr_sock_ is already invalid) and
+    // trips an assert, so we only join.
     if (tcp_thread.joinable()) {
-        if (pImpl->tcp_svr) pImpl->tcp_svr->stop();
         tcp_thread.join();
     }
 
@@ -814,13 +1139,19 @@ void Server::run() {
     if (pImpl->summarizer_) pImpl->summarizer_->stop();
     pImpl->stop_housekeeping_timer();
     if (!pImpl->pid_file_.empty()) std::remove(pImpl->pid_file_.c_str());
+
+    return g_restart_requested.load(std::memory_order_relaxed);
+}
+
+bool Server::restart_requested() {
+    return g_restart_requested.load(std::memory_order_relaxed);
 }
 
 void Server::stop() {
     if (pImpl->summarizer_) pImpl->summarizer_->stop();
     pImpl->stop_housekeeping_timer();
-    pImpl->unix_svr.stop();
-    if (pImpl->tcp_svr) pImpl->tcp_svr->stop();
+    if (pImpl->unix_svr.is_running()) pImpl->unix_svr.stop();
+    if (pImpl->tcp_svr && pImpl->tcp_svr->is_running()) pImpl->tcp_svr->stop();
 }
 
 } // namespace ragger

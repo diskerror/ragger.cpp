@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ragger Memory Dashboard</title>
+<style>
+  :root {
+    --bg: #f6f8fa; --panel: #ffffff; --border: #d1d9e0;
+    --text: #24292f; --muted: #57606a; --accent: #0969da;
+    --ok-bg: #dafbe1; --ok-fg: #1a7f37; --err-bg: #ffebe9; --err-fg: #cf222e;
+    --warn-bg: #fff8c5; --warn-fg: #9a6700; --info-bg: #ddf4ff; --info-fg: #0969da;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  /* ---- header ---- */
+  .header {
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 12px 20px; display: flex; align-items: center;
+    justify-content: space-between; flex-shrink: 0; gap: 16px;
+  }
+  .header h1 { font-size: 18px; font-weight: 600; margin: 0; white-space: nowrap; }
+  .badges { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+  .badge {
+    padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 500;
+    background: var(--info-bg); color: var(--info-fg); white-space: nowrap;
+  }
+  .badge.ok { background: var(--ok-bg); color: var(--ok-fg); }
+  .badge.down { background: var(--err-bg); color: var(--err-fg); }
+  /* ---- body: sidebar + main ---- */
+  .body { display: flex; flex: 1; min-height: 0; }
+  .sidebar {
+    width: 200px; background: var(--panel); border-right: 1px solid var(--border);
+    padding: 12px 0; overflow-y: auto; flex-shrink: 0;
+  }
+  .tab {
+    padding: 10px 20px; cursor: pointer; font-weight: 500; color: var(--muted);
+    border-left: 3px solid transparent; user-select: none;
+  }
+  .tab:hover { background: var(--bg); color: var(--text); }
+  .tab.active { background: var(--bg); color: var(--text); border-left-color: var(--accent); }
+  .main { flex: 1; overflow-y: auto; padding: 20px 24px; min-width: 0; }
+  .panel-title { font-size: 20px; font-weight: 600; margin: 0 0 16px;
+    padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+  /* ---- setting rows ---- */
+  .row {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    gap: 20px; padding: 14px 0; border-bottom: 1px solid #eaeef2;
+  }
+  .row .info { flex: 1; min-width: 0; }
+  .row .label { font-weight: 500; font-size: 15px; }
+  .row .key { font-family: 'SF Mono', Monaco, monospace; font-size: 12px;
+    color: var(--muted); margin-left: 8px; }
+  .row .help { font-size: 13px; color: var(--muted); line-height: 1.4;
+    margin-top: 4px; max-width: 560px; }
+  .row .control { flex-shrink: 0; display: flex; flex-direction: column;
+    align-items: flex-end; gap: 6px; }
+  input[type=text], select, textarea {
+    padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;
+    font-size: 14px; font-family: inherit; background: #fff; transition: box-shadow .15s, border-color .15s;
+  }
+  input[type=text] { width: 200px; }
+  textarea { width: 320px; resize: vertical; }
+  select { width: 160px; }
+  input:disabled, select:disabled, textarea:disabled { background: #f0f1f3; color: var(--muted); }
+  .flash-ok { border-color: var(--ok-fg) !important; box-shadow: 0 0 0 3px var(--ok-bg); }
+  .flash-err { border-color: var(--err-fg) !important; box-shadow: 0 0 0 3px var(--err-bg); }
+  .tag { font-size: 11px; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
+  .tag.locked { background: #eaeef2; color: var(--muted); }
+  .tag.rebuild { background: var(--warn-bg); color: var(--warn-fg); }
+  .tag.restart { background: var(--info-bg); color: var(--info-fg); }
+  .cb { width: 18px; height: 18px; }
+  /* trash-can reset: shown only when a field differs from its default */
+  .reset {
+    border: none; background: none; cursor: pointer; padding: 2px 4px;
+    font-size: 14px; line-height: 1; color: var(--muted); border-radius: 4px;
+  }
+  .reset:hover { background: var(--err-bg); color: var(--err-fg); }
+  .ctl-line { display: flex; align-items: center; gap: 6px; }
+  /* embedding panel banner */
+  .embed-banner {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 14px 16px; margin-bottom: 20px;
+  }
+  .embed-banner .cur { font-size: 14px; color: var(--muted); }
+  .embed-banner .cur b { color: var(--text); font-family: 'SF Mono', Monaco, monospace; }
+  .embed-row { display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; margin-top: 10px; }
+  .embed-status { font-size: 14px; font-weight: 500; }
+  .embed-status.ok { color: var(--ok-fg); }
+  .embed-status.pending { color: var(--warn-fg); }
+  .embed-status.busy { color: var(--info-fg); }
+  .btn {
+    padding: 8px 16px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--accent); color: #fff; font-weight: 600; font-size: 14px;
+    cursor: pointer;
+  }
+  .btn:disabled { background: #94a3b8; cursor: not-allowed; opacity: .7; }
+  /* ---- activity ---- */
+  .activity {
+    height: 160px; flex-shrink: 0; background: var(--panel);
+    border-top: 1px solid var(--border); display: flex; flex-direction: column;
+  }
+  .activity h2 { font-size: 13px; font-weight: 600; color: var(--muted);
+    margin: 0; padding: 8px 20px; border-bottom: 1px solid #eaeef2; text-transform: uppercase; letter-spacing: .5px; }
+  .activity ul { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1;
+    font-family: 'SF Mono', Monaco, monospace; font-size: 12px; }
+  .activity li { padding: 4px 20px; border-bottom: 1px solid #f6f8fa; color: var(--text); white-space: pre-wrap; }
+  /* ---- error banner ---- */
+  .banner { background: var(--err-bg); color: var(--err-fg); padding: 10px 20px;
+    font-size: 14px; display: none; }
+  .banner.show { display: block; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>Ragger Memory Dashboard</h1>
+    <div class="badges" id="badges">
+      <span class="badge down" id="server-badge">Server: connecting…</span>
+    </div>
+  </div>
+
+  <div class="banner" id="banner"></div>
+
+  <div class="body">
+    <div class="sidebar" id="sidebar"></div>
+    <div class="main" id="main"></div>
+  </div>
+
+  <div class="activity">
+    <h2>Recent Activity</h2>
+    <ul id="activity"></ul>
+  </div>
+
+<script>
+"use strict";
+
+// ---- token & fetch helpers -------------------------------------------------
+const TOKEN = new URLSearchParams(location.search).get("token") || "";
+const qs = TOKEN ? ("?token=" + encodeURIComponent(TOKEN)) : "";
+
+function api(path) { return path + qs; }
+
+// Fixed section order + pretty labels (mirrors the C++ schema sections).
+const SECTIONS = [
+  ["server", "Server"],
+  ["embedding", "Embedding"],
+  ["search", "Search"],
+  ["summarizer", "Summarizer"],
+  ["logging", "Logging"],
+  ["housekeeping", "Housekeeping"],
+  ["import", "Import"],
+];
+
+let CONFIG = [];          // array of entries from /config
+let activeSection = SECTIONS[0][0];
+
+function showBanner(msg) {
+  const b = document.getElementById("banner");
+  b.textContent = msg; b.classList.add("show");
+}
+
+// ---- load config and build the UI -----------------------------------------
+async function loadConfig() {
+  let data;
+  try {
+    const r = await fetch(api("/config"));
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    data = await r.json();
+  } catch (e) {
+    showBanner("Could not load configuration from the server: " + e.message);
+    return;
+  }
+  CONFIG = data.config || [];
+  buildTabs();
+  renderSection(activeSection);
+}
+
+function buildTabs() {
+  const sidebar = document.getElementById("sidebar");
+  sidebar.innerHTML = "";
+  // Only show sections that actually have entries.
+  const present = new Set(CONFIG.map(e => e.section));
+  for (const [key, label] of SECTIONS) {
+    if (!present.has(key)) continue;
+    const div = document.createElement("div");
+    div.className = "tab" + (key === activeSection ? " active" : "");
+    div.textContent = label;
+    div.onclick = () => {
+      activeSection = key;
+      document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+      div.classList.add("active");
+      renderSection(key);
+    };
+    sidebar.appendChild(div);
+  }
+}
+
+function renderSection(section) {
+  const main = document.getElementById("main");
+  const label = (SECTIONS.find(s => s[0] === section) || [section, section])[1];
+  main.innerHTML = "";
+  const title = document.createElement("h2");
+  title.className = "panel-title";
+  title.textContent = label;
+  main.appendChild(title);
+
+  // The Server tab gets a restart banner (bound-vs-configured port + button).
+  if (section === "server") {
+    const banner = document.createElement("div");
+    banner.className = "embed-banner";
+    banner.id = "restart-banner";
+    banner.innerHTML =
+      '<div class="cur" id="restart-current">Checking listener status…</div>' +
+      '<div class="embed-row">' +
+        '<span class="embed-status" id="restart-status"></span>' +
+        '<button class="btn" id="restart-btn" disabled>Restart now</button>' +
+      '</div>';
+    main.appendChild(banner);
+    document.getElementById("restart-btn").onclick = doRestart;
+    refreshRestart();
+  }
+
+  // The Embedding tab gets a special banner (current identity + Update now).
+  if (section === "embedding") {
+    const banner = document.createElement("div");
+    banner.className = "embed-banner";
+    banner.id = "embed-banner";
+    banner.innerHTML =
+      '<div class="cur" id="embed-current">Loading embedding status…</div>' +
+      '<div class="embed-row">' +
+        '<span class="embed-status" id="embed-status"></span>' +
+        '<button class="btn" id="embed-update" disabled>Update now</button>' +
+      '</div>';
+    main.appendChild(banner);
+    document.getElementById("embed-update").onclick = doEmbeddingUpdate;
+    refreshEmbedding();
+    populateModelChoices();
+  }
+
+  for (const entry of CONFIG.filter(e => e.section === section)) {
+    main.appendChild(renderRow(entry));
+  }
+}
+
+// ---- embedding panel -------------------------------------------------------
+let EMBED_STATUS = null;
+
+async function refreshEmbedding() {
+  try {
+    const r = await fetch(api("/embedding/status"));
+    if (!r.ok) return;
+    EMBED_STATUS = await r.json();
+  } catch (e) { return; }
+  renderEmbeddingBanner();
+}
+
+function renderEmbeddingBanner() {
+  const s = EMBED_STATUS;
+  const cur = document.getElementById("embed-current");
+  const st = document.getElementById("embed-status");
+  const btn = document.getElementById("embed-update");
+  if (!s || !cur) return;
+  const c = s.current || {};
+  cur.innerHTML = "Current vectors: <b>" + escapeHtml(c.model) + "</b> · " +
+    escapeHtml(c.vector_type) + " · " + escapeHtml(String(c.dimensions)) + "-dim";
+  if (s.reembedding) {
+    st.className = "embed-status busy";
+    st.textContent = "Re-embedding in progress… search is paused.";
+    btn.disabled = true; btn.textContent = "Updating…";
+  } else if (s.needs_update) {
+    st.className = "embed-status pending";
+    st.textContent = "Needs re-embedding — desired settings differ from current.";
+    btn.disabled = false; btn.textContent = "Update now";
+  } else {
+    st.className = "embed-status ok";
+    st.textContent = "Up to date.";
+    btn.disabled = true; btn.textContent = "Update now";
+  }
+}
+
+async function doEmbeddingUpdate() {
+  const btn = document.getElementById("embed-update");
+  btn.disabled = true; btn.textContent = "Starting…";
+  try {
+    await fetch(api("/embedding/update"), { method: "POST" });
+  } catch (e) {}
+  refreshEmbedding();
+}
+
+// Fill the Desired Model dropdown from the models directory (GET /models).
+async function populateModelChoices() {
+  let models = [];
+  try {
+    const r = await fetch(api("/models"));
+    if (r.ok) models = (await r.json()).models || [];
+  } catch (e) { return; }
+  const entry = CONFIG.find(e => e.key === "desired_embedding_model");
+  if (!entry || !entry.__field || entry.__field.tagName !== "SELECT") return;
+  const sel = entry.__field;
+  const chosen = entry.value;
+  sel.innerHTML = "";
+  for (const m of models) {
+    const o = document.createElement("option");
+    o.value = m; o.textContent = m;
+    if (m === chosen) o.selected = true;
+    sel.appendChild(o);
+  }
+}
+
+// ---- server restart panel --------------------------------------------------
+let RESTART_STATUS = null;
+
+async function refreshRestart() {
+  try {
+    const r = await fetch(api("/restart/status"));
+    if (!r.ok) return;
+    RESTART_STATUS = await r.json();
+  } catch (e) { return; }
+  renderRestartBanner();
+}
+
+function renderRestartBanner() {
+  const s = RESTART_STATUS;
+  const cur = document.getElementById("restart-current");
+  const st = document.getElementById("restart-status");
+  const btn = document.getElementById("restart-btn");
+  if (!s || !cur) return;
+  cur.innerHTML = "Listening on <b>" + escapeHtml(s.bound_bind) + ":" +
+    escapeHtml(String(s.bound_port)) + "</b>";
+  if (s.needs_restart) {
+    st.className = "embed-status pending";
+    st.textContent = "Restart required — configured " +
+      s.configured_bind + ":" + s.configured_port +
+      " differs from the running listener.";
+    btn.disabled = false; btn.textContent = "Restart now";
+  } else {
+    st.className = "embed-status ok";
+    st.textContent = "Running with the current network settings.";
+    btn.disabled = true; btn.textContent = "Restart now";
+  }
+}
+
+async function doRestart() {
+  const st = document.getElementById("restart-status");
+  const btn = document.getElementById("restart-btn");
+  btn.disabled = true; btn.textContent = "Restarting…";
+  let reconnect = null;
+  try {
+    const r = await fetch(api("/restart"), { method: "POST" });
+    const d = await r.json();
+    reconnect = d.reconnect_url;
+  } catch (e) {}
+  if (!reconnect) {
+    // Fall back to the current origin with the (new) configured port.
+    const s = RESTART_STATUS || {};
+    reconnect = (s.scheme || location.protocol.replace(":", "")) + "://" +
+      location.hostname + ":" + (s.configured_port || location.port) + "/dashboard";
+  }
+  st.className = "embed-status busy";
+  st.textContent = "Daemon is restarting… reconnecting to " + reconnect;
+  const target = reconnect + (qs ? qs : "");
+  const probe = reconnect.replace("/dashboard", "/health") + (qs ? qs : "");
+  // Poll the new listener until it answers, then redirect the browser. The
+  // probe is cross-origin when the port changed (:oldport -> :newport), so a
+  // normal fetch is CORS-blocked and can't read the status. Use no-cors: a
+  // reachable server resolves the promise (opaque response), an unreachable
+  // one throws (connection refused). "Resolved without throwing" == up.
+  let tries = 0;
+  const poll = async () => {
+    tries++;
+    try {
+      await fetch(probe, { mode: "no-cors", cache: "no-store" });
+      location.href = target;   // resolved -> the new listener is answering
+      return;
+    } catch (e) { /* not up yet */ }
+    if (tries > 60) {  // ~30s
+      st.className = "embed-status pending";
+      st.textContent = "Could not reconnect automatically. Open " + target + " manually.";
+      return;
+    }
+    setTimeout(poll, 500);
+  };
+  // Give the old listener a moment to drop before polling the new one.
+  setTimeout(poll, 1500);
+}
+
+// ---- one setting row -------------------------------------------------------
+function renderRow(entry) {
+  const row = document.createElement("div");
+  row.className = "row";
+
+  const info = document.createElement("div");
+  info.className = "info";
+  const lab = document.createElement("div");
+  lab.className = "label";
+  lab.innerHTML = escapeHtml(entry.label) + '<span class="key">' + escapeHtml(entry.key) + '</span>';
+  info.appendChild(lab);
+  if (entry.help) {
+    const help = document.createElement("div");
+    help.className = "help";
+    help.textContent = entry.help;
+    info.appendChild(help);
+  }
+  row.appendChild(info);
+
+  const control = document.createElement("div");
+  control.className = "control";
+
+  const line = document.createElement("div");
+  line.className = "ctl-line";
+  const field = buildControl(entry);
+
+  // Trash-can undo: reverts the field to its PREVIOUS value (one-step undo).
+  // Shown only when there is a prior value to go back to and the field is
+  // editable. Clicking commits the previous value.
+  const reset = document.createElement("button");
+  reset.className = "reset";
+  reset.title = "Undo — revert to previous value";
+  reset.textContent = "🗑";
+  reset.style.visibility = "hidden";
+  reset.onclick = () => {
+    if (entry.__prev === undefined) return;
+    const target = entry.__prev;
+    entry.__prev = undefined;          // one-step undo: consume the history
+    commit(entry, target, field, /*isUndo=*/true);
+  };
+
+  entry.__field = field;
+  entry.__reset = reset;
+  updateResetVisibility(entry);
+
+  line.appendChild(field);
+  if (entry.edit !== "locked") line.appendChild(reset);
+  control.appendChild(line);
+
+  // edit-class tag / note
+  const note = document.createElement("div");
+  if (entry.edit === "locked") note.innerHTML = '<span class="tag locked">locked</span>';
+  else if (entry.edit === "rebuild") note.innerHTML = '<span class="tag rebuild">rebuild required</span>';
+  else if (entry.edit === "restart") note.innerHTML = '<span class="tag restart">restart required</span>';
+  control.appendChild(note);
+
+  row.appendChild(control);
+  return row;
+}
+
+// Show the trash-can only when there's a previous value to undo to.
+function updateResetVisibility(entry) {
+  if (!entry.__reset) return;
+  const hasPrev = entry.__prev !== undefined &&
+                  String(entry.__prev) !== String(entry.value);
+  entry.__reset.style.visibility = (hasPrev && entry.edit !== "locked")
+    ? "visible" : "hidden";
+}
+
+function buildControl(entry) {
+  const locked = entry.edit === "locked";
+  const t = entry.type;
+
+  if (t === "boolean") {
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.className = "cb";
+    cb.checked = entry.value === "true";
+    cb.disabled = locked;
+    cb.onchange = () => commit(entry, cb.checked ? "true" : "false", cb);
+    return cb;
+  }
+
+  if (t === "enum") {
+    const sel = document.createElement("select");
+    sel.disabled = locked;
+    for (const opt of (entry.options || [])) {
+      const o = document.createElement("option");
+      o.value = opt; o.textContent = opt;
+      if (opt === entry.value) o.selected = true;
+      sel.appendChild(o);
+    }
+    sel.onchange = () => commit(entry, sel.value, sel);
+    return sel;
+  }
+
+  if (t === "text") {
+    const ta = document.createElement("textarea");
+    ta.rows = 4; ta.value = entry.value; ta.disabled = locked;
+    ta.dataset.prev = entry.value;
+    ta.onchange = () => commit(entry, ta.value, ta);
+    return ta;
+  }
+
+  // integer / float / string / path -> text input
+  const inp = document.createElement("input");
+  inp.type = "text"; inp.value = entry.value; inp.disabled = locked;
+  inp.dataset.prev = entry.value;
+
+  // Character filtering for numeric fields: strip disallowed chars on input.
+  if (t === "integer" || t === "float") {
+    const allowed = t === "integer" ? /[^0-9-]/g : /[^0-9.\-]/g;
+    inp.addEventListener("input", () => {
+      const clean = inp.value.replace(allowed, "");
+      if (clean !== inp.value) inp.value = clean;
+    });
+  }
+  // Commit on Enter or blur/change.
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); });
+  inp.onchange = () => commit(entry, inp.value, inp);
+  return inp;
+}
+
+// ---- commit a change to the server ----------------------------------------
+async function commit(entry, value, field, isUndo) {
+  try {
+    const r = await fetch(api("/config/" + entry.key), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: value }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      flash(field, false);
+      revert(entry, field);
+      return;
+    }
+    // Success: server returns the resolved value (blank -> default).
+    const oldValue = entry.value;
+    entry.value = data.value !== undefined ? data.value : value;
+    // Record the value we just moved away from so the trash-can can undo to
+    // it (one-step undo). Skip when this commit IS the undo — the click
+    // already consumed the history so the button hides afterward.
+    if (!isUndo && String(oldValue) !== String(entry.value)) entry.__prev = oldValue;
+    if (field.type === "checkbox") field.checked = entry.value === "true";
+    else if ("value" in field) field.value = entry.value;
+    if ("dataset" in field) field.dataset.prev = entry.value;
+    // Update restart/rebuild note from response flags, trash-can, and (for
+    // embedding keys) the embedding panel's needs-update indicator.
+    updateNote(entry, data);
+    updateResetVisibility(entry);
+    if (entry.key.indexOf("desired_embedding") === 0) refreshEmbedding();
+    if (entry.key === "desired_port" || entry.key === "bind") refreshRestart();
+    flash(field, true);
+  } catch (e) {
+    flash(field, false);
+    revert(entry, field);
+  }
+}
+
+function revert(entry, field) {
+  const prev = field.dataset ? field.dataset.prev : undefined;
+  if (field.type === "checkbox") field.checked = entry.value === "true";
+  else if (prev !== undefined) field.value = prev;
+}
+
+function updateNote(entry, data) {
+  const note = entry && entry.__noteEl;
+  // (Notes are static per edit-class; nothing dynamic needed for now.)
+}
+
+function flash(field, ok) {
+  const cls = ok ? "flash-ok" : "flash-err";
+  field.classList.add(cls);
+  setTimeout(() => field.classList.remove(cls), 800);
+}
+
+// ---- live status + activity via SSE ---------------------------------------
+function connectEvents() {
+  let es;
+  try {
+    es = new EventSource(api("/events"));
+  } catch (e) {
+    return;
+  }
+  es.addEventListener("stats", (ev) => {
+    try { updateStats(JSON.parse(ev.data)); } catch (e) {}
+    // Refresh the embedding banner if that tab is open, so re-embed progress
+    // and completion show live without a manual poll.
+    if (activeSection === "embedding") refreshEmbedding();
+  });
+  es.addEventListener("activity", (ev) => {
+    try { addActivity(JSON.parse(ev.data).line); } catch (e) {}
+  });
+  es.onerror = () => {
+    setServerBadge(false);
+    // EventSource auto-reconnects; just reflect the state.
+  };
+}
+
+function updateStats(s) {
+  setServerBadge((s.status || "") === "running");
+  const badges = document.getElementById("badges");
+  // Rebuild all badges: server + one per table + version.
+  badges.innerHTML = "";
+  const sb = document.createElement("span");
+  sb.className = "badge ok"; sb.textContent = "Server: running";
+  sb.id = "server-badge";
+  badges.appendChild(sb);
+  const tables = s.tables || {};
+  for (const name of Object.keys(tables)) {
+    const b = document.createElement("span");
+    b.className = "badge";
+    b.textContent = name + ": " + tables[name].toLocaleString();
+    badges.appendChild(b);
+  }
+  if (s.version) {
+    const v = document.createElement("span");
+    v.className = "badge"; v.textContent = "v" + s.version;
+    badges.appendChild(v);
+  }
+}
+
+function setServerBadge(up) {
+  const b = document.getElementById("server-badge");
+  if (!b) return;
+  b.className = "badge " + (up ? "ok" : "down");
+  b.textContent = up ? "Server: running" : "Server: disconnected";
+}
+
+const MAX_ACTIVITY = 200;
+function addActivity(line) {
+  if (!line) return;
+  const ul = document.getElementById("activity");
+  const li = document.createElement("li");
+  li.textContent = line;
+  ul.appendChild(li);
+  while (ul.children.length > MAX_ACTIVITY) ul.removeChild(ul.firstChild);
+  ul.scrollTop = ul.scrollHeight;  // auto-scroll to newest
+}
+
+// ---- util ------------------------------------------------------------------
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
+// ---- boot ------------------------------------------------------------------
+loadConfig();
+connectEvents();
+</script>
+</body>
+</html>

@@ -30,8 +30,14 @@ struct Config {
     // after config load, load_config() falls bind back to "127.0.0.1" so
     // the daemon always has at least one listener.
     bool        socket_enabled  = true;   // AF_UNIX listener at resolved_socket_path()
-    std::string bind_address   = "";  // empty = no TCP listener
+    bool        tcp_enabled    = true;    // TCP listener on bind_address:port
+    std::string bind_address   = "127.0.0.1";  // TCP bind address
     int         port           = 8432;  // only meaningful when bind_address is set
+    // Editable target port the dashboard writes. The daemon binds `port`, but
+    // on startup (absent a --port CLI override) it rectifies `port` :=
+    // `desired_port` so a UI port change is adopted by ANY restart path, not
+    // just the dashboard button. 0 = "same as port" (seeded on first load).
+    int         desired_port   = 0;
     std::string server_name;   // hostname for cpp-httplib (e.g. "ragger.local")
 
     // --- Storage ---
@@ -49,6 +55,16 @@ struct Config {
     // blob written to the DB. Tracked in the settings table for drift
     // protection — a whole DB must use one type (model+type are paired).
     std::string embedding_vector_type = "f16";
+
+    // --- Desired embedding identity (staged target for re-embedding) -------
+    // Editable via dashboard/CLI. The CURRENT identity above is what the
+    // stored vectors actually are (written by the drift guard / rebuild) and
+    // is read-only. When desired != current the DB "needs re-embedding"; an
+    // explicit update re-encodes everything and promotes current := desired.
+    // Empty string means "same as current" (seeded on first load).
+    std::string desired_embedding_model       = "";
+    int         desired_embedding_dimensions  = 0;    // 0 = same as current
+    std::string desired_embedding_vector_type = "";   // "" = same as current
 
     // --- Search ---
     int   default_search_limit = 5;
@@ -252,5 +268,11 @@ int reload_config();
 /// (resolved via PATH) if never set or unresolvable.
 void set_executable_path(const std::string& argv0);
 const std::string& executable_path();
+
+/// Full argv captured at startup, used to re-exec the daemon in place for an
+/// in-process restart (e.g. after a port change from the dashboard). Set once
+/// from main(); empty until then.
+void set_full_argv(int argc, char** argv);
+const std::vector<std::string>& full_argv();
 
 } // namespace ragger

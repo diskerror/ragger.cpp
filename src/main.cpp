@@ -29,6 +29,7 @@
 #include "ragger/auth.h"
 #include "ragger/client.h"
 #include "ragger/config.h"
+#include "ragger/config_access.h"
 #include "ragger/export.h"
 #include "ragger/import.h"
 #include "ragger/inference.h"
@@ -218,6 +219,8 @@ static std::pair<std::string, bool> provision_user(
 int main(int argc, char **argv) {
     // Record our own path so embedding can be spawned as `ragger embed`.
     if (argc > 0) ragger::set_executable_path(argv[0]);
+    // Record full argv so the daemon can re-exec itself in place (restart).
+    ragger::set_full_argv(argc, argv);
 
     Diskerror::ProgramOptions opts(CLI_DESCRIPTION);
     opts.add_options()
@@ -257,6 +260,9 @@ int main(int argc, char **argv) {
                 "JSONL file ({text, tags?, timestamp?} per line)")
             // admin flags removed — sudo is the admin gate
             ("yes,y", CLI_YES)
+            ("all,a", "config get: show all settings")
+            ("json,j", "config get: format output as JSON")
+            ("browser,b", "dashboard: open the URL in the default browser")
             ("embeddings,e", CLI_EMBEDDINGS)
             ("missing", "rebuild-phon: only fill rows with a NULL phon column")
             ("output,o", Diskerror::po::value<std::string>(), "Output file");
@@ -320,7 +326,8 @@ int main(int argc, char **argv) {
 
     // CLI overrides
     std::string host = opts.count("host") ? opts["host"].as<std::string>() : cfg.bind_address;
-    int port = opts.count("port") ? opts["port"].as<int>() : cfg.port;
+    const bool port_overridden = opts.count("port") > 0;
+    int port = port_overridden ? opts["port"].as<int>() : cfg.port;
     std::string db_path = cfg.resolved_db_path();
     int min_chunk_size = opts.count("min-chunk-size")
                              ? opts["min-chunk-size"].as<int>()
@@ -334,14 +341,99 @@ int main(int argc, char **argv) {
         }
         else if (command == "serve") {
             const auto &cfg = ragger::config();
+
+            // Create the memory store first so the DB + schema exist. This is
+            // also what the one-time settings.ini migration and the port
+            // rectify below need in place.
             std::unique_ptr<ragger::RaggerMemory> mem_ptr;
-            // Single-user mode only
             mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path);
             auto &memory = *mem_ptr;
             Diskerror::logger::info(std::format(MSG_LOADED_MEMORIES, memory.count()));
 
+            // One-time legacy config migration: seed the DB `settings` table
+            // from settings.ini (if present and not already migrated), retire
+            // the file, then re-overlay so the imported values take effect this
+            // run. Idempotent via the DB `ini_migrated` marker.
+            int imported = ragger::migrate_ini_to_db(db_path);
+            if (imported > 0) {
+                Diskerror::logger::info(std::format(
+                    "Migrated {} setting(s) from settings.ini into the DB; "
+                    "renamed settings.ini -> settings.ini.migrated", imported));
+                ragger::overlay_settings_from_db(ragger::mutable_config(),
+                                                 cfg.resolved_db_path());
+            }
+
+            // Startup port rectify: unless --port was given on the CLI, adopt
+            // the dashboard's desired_port into the committed port before
+            // binding. This makes ANY restart path (service manager, crash
+            // respawn, bare `ragger serve`) pick up a UI port change — not
+            // just the dashboard's Restart button. A --port override is
+            // transient: it binds the given port but leaves desired_port
+            // untouched, so the next plain restart falls back to desired.
+            if (!port_overridden && cfg.desired_port != 0 &&
+                cfg.desired_port != cfg.port) {
+                int adopted = cfg.desired_port;
+                Diskerror::logger::info(std::format(
+                    "Startup port rectify: adopting desired_port {} (was {})",
+                    adopted, cfg.port));
+                auto r = ragger::set_config_persisted("port", std::to_string(adopted),
+                                                      /*allow_locked=*/true);
+                if (r.has_value()) {
+                    port = adopted;  // bind the adopted port this run
+                } else {
+                    Diskerror::logger::error(std::format(
+                        "Failed to persist rectified port (err={}); binding existing port",
+                        static_cast<int>(r.error())));
+                }
+            }
+
+            // Keep the live config's `port` honest: it must reflect the port
+            // actually being bound this run (the CLI override when present, or
+            // the rectified/committed value otherwise), NOT persist it. The
+            // dashboard's read-only "TCP Port" field reads this, so without
+            // this a --port override would show the stale DB value. desired_port
+            // is a separate field and is left untouched.
+            ragger::mutable_config().port = port;
+
             ragger::Server server(memory, host, port);
-            server.run();
+            bool restart = server.run();
+
+            if (restart) {
+                // In-place re-exec: rebind listeners with the current config
+                // (e.g. a new port). Destroy the server/memory first so the
+                // socket + DB handles are released before the new image binds.
+                mem_ptr.reset();
+                const auto& saved_argv = ragger::full_argv();
+                if (!saved_argv.empty()) {
+                    // Strip any --host/--port CLI overrides from the replayed
+                    // argv so the restarted daemon takes host/port from config
+                    // (the DB, which now holds the new port the dashboard set).
+                    // Without this, a CLI -p would pin the OLD port on re-exec.
+                    std::vector<std::string> filtered;
+                    for (size_t i = 0; i < saved_argv.size(); ++i) {
+                        const std::string& a = saved_argv[i];
+                        if (a == "-p" || a == "--port" || a == "--host") {
+                            ++i;  // also skip the following value token
+                            continue;
+                        }
+                        if (a.rfind("--port=", 0) == 0 || a.rfind("--host=", 0) == 0 ||
+                            (a.rfind("-p", 0) == 0 && a.size() > 2))  // -p18435
+                            continue;
+                        filtered.push_back(a);
+                    }
+                    std::vector<char*> cargv;
+                    cargv.reserve(filtered.size() + 1);
+                    for (const auto& a : filtered)
+                        cargv.push_back(const_cast<char*>(a.c_str()));
+                    cargv.push_back(nullptr);
+                    Diskerror::logger::info("Re-executing daemon in place for restart");
+                    ::execv(ragger::executable_path().c_str(), cargv.data());
+                    // execv only returns on failure.
+                    Diskerror::logger::critical(std::format(
+                        "re-exec failed: {} — daemon is stopped", std::strerror(errno)));
+                    return 1;
+                }
+            }
 
         }
         else if (command == "search") {
@@ -500,6 +592,166 @@ int main(int argc, char **argv) {
             }
             std::cout << count << "\n";
 
+        }
+        else if (command == "config") {
+            // DB-backed config get/set. Reads/writes the settings table via the
+            // live (already DB-overlaid) config. No daemon required.
+            //
+            //   ragger config                      -> help
+            //   ragger config get -a [-j]          -> all values
+            //   ragger config get <name> [-j]      -> one value
+            //   ragger config set <name> <value>   -> validate + persist
+            auto args = opts.getParams("args");
+            const bool as_json = opts.count("json") > 0;
+
+            auto print_help = []() {
+                std::cout <<
+                    "Usage:\n"
+                    "  ragger config get -a [-j]         Show all settings (‑j = JSON)\n"
+                    "  ragger config get <name> [-j]     Show one setting\n"
+                    "  ragger config set <name> <value>  Change a setting (blank value = default)\n"
+                    "\n"
+                    "Settings:\n";
+                std::string cur_section;
+                for (const auto& m : ragger::lang::config_schema()) {
+                    if (m.section != cur_section) {
+                        cur_section = std::string(m.section);
+                        std::cout << "\n  [" << cur_section << "]\n";
+                    }
+                    std::cout << std::format("    {:<24} {}\n",
+                                             std::string(m.key), std::string(m.help));
+                }
+            };
+
+            if (args.empty()) {                       // bare `config` -> help
+                print_help();
+                return 0;
+            }
+
+            const std::string sub = args[0];
+
+            if (sub == "get") {
+                const auto& cfg = ragger::config();
+                // `-a` OR no name -> all. A name -> that one.
+                std::string name;
+                for (size_t i = 1; i < args.size(); ++i) {
+                    if (args[i] == "-a" || args[i] == "--all") continue;
+                    if (args[i] == "-j" || args[i] == "--json") continue;
+                    name = args[i];
+                    break;
+                }
+                const bool want_all =
+                    name.empty() || opts.count("all") > 0 ||
+                    std::find(args.begin(), args.end(), "-a") != args.end() ||
+                    std::find(args.begin(), args.end(), "--all") != args.end();
+                const bool json_out = as_json ||
+                    std::find(args.begin(), args.end(), "-j") != args.end();
+
+                if (!want_all && !name.empty()) {
+                    auto v = ragger::get_config_value(cfg, name);
+                    if (!v) {
+                        std::cerr << "Unknown config key: " << name << "\n";
+                        return 1;
+                    }
+                    if (json_out)
+                        std::cout << nlohmann::json{{name, *v}}.dump(2) << "\n";
+                    else
+                        std::cout << *v << "\n";
+                    return 0;
+                }
+
+                // All keys.
+                if (json_out) {
+                    nlohmann::json out = nlohmann::json::object();
+                    for (auto key : ragger::all_config_keys()) {
+                        auto v = ragger::get_config_value(cfg, key);
+                        if (v) out[std::string(key)] = *v;
+                    }
+                    std::cout << out.dump(2) << "\n";
+                } else {
+                    for (auto key : ragger::all_config_keys()) {
+                        auto v = ragger::get_config_value(cfg, key);
+                        if (v) std::cout << std::format("{:<24} = {}\n",
+                                                        std::string(key), *v);
+                    }
+                }
+                return 0;
+            }
+            else if (sub == "set") {
+                if (args.size() < 2) {
+                    std::cerr << "Usage: ragger config set <name> <value>\n";
+                    return 1;
+                }
+                const std::string name = args[1];
+                // Value may be empty (reset to default) or contain spaces.
+                std::string value;
+                for (size_t i = 2; i < args.size(); ++i) {
+                    if (i > 2) value += " ";
+                    value += args[i];
+                }
+                auto r = ragger::set_config_persisted(name, value);
+                if (!r) {
+                    switch (r.error()) {
+                        case ragger::ConfigSetError::UnknownKey:
+                            std::cerr << "Unknown config key: " << name << "\n"; break;
+                        case ragger::ConfigSetError::Locked:
+                            std::cerr << "Config key is locked (not user-writable): "
+                                      << name << "\n"; break;
+                        case ragger::ConfigSetError::InvalidValue:
+                            std::cerr << "Invalid value for " << name << ": \""
+                                      << value << "\"\n"; break;
+                    }
+                    return 1;
+                }
+                auto v = ragger::get_config_value(ragger::config(), name);
+                std::cout << name << " = " << (v ? *v : value) << "\n";
+                if (r->restart_required)
+                    std::cout << "(change saved — restart the daemon to apply)\n";
+                if (r->rebuild_required)
+                    std::cout << "(change saved — run 'ragger rebuild-embeddings' to apply)\n";
+                return 0;
+            }
+            else {
+                print_help();
+                return (sub == "help" || sub == "-h" || sub == "--help") ? 0 : 1;
+            }
+        }
+        else if (command == "dashboard") {
+            // Print the dashboard URL (same port as normal access) with the
+            // access token as a query string. -b/--browser also opens it in
+            // the default browser. Access is gated by the token; only a user
+            // with RW access to ~/.ragger can read the token file, so holding
+            // it proves authorization.
+            const auto& cfg = ragger::config();
+
+            // Scheme: HTTPS iff both TLS cert and key are configured.
+            const bool tls = !cfg.tls_cert.empty() && !cfg.tls_key.empty();
+            const std::string scheme = tls ? "https" : "http";
+
+            // Host: prefer an explicit bind address; fall back to localhost.
+            std::string url_host = cfg.bind_address.empty() ? "127.0.0.1"
+                                                            : cfg.bind_address;
+            if (url_host == "0.0.0.0" || url_host == "::") url_host = "127.0.0.1";
+
+            const std::string token = ragger::ensure_token();
+
+            std::string url = std::format("{}://{}:{}/dashboard",
+                                          scheme, url_host, cfg.port);
+            if (!token.empty()) url += "?token=" + token;
+
+            std::cout << url << "\n";
+
+            const bool open_browser = opts.count("browser") > 0;
+            if (open_browser) {
+#if defined(__APPLE__)
+                std::string cmd = "open '" + url + "'";
+#else
+                std::string cmd = "xdg-open '" + url + "' >/dev/null 2>&1 &";
+#endif
+                if (std::system(cmd.c_str()) != 0)
+                    std::cerr << "Could not launch a browser; open the URL above manually.\n";
+            }
+            return 0;
         }
         else if (command == "import-docs") {
             auto args = opts.getParams("args");

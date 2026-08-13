@@ -54,7 +54,7 @@ static inline float f16_to_f32(uint16_t bits) {
     std::memcpy(&h, &bits, sizeof(h));
     return static_cast<float>(h);
 }
-// (Embedding blobs are written by Impl::bind_embedding, which honours the
+// (Embedding blobs are written by Impl::bind_embedding, which honors the
 //  configured storage dtype — f16 or f32. SQLITE_TRANSIENT makes sqlite copy
 //  immediately, so the temporary buffer is safe.)
 
@@ -2769,6 +2769,25 @@ struct SqliteBackend::Impl {
         return c;
     }
 
+    std::vector<std::pair<std::string, int64_t>> table_row_counts() const {
+        // User-facing tables for the dashboard status pane, in display order.
+        static const char* kTables[] = {
+            "turns", "summaries", "turn_summaries", "sessions",
+            "documents", "decisions", "statements", "models",
+        };
+        std::vector<std::pair<std::string, int64_t>> out;
+        for (const char* t : kTables) {
+            try {
+                Stmt s(db, std::string("SELECT COUNT(*) FROM ") + t);
+                if (s.step())
+                    out.emplace_back(t, static_cast<int64_t>(s.column_int(0)));
+            } catch (...) {
+                // Table absent in this schema version — just skip it.
+            }
+        }
+        return out;
+    }
+
     // Total rows across the four embedded tables (turns, summaries, decisions,
     // documents) — i.e. how many rows `rebuild_embeddings()` will re-encode.
     // (count() alone is just summaries, which understates the rebuild scope.)
@@ -3402,6 +3421,8 @@ SearchResponse SqliteBackend::search(const std::string& query, int limit,
 }
 
 int SqliteBackend::count() const { std::lock_guard<std::mutex> lk(pImpl->mu); return pImpl->count(); }
+
+std::vector<std::pair<std::string, int64_t>> SqliteBackend::table_row_counts() const { std::lock_guard<std::mutex> lk(pImpl->mu); return pImpl->table_row_counts(); }
 
 bool SqliteBackend::has_embeddings() const { std::lock_guard<std::mutex> lk(pImpl->mu); return pImpl->has_embeddings(); }
 

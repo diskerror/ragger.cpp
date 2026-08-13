@@ -302,7 +302,7 @@ void test_socket_bind_config() {
     }
 
     ragger::Config cfg1 = ragger::load_config(path1).value();
-    assert(cfg1.bind_address.empty());  // bind should be empty when only socket is set
+    assert(cfg1.bind_address == "127.0.0.1");  // bind defaults to 127.0.0.1
     fs::remove(path1);
 
     // Test: bind + port populate both fields

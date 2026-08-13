@@ -402,6 +402,12 @@ public:
     /// Number of stored memories.
     virtual int count() const = 0;
 
+    /// Row counts for the user-facing tables (turns, summaries,
+    /// turn_summaries, sessions, documents, decisions, statements, models),
+    /// for the dashboard status pane. Ordered, name -> count. Missing tables
+    /// are simply omitted rather than erroring.
+    virtual std::vector<std::pair<std::string, int64_t>> table_row_counts() const = 0;
+
     /// True if any table holds a non-NULL embedding — i.e. the DB has vectors
     /// that an embedding-config change would invalidate. Used by the startup
     /// drift guard to decide between hard-error and re-adopt on an empty DB.

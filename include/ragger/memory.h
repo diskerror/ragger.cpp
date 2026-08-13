@@ -149,6 +149,29 @@ public:
     /// Rebuild embeddings for all documents. Returns doc count.
     int rebuild_embeddings();
 
+    // ---- Embedding identity: current vs desired + re-embed control -------
+    struct EmbeddingStatus {
+        std::string current_model, current_vtype;
+        int         current_dims = 0;
+        std::string desired_model, desired_vtype;
+        int         desired_dims = 0;
+        bool        needs_update = false;   // current != desired
+        bool        reembedding  = false;   // an update is in progress
+    };
+
+    /// Snapshot of current vs desired embedding identity, read from the
+    /// settings table (current) and config (desired).
+    EmbeddingStatus embedding_status();
+
+    /// True while a re-embed is running (search short-circuits on this).
+    bool is_reembedding();
+
+    /// Perform the staged re-embed: set the reembedding flag, re-encode every
+    /// row with an embedder for the DESIRED model, promote current := desired
+    /// in the settings table, swap the live embedder, then clear the flag.
+    /// Returns rows re-encoded. Throws on failure (flag is always cleared).
+    int update_embeddings();
+
     /// Embed only rows whose embedding column is NULL. Returns count.
     int backfill_embeddings();
 

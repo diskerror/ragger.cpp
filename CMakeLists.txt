@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 if(APPLE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
 endif()
-project(ragger VERSION 0.12.1 LANGUAGES CXX)
+project(ragger VERSION 0.13.0 LANGUAGES CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -199,12 +199,26 @@ add_custom_command(
 )
 add_custom_target(generate_default_config DEPENDS "${RAGGER_GENERATED_DIR}/default_config.inc")
 
+# Embed the dashboard HTML/JS into the binary (served from memory by the
+# daemon at /dashboard). web/dashboard.html is the single source of truth.
+add_custom_command(
+    OUTPUT "${RAGGER_GENERATED_DIR}/dashboard_html.inc"
+    COMMAND ${CMAKE_COMMAND}
+            -DSRC=${CMAKE_SOURCE_DIR}/web/dashboard.html
+            -DDST=${RAGGER_GENERATED_DIR}/dashboard_html.inc
+            -P ${CMAKE_SOURCE_DIR}/cmake/embed_html.cmake
+    DEPENDS "${CMAKE_SOURCE_DIR}/web/dashboard.html" "${CMAKE_SOURCE_DIR}/cmake/embed_html.cmake"
+    COMMENT "Embedding web/dashboard.html -> dashboard_html.inc"
+)
+add_custom_target(generate_dashboard_html DEPENDS "${RAGGER_GENERATED_DIR}/dashboard_html.inc")
+
 # ---------------------------------------------------------------------------
 # ragger library (core logic, no main())
 # ---------------------------------------------------------------------------
 add_library(ragger_core STATIC
     src/client.cpp
     src/config.cpp
+    src/config_access.cpp
     src/util/time.cpp
     src/util/fs.cpp
     src/summarizer.cpp
@@ -236,6 +250,7 @@ target_include_directories(ragger_core PRIVATE
     "${RAGGER_GENERATED_DIR}"
 )
 add_dependencies(ragger_core generate_default_config)
+add_dependencies(ragger_core generate_dashboard_html)
 target_compile_definitions(ragger_core PUBLIC
     RAGGER_VERSION="${PROJECT_VERSION}"
     RAGGER_COMMIT="${RAGGER_COMMIT}"

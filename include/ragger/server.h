@@ -20,11 +20,15 @@ public:
                     int port = 8432);
     ~Server();
 
-    /// Start listening (blocks).
-    void run();
+    /// Start listening (blocks). Returns true if a restart was requested
+    /// (POST /restart) — the caller (main) should re-exec the daemon in place.
+    bool run();
 
     /// Request stop (from signal handler or another thread).
     void stop();
+
+    /// True if the last run() ended because a restart was requested.
+    static bool restart_requested();
 
 private:
     struct Impl;
