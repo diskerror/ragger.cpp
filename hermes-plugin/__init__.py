@@ -113,6 +113,52 @@ def _load_ragger_config() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Shared instructions file (single source of truth across all Ragger hosts)
+# ---------------------------------------------------------------------------
+#
+# docs/agent-memory-instructions.md is the canonical policy doc — installers
+# copy it to ~/.ragger/agent-memory-instructions.md and `ragger mcp` also
+# serves it to MCP clients via the `initialize` response. Rather than
+# duplicating its wording in this schema's description (which drifts), we
+# load the file at import time and extract the decision-capture-policy
+# section directly. Falls back to a short static string if the file is
+# missing so the plugin still works standalone.
+
+_INSTRUCTIONS_PATH = Path.home() / ".ragger" / "agent-memory-instructions.md"
+_DECISION_POLICY_FALLBACK = (
+    "For 'decision' entries: capture generously (including generalized "
+    "reusable takeaways, not just narrow pivots), leading with a punchy "
+    "conclusion line, then rationale/scope/source context when known. "
+    "(Fallback text — full policy normally loaded from "
+    "~/.ragger/agent-memory-instructions.md, which was not found.)"
+)
+
+
+def _load_decision_capture_policy() -> str:
+    """Extract the decision-capture-policy section from the shared
+    instructions file so this schema's description stays in sync with
+    docs/agent-memory-instructions.md without copy-pasting text."""
+    try:
+        text = _INSTRUCTIONS_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return _DECISION_POLICY_FALLBACK
+    marker = '### Capture policy for `category: "decision"`'
+    start = text.find(marker)
+    if start == -1:
+        return _DECISION_POLICY_FALLBACK
+    # Section runs until the next "**Do not store" line or next "## " heading.
+    rest = text[start:]
+    end = len(rest)
+    for stop_marker in ("\n**Do not store", "\n## "):
+        idx = rest.find(stop_marker, len(marker))
+        if idx != -1:
+            end = min(end, idx)
+    return rest[:end].strip()
+
+
+_DECISION_CAPTURE_POLICY = _load_decision_capture_policy()
+
+# ---------------------------------------------------------------------------
 # Tool schemas exposed to the Hermes agent
 # ---------------------------------------------------------------------------
 
@@ -144,7 +190,8 @@ STORE_SCHEMA = {
     "description": (
         "Store a fact, decision, preference, or piece of context into semantic memory "
         "for future retrieval. Use for anything worth remembering across conversations: "
-        "user preferences, project decisions, key facts, lessons learned."
+        "user preferences, project decisions, key facts, lessons learned.\n\n"
+        + _DECISION_CAPTURE_POLICY
     ),
     "parameters": {
         "type": "object",
@@ -156,8 +203,10 @@ STORE_SCHEMA = {
             "category": {
                 "type": "string",
                 "description": (
-                    "Memory category: 'fact', 'decision', 'preference', or 'lesson'. "
-                    "Default: 'fact'."
+                    "Free-form label, not a database-enforced enum (Ragger does a plain "
+                    "string match server-side — any string works, but stick to the "
+                    "convention for consistent retrieval). Convention: 'fact', "
+                    "'decision', 'preference', or 'lesson'. Default: 'fact'."
                 ),
             },
         },

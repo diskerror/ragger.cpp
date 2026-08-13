@@ -30,6 +30,42 @@ interface RaggerConfig {
 
 const DEFAULT_SERVER_URL = "http://localhost:8432";
 const TOKEN_PATH = `${process.env.HOME}/.ragger/token`;
+const INSTRUCTIONS_PATH = `${process.env.HOME}/.ragger/agent-memory-instructions.md`;
+
+// ============================================================================
+// Shared instructions file (single source of truth across all Ragger hosts)
+// ============================================================================
+// docs/agent-memory-instructions.md is the canonical policy doc — installers
+// copy it to ~/.ragger/agent-memory-instructions.md and `ragger mcp` also
+// serves it to MCP clients via the `initialize` response. Load it here and
+// extract the decision-capture-policy section instead of duplicating the
+// wording in this file's tool description (which would drift).
+
+const DECISION_POLICY_FALLBACK =
+  "For decisions: capture generously (including generalized reusable takeaways, not just narrow pivots), " +
+  "leading with a punchy conclusion, then rationale/scope/source context when known. " +
+  "(Fallback text — full policy normally loaded from ~/.ragger/agent-memory-instructions.md, which was not found.)";
+
+function loadDecisionCapturePolicy(): string {
+  let text: string;
+  try {
+    text = readFileSync(INSTRUCTIONS_PATH, "utf-8");
+  } catch {
+    return DECISION_POLICY_FALLBACK;
+  }
+  const marker = '### Capture policy for `category: "decision"`';
+  const start = text.indexOf(marker);
+  if (start === -1) return DECISION_POLICY_FALLBACK;
+  const rest = text.slice(start);
+  let end = rest.length;
+  for (const stopMarker of ["\n**Do not store", "\n## "]) {
+    const idx = rest.indexOf(stopMarker, marker.length);
+    if (idx !== -1) end = Math.min(end, idx);
+  }
+  return rest.slice(0, end).trim();
+}
+
+const DECISION_CAPTURE_POLICY = loadDecisionCapturePolicy();
 
 // ============================================================================
 // Token Management
@@ -415,7 +451,8 @@ const raggerPlugin = {
         name: "memory_store",
         label: "Memory Store",
         description:
-          "Save important information to long-term memory. Use for preferences, facts, decisions, lessons learned.",
+          "Save important information to long-term memory. Use for preferences, facts, decisions, lessons learned.\n\n" +
+          DECISION_CAPTURE_POLICY,
         parameters: {
           type: "object",
           required: ["text"],
@@ -425,7 +462,7 @@ const raggerPlugin = {
               type: "object",
               properties: {
                 source: { type: "string", description: "Where this was learned" },
-                category: { type: "string", description: "Category: preference, fact, decision, lesson, entity" },
+                category: { type: "string", description: "Free-form label, not a database-enforced enum. Convention: preference, fact, decision, lesson, entity" },
                 tags: { type: "array", items: { type: "string" }, description: "Tags for filtering" },
               },
             },
