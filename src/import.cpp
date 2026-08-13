@@ -135,6 +135,26 @@ std::vector<ImportChunk> chunk_markdown(const std::string& raw_text, int min_chu
     return chunks;
 }
 
+std::string clean_document_text(const std::string& text) {
+    std::istringstream lines(text);
+    std::string line;
+    std::string out;
+    bool first = true;
+    while (std::getline(lines, line)) {
+        // Strip a trailing \r left over from CRLF input.
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        // Strip leading spaces and '#' characters, in any mix.
+        size_t start = line.find_first_not_of(" #");
+        line = (start == std::string::npos) ? std::string() : line.substr(start);
+        // Strip trailing spaces.
+        while (!line.empty() && line.back() == ' ') line.pop_back();
+        if (!first) out += "\n";
+        out += line;
+        first = false;
+    }
+    return out;
+}
+
 namespace {
 
 // Structural/metadata keys we never want as prose — skip their string

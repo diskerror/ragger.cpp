@@ -25,6 +25,19 @@ std::string heading_text(const std::string& line);
 /// min_chunk_size: minimum chars before starting a new chunk.
 std::vector<ImportChunk> chunk_markdown(const std::string& text, int min_chunk_size);
 
+/// Final line-level cleanup applied to a chunk's text right before it's
+/// stored in the `documents` table (issue: Markdown heading/list noise
+/// bloating L5 rows). For every line: strip leading spaces and '#'
+/// characters (in any mix — "  ## Heading" -> "Heading", "### " ->
+/// "", a bare "#" -> ""), and strip trailing spaces. Newlines and blank
+/// lines are preserved as structure; this only touches the run of
+/// leading/trailing characters on each line, never the line count.
+/// Deliberately separate from chunk_markdown() itself: the chunker's own
+/// heading-block text is still needed verbatim for section-breadcrumb
+/// logic and is covered by existing tests, so this is a distinct pass
+/// callers apply only when the destination is a stored document body.
+std::string clean_document_text(const std::string& text);
+
 /// Walk a JSON document and concatenate every string leaf worth keeping
 /// into plain text (double-newline separated), preferring values under
 /// keys that read as prose ("text", "content", "description",

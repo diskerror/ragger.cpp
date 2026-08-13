@@ -154,6 +154,26 @@ void test_tiny_file() {
 }
 
 // -----------------------------------------------------------------------
+// clean_document_text tests
+// -----------------------------------------------------------------------
+
+void test_clean_document_text() {
+    using ragger::clean_document_text;
+    assert(clean_document_text("## Heading") == "Heading");
+    assert(clean_document_text("  ### Sub  ") == "Sub");
+    assert(clean_document_text("#") == "");
+    assert(clean_document_text("   #   ") == "");
+    assert(clean_document_text("No markup here") == "No markup here");
+    assert(clean_document_text("  leading spaces") == "leading spaces");
+    assert(clean_document_text("trailing spaces   ") == "trailing spaces");
+    assert(clean_document_text("line1\n## line2\nline3   \n") ==
+           "line1\nline2\nline3");
+    assert(clean_document_text("###No space heading") == "No space heading");
+    assert(clean_document_text("mid # hash stays") == "mid # hash stays");
+    assert(clean_document_text("line1\r\n## line2\r\n") == "line1\nline2");
+}
+
+// -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
 
@@ -171,6 +191,7 @@ int main() {
     test_base64_stripping();
     test_whitespace_collapsing();
     test_tiny_file();
+    test_clean_document_text();
 
     std::println("test_import: all passed");
     return 0;

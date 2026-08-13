@@ -94,7 +94,7 @@ static void do_import(ragger::RaggerMemory &memory,
     texts.reserve(total);
     for (int i = 0; i < total; ++i) {
         ragger::DocumentChunk doc;
-        doc.text        = chunks[i].text;
+        doc.text        = ragger::clean_document_text(chunks[i].text);
         doc.title       = doc_title;
         doc.tags        = tags;
         doc.year        = year;
@@ -104,7 +104,7 @@ static void do_import(ragger::RaggerMemory &memory,
 
         int id = memory.store_document(doc, /*defer_embedding=*/true);
         ids.push_back(id);
-        texts.push_back(chunks[i].text);
+        texts.push_back(doc.text);
         std::println(ragger::lang::MSG_IMPORT_CHUNK, (i + 1), total, std::to_string(id));
     }
 
