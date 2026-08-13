@@ -3,6 +3,19 @@
  *
  * Defines the contract for storage implementations (e.g., SQLite).
  * Allows swapping implementations without changing client code.
+ *
+ * KNOWN GAP (engine-swap TODO, not urgent — functionality first):
+ * UserStore (user_store.cpp — auth `users` table AND the `settings`
+ * table backing the dashboard/config-DB work) and export.cpp (`ragger
+ * export`, which reads `sqlite_master`/`PRAGMA table_info` directly)
+ * both bypass this interface and hand-roll raw sqlite3_* calls of their
+ * own instead of going through StorageBackend. They're the two pieces
+ * that would need a real abstraction (or a rewrite) before a different
+ * DB engine could be dropped in — everything else (main.cpp, server.cpp,
+ * mcp.cpp, RaggerMemory) already goes through this interface cleanly.
+ * StatsLogger is intentionally exempt from this — separate
+ * SQLite-specific instrumentation DB by design, not part of the
+ * swappable storage layer.
  */
 #pragma once
 
