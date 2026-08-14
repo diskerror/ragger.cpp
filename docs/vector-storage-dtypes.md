@@ -93,3 +93,53 @@ and int8 measured relative to that f16 store.
   Re-run `bench_vector_quant.py` against your own DB before switching a large
   or accuracy-critical store to int8; a domain with tightly clustered
   embeddings can lose more recall to quantization than this general corpus did.
+
+## Sub-byte formats (int4, binary) — evaluated, not shipped
+
+`bench_vector_quant.py` also simulates int4 (0.5 B/dim, 15 levels, per-vector
+scale) and binary (1 bit/dim = 0.125 B/dim, sign quantization / Hamming). These
+are **not implemented in the C++ codec** — the benchmark measures them in
+Python to decide whether they're worth building. They are not.
+
+**Raw recall@10** (rank entirely on the stored dtype, 18.6k MiniLM vectors):
+
+| dtype  | size    | recall@10 | mean cos err |
+|--------|---------|-----------|--------------|
+| int8   | 7.0 MB  | 0.9770    | 4.3e-05 |
+| int4   | 3.5 MB  | 0.8810    | 1.4e-02 |
+| binary | 0.9 MB  | 0.6332    | 2.1e-01 |
+
+int4 loses ~12 points and binary ~37 points of recall@10 — far too lossy to
+rank on directly. In practice low-bit indexes are always used **two-stage**:
+fetch `oversample × k` candidates cheaply on the small vectors, then rerank
+that shortlist with full-precision f32. With oversample ×4 / ×8 (f32 rerank;
+the ~0.985 ceiling is a duplicate-vector tie-breaking artifact, not real loss):
+
+| dtype  | raw    | rerank ×4 | rerank ×8 |
+|--------|--------|-----------|-----------|
+| int8   | 0.9770 | 0.9878    | 0.9858 |
+| int4   | 0.8810 | 0.9833    | 0.9808 |
+| binary | 0.6332 | 0.9028    | 0.9485 |
+
+**Why they're not worth building for Ragger:**
+
+- The two-stage recovery **requires keeping f32 (or f16) vectors around to
+  rerank with.** That defeats the storage win — you'd store *both* the tiny
+  vectors and the full-precision set. It only pays off when the low-bit index
+  lives in RAM and the f32 set lives on slower/cheaper storage, or is
+  recomputed on demand. Ragger keeps one in-memory `Eigen::MatrixXf` and does a
+  brute-force cosine scan; there is no separate ANN index for a binary
+  first-stage to accelerate, and no second stage to rerank into.
+- At Ragger's corpus scale (thousands to low tens-of-thousands of vectors) the
+  f16 matrix is already small (~14 MB here) and the scan is sub-millisecond.
+  The problem sub-byte formats solve — RAM pressure and scan cost on
+  100M-vector indexes — isn't one Ragger has.
+- int8 already captures the useful part of the curve: 4× smaller than f32 for
+  ~2% recall, no rerank stage needed. Below that, you pay real accuracy or real
+  architectural complexity (a two-tier retrieve+rerank pipeline) for space
+  Ragger isn't short on.
+
+If Ragger ever grows a true ANN index (HNSW/IVF) over a much larger corpus,
+revisit binary-first + f32-rerank then — that's the regime where it wins. Until
+there's telemetry showing the f16 scan is a bottleneck, it's speculative
+complexity. Re-run the benchmark to regenerate these numbers on any corpus.

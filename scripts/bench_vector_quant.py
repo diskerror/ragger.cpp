@@ -76,8 +76,33 @@ def rt_int8(X):
     return out
 
 
-ROUNDTRIPS = {"f32": rt_f32, "f16": rt_f16, "bf16": rt_bf16, "int8": rt_int8}
-BYTES_PER_DIM = {"f32": 4, "f16": 2, "bf16": 2, "int8": 1}
+def rt_int4(X):
+    # symmetric per-vector int4: 15 levels, scale = max|x|/7, clip to [-7,7].
+    # (SIMULATION ONLY — no C++ int4 codec yet. Two values pack per byte on
+    #  disk, so 0.5 B/dim; here we just measure the dequantized ranking loss.)
+    out = np.empty_like(X)
+    for i in range(X.shape[0]):
+        v = X[i]
+        maxabs = np.max(np.abs(v))
+        scale = (maxabs / 7.0) if maxabs > 0 else 1.0
+        q = np.clip(np.round(v / scale), -7, 7)
+        out[i] = q.astype(np.float32) * scale
+    return out
+
+
+def rt_binary(X):
+    # 1-bit sign quantization (Hamming-distance retrieval). Ranking by cosine
+    # on the ±1 sign vectors is monotonic with Hamming distance, so cosine on
+    # this reconstruction faithfully reproduces a real binary index's ordering.
+    # (SIMULATION ONLY — no C++ bit codec yet.) 1 bit/dim = 0.125 B/dim.
+    s = np.where(X >= 0.0, 1.0, -1.0).astype(np.float32)
+    return s
+
+
+ROUNDTRIPS = {"f32": rt_f32, "f16": rt_f16, "bf16": rt_bf16,
+              "int8": rt_int8, "int4": rt_int4, "binary": rt_binary}
+BYTES_PER_DIM = {"f32": 4, "f16": 2, "bf16": 2, "int8": 1,
+                 "int4": 0.5, "binary": 0.125}
 
 
 def normalize(X):
@@ -93,6 +118,8 @@ def main():
     ap.add_argument("--k", type=int, default=10)
     ap.add_argument("--queries", type=int, default=300)
     ap.add_argument("--dims", type=int, default=384)
+    ap.add_argument("--rerank", type=int, default=4,
+                    help="oversample factor for the two-stage rerank pass")
     args = ap.parse_args()
 
     con = sqlite3.connect(args.db)
@@ -132,13 +159,16 @@ def main():
         sims[qi] = -np.inf
         ref_topk[qi] = set(np.argpartition(-sims, args.k)[: args.k])
 
+    # -- Part 1: raw recall (rank purely on the quantized store) ---------
+    print("RAW recall (rank entirely on the stored dtype):\n")
     print(f"{'dtype':>6} {'B/dim':>6} {'size':>8} {'recall@k':>10} "
           f"{'mean cos err':>13} {'mean |Δrank|':>13}")
     print("-" * 62)
+    QN = {}  # cache normalized quantized matrices for part 2
     for name, fn in ROUNDTRIPS.items():
         Q = normalize(fn(X))
-        recalls, coserrs, rankshift = [], [], []
-        # cosine error vs reference, averaged over all vectors
+        QN[name] = Q
+        recalls, rankshift = [], []
         coserr_all = float(np.mean(np.abs(np.sum(ref * Q, axis=1) - 1.0)))
         for qi in qidx:
             sims = Q @ Q[qi]
@@ -147,7 +177,6 @@ def main():
             got = set(order)
             true = ref_topk[qi]
             recalls.append(len(got & true) / args.k)
-            # rank displacement of the true #1 neighbor
             true1 = max(true, key=lambda j: ref[j] @ ref[qi])
             full_order = np.argsort(-sims)
             pos = int(np.where(full_order == true1)[0][0])
@@ -156,6 +185,32 @@ def main():
         print(f"{name:>6} {BYTES_PER_DIM[name]:>6} {size_kb:>7.0f}K "
               f"{np.mean(recalls):>10.4f} {coserr_all:>13.2e} "
               f"{np.mean(rankshift):>13.3f}")
+
+    # -- Part 2: oversample + f32 rerank (how binary/int4 are used) ------
+    # Retrieve top-(rerank*k) candidates cheaply on the quantized store, then
+    # rescore just those with the full-precision reference and keep the top-k.
+    # This is the standard two-stage pipeline; it recovers most of the recall
+    # a low-bit index loses, at the cost of keeping f32 vectors around to
+    # rerank with (so it only saves query/scan cost, not f32 storage — unless
+    # the f32 set lives elsewhere / is recomputed).
+    print(f"\nOVERSAMPLE x{args.rerank} + f32 rerank "
+          f"(fetch {args.rerank*args.k} on the stored dtype, rescore with f32):\n")
+    print(f"{'dtype':>6} {'recall@k':>10}")
+    print("-" * 18)
+    for name in ROUNDTRIPS:
+        Q = QN[name]
+        cand_k = min(args.rerank * args.k, n - 1)
+        recalls = []
+        for qi in qidx:
+            sims = Q @ Q[qi]
+            sims[qi] = -np.inf
+            cand = np.argpartition(-sims, cand_k)[: cand_k]
+            # rerank candidates with the full-precision reference
+            rsc = ref[cand] @ ref[qi]
+            top = cand[np.argsort(-rsc)[: args.k]]
+            got = set(top)
+            recalls.append(len(got & ref_topk[qi]) / args.k)
+        print(f"{name:>6} {np.mean(recalls):>10.4f}")
 
 
 if __name__ == "__main__":
