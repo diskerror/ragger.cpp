@@ -295,18 +295,16 @@ struct SqliteBackend::Impl {
 
         // Users, settings, and session tables — credentials (for read-only
         // document access) plus web/chat session persistence. These are a
-        // separate concern from the v2 memory tables ("out of scope" in
-        // scripts/schema_v2_fading_memory.sql); one declarative definition,
-        // shared with the DB-only constructor.
+        // separate concern from the v2 memory tables; one declarative
+        // definition, shared with the DB-only constructor.
         create_user_schema();
 
         // ---- v2 fading-memory schema (issue #33): turns / summaries /
         //      decisions / documents / models, with FTS5 (issue #49).
-        //      See scripts/schema_v2_fading_memory.sql for the reference DDL.
         //      Pre-v2 data is exported out-of-band, not migrated in place.
 
-        // models — lookup table; turns + summaries reference it. v4 adds
-        // created_at (see scripts/schema_v4.sql). The column sits at the end so
+        // models — lookup table; turns + summaries reference it. created_at
+        // was added in a later schema revision; the column sits at the end so
         // it maps cleanly to the canonical (id, keys, data, timestamps) order.
         exec(R"(
             CREATE TABLE IF NOT EXISTS models (
@@ -707,8 +705,8 @@ struct SqliteBackend::Impl {
 
     /// Users + settings tables — declarative, no in-place migration
     /// (single-user app; pre-v2 data is exported out-of-band). `users` mirrors
-    /// the reference DDL (scripts/schema_v2_fading_memory.sql) plus
-    /// `password_hash` for credentialed access. Shared by both constructors.
+    /// the reference DDL plus `password_hash` for credentialed access.
+    /// Shared by both constructors.
     void create_user_schema() {
         exec(R"(
             CREATE TABLE IF NOT EXISTS users (
