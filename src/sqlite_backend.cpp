@@ -9,6 +9,7 @@
 #include "ragger/util/time.h"
 #include "ragger/util/sqlite.h"
 #include "ragger/double_metaphone.h"
+#include "ragger/vector_codec.h"
 #include "diskerror/logger.h"
 #include <format>
 #include "nlohmann_json.hpp"
@@ -39,24 +40,11 @@ using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 // -----------------------------------------------------------------------
-// IEEE half-precision (f16) helpers — embeddings are stored as f16 to
-// halve blob size; all in-memory math stays float32.
-// _Float16 is native on Apple Silicon.
+// Embedding storage dtype conversions live in ragger/vector_codec.h. Blobs
+// are written by Impl::bind_embedding (which honors the configured storage
+// dtype) and read by Impl::decode_embedding_blob. Headered blobs are
+// self-describing; legacy raw f16/f32 blobs still decode by size.
 // -----------------------------------------------------------------------
-static inline uint16_t f32_to_f16(float f) {
-    _Float16 h = static_cast<_Float16>(f);
-    uint16_t bits;
-    std::memcpy(&bits, &h, sizeof(bits));
-    return bits;
-}
-static inline float f16_to_f32(uint16_t bits) {
-    _Float16 h;
-    std::memcpy(&h, &bits, sizeof(h));
-    return static_cast<float>(h);
-}
-// (Embedding blobs are written by Impl::bind_embedding, which honors the
-//  configured storage dtype — f16 or f32. SQLITE_TRANSIENT makes sqlite copy
-//  immediately, so the temporary buffer is safe.)
 
 // -----------------------------------------------------------------------
 // Free helpers (no db access needed)
@@ -94,25 +82,19 @@ struct SqliteBackend::Impl {
     sqlite3*    db       = nullptr;
     Embedder*   embedder = nullptr;    // nullable — null for DB-only (user mgmt) mode
     std::string db_path;
-    bool        store_f16_ = true;     // on-disk vector dtype (config vector_type)
+    // On-disk vector dtype (from config vector_type). All in-memory math is
+    // f32; this only governs how embeddings are packed into the stored BLOB.
+    vector_codec::VectorType vtype_ = vector_codec::VectorType::F16;
 
     // Bind a float vector as the embedding blob in the configured storage
-    // dtype: f16 (2 bytes/dim, default) or f32 (4 bytes/dim). The decode side
-    // (ensure_cache) distinguishes them by blob size, so the dtype is
-    // self-describing on read.
+    // dtype (f32/f16/bf16/int8). Blobs are self-describing (headered), so the
+    // decode side reads them back regardless of the current config setting.
     void bind_embedding(sqlite3_stmt* s, int idx,
                         const std::vector<float>& emb) const {
-        if (store_f16_) {
-            std::vector<uint16_t> h(emb.size());
-            for (size_t i = 0; i < emb.size(); ++i) h[i] = f32_to_f16(emb[i]);
-            sqlite3_bind_blob(s, idx, h.data(),
-                              static_cast<int>(h.size() * sizeof(uint16_t)),
-                              SQLITE_TRANSIENT);
-        } else {
-            sqlite3_bind_blob(s, idx, emb.data(),
-                              static_cast<int>(emb.size() * sizeof(float)),
-                              SQLITE_TRANSIENT);
-        }
+        std::vector<uint8_t> blob = vector_codec::encode(vtype_, emb);
+        sqlite3_bind_blob(s, idx, blob.data(),
+                          static_cast<int>(blob.size()),
+                          SQLITE_TRANSIENT);
     }
 
     // Embedding cache for the summaries table — invalidated on writes.
@@ -170,31 +152,28 @@ struct SqliteBackend::Impl {
     // never re-lock, so no recursive deadlock is possible.
     mutable std::mutex mu;
 
-    // Decode an embedding BLOB into a float vector of `dims`, choosing f16 vs
-    // f32 by the blob's actual byte length (self-describing), NOT by the
-    // store_f16_ config flag. This makes a DB readable even if its stored dtype
-    // differs from the current config (e.g. dtype changed without a rebuild).
-    //   dims*2 bytes  -> f16   |   dims*4 bytes -> f32
-    // Anything else (NULL, deferred-but-unbackfilled row, corruption, or a
-    // dimension mismatch) yields a zero vector; the first such row per cache
-    // load is logged once as a warning (table + row id).
+    // Decode an embedding BLOB into a float vector of `dims`. Delegates to
+    // vector_codec::decode, which reads self-describing headered blobs
+    // (f32/f16/bf16/int8) AND legacy raw f16/f32 blobs (distinguished by byte
+    // length) — so a DB stays readable even if its stored dtype differs from
+    // the current config, and old pre-header databases keep working until a
+    // rebuild-embeddings rewrites them. On any failure (NULL, deferred-but-
+    // unbackfilled row, corruption, or a dimension mismatch) a zero vector is
+    // returned; the first such row per cache load is logged once (table + id).
     std::vector<float> decode_embedding_blob(const void* blob, int blob_bytes,
                                              int dims, const char* table,
                                              int row_id, bool& warned) {
-        std::vector<float> emb(dims, 0.0f);
-        if (blob == nullptr) return emb;  // deferred row; silent (expected)
-        if (blob_bytes == dims * static_cast<int>(sizeof(uint16_t))) {
-            const uint16_t* h = static_cast<const uint16_t*>(blob);
-            for (int i = 0; i < dims; ++i) emb[i] = f16_to_f32(h[i]);
-        } else if (blob_bytes == dims * static_cast<int>(sizeof(float))) {
-            const float* f = static_cast<const float*>(blob);
-            for (int i = 0; i < dims; ++i) emb[i] = f[i];
-        } else if (!warned) {
+        std::vector<float> emb;
+        if (blob == nullptr) {         // deferred row; silent (expected)
+            emb.assign(static_cast<size_t>(dims), 0.0f);
+            return emb;
+        }
+        if (!vector_codec::decode(blob, blob_bytes, dims, emb) && !warned) {
             warned = true;
             Diskerror::logger::warn(std::format(
-                "[cache] {} row {}: embedding blob is {} bytes, expected {} (f16) "
-                "or {} (f32); using zero vector",
-                table, row_id, blob_bytes, dims * 2, dims * 4));
+                "[cache] {} row {}: undecodable embedding blob ({} bytes, "
+                "expected {}-dim f32/f16/bf16/int8); using zero vector",
+                table, row_id, blob_bytes, dims));
         }
         return emb;
     }
@@ -204,7 +183,8 @@ struct SqliteBackend::Impl {
     {
         const auto& cfg = config();
         db_path = path.empty() ? cfg.resolved_db_path() : expand_path(path);
-        store_f16_ = (cfg.embedding_vector_type != "f32");
+        vtype_ = vector_codec::parse(cfg.embedding_vector_type)
+                     .value_or(vector_codec::VectorType::F16);
 
         // Create parent dirs
         fs::create_directories(fs::path(db_path).parent_path());

@@ -640,7 +640,9 @@ void test_store_turn(ragger::Embedder& emb) {
         int emb_bytes = sqlite3_column_int(st, 2);
         const char* model = reinterpret_cast<const char*>(sqlite3_column_text(st, 3));
         assert(u && a && a[0] != '\0');          // assistant filled in
-        assert(emb_bytes == 384 * 2);            // embedded as f16 (2 bytes/value)
+        // Embedded as f16 in the self-describing headered format:
+        // 12-byte vector_codec header + 384 dims * 2 bytes/dim.
+        assert(emb_bytes == 12 + 384 * 2);
         assert(model && std::string(model) == "test-model");
         ++rows;
     }

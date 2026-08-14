@@ -37,6 +37,7 @@
 #include "diskerror/logger.h"
 #include "ragger/mcp.h"
 #include "ragger/memory.h"
+#include "ragger/vector_codec.h"
 #include "ragger/onboard.h"
 #include "ragger/recipe_cli.h"
 #include "ragger/embed_executor.h"
@@ -1372,7 +1373,7 @@ int main(int argc, char **argv) {
             settings_store.set_setting(
                 "embedding_model", cfg.resolve_model(cfg.embedding_model));
             settings_store.set_setting(
-                "vector_type", cfg.embedding_vector_type == "f32" ? "f32" : "f16");
+                "vector_type", ragger::vector_codec::canonical(cfg.embedding_vector_type));
             settings_store.set_setting(
                 "dimensions", std::to_string(cfg.embedding_dimensions));
             std::cout << std::format(ragger::lang::MSG_EMBEDDINGS_REBUILT, count) << "\n";

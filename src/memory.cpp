@@ -11,6 +11,7 @@
 #include "ragger/lang.h"
 #include "ragger/recipe.h"
 #include "ragger/summarizer.h"
+#include "ragger/vector_codec.h"
 #ifdef RAGGER_STATS
 #include "ragger/stats_logger.h"
 #endif
@@ -56,7 +57,7 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     //                                          guard still catches it next time).
     const std::string current_model = config().resolve_model(config().embedding_model);
     const std::string current_vtype =
-        (config().embedding_vector_type == "f32") ? "f32" : "f16";
+        vector_codec::canonical(config().embedding_vector_type);
     const std::string current_dims = std::to_string(config().embedding_dimensions);
 
     if (!skip_embedding_guard) {
@@ -329,19 +330,21 @@ int RaggerMemory::update_embeddings() {
         int count = backend_->rebuild_embeddings(*desired_embedder);
 
         // Promote current := desired in the drift-guard settings keys.
-        const std::string vtype = config().desired_embedding_vector_type.empty()
-            ? config().embedding_vector_type : config().desired_embedding_vector_type;
+        const std::string vtype = vector_codec::canonical(
+            config().desired_embedding_vector_type.empty()
+                ? config().embedding_vector_type
+                : config().desired_embedding_vector_type);
         const int dims = config().desired_embedding_dimensions == 0
             ? desired_embedder->dimensions() : config().desired_embedding_dimensions;
         user_store_->set_setting("embedding_model", config().resolve_model(desired_model_name));
-        user_store_->set_setting("vector_type", vtype == "f32" ? "f32" : "f16");
+        user_store_->set_setting("vector_type", vtype);
         user_store_->set_setting("dimensions", std::to_string(dims));
 
         // Swap the live embedder so subsequent queries use the new model.
         embedder_ = std::move(desired_embedder);
         // Keep the live config's current identity in sync with what we promoted.
         mutable_config().embedding_model = desired_model_name;
-        mutable_config().embedding_vector_type = (vtype == "f32" ? "f32" : "f16");
+        mutable_config().embedding_vector_type = vtype;
         mutable_config().embedding_dimensions = dims;
 
         user_store_->set_setting("reembedding", "false");
