@@ -25,7 +25,7 @@ allowed, not freely editable at runtime. (Embedding settings have a known
 wrinkle to discuss separately.)
 
 **Migration:** one-time import of an existing `settings.ini` into the table,
-then the file is ignored. `example-settings.ini` stops being the runtime seed.
+then the file is ignored. `default-settings.txt` stops being the runtime seed.
 
 ---
 

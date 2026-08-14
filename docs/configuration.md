@@ -5,12 +5,12 @@ you see is the file the daemon reads.
 
 ## Location
 
-`~/.ragger/settings.ini`. `install.sh` copies `example-settings.ini` from
-the source tree the first time, then leaves it alone on re-installs.
-`example-settings.ini` is the single source of truth for the full key
-list — it's also compiled directly into the binary as the built-in
-default (via a CMake build step), so the shipped template and the
-fallback config can never drift apart.
+`~/.ragger/settings.ini`. The daemon bootstraps this file itself on first
+run, seeded from a compiled-in default (`default-settings.txt` in the
+source tree — not installed to disk, and not parsed as an INI file; it's
+only ever a build-time input to `cmake/embed_ini.cmake`, which embeds it
+directly into the binary so the template and the fallback config can
+never drift apart).
 
 Every other on-disk path Ragger uses (database, models, recipes, formats,
 log, token, stats, socket) is hardcoded relative to a single base
@@ -53,7 +53,7 @@ The tables below cover every key currently recognized by the parser.
 | `cert`           | `(empty)`       | Path to a TLS certificate chain (PEM). Both `cert` and `key` must be set and load successfully to enable native TLS — once active, the TCP listener serves HTTPS only. Any problem (only one set, unloadable pair) is logged as a warning (stderr + `~/.ragger/logs/activity.log`) and the daemon falls back to plain HTTP rather than refusing to start. |
 | `key`            | `(empty)`       | Path to a TLS private key (PEM). |
 | `capture_turns`  | `true`          | **Write side.** When `true`, `capture_turn` (MCP) / `POST /turn` ingests agent-pushed turns into the `turns` table. Set `false` to make the call a no-op. |
-| `build_context`  | `false`         | **Read side.** When `true`, `build_context` / `GET /session/<id>` assembles a recipe-shaped payload. Only meaningful when `capture_turns` is also on. Agent-driven `search`/`store` work either way. Not currently documented in `example-settings.ini` — code and default (`false`) remain intact if you want to opt back in by hand. |
+| `build_context`  | `false`         | **Read side.** When `true`, `build_context` / `GET /session/<id>` assembles a recipe-shaped payload. Only meaningful when `capture_turns` is also on. Agent-driven `search`/`store` work either way. Not currently documented in `default-settings.txt` — code and default (`false`) remain intact if you want to opt back in by hand. |
 | `default_recipe` | `natural_fading` | Recipe used when the caller doesn't name one. See [Recipes](#recipes) below. Also undocumented in the shipped template for the same reason as `build_context`; both keys are still parsed. |
 
 Both listeners can run at the same time. If `socket_enable` is false and
@@ -249,7 +249,7 @@ daemon restart needed.
 
 Note: `build_context`/`default_recipe` are still functional (code and
 recipes are fully intact) but no longer documented in the shipped
-`example-settings.ini` template — set them by hand if you want the
+`default-settings.txt` template — set them by hand if you want the
 feature; the default remains off (`build_context = false`).
 
 ## Ceilings for sub-users

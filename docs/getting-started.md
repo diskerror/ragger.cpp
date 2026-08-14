@@ -117,7 +117,7 @@ build_context = false    # read: serve recipe-shaped context payloads
 ```
 
 Note: `build_context` and `default_recipe` are still fully functional
-but no longer documented in the shipped `example-settings.ini` template
+but no longer documented in the shipped `default-settings.txt` template
 — add them by hand if you want the read side turned on.
 
 `ragger reload` (or `ragger restart`) picks up the change. With

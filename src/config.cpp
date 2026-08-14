@@ -92,7 +92,7 @@ std::string Config::resolve_model(const std::string& name) const {
 
 // -----------------------------------------------------------------------
 // Default config (embedded) — generated at build time from
-// example-settings.ini (single source of truth); see cmake/embed_ini.cmake.
+// default-settings.txt (single source of truth); see cmake/embed_ini.cmake.
 // -----------------------------------------------------------------------
 #include "default_config.inc"
 

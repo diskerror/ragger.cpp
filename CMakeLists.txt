@@ -183,19 +183,21 @@ find_package(CURL REQUIRED)
 find_package(OpenSSL REQUIRED)
 
 # ---------------------------------------------------------------------------
-# Embed example-settings.ini into a generated header (single source of truth
-# for both the user-facing template and config.cpp's DEFAULT_CONFIG string).
+# Embed default-settings.txt into a generated header — the single source of
+# truth for config.cpp's compiled-in DEFAULT_CONFIG string. This file is
+# NOT installed or parsed as an INI file at runtime; it only ever exists as
+# this build-time input.
 # ---------------------------------------------------------------------------
 set(RAGGER_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${RAGGER_GENERATED_DIR}")
 add_custom_command(
     OUTPUT "${RAGGER_GENERATED_DIR}/default_config.inc"
     COMMAND ${CMAKE_COMMAND}
-            -DSRC=${CMAKE_SOURCE_DIR}/example-settings.ini
+            -DSRC=${CMAKE_SOURCE_DIR}/default-settings.txt
             -DDST=${RAGGER_GENERATED_DIR}/default_config.inc
             -P ${CMAKE_SOURCE_DIR}/cmake/embed_ini.cmake
-    DEPENDS "${CMAKE_SOURCE_DIR}/example-settings.ini" "${CMAKE_SOURCE_DIR}/cmake/embed_ini.cmake"
-    COMMENT "Embedding example-settings.ini -> default_config.inc"
+    DEPENDS "${CMAKE_SOURCE_DIR}/default-settings.txt" "${CMAKE_SOURCE_DIR}/cmake/embed_ini.cmake"
+    COMMENT "Embedding default-settings.txt -> default_config.inc"
 )
 add_custom_target(generate_default_config DEPENDS "${RAGGER_GENERATED_DIR}/default_config.inc")
 

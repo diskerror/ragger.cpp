@@ -67,7 +67,6 @@ MODEL_DIR="$RAGGER_BASE/models"
 FORMATS_DIR="$RAGGER_BASE/formats"
 RECIPES_DIR="$RAGGER_BASE/recipes"
 WEB_DIR="$RAGGER_BASE/www"
-CONF_FILE="$RAGGER_BASE/settings.ini"
 DEST="$BIN_DIR/ragger"
 
 # ============================================================
@@ -92,18 +91,9 @@ fi
 # ============================================================
 # PHASE 2: Config
 # ============================================================
-
-if [ ! -f "$CONF_FILE" ]; then
-    if [ -f "$SRC/example-settings.ini" ]; then
-        info "Installing $CONF_FILE from example-settings.ini"
-        cp "$SRC/example-settings.ini" "$CONF_FILE"
-    else
-        fail "Missing $SRC/example-settings.ini — cannot bootstrap config."
-    fi
-    chmod 0644 "$CONF_FILE"
-else
-    info "Keeping existing $CONF_FILE"
-fi
+# settings.ini is bootstrapped by the daemon itself on first run (from the
+# compiled-in default, sourced from default-settings.txt at build time) —
+# install.sh no longer copies a template file onto disk.
 
 # Agent memory-usage instructions (served by `ragger mcp` via the MCP
 # initialize `instructions` field). Install if missing — preserves user edits.

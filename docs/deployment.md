@@ -53,7 +53,7 @@ ragger start         # bring the daemon up
 `install.sh`:
 
 - Creates `~/.local/bin` and `~/.ragger/{models,formats,recipes,www}` if missing
-- Copies `example-settings.ini` → `~/.ragger/settings.ini` on first run
+- Bootstraps `~/.ragger/settings.ini` from the compiled-in default on first run
 - Refreshes `~/.ragger/formats/` and `~/.ragger/recipes/` from the source
   tree (user-added files are preserved; user edits to shipped files are
   overwritten — copy a renamed variant to keep customizations)

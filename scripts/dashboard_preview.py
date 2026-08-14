@@ -6,7 +6,7 @@ Serves web/dashboard.html with a MOCK backend so you can iterate on the
 HTML/CSS/JS in a browser without building the C++ daemon. It fakes the two
 real endpoints the dashboard talks to:
 
-    GET  /config          -> config entries built from example-settings.ini-ish
+    GET  /config          -> config entries built from default-settings.txt-ish
                              schema (mirrors the C++ config_schema in en.h)
     GET  /config/<key>    -> one entry
     PUT  /config/<key>    -> validate + echo back (in-memory only)
