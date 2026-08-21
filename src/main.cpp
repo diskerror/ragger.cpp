@@ -1366,6 +1366,14 @@ int main(int argc, char **argv) {
             // identity so the new model/dtype/dimensions "take". Doing this
             // *after* the re-encode means an aborted/failed rebuild leaves
             // settings≠config, so the guard still catches it next startup.
+            // Log start/finish to the activity log (not just stdout) so the
+            // re-embed is visible in the audit trail alongside the daemon's
+            // degraded-mode / recovery messages.
+            Diskerror::Logger::info(std::format(
+                "rebuild-embeddings started: {} row(s), model '{}', {} {}-dim",
+                total_count, cfg.resolve_model(cfg.embedding_model),
+                ragger::vector_codec::canonical(cfg.embedding_vector_type),
+                cfg.embedding_dimensions));
             ragger::RaggerMemory memory(db_path,
                                         /*skip_embedding_guard=*/true);
             int count = memory.rebuild_embeddings();
@@ -1376,6 +1384,9 @@ int main(int argc, char **argv) {
                 "vector_type", ragger::vector_codec::canonical(cfg.embedding_vector_type));
             settings_store.set_setting(
                 "dimensions", std::to_string(cfg.embedding_dimensions));
+            Diskerror::Logger::info(std::format(
+                "rebuild-embeddings finished: {} row(s) re-encoded; settings "
+                "identity updated", count));
             std::cout << std::format(ragger::lang::MSG_EMBEDDINGS_REBUILT, count) << "\n";
 
         }

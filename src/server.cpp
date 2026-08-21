@@ -238,14 +238,21 @@ struct Server::Impl {
         }
 
         // 3. Backfill NULL embeddings (deferred stores, partial rebuilds).
-        try {
-            int filled = memory.backfill_embeddings();
-            if (filled > 0) {
-                Diskerror::Logger::info(std::format(
-                    lang::MSG_BACKFILLED_EMBEDDINGS, filled));
+        //    If embeddings are degraded, try to recover first — a rebuild may
+        //    have fixed the drift since the last housekeeping tick.
+        if (memory.embeddings_degraded()) {
+            memory.try_recover_embeddings();
+        }
+        if (!memory.embeddings_degraded()) {
+            try {
+                int filled = memory.backfill_embeddings();
+                if (filled > 0) {
+                    Diskerror::Logger::info(std::format(
+                        lang::MSG_BACKFILLED_EMBEDDINGS, filled));
+                }
+            } catch (const std::exception& e) {
+                Diskerror::Logger::warn(std::format(lang::ERR_CLEANUP_DB, e.what()));
             }
-        } catch (const std::exception& e) {
-            Diskerror::Logger::warn(std::format(lang::ERR_CLEANUP_DB, e.what()));
         }
 
         // 4. Backfill NULL phon (dolphining sounds-like) — self-heals rows that
@@ -620,7 +627,9 @@ struct Server::Impl {
                                  {"version",  RAGGER_VERSION},
                                  {"commit",   RAGGER_COMMIT},
                                  {"built",    RAGGER_BUILD_DATE},
-                                 {"memories", memory.count()}}.dump(), "application/json");
+                                 {"memories", memory.count()},
+                                 {"embeddable_rows", memory.count_embeddable_rows()},
+                                 {"degraded", memory.embeddings_degraded()}}.dump(), "application/json");
             Diskerror::Logger::debug("GET /health 200");
         });
 
@@ -771,6 +780,7 @@ struct Server::Impl {
                              {"dimensions", s.desired_dims}}},
                 {"needs_update", s.needs_update},
                 {"reembedding",  s.reembedding},
+                {"degraded",     memory.embeddings_degraded()},
             }.dump(), "application/json");
         }));
 

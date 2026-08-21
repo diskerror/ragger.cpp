@@ -412,6 +412,11 @@ public:
                                   float min_score = 0.0f,
                                   std::vector<std::string> collections = {}) = 0;
 
+    /// Text-only search using FTS5 keyword + phonetic scoring only (no
+    /// embeddings). Used when embeddings are degraded (drift mismatch).
+    virtual SearchResponse search_text_only(const std::string& query,
+                                            int limit = 5) = 0;
+
     /// Number of stored memories.
     virtual int count() const = 0;
 

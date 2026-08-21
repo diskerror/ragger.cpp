@@ -156,6 +156,10 @@ public:
                           float min_score = 0.0f,
                           std::vector<std::string> collections = {}) override;
 
+    /// Text-only fallback: FTS5 keyword + phonetic scoring, no embeddings.
+    SearchResponse search_text_only(const std::string& query,
+                                    int limit = 5) override;
+
     /// Number of stored memories.
     int count() const override;
 

@@ -24,6 +24,7 @@
 #include <cstring>
 #include <ctime>
 #include <unordered_map>
+#include <unordered_set>
 #include <iomanip>
 #include <filesystem>
 #include <numeric>
@@ -2834,6 +2835,123 @@ struct SqliteBackend::Impl {
         return {std::move(results), std::move(timing)};
     }
 
+    // Text-only search: FTS5 keyword + phonetic scoring across all four
+    // corpora. No embedding caches, no embedder call. Used when embeddings
+    // are degraded (drift mismatch at startup).
+    SearchResponse search_text_only(const std::string& query, int limit) {
+        using clock = std::chrono::high_resolution_clock;
+        auto t_start = clock::now();
+
+        std::string match_expr = fts_match_expr(query);
+        std::string phon_expr  = phon_match_expr(query);
+
+        if (match_expr.empty() && phon_expr.empty())
+            return {{}, {{"corpus_size", 0}, {"text_only", true}}};
+
+        struct Candidate {
+            float        score;
+            SearchResult result;
+        };
+        std::vector<Candidate> candidates;
+
+        // Score one FTS5 corpus: gather BM25 hits, optionally blend phon.
+        // We need to join back to the source table for text + metadata.
+        auto score_fts_corpus = [&](
+                const char* table, const char* id_col, const char* text_col,
+                const char* fts_table, const char* phon_fts_table,
+                const char* source_label,
+                const char* ts_expr) {
+            // BM25 hits
+            std::unordered_map<int, float> kw;
+            if (!match_expr.empty()) {
+                Stmt s(db, std::format(
+                    "SELECT rowid, bm25({0}) FROM {0} WHERE {0} MATCH ?", fts_table));
+                s.bind(1, match_expr);
+                while (s.step()) {
+                    kw[s.column_int(0)] = static_cast<float>(-s.column_double(1));
+                }
+            }
+            // Phon hits
+            std::unordered_map<int, float> ph;
+            if (!phon_expr.empty() && phon_fts_table) {
+                Stmt s(db, std::format(
+                    "SELECT rowid, bm25({0}) FROM {0} WHERE {0} MATCH ?", phon_fts_table));
+                s.bind(1, phon_expr);
+                while (s.step()) {
+                    ph[s.column_int(0)] = static_cast<float>(-s.column_double(1));
+                }
+            }
+
+            // Union of all hit IDs
+            std::unordered_set<int> hit_ids;
+            for (auto& [id, _] : kw) hit_ids.insert(id);
+            for (auto& [id, _] : ph) hit_ids.insert(id);
+            if (hit_ids.empty()) return;
+
+            // Fetch text + metadata for hits
+            for (int id : hit_ids) {
+                Stmt s(db, std::format(
+                    "SELECT {}, {} FROM {} WHERE {} = ?",
+                    text_col, ts_expr, table, id_col));
+                s.bind(1, id);
+                if (!s.step()) continue;
+                std::string text = s.column_text(0);
+                std::string ts   = s.column_text(1);
+
+                float kw_score  = kw.count(id) ? kw[id] : 0.0f;
+                float ph_score  = ph.count(id) ? ph[id] : 0.0f;
+                float combined  = kw_score + ph_score;
+
+                json meta = json::object();
+                meta["source"] = source_label;
+
+                SearchResult sr{id, text, combined, meta, ts};
+                sr.vec_score  = -1.0f;  // no vector signal
+                sr.bm25_score = kw_score;
+                sr.phon_score = ph_score;
+                sr.blended    = combined;
+                candidates.push_back({combined, std::move(sr)});
+            }
+        };
+
+        // Summaries
+        score_fts_corpus("summaries", "summary_id", "text",
+                         "summaries_fts", "summaries_phon_fts", "summary",
+                         "datetime(created_at,'unixepoch','localtime')");
+        // Documents
+        score_fts_corpus("documents", "document_id", "text",
+                         "documents_fts", "documents_phon_fts", "document",
+                         "imported_at");
+        // Decisions
+        score_fts_corpus("decisions", "decision_id", "text",
+                         "decisions_fts", "decisions_phon_fts", "decision",
+                         "datetime(created_at,'unixepoch','localtime')");
+        // Turn summaries
+        score_fts_corpus("turn_summaries", "turn_summary_id", "text",
+                         "turn_summaries_fts", "turn_summaries_phon_fts", "turn_summary",
+                         "datetime(created_at,'unixepoch','localtime')");
+
+        // Rank by blended score, top-k
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const Candidate& a, const Candidate& b) {
+                      return a.score > b.score;
+                  });
+
+        std::vector<SearchResult> results;
+        int top_k = std::min(limit, static_cast<int>(candidates.size()));
+        for (int i = 0; i < top_k; ++i)
+            results.push_back(std::move(candidates[i].result));
+
+        auto ms = [](auto a, auto b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        json timing = {
+            {"total_ms", ms(t_start, clock::now())},
+            {"text_only", true},
+        };
+        return {std::move(results), std::move(timing)};
+    }
+
     int count() const {
         Stmt s(db, "SELECT COUNT(*) FROM summaries");
         int c = 0;
@@ -2861,12 +2979,13 @@ struct SqliteBackend::Impl {
         return out;
     }
 
-    // Total rows across the four embedded tables (turns, summaries, decisions,
-    // documents) — i.e. how many rows `rebuild_embeddings()` will re-encode.
-    // (count() alone is just summaries, which understates the rebuild scope.)
+    // Total rows across the five embedded tables (turns, turn_summaries,
+    // summaries, decisions, documents) — i.e. how many rows
+    // `rebuild_embeddings()` will re-encode. (count() alone is just
+    // summaries, which understates the rebuild scope.)
     int count_embeddable_rows() const {
         int total = 0;
-        for (const char* tbl : {"turns", "summaries", "decisions", "documents"}) {
+        for (const char* tbl : {"turns", "turn_summaries", "summaries", "decisions", "documents"}) {
             Stmt s(db, std::format("SELECT COUNT(*) FROM {}", tbl));
             if (s.step()) total += s.column_int(0);
         }
@@ -3564,6 +3683,12 @@ SearchResponse SqliteBackend::search(const std::string& query, int limit,
                                      std::vector<std::string> collections) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->search(query, limit, min_score, std::move(collections));
+}
+
+SearchResponse SqliteBackend::search_text_only(const std::string& query,
+                                               int limit) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->search_text_only(query, limit);
 }
 
 int SqliteBackend::count() const { std::lock_guard<std::mutex> lk(pImpl->mu); return pImpl->count(); }

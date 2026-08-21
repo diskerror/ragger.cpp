@@ -72,24 +72,33 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
             if (has_data) throw std::runtime_error(err);
             user_store_->set_setting(key, current);  // empty DB: re-adopt
         };
-        guard("embedding_model", current_model,
-              std::format(lang::ERR_EMBEDDING_MISMATCH,
-                          user_store_->get_setting("embedding_model").value_or(""), current_model));
-        guard("vector_type", current_vtype,
-              std::format(lang::ERR_VECTOR_TYPE_MISMATCH,
-                          user_store_->get_setting("vector_type").value_or(""), current_vtype));
-        guard("dimensions", current_dims,
-              std::format(lang::ERR_DIMENSIONS_MISMATCH,
-                          user_store_->get_setting("dimensions").value_or(""), current_dims));
+        try {
+            guard("embedding_model", current_model,
+                  std::format(lang::ERR_EMBEDDING_MISMATCH,
+                              user_store_->get_setting("embedding_model").value_or(""), current_model));
+            guard("vector_type", current_vtype,
+                  std::format(lang::ERR_VECTOR_TYPE_MISMATCH,
+                              user_store_->get_setting("vector_type").value_or(""), current_vtype));
+            guard("dimensions", current_dims,
+                  std::format(lang::ERR_DIMENSIONS_MISMATCH,
+                              user_store_->get_setting("dimensions").value_or(""), current_dims));
+        } catch (const std::runtime_error& e) {
+            // Degrade gracefully: log the error and disable vector search.
+            // FTS5 text + phonetic search still works.
+            Diskerror::Logger::error(std::format(
+                "Embedding drift detected — vector search disabled, "
+                "falling back to text + phonetic search only. {}", e.what()));
+            embeddings_degraded_ = true;
+        }
     }
 
-    // Backfill any rows left without embeddings (deferred-embedding writes
-    // that didn't get processed before the previous shutdown). The query is
-    // a no-op when nothing is NULL; embedder is already loaded above.
-    int filled = backend_->backfill_embeddings(*embedder_);
-    if (filled > 0) {
-        Diskerror::Logger::info(std::format(lang::MSG_BACKFILLED_EMBEDDINGS, filled));
-    }
+    // NOTE: embedding backfill no longer runs here. A large backfill (e.g.
+    // after a blob-format or version change touching every row) used to run
+    // synchronously in this constructor and could block daemon startup for
+    // minutes — long enough that deploy health checks reported failure while
+    // the daemon was actually fine. Backfill is now owned by the server's
+    // housekeeping tick (background, ~60s after start). CLI paths that need
+    // it immediately use `ragger rebuild-embeddings`.
 
     // Backfill any NULL phon (dolphining sounds-like) rows — self-heals rows
     // that predate the phon column after the one-time ADD COLUMN migration.
@@ -257,6 +266,12 @@ SearchResponse RaggerMemory::search(const std::string& query,
         busy.timing = json{{"reembedding", true}};
         return busy;
     }
+    // When embeddings are degraded (drift mismatch at startup), fall back to
+    // text-only search (FTS5 keyword + phonetic). Vector similarity is
+    // unavailable but lookups still work.
+    if (embeddings_degraded_) {
+        return backend_->search_text_only(query, limit);
+    }
     SearchResponse resp = backend_->search(query, limit, min_score, std::move(collections));
 #ifdef RAGGER_STATS
     if (stats_ && stats_->enabled()) {
@@ -273,6 +288,10 @@ SearchResponse RaggerMemory::search(const std::string& query,
 
 int RaggerMemory::count() const {
     return backend_->count();
+}
+
+int RaggerMemory::count_embeddable_rows() const {
+    return backend_->count_embeddable_rows();
 }
 
 std::vector<SearchResult> RaggerMemory::load_all(const std::string& collection) {
@@ -305,6 +324,44 @@ RaggerMemory::EmbeddingStatus RaggerMemory::embedding_status() {
                      (s.current_dims  != s.desired_dims);
     s.reembedding = is_reembedding();
     return s;
+}
+
+bool RaggerMemory::try_recover_embeddings() {
+    if (!embeddings_degraded_) return false;  // nothing to recover
+
+    const std::string current_model = config().resolve_model(config().embedding_model);
+    const std::string current_vtype =
+        vector_codec::canonical(config().embedding_vector_type);
+    const std::string current_dims = std::to_string(config().embedding_dimensions);
+
+    auto stored_model = user_store_->get_setting("embedding_model");
+    auto stored_vtype = user_store_->get_setting("vector_type");
+    auto stored_dims  = user_store_->get_setting("dimensions");
+
+    // All three must match for recovery.
+    if (stored_model.value_or("") != current_model ||
+        stored_vtype.value_or("") != current_vtype ||
+        stored_dims.value_or("")  != current_dims) {
+        return false;  // still mismatched
+    }
+
+    // Settings match config — embeddings are valid again.
+    embeddings_degraded_ = false;
+    Diskerror::Logger::info(
+        "Embedding drift resolved — semantic search re-enabled.");
+
+    // Backfill any rows left without embeddings.
+    try {
+        int filled = backend_->backfill_embeddings(*embedder_);
+        if (filled > 0) {
+            Diskerror::Logger::info(
+                std::format(lang::MSG_BACKFILLED_EMBEDDINGS, filled));
+        }
+    } catch (const std::exception& e) {
+        Diskerror::Logger::warn(std::format(
+            "Backfill after recovery failed: {}", e.what()));
+    }
+    return true;
 }
 
 bool RaggerMemory::is_reembedding() {

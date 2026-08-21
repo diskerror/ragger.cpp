@@ -143,6 +143,11 @@ public:
     /// Total count in the single DB.
     int  count() const;
 
+    /// Total rows across all five embedded tables (turns, turn_summaries,
+    /// summaries, decisions, documents) — the rebuild/backfill scope, and a
+    /// more accurate "how much is in here" figure than count() (summaries only).
+    int  count_embeddable_rows() const;
+
     /// Load all memories (for export). Optionally filter by collection.
     std::vector<SearchResult> load_all(const std::string& collection = "");
 
@@ -162,6 +167,17 @@ public:
     /// Snapshot of current vs desired embedding identity, read from the
     /// settings table (current) and config (desired).
     EmbeddingStatus embedding_status();
+
+    /// True when the embedding drift guard failed at startup — vectors are
+    /// unusable but FTS5 text + phonetic search still works. Log the error
+    /// and keep serving rather than refusing to start.
+    bool embeddings_degraded() const { return embeddings_degraded_; }
+
+    /// Re-check the embedding drift guard. If the stored settings now match
+    /// the config (e.g. after `ragger rebuild-embeddings`), clear the
+    /// degraded flag, backfill any NULL embeddings, and re-enable semantic
+    /// search. Returns true if embeddings were recovered.
+    bool try_recover_embeddings();
 
     /// True while a re-embed is running (search short-circuits on this).
     bool is_reembedding();
@@ -210,6 +226,7 @@ private:
     std::unique_ptr<Embedder>      embedder_;
     std::unique_ptr<StorageBackend> backend_;
     std::unique_ptr<UserStore>      user_store_;   // settings and user management
+    bool                            embeddings_degraded_ = false;
 #ifdef RAGGER_STATS
     std::unique_ptr<class StatsLogger> stats_;      // opt-in retrieval instrumentation
 #endif
