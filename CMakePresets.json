@@ -1,0 +1,19 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Default (fetch c_lib from GitHub)",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {}
+    },
+    {
+      "name": "dev",
+      "displayName": "Dev (local c_lib)",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "FETCHCONTENT_SOURCE_DIR_C_LIB": "/Volumes/WDBlack2/CLionProjects/c_lib"
+      }
+    }
+  ]
+}

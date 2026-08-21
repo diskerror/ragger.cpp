@@ -162,31 +162,23 @@ target_include_directories(vendor_headers INTERFACE
 target_compile_definitions(vendor_headers INTERFACE CPPHTTPLIB_OPENSSL_SUPPORT)
 
 # ---------------------------------------------------------------------------
-set(C_LIB_DIR "${CMAKE_SOURCE_DIR}/vendor/c_lib")
-
-# c_lib — ProgramOptions + Logger (vendored via symlink)
+# c_lib (FetchContent — uses local copy if FETCHCONTENT_SOURCE_DIR_C_LIB is
+# set, otherwise clones from GitHub)
 # ---------------------------------------------------------------------------
-add_library(c_lib_utils STATIC
-    "${C_LIB_DIR}/ProgramOptions.cp"
-    "${C_LIB_DIR}/Logger.cp"
+include(FetchContent)
+FetchContent_Declare(c_lib
+    GIT_REPOSITORY https://github.com/diskerror/c_lib.git
+    GIT_TAG        master
 )
-set_source_files_properties(
-    "${C_LIB_DIR}/ProgramOptions.cp"
-    "${C_LIB_DIR}/Logger.cp"
-    PROPERTIES LANGUAGE CXX
-)
-target_include_directories(c_lib_utils PUBLIC
-    "${CMAKE_SOURCE_DIR}/include"
-    "${C_LIB_DIR}"
-)
-target_link_libraries(c_lib_utils PUBLIC Boost::program_options)
+FetchContent_MakeAvailable(c_lib)
 
-# c_lib — EmbeddingCodec + DoubleMetaphone (vendored via symlink)
-# ---------------------------------------------------------------------------
-set_source_files_properties(
-    "${C_LIB_DIR}/EmbeddingCodec.cp"
-    "${C_LIB_DIR}/DoubleMetaphone.cp"
-    PROPERTIES LANGUAGE CXX
+# c_lib targets provide their own include directories via
+# target_include_directories(... PUBLIC), so consumers just link the targets.
+# Convenience alias for ragger_core:
+add_library(c_lib_utils INTERFACE)
+target_link_libraries(c_lib_utils INTERFACE
+    diskerror_program_options
+    diskerror_logger
 )
 
 # ---------------------------------------------------------------------------
@@ -249,8 +241,6 @@ add_library(ragger_core STATIC
     src/embed_executor.cpp
     src/tokenizer_wrapper.cpp
     src/sqlite_backend.cpp
-    "${C_LIB_DIR}/EmbeddingCodec.cp"
-    "${C_LIB_DIR}/DoubleMetaphone.cp"
     src/user_store.cpp
     src/import.cpp
     src/export.cpp
@@ -264,7 +254,6 @@ add_library(ragger_core STATIC
 )
 target_include_directories(ragger_core PUBLIC
     "${CMAKE_SOURCE_DIR}/include"
-    "${C_LIB_DIR}"
 )
 target_include_directories(ragger_core PRIVATE
     "${RAGGER_GENERATED_DIR}"
@@ -282,6 +271,8 @@ if(RAGGER_STATS)
 endif()
 target_link_libraries(ragger_core PUBLIC
     c_lib_utils
+    diskerror_embedding_codec
+    diskerror_double_metaphone
     SQLite::SQLite3
     onnxruntime
     tokenizers_cpp
