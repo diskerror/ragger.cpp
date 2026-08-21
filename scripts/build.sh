@@ -118,7 +118,19 @@ esac
 # different flag value. Re-run cmake only when unconfigured or CMakeLists changed.
 if [ ! -f Makefile ] || [ ../CMakeLists.txt -nt Makefile ]; then
     echo "[+] Configuring (RAGGER_STATS=$RAGGER_STATS_FLAG) in $BUILD_DIR/..."
-    cmake .. $CMAKE_FLAGS -DRAGGER_STATS="$RAGGER_STATS_FLAG"
+
+    # Use dev preset (local c_lib) if CMakeUserPresets.json exists,
+    # otherwise fall back to default (fetches c_lib from GitHub).
+    LOCAL_C_LIB=""
+    if [ -f ../CMakeUserPresets.json ]; then
+        # Extract FETCHCONTENT_SOURCE_DIR_C_LIB from the user presets
+        C_LIB_PATH=$(python3 -c "import json,sys; d=json.load(open('../CMakeUserPresets.json')); print(d['configurePresets'][0].get('cacheVariables',{}).get('FETCHCONTENT_SOURCE_DIR_C_LIB',''))" 2>/dev/null || true)
+        if [ -n "$C_LIB_PATH" ] && [ -d "$C_LIB_PATH" ]; then
+            LOCAL_C_LIB="-DFETCHCONTENT_SOURCE_DIR_C_LIB=$C_LIB_PATH"
+        fi
+    fi
+
+    cmake .. $CMAKE_FLAGS $LOCAL_C_LIB -DRAGGER_STATS="$RAGGER_STATS_FLAG"
 fi
 
 echo "[+] Building with $JOBS threads..."

@@ -61,8 +61,7 @@ ragger start | stop | restart | status
 Dev build (manual cmake):
 
 ```bash
-cmake -B build -DBOOST_ROOT=/opt/local/libexec/boost/1.88 \
-  && cmake --build build -j8
+cmake --preset dev && cmake --build build -j8
 ./build/ragger version
 ```
 
@@ -92,7 +91,8 @@ elsewhere if you need the data on a different disk.
 - **System:** SQLite3, Eigen3, Boost (program_options), OpenSSL, libcurl,
   Rust (for tokenizers-cpp; rustup stable is fine).
 - **Auto-fetched at configure time:** ONNX Runtime (downloaded into the
-  build dir for your platform). Drop a matching `vendor/onnxruntime/`
+  build dir for your platform), [c_lib](https://github.com/diskerror/c_lib)
+  (shared C++ utilities). Drop a matching `vendor/onnxruntime/`
   in place if you want an offline build.
 - **Vendored** (already in the repo): cpp-httplib, nlohmann/json,
   tokenizers-cpp source.
@@ -120,9 +120,38 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 Then:
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-./scripts/install.sh    # places binary + downloads ~90 MB embedding model
+./scripts/build.sh          # check deps, configure, build
+./scripts/install.sh        # places binary + downloads ~90 MB embedding model
+```
+
+### Dev build (local c_lib)
+
+If you have a local checkout of [c_lib](https://github.com/diskerror/c_lib),
+create a `CMakeUserPresets.json` (gitignored) to use it instead of fetching
+from GitHub:
+
+```json
+{
+  "version": 6,
+  "configurePresets": [{
+    "name": "dev",
+    "inherits": "default",
+    "cacheVariables": {
+      "FETCHCONTENT_SOURCE_DIR_C_LIB": "/path/to/your/c_lib"
+    }
+  }]
+}
+```
+
+The build script auto-detects this file and passes the variable to cmake.
+CLion also picks up the `dev` preset from its CMake profile dropdown.
+
+Manual cmake (without the build script):
+
+```bash
+cmake --preset dev            # or: cmake -B build
+cmake --build build -j8
+./build/ragger version
 ```
 
 macOS (arm64 and x86_64) and Linux (x86_64 and aarch64) are supported.
