@@ -1,10 +1,10 @@
 /**
  * UserStore — user and settings management over the Ragger SQLite database.
  */
-#include "ragger/user_store.h"
-#include "ragger/util/sqlite.h"
-#include "ragger/util/time.h"
-#include "ragger/config.h"
+#include "user_store.h"
+#include "util/sqlite.h"
+#include "util/time.h"
+#include "config.h"
 
 #include <sqlite3.h>
 #include <filesystem>

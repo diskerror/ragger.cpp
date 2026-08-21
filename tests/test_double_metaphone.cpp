@@ -2,7 +2,7 @@
 // Vectors validated against the reference `metaphone` implementation, capped to
 // the canonical 4-char keys. main()-based per this project's test convention.
 
-#include "ragger/double_metaphone.h"
+#include "double_metaphone.h"
 
 #include <cassert>
 #include <cstdio>

@@ -4,8 +4,8 @@
  * RAGGER_BIN is injected by CMake ($<TARGET_FILE:ragger>) so the test drives
  * the freshly-built binary. Skips if the embedding model isn't present.
  */
-#include "ragger/config.h"
-#include "ragger/embed_executor.h"
+#include "config.h"
+#include "embed_executor.h"
 
 #include <cassert>
 #include <filesystem>

@@ -10,13 +10,13 @@
  * grow unbounded when the user only uses MCP mode.
  */
 
-#include "ragger/mcp.h"
-#include "ragger/config.h"
-#include "ragger/lang.h"
-#include "diskerror/logger.h"
-#include "ragger/memory.h"
-#include "ragger/sqlite_backend.h"
-#include "ragger/util/fs.h"
+#include "mcp.h"
+#include "config.h"
+#include "lang.h"
+#include "Logger.h"
+#include "memory.h"
+#include "sqlite_backend.h"
+#include "util/fs.h"
 #include "nlohmann_json.hpp"
 
 #include <chrono>
@@ -280,7 +280,7 @@ static void housekeeping_thread(RaggerMemory& memory,
                 if (pos != std::string::npos) {
                     msg.replace(pos, 2, std::to_string(deleted));
                 }
-                Diskerror::logger::info(msg);
+                Diskerror::Logger::info(msg);
             }
         } catch (...) {}
     }

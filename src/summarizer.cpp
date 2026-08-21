@@ -1,12 +1,12 @@
 /**
  * Conversation summarization implementation. See include/ragger/summarizer.h.
  */
-#include "ragger/summarizer.h"
+#include "summarizer.h"
 
-#include "ragger/config.h"
-#include "ragger/inference.h"
-#include "ragger/lang.h"
-#include "diskerror/logger.h"
+#include "config.h"
+#include "inference.h"
+#include "lang.h"
+#include "Logger.h"
 
 #include <format>
 #include <string_view>
@@ -222,7 +222,7 @@ std::string summarize_transcript(
     try {
         result = strip_thinking(inference.chat_memory(messages));
     } catch (const std::exception& e) {
-        Diskerror::logger::warn(std::format(lang::WARN_SUMMARY, e.what()));
+        Diskerror::Logger::warn(std::format(lang::WARN_SUMMARY, e.what()));
         return "";
     }
 
@@ -292,7 +292,7 @@ std::string summarize_texts(
     try {
         result = strip_thinking(inference.chat_memory(messages));
     } catch (const std::exception& e) {
-        Diskerror::logger::warn(std::format(lang::WARN_SUMMARY, e.what()));
+        Diskerror::Logger::warn(std::format(lang::WARN_SUMMARY, e.what()));
         return "";
     }
 

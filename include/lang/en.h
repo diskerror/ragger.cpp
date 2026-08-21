@@ -6,7 +6,7 @@
  */
 #pragma once
 
-#include "ragger/config_schema.h"
+#include "config_schema.h"
 #include <array>
 
 namespace ragger::lang {

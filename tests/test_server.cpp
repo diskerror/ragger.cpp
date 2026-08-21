@@ -21,10 +21,10 @@
  * - Error handling (401, 404, etc.)
  */
 
-#include "ragger/config.h"
-#include "ragger/embedder.h"
-#include "ragger/memory.h"
-#include "ragger/server.h"
+#include "config.h"
+#include "embedder.h"
+#include "memory.h"
+#include "server.h"
 #include <cassert>
 #include <iostream>
 #include <print>

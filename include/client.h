@@ -10,7 +10,7 @@
 #include <vector>
 #include <optional>
 #include "nlohmann_json.hpp"
-#include "ragger/storage_types.h"
+#include "storage_types.h"
 
 namespace ragger {
 

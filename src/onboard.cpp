@@ -2,12 +2,12 @@
  * `ragger onboard` — guided first-run setup. See include/ragger/onboard.h.
  */
 
-#include "ragger/onboard.h"
+#include "onboard.h"
 
-#include "ragger/config.h"
-#include "ragger/daemon_control.h"
-#include "ragger/recipe_cli.h"
-#include "ragger/util/fs.h"
+#include "config.h"
+#include "daemon_control.h"
+#include "recipe_cli.h"
+#include "util/fs.h"
 
 #include <curl/curl.h>
 #include <nlohmann_json.hpp>

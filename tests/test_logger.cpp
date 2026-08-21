@@ -5,7 +5,7 @@
  * file output, timestamps, and destructor cleanup.
  * Uses a temp file that is removed after each test group.
  */
-#include "diskerror/logger.h"
+#include "Logger.h"
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -35,8 +35,8 @@ int main() {
     std::println("  test_file_created...");
     cleanup();
     {
-        Diskerror::logger log(LOG_FILE, "info");
-        Diskerror::logger::info("startup message");
+        Diskerror::Logger log(LOG_FILE, "info");
+        Diskerror::Logger::info("startup message");
     }
     assert(fs::exists(LOG_FILE));
     auto content = read_file(LOG_FILE);
@@ -47,12 +47,12 @@ int main() {
     std::println("  test_destructor_closes_file...");
     cleanup();
     {
-        Diskerror::logger log(LOG_FILE, "info");
-        Diskerror::logger::info("first run");
+        Diskerror::Logger log(LOG_FILE, "info");
+        Diskerror::Logger::info("first run");
     }
     {
-        Diskerror::logger log(LOG_FILE, "info");
-        Diskerror::logger::info("second run");
+        Diskerror::Logger log(LOG_FILE, "info");
+        Diskerror::Logger::info("second run");
     }
     content = read_file(LOG_FILE);
     assert(content.find("first run") != std::string::npos);
@@ -63,11 +63,11 @@ int main() {
     std::println("  test_level_filtering_warn...");
     cleanup();
     {
-        Diskerror::logger log(LOG_FILE, "warn");
-        Diskerror::logger::debug("should not appear");
-        Diskerror::logger::info("should not appear either");
-        Diskerror::logger::warn("visible warning");
-        Diskerror::logger::error("visible error");
+        Diskerror::Logger log(LOG_FILE, "warn");
+        Diskerror::Logger::debug("should not appear");
+        Diskerror::Logger::info("should not appear either");
+        Diskerror::Logger::warn("visible warning");
+        Diskerror::Logger::error("visible error");
     }
     content = read_file(LOG_FILE);
     assert(content.find("should not appear") == std::string::npos);
@@ -80,13 +80,13 @@ int main() {
     std::println("  test_level_filtering_trace...");
     cleanup();
     {
-        Diskerror::logger log(LOG_FILE, "trace");
-        Diskerror::logger::trace("t msg");
-        Diskerror::logger::debug("d msg");
-        Diskerror::logger::info("i msg");
-        Diskerror::logger::warn("w msg");
-        Diskerror::logger::error("e msg");
-        Diskerror::logger::critical("c msg");
+        Diskerror::Logger log(LOG_FILE, "trace");
+        Diskerror::Logger::trace("t msg");
+        Diskerror::Logger::debug("d msg");
+        Diskerror::Logger::info("i msg");
+        Diskerror::Logger::warn("w msg");
+        Diskerror::Logger::error("e msg");
+        Diskerror::Logger::critical("c msg");
     }
     content = read_file(LOG_FILE);
     assert(content.find("[TRACE]") != std::string::npos);
@@ -101,13 +101,13 @@ int main() {
     std::println("  test_level_filtering_critical...");
     cleanup();
     {
-        Diskerror::logger log(LOG_FILE, "critical");
-        Diskerror::logger::trace("no");
-        Diskerror::logger::debug("no");
-        Diskerror::logger::info("no");
-        Diskerror::logger::warn("no");
-        Diskerror::logger::error("no");
-        Diskerror::logger::critical("yes critical");
+        Diskerror::Logger log(LOG_FILE, "critical");
+        Diskerror::Logger::trace("no");
+        Diskerror::Logger::debug("no");
+        Diskerror::Logger::info("no");
+        Diskerror::Logger::warn("no");
+        Diskerror::Logger::error("no");
+        Diskerror::Logger::critical("yes critical");
     }
     content = read_file(LOG_FILE);
     assert(content.find("yes critical") != std::string::npos);
@@ -121,8 +121,8 @@ int main() {
     std::println("  test_timestamp_format...");
     cleanup();
     {
-        Diskerror::logger log(LOG_FILE, "info");
-        Diskerror::logger::info("timestamp check");
+        Diskerror::Logger log(LOG_FILE, "info");
+        Diskerror::Logger::info("timestamp check");
     }
     content = read_file(LOG_FILE);
     assert(content.find("202") != std::string::npos);
@@ -136,8 +136,8 @@ int main() {
     std::println("  test_log_tags...");
     cleanup();
     {
-        Diskerror::logger log(LOG_FILE, "info");
-        Diskerror::logger::info("tag test");
+        Diskerror::Logger log(LOG_FILE, "info");
+        Diskerror::Logger::info("tag test");
     }
     content = read_file(LOG_FILE);
     assert(content.find("[INFO ]") != std::string::npos);
@@ -147,9 +147,9 @@ int main() {
     std::println("  test_invalid_level_defaults_to_warn...");
     cleanup();
     {
-        Diskerror::logger log(LOG_FILE, "nonsense");
-        Diskerror::logger::info("should be hidden");
-        Diskerror::logger::warn("should be visible");
+        Diskerror::Logger log(LOG_FILE, "nonsense");
+        Diskerror::Logger::info("should be hidden");
+        Diskerror::Logger::warn("should be visible");
     }
     content = read_file(LOG_FILE);
     assert(content.find("should be hidden") == std::string::npos);
@@ -160,10 +160,10 @@ int main() {
     std::println("  test_accumulation...");
     cleanup();
     {
-        Diskerror::logger log(LOG_FILE, "info");
-        Diskerror::logger::info("line one");
-        Diskerror::logger::info("line two");
-        Diskerror::logger::info("line three");
+        Diskerror::Logger log(LOG_FILE, "info");
+        Diskerror::Logger::info("line one");
+        Diskerror::Logger::info("line two");
+        Diskerror::Logger::info("line three");
     }
     content = read_file(LOG_FILE);
     assert(content.find("line one") != std::string::npos);
@@ -176,7 +176,7 @@ int main() {
     {
         bool threw = false;
         try {
-            Diskerror::logger log("/no/such/directory/bad.log", "info");
+            Diskerror::Logger log("/no/such/directory/bad.log", "info");
         } catch (const std::runtime_error& e) {
             threw = true;
             assert(std::string(e.what()).find("failed to open") != std::string::npos);
@@ -192,8 +192,8 @@ int main() {
         std::string nested = "/tmp/ragger_test_logdir/nested/activity.log";
         assert(!fs::exists("/tmp/ragger_test_logdir"));
         {
-            Diskerror::logger log(nested, "info");
-            Diskerror::logger::info("dir autocreate check");
+            Diskerror::Logger log(nested, "info");
+            Diskerror::Logger::info("dir autocreate check");
         }
         assert(fs::exists(nested));
         content = read_file(nested);
@@ -217,10 +217,10 @@ int main() {
             seed << std::string(1024 * 1024 + 10, 'x');  // > 1MB
         }
         {
-            Diskerror::logger log(path, "info", /*maxSizeMb=*/1, /*maxAgeDays=*/0);
-            Diskerror::logger::info("triggers rotation");
+            Diskerror::Logger log(path, "info", /*maxSizeMb=*/1, /*maxAgeDays=*/0);
+            Diskerror::Logger::info("triggers rotation");
             // Second write lands in the fresh post-rotation file.
-            Diskerror::logger::info("post rotation");
+            Diskerror::Logger::info("post rotation");
         }
         int backups = 0;
         std::string backup_path;
@@ -265,8 +265,8 @@ int main() {
             std::ofstream seed(path);
             seed << std::string(1024 * 1024 + 10, 'x');
         }
-        Diskerror::logger log(path, "info", /*maxSizeMb=*/1, /*maxAgeDays=*/1);
-        Diskerror::logger::info("triggers rotation + sweep");
+        Diskerror::Logger log(path, "info", /*maxSizeMb=*/1, /*maxAgeDays=*/1);
+        Diskerror::Logger::info("triggers rotation + sweep");
 
         assert(!fs::exists(old_backup));    // swept (30 days old, cutoff is 1 day)
         assert(fs::exists(young_backup));   // untouched (2099 mtime, not old)

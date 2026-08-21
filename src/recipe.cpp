@@ -2,9 +2,9 @@
  * Recipe loader. See include/ragger/recipe.h.
  */
 
-#include "ragger/recipe.h"
+#include "recipe.h"
 
-#include "diskerror/logger.h"
+#include "Logger.h"
 
 #include <filesystem>
 #include <fstream>
@@ -34,7 +34,7 @@ void parse_layers_into(Recipe& recipe, const nlohmann::json& layers,
         const std::string kind_str = layer.value("kind", "");
         auto it = kinds.find(kind_str);
         if (it == kinds.end()) {
-            Diskerror::logger::warn(
+            Diskerror::Logger::warn(
                 "recipe '" + source + "': unknown layer kind '" + kind_str +
                 "', skipping");
             continue;
@@ -42,7 +42,7 @@ void parse_layers_into(Recipe& recipe, const nlohmann::json& layers,
         int limit = layer.value("limit", 0);
         // Accept legacy "count" field with a deprecation warning.
         if (limit == 0 && layer.contains("count")) {
-            Diskerror::logger::warn(
+            Diskerror::Logger::warn(
                 "recipe '" + source + "': layer field \"count\" is deprecated; use \"limit\" instead");
             limit = layer.value("count", 0);
         }
@@ -88,7 +88,7 @@ std::vector<Recipe> load_recipes_from_dir(const std::string& dir) {
                 out.push_back(parse_recipe(doc, stem));
             }
         } catch (const std::exception& e) {
-            Diskerror::logger::warn(
+            Diskerror::Logger::warn(
                 std::string("recipe load failed for ") + path.string() +
                 ": " + e.what());
         }

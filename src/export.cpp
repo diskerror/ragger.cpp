@@ -5,9 +5,9 @@
  * Dumps CREATE TABLE / CREATE INDEX / CREATE TRIGGER + INSERT statements.
  * The `embedding` BLOB column in `memories` is skipped unless requested.
  */
-#include "ragger/export.h"
-#include "ragger/config.h"
-#include "ragger/lang.h"
+#include "export.h"
+#include "config.h"
+#include "lang.h"
 
 #include <sqlite3.h>
 

@@ -4,12 +4,12 @@
  * Requires ONNX model files at the configured model_dir.
  * Uses a temp DB that's deleted after the test.
  */
-#include "ragger/config.h"
-#include "ragger/embedder.h"
-#include "ragger/sqlite_backend.h"
-#include "ragger/user_store.h"
-#include "ragger/auth.h"
-#include "ragger/util/time.h"
+#include "config.h"
+#include "embedder.h"
+#include "sqlite_backend.h"
+#include "user_store.h"
+#include "auth.h"
+#include "util/time.h"
 #include <sqlite3.h>
 #include <cassert>
 #include <filesystem>
@@ -640,9 +640,9 @@ void test_store_turn(ragger::Embedder& emb) {
         int emb_bytes = sqlite3_column_int(st, 2);
         const char* model = reinterpret_cast<const char*>(sqlite3_column_text(st, 3));
         assert(u && a && a[0] != '\0');          // assistant filled in
-        // Embedded as f16 in the self-describing headered format:
-        // 12-byte vector_codec header + 384 dims * 2 bytes/dim.
-        assert(emb_bytes == 12 + 384 * 2);
+        // Embedded as f16 in the version-tagged format:
+        // 1-byte version + 384 dims * 2 bytes/dim.
+        assert(emb_bytes == 1 + 384 * 2);
         assert(model && std::string(model) == "test-model");
         ++rows;
     }

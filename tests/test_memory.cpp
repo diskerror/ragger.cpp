@@ -3,8 +3,8 @@
  *
  * Requires ONNX model files at the configured model_dir.
  */
-#include "ragger/config.h"
-#include "ragger/memory.h"
+#include "config.h"
+#include "memory.h"
 #include <cassert>
 #include <filesystem>
 #include <iostream>

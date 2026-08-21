@@ -4,7 +4,7 @@
  * Tests HTTP client construction and basic functionality.
  * Integration tests are commented out (require running server).
  */
-#include "ragger/client.h"
+#include "client.h"
 #include <cassert>
 #include <iostream>
 #include <print>

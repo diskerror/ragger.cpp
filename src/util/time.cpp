@@ -1,7 +1,7 @@
 /**
  * Timestamp helpers implementation. See include/ragger/util/time.h.
  */
-#include "ragger/util/time.h"
+#include "util/time.h"
 
 #include <chrono>
 #include <iomanip>

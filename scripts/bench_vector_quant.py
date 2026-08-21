@@ -120,6 +120,10 @@ def main():
     ap.add_argument("--dims", type=int, default=384)
     ap.add_argument("--rerank", type=int, default=4,
                     help="oversample factor for the two-stage rerank pass")
+    ap.add_argument("--skip-renorm", action="store_true",
+                    help="don't renormalize after quantization round-trip "
+                         "(measures the cost of dropping the renormalize-on-"
+                         "load step, using the raw dequantized vector as-is)")
     args = ap.parse_args()
 
     con = sqlite3.connect(args.db)
@@ -160,16 +164,23 @@ def main():
         ref_topk[qi] = set(np.argpartition(-sims, args.k)[: args.k])
 
     # -- Part 1: raw recall (rank purely on the quantized store) ---------
-    print("RAW recall (rank entirely on the stored dtype):\n")
+    renorm_label = "SKIPPING renormalize-after-dequant" if args.skip_renorm \
+        else "renormalizing after dequant (current C++ behavior)"
+    print(f"RAW recall (rank entirely on the stored dtype) — {renorm_label}:\n")
     print(f"{'dtype':>6} {'B/dim':>6} {'size':>8} {'recall@k':>10} "
-          f"{'mean cos err':>13} {'mean |Δrank|':>13}")
-    print("-" * 62)
-    QN = {}  # cache normalized quantized matrices for part 2
+          f"{'mean cos err':>13} {'mean |Δrank|':>13} {'mean |norm-1|':>13}")
+    print("-" * 76)
+    QN = {}  # cache quantized matrices (normalized or not, per --skip-renorm)
     for name, fn in ROUNDTRIPS.items():
-        Q = normalize(fn(X))
+        Qraw = fn(X)
+        # How far the raw dequantized vector's norm drifted from 1.0 —
+        # this is exactly what the renormalize-on-load step corrects.
+        raw_norms = np.linalg.norm(Qraw, axis=1)
+        norm_drift = float(np.mean(np.abs(raw_norms - 1.0)))
+        Q = Qraw if args.skip_renorm else normalize(Qraw)
         QN[name] = Q
         recalls, rankshift = [], []
-        coserr_all = float(np.mean(np.abs(np.sum(ref * Q, axis=1) - 1.0)))
+        coserr_all = float(np.mean(np.abs(np.sum(ref * normalize(Qraw), axis=1) - 1.0)))
         for qi in qidx:
             sims = Q @ Q[qi]
             sims[qi] = -np.inf
@@ -184,7 +195,7 @@ def main():
         size_kb = n * args.dims * BYTES_PER_DIM[name] / 1024.0
         print(f"{name:>6} {BYTES_PER_DIM[name]:>6} {size_kb:>7.0f}K "
               f"{np.mean(recalls):>10.4f} {coserr_all:>13.2e} "
-              f"{np.mean(rankshift):>13.3f}")
+              f"{np.mean(rankshift):>13.3f} {norm_drift:>13.2e}")
 
     # -- Part 2: oversample + f32 rerank (how binary/int4 are used) ------
     # Retrieve top-(rerank*k) candidates cheaply on the quantized store, then

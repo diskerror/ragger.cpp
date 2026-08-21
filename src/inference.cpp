@@ -1,11 +1,11 @@
 /**
  * Inference client implementation
  */
-#include "ragger/inference.h"
-#include "ragger/config.h"
-#include "ragger/api_formats.h"
-#include "ragger/lang.h"
-#include "ragger/util/time.h"
+#include "inference.h"
+#include "config.h"
+#include "api_formats.h"
+#include "lang.h"
+#include "util/time.h"
 #include "nlohmann_json.hpp"
 
 #include <curl/curl.h>

@@ -2,9 +2,9 @@
  * Daemon / service control implementation. See include/ragger/daemon_control.h.
  * Moved verbatim out of main.cpp (the launchctl/systemctl service plumbing).
  */
-#include "ragger/daemon_control.h"
-#include "ragger/lang.h"
-#include "diskerror/logger.h"
+#include "daemon_control.h"
+#include "lang.h"
+#include "Logger.h"
 
 #include <chrono>
 #include <csignal>
@@ -93,7 +93,7 @@ int daemon_control(const std::string &action) {
     struct passwd *pw = getpwuid(getuid());
     std::string home = pw ? pw->pw_dir : (std::getenv("HOME") ? std::getenv("HOME") : "");
     if (home.empty()) {
-        Diskerror::logger::error(ragger::lang::ERR_HOME_NOT_FOUND);
+        Diskerror::Logger::error(ragger::lang::ERR_HOME_NOT_FOUND);
         return 1;
     }
 
@@ -120,7 +120,7 @@ int daemon_control(const std::string &action) {
 
     auto ensure_plist = [&]() -> bool {
         if (fs::exists(plist)) return true;
-        Diskerror::logger::error(std::format(ragger::lang::ERR_PLIST_NOT_FOUND, plist));
+        Diskerror::Logger::error(std::format(ragger::lang::ERR_PLIST_NOT_FOUND, plist));
         return false;
     };
 
@@ -132,13 +132,13 @@ int daemon_control(const std::string &action) {
         }
         if (is_loaded()) {
             if (!run_quiet("launchctl kickstart " + target)) {
-                Diskerror::logger::error(ragger::lang::ERR_LAUNCHCTL_KICKSTART);
+                Diskerror::Logger::error(ragger::lang::ERR_LAUNCHCTL_KICKSTART);
                 return 1;
             }
         }
         else {
             if (!run_quiet("launchctl bootstrap " + domain + " " + plist)) {
-                Diskerror::logger::error(ragger::lang::ERR_LAUNCHCTL_BOOTSTRAP);
+                Diskerror::Logger::error(ragger::lang::ERR_LAUNCHCTL_BOOTSTRAP);
                 return 1;
             }
         }
@@ -154,7 +154,7 @@ int daemon_control(const std::string &action) {
         bool daemon_was_running = is_loaded() && is_running();
         if (daemon_was_running) {
             if (!run_quiet("launchctl bootout " + target)) {
-                Diskerror::logger::error(ragger::lang::ERR_LAUNCHCTL_BOOTOUT);
+                Diskerror::Logger::error(ragger::lang::ERR_LAUNCHCTL_BOOTOUT);
                 return 1;
             }
         }
@@ -199,7 +199,7 @@ int daemon_control(const std::string &action) {
         kill_other_ragger_instances();
 
         if (!run_quiet("launchctl bootstrap " + domain + " " + plist)) {
-            Diskerror::logger::critical(ragger::lang::ERR_LAUNCHCTL_BOOTSTRAP);
+            Diskerror::Logger::critical(ragger::lang::ERR_LAUNCHCTL_BOOTSTRAP);
             return 1;
         }
         auto pid = get_pid();
@@ -231,7 +231,7 @@ int daemon_control(const std::string &action) {
         return 0;
     }
 
-    Diskerror::logger::critical(std::format(ragger::lang::ERR_UNKNOWN_ACTION, action));
+    Diskerror::Logger::critical(std::format(ragger::lang::ERR_UNKNOWN_ACTION, action));
     return 1;
 
 #elif defined(__linux__)
@@ -260,7 +260,7 @@ int daemon_control(const std::string &action) {
             return 0;
         }
         if (!run_quiet("systemctl --user start " + unit)) {
-            Diskerror::logger::critical(ragger::lang::ERR_SYSTEMCTL_START);
+            Diskerror::Logger::critical(ragger::lang::ERR_SYSTEMCTL_START);
             return 1;
         }
         auto pid = main_pid();
@@ -275,7 +275,7 @@ int daemon_control(const std::string &action) {
         bool daemon_was_running = is_active();
         if (daemon_was_running) {
             if (!run_quiet("systemctl --user stop " + unit)) {
-                Diskerror::logger::critical(ragger::lang::ERR_SYSTEMCTL_STOP);
+                Diskerror::Logger::critical(ragger::lang::ERR_SYSTEMCTL_STOP);
                 return 1;
             }
         }
@@ -308,7 +308,7 @@ int daemon_control(const std::string &action) {
         if (was_active) run_quiet("systemctl --user stop " + unit);
         kill_other_ragger_instances();
         if (!run_quiet("systemctl --user start " + unit)) {
-            Diskerror::logger::critical(ragger::lang::ERR_SYSTEMCTL_START);
+            Diskerror::Logger::critical(ragger::lang::ERR_SYSTEMCTL_START);
             return 1;
         }
         auto pid = main_pid();
@@ -340,10 +340,10 @@ int daemon_control(const std::string &action) {
         return 0;
     }
 
-    Diskerror::logger::critical(std::format(ragger::lang::ERR_UNKNOWN_ACTION, action));
+    Diskerror::Logger::critical(std::format(ragger::lang::ERR_UNKNOWN_ACTION, action));
     return 1;
 #else
-    Diskerror::logger::error(ragger::lang::ERR_DAEMON_UNSUPPORTED);
+    Diskerror::Logger::error(ragger::lang::ERR_DAEMON_UNSUPPORTED);
     return 1;
 #endif
 }

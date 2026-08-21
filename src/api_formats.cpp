@@ -1,11 +1,11 @@
 /**
  * API format loader and request/response transformers
  */
-#include "ragger/api_formats.h"
-#include "ragger/config.h"
-#include "ragger/lang.h"
-#include "ragger/util/fs.h"
-#include "diskerror/logger.h"
+#include "api_formats.h"
+#include "config.h"
+#include "lang.h"
+#include "util/fs.h"
+#include "Logger.h"
 #include <fstream>
 #include <filesystem>
 #include <iostream>
@@ -110,7 +110,7 @@ static std::optional<ApiFormat> _load_format_file(const std::string& name) {
                 // Loaded silently
                 return fmt;
             } catch (const std::exception& e) {
-                Diskerror::logger::warn(std::format(ragger::lang::WARN_FORMAT_LOAD_FAILED,
+                Diskerror::Logger::warn(std::format(ragger::lang::WARN_FORMAT_LOAD_FAILED,
                                          path, e.what()));
             }
         }

@@ -9,7 +9,7 @@
  */
 #pragma once
 
-#include "ragger/storage_types.h"
+#include "storage_types.h"
 
 #include <memory>
 #include <optional>

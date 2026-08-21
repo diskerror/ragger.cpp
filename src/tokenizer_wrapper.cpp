@@ -1,8 +1,8 @@
 /**
  * TokenizerWrapper implementation using tokenizers-cpp
  */
-#include "ragger/lang.h"
-#include "ragger/tokenizer_wrapper.h"
+#include "lang.h"
+#include "tokenizer_wrapper.h"
 #include <tokenizers_cpp.h>
 #include <format>
 #include <fstream>

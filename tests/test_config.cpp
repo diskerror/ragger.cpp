@@ -1,5 +1,5 @@
-#include "ragger/config.h"
-#include "ragger/util/fs.h"
+#include "config.h"
+#include "util/fs.h"
 #include <cassert>
 #include <cstdlib>
 #include <fstream>

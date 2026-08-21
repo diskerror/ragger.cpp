@@ -2,8 +2,8 @@
  * Export tests — exercises SQL dump output against a temp SQLite database.
  * No ONNX model needed; uses SqliteBackend's DB-only constructor + raw SQL.
  */
-#include "ragger/export.h"
-#include "ragger/config.h"
+#include "export.h"
+#include "config.h"
 
 #include <sqlite3.h>
 

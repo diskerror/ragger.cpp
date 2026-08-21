@@ -25,30 +25,30 @@
 #include <curl/curl.h>
 #include <print>
 
-#include "diskerror/program_options.h"
-#include "ragger/auth.h"
-#include "ragger/client.h"
-#include "ragger/config.h"
-#include "ragger/config_access.h"
-#include "ragger/export.h"
-#include "ragger/import.h"
-#include "ragger/inference.h"
-#include "ragger/lang.h"
-#include "diskerror/logger.h"
-#include "ragger/mcp.h"
-#include "ragger/memory.h"
-#include "ragger/vector_codec.h"
-#include "ragger/onboard.h"
-#include "ragger/recipe_cli.h"
-#include "ragger/embed_executor.h"
-#include "ragger/sqlite_backend.h"
-#include "ragger/user_store.h"
-#include "ragger/server.h"
-#include "ragger/embedder.h"
-#include "ragger/daemon_control.h"
-#include "ragger/util/fs.h"
-#include "ragger/util/time.h"
-#include "ragger/storage_types.h"
+#include "ProgramOptions.h"
+#include "auth.h"
+#include "client.h"
+#include "config.h"
+#include "config_access.h"
+#include "export.h"
+#include "import.h"
+#include "inference.h"
+#include "lang.h"
+#include "Logger.h"
+#include "mcp.h"
+#include "memory.h"
+#include "vector_codec.h"
+#include "onboard.h"
+#include "recipe_cli.h"
+#include "embed_executor.h"
+#include "sqlite_backend.h"
+#include "user_store.h"
+#include "server.h"
+#include "embedder.h"
+#include "daemon_control.h"
+#include "util/fs.h"
+#include "util/time.h"
+#include "storage_types.h"
 #include "nlohmann_json.hpp"
 
 using namespace ragger::lang;
@@ -119,7 +119,7 @@ static void do_import(ragger::RaggerMemory &memory,
     }
     std::println(ragger::lang::MSG_IMPORT_DONE, chunks.size());
     if (skipped > 0)
-        Diskerror::logger::warn(std::format(ragger::lang::WARN_IMPORT_EMBED_SKIPPED,
+        Diskerror::Logger::warn(std::format(ragger::lang::WARN_IMPORT_EMBED_SKIPPED,
                                             skipped, total));
 }
 
@@ -322,7 +322,7 @@ int main(int argc, char **argv) {
     const auto &cfg = ragger::config();
 
     //  Initialize static logging system.
-    Diskerror::logger log(cfg.log_file, cfg.log_level,
+    Diskerror::Logger log(cfg.log_file, cfg.log_level,
                            cfg.log_max_size_mb, cfg.log_max_age_days);
 
     // CLI overrides
@@ -349,7 +349,7 @@ int main(int argc, char **argv) {
             std::unique_ptr<ragger::RaggerMemory> mem_ptr;
             mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path);
             auto &memory = *mem_ptr;
-            Diskerror::logger::info(std::format(MSG_LOADED_MEMORIES, memory.count()));
+            Diskerror::Logger::info(std::format(MSG_LOADED_MEMORIES, memory.count()));
 
             // One-time legacy config migration: seed the DB `settings` table
             // from settings.ini (if present and not already migrated), retire
@@ -357,7 +357,7 @@ int main(int argc, char **argv) {
             // run. Idempotent via the DB `ini_migrated` marker.
             int imported = ragger::migrate_ini_to_db(db_path);
             if (imported > 0) {
-                Diskerror::logger::info(std::format(
+                Diskerror::Logger::info(std::format(
                     "Migrated {} setting(s) from settings.ini into the DB; "
                     "renamed settings.ini -> settings.ini.migrated", imported));
                 ragger::overlay_settings_from_db(ragger::mutable_config(),
@@ -374,7 +374,7 @@ int main(int argc, char **argv) {
             if (!port_overridden && cfg.desired_port != 0 &&
                 cfg.desired_port != cfg.port) {
                 int adopted = cfg.desired_port;
-                Diskerror::logger::info(std::format(
+                Diskerror::Logger::info(std::format(
                     "Startup port rectify: adopting desired_port {} (was {})",
                     adopted, cfg.port));
                 auto r = ragger::set_config_persisted("port", std::to_string(adopted),
@@ -382,7 +382,7 @@ int main(int argc, char **argv) {
                 if (r.has_value()) {
                     port = adopted;  // bind the adopted port this run
                 } else {
-                    Diskerror::logger::error(std::format(
+                    Diskerror::Logger::error(std::format(
                         "Failed to persist rectified port (err={}); binding existing port",
                         static_cast<int>(r.error())));
                 }
@@ -427,10 +427,10 @@ int main(int argc, char **argv) {
                     for (const auto& a : filtered)
                         cargv.push_back(const_cast<char*>(a.c_str()));
                     cargv.push_back(nullptr);
-                    Diskerror::logger::info("Re-executing daemon in place for restart");
+                    Diskerror::Logger::info("Re-executing daemon in place for restart");
                     ::execv(ragger::executable_path().c_str(), cargv.data());
                     // execv only returns on failure.
-                    Diskerror::logger::critical(std::format(
+                    Diskerror::Logger::critical(std::format(
                         "re-exec failed: {} — daemon is stopped", std::strerror(errno)));
                     return 1;
                 }
@@ -440,7 +440,7 @@ int main(int argc, char **argv) {
         else if (command == "search") {
             auto args = opts.getParams("args");
             if (args.empty()) {
-                Diskerror::logger::error(CLI_USAGE_SEARCH);
+                Diskerror::Logger::error(CLI_USAGE_SEARCH);
                 return 1;
             }
             std::string query;
@@ -486,7 +486,7 @@ int main(int argc, char **argv) {
         else if (command == "store") {
             auto args = opts.getParams("args");
             if (args.empty()) {
-                Diskerror::logger::error(CLI_USAGE_STORE);
+                Diskerror::Logger::error(CLI_USAGE_STORE);
                 return 1;
             }
             std::string text;
@@ -516,7 +516,7 @@ int main(int argc, char **argv) {
         else if (command == "decision") {
             auto args = opts.getParams("args");
             if (args.empty()) {
-                Diskerror::logger::error(ragger::lang::CLI_USAGE_DECISION);
+                Diskerror::Logger::error(ragger::lang::CLI_USAGE_DECISION);
                 return 1;
             }
             std::string sub = args[0];
@@ -524,7 +524,7 @@ int main(int argc, char **argv) {
 
             if (sub == "add") {
                 if (args.size() < 2) {
-                    Diskerror::logger::error(ragger::lang::CLI_USAGE_DECISION);
+                    Diskerror::Logger::error(ragger::lang::CLI_USAGE_DECISION);
                     return 1;
                 }
                 std::string text;
@@ -556,24 +556,24 @@ int main(int argc, char **argv) {
             }
             if (sub == "set-status") {
                 if (args.size() < 3) {
-                    Diskerror::logger::error(ragger::lang::CLI_USAGE_DECISION);
+                    Diskerror::Logger::error(ragger::lang::CLI_USAGE_DECISION);
                     return 1;
                 }
                 int decision_id = 0;
                 try { decision_id = std::stoi(args[1]); } catch (...) {
-                    Diskerror::logger::error("decision set-status: <decision_id> must be a number");
+                    Diskerror::Logger::error("decision set-status: <decision_id> must be a number");
                     return 1;
                 }
                 std::string status = args[2];
                 if (!memory.set_decision_status(decision_id, status)) {
-                    Diskerror::logger::error(
+                    Diskerror::Logger::error(
                         "decision set-status: no decision with id " + args[1]);
                     return 1;
                 }
                 std::println("Decision {} set to status \"{}\".", decision_id, status);
                 return 0;
             }
-            Diskerror::logger::error(ragger::lang::CLI_USAGE_DECISION);
+            Diskerror::Logger::error(ragger::lang::CLI_USAGE_DECISION);
             return 1;
         }
         else if (command == "count") {
@@ -757,7 +757,7 @@ int main(int argc, char **argv) {
         else if (command == "import-docs") {
             auto args = opts.getParams("args");
             if (args.empty()) {
-                Diskerror::logger::error(ragger::lang::CLI_USAGE_IMPORT);
+                Diskerror::Logger::error(ragger::lang::CLI_USAGE_IMPORT);
                 return 1;
             }
             // Markdown/text (and now JSON, auto-extracted to prose) → L5
@@ -776,7 +776,7 @@ int main(int argc, char **argv) {
         else if (command == "import-conversations") {
             auto args = opts.getParams("args");
             if (args.empty()) {
-                Diskerror::logger::error(ragger::lang::CLI_USAGE_IMPORT_CONVERSATIONS);
+                Diskerror::Logger::error(ragger::lang::CLI_USAGE_IMPORT_CONVERSATIONS);
                 return 1;
             }
 
@@ -802,7 +802,7 @@ int main(int argc, char **argv) {
                     for (auto& p : files) p = ragger::expand_path(p);
                     items = ragger::load_summary_files(files);
                 } else {
-                    Diskerror::logger::error(
+                    Diskerror::Logger::error(
                         "import-conversations summaries: provide files or --jsonl=FILE");
                     return 1;
                 }
@@ -848,7 +848,7 @@ int main(int argc, char **argv) {
                     if (e.is_regular_file() && e.path().extension() == ".md") { has_md = true; break; }
                 }
                 if (has_md && !all_flag) {
-                    Diskerror::logger::error(
+                    Diskerror::Logger::error(
                         "import-conversations: " + raw_src + " is a directory of Markdown "
                         "memory files — pass --all to import them all as one unit");
                     return 1;
@@ -941,7 +941,7 @@ int main(int argc, char **argv) {
                     mem_ts = buf;
                 }
                 if (mem_ts.empty()) {
-                    Diskerror::logger::error(
+                    Diskerror::Logger::error(
                         "import-conversations: " + raw_src + " has no derivable date — "
                         "pass --fdate (use the file's mtime) or --date=DATE, or import it via "
                         "import-docs instead");
@@ -969,7 +969,7 @@ int main(int argc, char **argv) {
             // --all: it's the single "yes, treat this as one multi-file
             // import unit" switch. No implicit default either way.
             if (is_dir && !all_flag) {
-                Diskerror::logger::error(
+                Diskerror::Logger::error(
                     "import-conversations: " + raw_src + " is a directory (looks like a "
                     "multi-file export) — pass --all to import it as one unit");
                 return 1;
@@ -983,7 +983,7 @@ int main(int argc, char **argv) {
             if (is_dir) {
                 conv_path = raw_src + "/conversations.json";
                 if (!fs::exists(conv_path)) {
-                    Diskerror::logger::error(
+                    Diskerror::Logger::error(
                         "import-conversations: " + raw_src + " has no conversations.json");
                     return 1;
                 }
@@ -1019,7 +1019,7 @@ int main(int argc, char **argv) {
                     bool has_siblings = fs::exists(dir + "/memories.json") ||
                                        fs::is_directory(dir + "/projects");
                     if (has_siblings) {
-                        Diskerror::logger::error(
+                        Diskerror::Logger::error(
                             "import-conversations: " + raw_src + " has sibling export files "
                             "(memories.json / projects/) — pass --all to import them together, "
                             "or point at just this file to import only conversations");
@@ -1037,21 +1037,21 @@ int main(int argc, char **argv) {
                     case ragger::ConversationFormat::ClaudeCode:     fmt = "code"; break;
                     case ragger::ConversationFormat::Telegram:       fmt = "telegram"; break;
                     case ragger::ConversationFormat::ClaudeMemories:
-                        Diskerror::logger::error(
+                        Diskerror::Logger::error(
                             "import-conversations: " + conv_path + " looks like a Claude "
                             "memories.json (no per-message timestamps) — point --all at the "
                             "export directory so dates come from conversations.json, or import "
                             "it directly with --fdate/--date=DATE, or use import-docs instead");
                         return 1;
                     case ragger::ConversationFormat::Unknown:
-                        Diskerror::logger::error(
+                        Diskerror::Logger::error(
                             "import-conversations: could not detect the format of " + conv_path +
                             " — pass --format=code|web|telegram to override");
                         return 1;
                 }
             }
             if (fmt != "code" && fmt != "web" && fmt != "telegram") {
-                Diskerror::logger::error(
+                Diskerror::Logger::error(
                     "import-conversations: --format must be code|web|telegram");
                 return 1;
             }
@@ -1069,7 +1069,7 @@ int main(int argc, char **argv) {
             } else { // telegram
                 std::string self_name = opts["self"].as<std::string>();
                 if (self_name.empty()) {
-                    Diskerror::logger::error(
+                    Diskerror::Logger::error(
                         "import-conversations --format=telegram: --self=\"Your Display Name\" is required");
                     return 1;
                 }
@@ -1183,7 +1183,7 @@ int main(int argc, char **argv) {
                     mem_ts = buf;
                 }
                 if (mem_ts.empty()) {
-                    Diskerror::logger::error(
+                    Diskerror::Logger::error(
                         "import-conversations: " + memories_path + " has no derivable date — "
                         "pass --fdate (use the file's mtime) or --date=DATE, or import it via "
                         "import-docs instead");
@@ -1240,10 +1240,10 @@ int main(int argc, char **argv) {
             // behavior). Kept working so existing scripts don't break.
             auto args = opts.getParams("args");
             if (args.empty()) {
-                Diskerror::logger::error(ragger::lang::CLI_USAGE_IMPORT);
+                Diskerror::Logger::error(ragger::lang::CLI_USAGE_IMPORT);
                 return 1;
             }
-            Diskerror::logger::warn(
+            Diskerror::Logger::warn(
                 "\"ragger import\" is deprecated — use \"ragger import-docs\" "
                 "(docs) or \"ragger import-conversations\" (conversations/memories/projects)");
             std::string imp_title = opts["title"].as<std::string>();
@@ -1258,7 +1258,7 @@ int main(int argc, char **argv) {
         else if (command == "export") {
             auto args = opts.getParams("args");
             if (args.empty()) {
-                Diskerror::logger::error(ragger::lang::CLI_USAGE_EXPORT);
+                Diskerror::Logger::error(ragger::lang::CLI_USAGE_EXPORT);
                 return 1;
             }
             std::string target = args[0];
@@ -1280,7 +1280,7 @@ int main(int argc, char **argv) {
                         if (!avail.empty()) avail += ", ";
                         avail += t;
                     }
-                    Diskerror::logger::error(std::format(
+                    Diskerror::Logger::error(std::format(
                         ragger::lang::MSG_EXPORT_TABLE_NOT_FOUND, target, avail));
                     return 1;
                 }
@@ -1291,7 +1291,7 @@ int main(int argc, char **argv) {
                 std::string outpath = opts["output"].as<std::string>();
                 std::ofstream outfile(outpath);
                 if (!outfile) {
-                    Diskerror::logger::error(std::format("Cannot open: {}", outpath));
+                    Diskerror::Logger::error(std::format("Cannot open: {}", outpath));
                     return 1;
                 }
                 int rows = ragger::export_sql(outfile, resolved_db, export_opts);
@@ -1358,7 +1358,7 @@ int main(int argc, char **argv) {
                 std::println(ragger::lang::MSG_DB_BACKED_UP, backup_path);
             }
             catch (const std::exception &e) {
-                Diskerror::logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
+                Diskerror::Logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
             }
 
             // Rebuild embeddings. Skip the drift guard — re-encoding at the
@@ -1396,7 +1396,7 @@ int main(int argc, char **argv) {
                 std::println(ragger::lang::MSG_DB_BACKED_UP, backup_path);
             }
             catch (const std::exception &e) {
-                Diskerror::logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
+                Diskerror::Logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
             }
 
             ragger::RaggerMemory memory(db_path,
@@ -1436,7 +1436,7 @@ int main(int argc, char **argv) {
             // (use `usermod <name>` to rotate an existing user's token).
             auto args = opts.getParams("args");
             if (args.empty()) {
-                Diskerror::logger::critical(ragger::lang::CLI_USAGE_USERADD);
+                Diskerror::Logger::critical(ragger::lang::CLI_USAGE_USERADD);
                 return 1;
             }
             std::string username = args[0];
@@ -1444,7 +1444,7 @@ int main(int argc, char **argv) {
             try {
                 ragger::UserStore storage(cfg.resolved_db_path());
                 if (storage.get_user_by_username(username)) {
-                    Diskerror::logger::error(std::format(ragger::lang::ERR_USERADD_EXISTS, username) + "\n"
+                    Diskerror::Logger::error(std::format(ragger::lang::ERR_USERADD_EXISTS, username) + "\n"
                                           + std::format(ragger::lang::ERR_USERADD_EXISTS_HINT, username));
                     return 1;
                 }
@@ -1458,7 +1458,7 @@ int main(int argc, char **argv) {
                 std::println("{}", ragger::lang::MSG_TOKEN_SAVE_WARNING);
             }
             catch (const std::exception &e) {
-                Diskerror::logger::critical(e.what());
+                Diskerror::Logger::critical(e.what());
                 return 1;
             }
 
@@ -1468,7 +1468,7 @@ int main(int argc, char **argv) {
             // Errors if the user does not exist.
             auto args = opts.getParams("args");
             if (args.empty()) {
-                Diskerror::logger::error(ragger::lang::CLI_USAGE_USERMOD);
+                Diskerror::Logger::error(ragger::lang::CLI_USAGE_USERMOD);
                 return 1;
             }
             std::string username = args[0];
@@ -1476,7 +1476,7 @@ int main(int argc, char **argv) {
             try {
                 ragger::UserStore storage(cfg.resolved_db_path());
                 if (!storage.get_user_by_username(username)) {
-                    Diskerror::logger::error(std::format(ragger::lang::ERR_USERMOD_MISSING, username) + "\n"
+                    Diskerror::Logger::error(std::format(ragger::lang::ERR_USERMOD_MISSING, username) + "\n"
                                           + std::format(ragger::lang::ERR_USERMOD_MISSING_HINT, username));
                     return 1;
                 }
@@ -1490,7 +1490,7 @@ int main(int argc, char **argv) {
                 std::println("{}", ragger::lang::MSG_TOKEN_SAVE_WARNING);
             }
             catch (const std::exception &e) {
-                Diskerror::logger::critical(e.what());
+                Diskerror::Logger::critical(e.what());
                 return 1;
             }
 
@@ -1498,7 +1498,7 @@ int main(int argc, char **argv) {
         else if (command == "userdel") {
             auto args = opts.getParams("args");
             if (args.empty()) {
-                Diskerror::logger::critical(ragger::lang::CLI_USAGE_USERDEL);
+                Diskerror::Logger::critical(ragger::lang::CLI_USAGE_USERDEL);
                 return 1;
             }
             std::string username = args[0];
@@ -1509,7 +1509,7 @@ int main(int argc, char **argv) {
                 std::println(ragger::lang::MSG_USER_REMOVED, username);
             }
             catch (const std::exception &e) {
-                Diskerror::logger::critical(e.what());
+                Diskerror::Logger::critical(e.what());
                 return 1;
             }
 
@@ -1519,7 +1519,7 @@ int main(int argc, char **argv) {
             struct passwd *self_pw = getpwuid(getuid());
             char *login = self_pw ? self_pw->pw_name : nullptr;
             if (!login) {
-                Diskerror::logger::error(ragger::lang::ERR_UNKNOWN_USER);
+                Diskerror::Logger::error(ragger::lang::ERR_UNKNOWN_USER);
                 return 1;
             }
             std::string username(login);
@@ -1560,7 +1560,7 @@ int main(int argc, char **argv) {
             // Empty password clears web-UI access for that user.
             auto args = opts.getParams("args");
             if (args.empty()) {
-                Diskerror::logger::error(ragger::lang::CLI_USAGE_PASSWD);
+                Diskerror::Logger::error(ragger::lang::CLI_USAGE_PASSWD);
                 return 1;
             }
             std::string target_user = args[0];
@@ -1569,7 +1569,7 @@ int main(int argc, char **argv) {
                 ragger::UserStore umgr(cfg.resolved_db_path());
                 auto user_info = umgr.get_user_by_username(target_user);
                 if (!user_info) {
-                    Diskerror::logger::error(std::format(ragger::lang::ERR_USERMOD_MISSING, target_user) + "\n"
+                    Diskerror::Logger::error(std::format(ragger::lang::ERR_USERMOD_MISSING, target_user) + "\n"
                                           + std::format(ragger::lang::ERR_PASSWD_MISSING_HINT, target_user));
                     return 1;
                 }
@@ -1582,7 +1582,7 @@ int main(int argc, char **argv) {
                 else {
                     std::string confirm = read_password(ragger::lang::PROMPT_CONFIRM_PASSWORD);
                     if (new_pass != confirm) {
-                        Diskerror::logger::critical(ragger::lang::ERR_PASSWORDS_DIFFER);
+                        Diskerror::Logger::critical(ragger::lang::ERR_PASSWORDS_DIFFER);
                         return 1;
                     }
                     std::string hash = ragger::hash_password(new_pass);
@@ -1591,7 +1591,7 @@ int main(int argc, char **argv) {
                 }
             }
             catch (const std::exception &e) {
-                Diskerror::logger::critical(e.what());
+                Diskerror::Logger::critical(e.what());
                 return 1;
             }
 
@@ -1614,23 +1614,23 @@ int main(int argc, char **argv) {
             catch (...) {
             }
             if (daemon_pid <= 0) {
-                Diskerror::logger::error(ragger::lang::ERR_DAEMON_NOT_FOUND);
+                Diskerror::Logger::error(ragger::lang::ERR_DAEMON_NOT_FOUND);
                 return 1;
             }
             if (kill(daemon_pid, 0) != 0) {
-                Diskerror::logger::error(std::format(ragger::lang::ERR_DAEMON_PID_NOT_RUNNING, daemon_pid));
+                Diskerror::Logger::error(std::format(ragger::lang::ERR_DAEMON_PID_NOT_RUNNING, daemon_pid));
                 return 1;
             }
             if (kill(daemon_pid, SIGUSR1) != 0) {
                 if (errno == EPERM) {
-                    Diskerror::logger::error(ragger::lang::ERR_PERMISSION_DENIED_SIGNAL);
+                    Diskerror::Logger::error(ragger::lang::ERR_PERMISSION_DENIED_SIGNAL);
                 }
                 else {
-                    Diskerror::logger::error(std::format(ragger::lang::ERR_SIGNAL_FAILED, strerror(errno)));
+                    Diskerror::Logger::error(std::format(ragger::lang::ERR_SIGNAL_FAILED, strerror(errno)));
                 }
                 return 1;
             }
-            Diskerror::logger::info(std::format(ragger::lang::MSG_HOUSEKEEPING_TRIGGERED, daemon_pid));
+            Diskerror::Logger::info(std::format(ragger::lang::MSG_HOUSEKEEPING_TRIGGERED, daemon_pid));
 
         }
         else if (command == "reload") {
@@ -1654,14 +1654,14 @@ int main(int argc, char **argv) {
             }
 
             if (daemon_pid <= 0) {
-                Diskerror::logger::error(ragger::lang::ERR_DAEMON_NOT_FOUND);
+                Diskerror::Logger::error(ragger::lang::ERR_DAEMON_NOT_FOUND);
                 return 1;
             }
             if (kill(daemon_pid, SIGHUP) != 0) {
                 std::cerr << std::format(ragger::lang::ERR_SIGNAL_FAILED, strerror(errno)) << "\n";
                 return 1;
             }
-            Diskerror::logger::error(std::format(ragger::lang::MSG_CONFIG_RELOAD_OK, daemon_pid));
+            Diskerror::Logger::error(std::format(ragger::lang::MSG_CONFIG_RELOAD_OK, daemon_pid));
 
         }
         else {
@@ -1670,7 +1670,7 @@ int main(int argc, char **argv) {
         }
     }
     catch (const std::exception &e) {
-        Diskerror::logger::critical(e.what());
+        Diskerror::Logger::critical(e.what());
         return 1;
     }
 

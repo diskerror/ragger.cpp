@@ -2,19 +2,19 @@
  * HTTP server for Ragger Memory implementation
  */
 
-#include "ragger/server.h"
-#include "ragger/memory.h"
-#include "ragger/user_store.h"
-#include "ragger/sqlite_backend.h"
-#include "ragger/lang.h"
-#include "diskerror/logger.h"
-#include "ragger/auth.h"
-#include "ragger/config.h"
-#include "ragger/config_access.h"
-#include "ragger/util/fs.h"
-#include "ragger/inference.h"
-#include "ragger/summarizer.h"
-#include "ragger/summarizer_service.h"
+#include "server.h"
+#include "memory.h"
+#include "user_store.h"
+#include "sqlite_backend.h"
+#include "lang.h"
+#include "Logger.h"
+#include "auth.h"
+#include "config.h"
+#include "config_access.h"
+#include "util/fs.h"
+#include "inference.h"
+#include "summarizer.h"
+#include "summarizer_service.h"
 #include "nlohmann_json.hpp"
 
 #include "httplib.h"
@@ -141,7 +141,7 @@ struct Server::Impl {
             // isn't possible.
             std::string msg = std::format(lang::WARN_TLS_PARTIAL_CONFIG,
                 have_cert ? "cert" : "key");
-            Diskerror::logger::warn(msg);
+            Diskerror::Logger::warn(msg);
             std::cerr << msg << "\n";
             return std::make_unique<httplib::Server>();
         }
@@ -156,16 +156,16 @@ struct Server::Impl {
             if (!svr->is_valid()) {
                 std::string msg = std::format(lang::WARN_TLS_INVALID_CERT,
                     cfg.tls_cert, cfg.tls_key);
-                Diskerror::logger::warn(msg);
+                Diskerror::Logger::warn(msg);
                 std::cerr << msg << "\n";
                 return std::make_unique<httplib::Server>();
             }
             tls_enabled_ = true;
-            Diskerror::logger::info(std::format(lang::MSG_TLS_ENABLED, cfg.tls_cert));
+            Diskerror::Logger::info(std::format(lang::MSG_TLS_ENABLED, cfg.tls_cert));
             return svr;
         } catch (const std::exception& e) {
             std::string msg = std::format(lang::WARN_TLS_SETUP_FAILED, e.what());
-            Diskerror::logger::warn(msg);
+            Diskerror::Logger::warn(msg);
             std::cerr << msg << "\n";
             return std::make_unique<httplib::Server>();
         }
@@ -175,9 +175,9 @@ struct Server::Impl {
         // Pre-load embedding cache so first request isn't slow
         try {
             auto result = memory.search("warmup", 1, 0.0f);
-            Diskerror::logger::info(std::format(lang::MSG_WARMUP_EMBEDDING_CACHE, memory.count()));
+            Diskerror::Logger::info(std::format(lang::MSG_WARMUP_EMBEDDING_CACHE, memory.count()));
         } catch (const std::exception& e) {
-            Diskerror::logger::info(std::format(lang::MSG_WARMUP_ERROR, e.what()));
+            Diskerror::Logger::info(std::format(lang::MSG_WARMUP_ERROR, e.what()));
         }
         // Preload default model on local inference engines
         if (inference_) {
@@ -198,13 +198,13 @@ struct Server::Impl {
         std::thread([this, model_name]() {
             auto err = inference_->ensure_model_loaded(model_name);
             if (err.empty()) {
-                Diskerror::logger::info(std::format(lang::MSG_PRELOADED_MODEL, model_name));
+                Diskerror::Logger::info(std::format(lang::MSG_PRELOADED_MODEL, model_name));
             } else {
                 // WARN, not info — preload is best-effort but a misconfigured or
                 // unreachable management endpoint is the kind of thing the user
                 // wants to see (issue #47). The err string already carries the
                 // tried URL via ERR_ENGINE_UNREACHABLE / ERR_MODEL_LOAD_*.
-                Diskerror::logger::warn(std::format(lang::MSG_MODEL_PRELOAD_SKIPPED, err));
+                Diskerror::Logger::warn(std::format(lang::MSG_MODEL_PRELOAD_SKIPPED, err));
             }
         }).detach();
     }
@@ -224,11 +224,11 @@ struct Server::Impl {
             try {
                 int deleted = memory.cleanup_old_conversations(max_age_hours);
                 if (deleted > 0) {
-                    Diskerror::logger::info(std::format(
+                    Diskerror::Logger::info(std::format(
                         lang::MSG_HOUSEKEEPING_EXPIRED, 0, deleted));
                 }
             } catch (const std::exception& e) {
-                Diskerror::logger::critical(std::format(lang::ERR_CLEANUP_DB, e.what()));
+                Diskerror::Logger::critical(std::format(lang::ERR_CLEANUP_DB, e.what()));
             }
         }
 
@@ -241,11 +241,11 @@ struct Server::Impl {
         try {
             int filled = memory.backfill_embeddings();
             if (filled > 0) {
-                Diskerror::logger::info(std::format(
+                Diskerror::Logger::info(std::format(
                     lang::MSG_BACKFILLED_EMBEDDINGS, filled));
             }
         } catch (const std::exception& e) {
-            Diskerror::logger::warn(std::format(lang::ERR_CLEANUP_DB, e.what()));
+            Diskerror::Logger::warn(std::format(lang::ERR_CLEANUP_DB, e.what()));
         }
 
         // 4. Backfill NULL phon (dolphining sounds-like) — self-heals rows that
@@ -255,11 +255,11 @@ struct Server::Impl {
         try {
             int phoned = memory.rebuild_phon(/*only_missing=*/true, /*progress=*/false);
             if (phoned > 0) {
-                Diskerror::logger::info(std::format(
+                Diskerror::Logger::info(std::format(
                     "Backfilled phonetic codes for {} row(s)", phoned));
             }
         } catch (const std::exception& e) {
-            Diskerror::logger::warn(std::format(lang::ERR_CLEANUP_DB, e.what()));
+            Diskerror::Logger::warn(std::format(lang::ERR_CLEANUP_DB, e.what()));
         }
     }
 
@@ -289,7 +289,7 @@ struct Server::Impl {
         auto pid_str = std::to_string(getpid());
         (void)write(fd, pid_str.c_str(), pid_str.size());
         housekeeping_locks_[username] = fd;
-        Diskerror::logger::info(std::format(lang::MSG_HOUSEKEEPING_OWNER, username));
+        Diskerror::Logger::info(std::format(lang::MSG_HOUSEKEEPING_OWNER, username));
         return true;
     }
 
@@ -298,7 +298,7 @@ struct Server::Impl {
     void start_housekeeping_timer() {
         int interval = config().housekeeping_interval;
         if (interval == 0) {
-            Diskerror::logger::info(lang::MSG_HOUSEKEEPING_DISABLED);
+            Diskerror::Logger::info(lang::MSG_HOUSEKEEPING_DISABLED);
             return;
         }
         timer_running_ = true;
@@ -310,7 +310,7 @@ struct Server::Impl {
                     // the same way — main() re-execs afterward).
                     if (g_shutdown_requested.load(std::memory_order_relaxed) ||
                         g_restart_requested.load(std::memory_order_relaxed)) {
-                        Diskerror::logger::info(
+                        Diskerror::Logger::info(
                             g_restart_requested.load(std::memory_order_relaxed)
                                 ? "Restart signal received; stopping listeners to re-exec"
                                 : "Shutdown signal received; stopping listeners");
@@ -321,24 +321,24 @@ struct Server::Impl {
                     }
                     // Check for signal-triggered housekeeping
                     if (g_housekeeping_requested.exchange(false)) {
-                        Diskerror::logger::info(lang::MSG_HOUSEKEEPING_SIGNAL);
+                        Diskerror::Logger::info(lang::MSG_HOUSEKEEPING_SIGNAL);
                         run_housekeeping();
                     }
                     // Check for config reload (SIGHUP)
                     if (g_config_reload_requested.exchange(false)) {
                         int n = reload_config();
                         if (n > 0) {
-                            Diskerror::logger::info(std::format(ragger::lang::MSG_CONFIG_RELOADED_N, n));
+                            Diskerror::Logger::info(std::format(ragger::lang::MSG_CONFIG_RELOADED_N, n));
                             // Re-initialize inference client if endpoints changed
                             try {
                                 inference_ = std::make_unique<InferenceClient>(
                                     InferenceClient::from_config(config()));
-                                Diskerror::logger::info(lang::MSG_INFERENCE_CLIENT_OK);
+                                Diskerror::Logger::info(lang::MSG_INFERENCE_CLIENT_OK);
                             } catch (const std::exception& e) {
-                                Diskerror::logger::critical(std::format(lang::ERR_INFERENCE_CLIENT_FAIL, e.what()));
+                                Diskerror::Logger::critical(std::format(lang::ERR_INFERENCE_CLIENT_FAIL, e.what()));
                             }
                         } else {
-                            Diskerror::logger::info(lang::MSG_CONFIG_RELOADED_NONE);
+                            Diskerror::Logger::info(lang::MSG_CONFIG_RELOADED_NONE);
                         }
                     }
                 }
@@ -368,7 +368,7 @@ struct Server::Impl {
         auto client = InferenceClient::from_config(cfg);
         if (!client.endpoints.empty()) {
             inference_ = std::make_unique<InferenceClient>(std::move(client));
-            Diskerror::logger::info(std::format(lang::MSG_INFERENCE_ENABLED, inference_->endpoints.size()));
+            Diskerror::Logger::info(std::format(lang::MSG_INFERENCE_ENABLED, inference_->endpoints.size()));
         }
     }
 
@@ -388,11 +388,11 @@ struct Server::Impl {
 
                 int user_id = users_.create_user(username, token_hash);
                 user = UserInfo{user_id, username, token_hash};
-                Diskerror::logger::info(std::format(lang::MSG_CREATED_USER, username, user_id));
+                Diskerror::Logger::info(std::format(lang::MSG_CREATED_USER, username, user_id));
             }
             default_user_ = user;
         }
-        Diskerror::logger::info(lang::MSG_SINGLE_USER_MODE);
+        Diskerror::Logger::info(lang::MSG_SINGLE_USER_MODE);
     }
 
     /// True if this request must present a valid token. False for requests
@@ -460,7 +460,7 @@ struct Server::Impl {
         std::string text = body.value("text", "");
         json metadata = body.value("metadata", json::object());
         if (text.empty()) {
-            Diskerror::logger::debug("POST /store 400");
+            Diskerror::Logger::debug("POST /store 400");
             res.status = 400;
             res.set_content(lang::HTTP_MISSING_TEXT, "text/plain");
             return;
@@ -482,7 +482,7 @@ struct Server::Impl {
             // recall until it's actually done.
             std::string status = metadata.value("status", "current");
             int did = mem.store_decision(text, status, tags);
-            Diskerror::logger::debug("POST /store 200 (decision)");
+            Diskerror::Logger::debug("POST /store 200 (decision)");
             res.set_content(json{{"id", std::to_string(did)},
                                  {"status", "stored"},
                                  {"table", "decisions"}}.dump(), "application/json");
@@ -490,7 +490,7 @@ struct Server::Impl {
         }
 
         std::string id = mem.store(text, metadata);
-        Diskerror::logger::debug("POST /store 200");
+        Diskerror::Logger::debug("POST /store 200");
         res.set_content(json{{"id", id}, {"status", "stored"}}.dump(), "application/json");
     }
 
@@ -499,7 +499,7 @@ struct Server::Impl {
         auto body = json::parse(req.body);
         std::string query = body.value("query", "");
         if (query.empty()) {
-            Diskerror::logger::debug("POST /search 400");
+            Diskerror::Logger::debug("POST /search 400");
             res.status = 400; res.set_content(lang::HTTP_MISSING_QUERY, "text/plain"); return;
         }
         int limit       = body.value("limit", config().default_search_limit);
@@ -512,8 +512,8 @@ struct Server::Impl {
             std::chrono::high_resolution_clock::now() - t0).count();
         json timing = sr.timing;
         timing["total_ms"] = ms;
-        Diskerror::logger::trace(std::format(lang::DBG_QUERY_LOG, query, sr.results.size(), ms));
-        Diskerror::logger::debug(std::format(lang::DBG_HTTP, "POST", "/search", "200"));
+        Diskerror::Logger::trace(std::format(lang::DBG_QUERY_LOG, query, sr.results.size(), ms));
+        Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "POST", "/search", "200"));
         res.set_content(json{{"results", search_results_to_json(sr.results)},
                              {"timing",  timing}}.dump(), "application/json");
     }
@@ -530,7 +530,7 @@ struct Server::Impl {
         std::string session_name = body.value("session_name", "");
         std::string name_source  = body.value("name_source", "");
         if (user_text.empty()) {
-            Diskerror::logger::debug("POST /turn 400");
+            Diskerror::Logger::debug("POST /turn 400");
             res.status = 400;
             res.set_content(json{{"error", "missing required field: user"}}.dump(),
                             "application/json");
@@ -543,7 +543,7 @@ struct Server::Impl {
         // placeholder) by capture_turn. The summarizer picks it up on the next
         // housekeeping tick (every 60s) via enqueue_catch_up — no immediate
         // LLM call here.
-        Diskerror::logger::debug(std::format(lang::DBG_HTTP, "POST", "/turn", "200"));
+        Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "POST", "/turn", "200"));
         res.set_content(json{{"status",  result.captured ? "captured" : "disabled"},
                              {"turn_id", result.turn_id}}.dump(), "application/json");
     }
@@ -562,7 +562,7 @@ struct Server::Impl {
         json chunks = json::array();
         for (const auto& c : ctx.chunks)
             chunks.push_back({{"kind", c.kind}, {"text", c.text}, {"timestamp", c.timestamp}});
-        Diskerror::logger::debug(std::format(lang::DBG_HTTP, "GET", "/session", "200"));
+        Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "GET", "/session", "200"));
         res.set_content(json{{"status",     "ok"},
                              {"session_id", sid},
                              {"recipe",     ctx.recipe_name},
@@ -574,10 +574,10 @@ struct Server::Impl {
         int id = std::stoi(req.matches[1]);
         auto& mem = _get_memory(user.username);
         if (mem.delete_memory(id)) {
-            Diskerror::logger::debug("DELETE /memory 200");
+            Diskerror::Logger::debug("DELETE /memory 200");
             res.set_content(json{{"id", id}, {"status", "deleted"}}.dump(), "application/json");
         } else {
-            Diskerror::logger::debug("DELETE /memory 404");
+            Diskerror::Logger::debug("DELETE /memory 404");
             res.status = 404; res.set_content(lang::HTTP_MEMORY_NOT_FOUND, "text/plain");
         }
     }
@@ -586,13 +586,13 @@ struct Server::Impl {
                               httplib::Response& res) {
         auto body = json::parse(req.body);
         if (!body.contains("ids") || !body["ids"].is_array()) {
-            Diskerror::logger::debug("POST /delete_batch 400");
+            Diskerror::Logger::debug("POST /delete_batch 400");
             res.status = 400; res.set_content(lang::HTTP_MISSING_IDS, "text/plain"); return;
         }
         auto ids = body["ids"].get<std::vector<int>>();
         auto& mem = _get_memory(user.username);
         int deleted = mem.delete_batch(ids);
-        Diskerror::logger::debug("POST /delete_batch 200");
+        Diskerror::Logger::debug("POST /delete_batch 200");
         res.set_content(json{{"deleted", deleted}}.dump(), "application/json");
     }
 
@@ -600,13 +600,13 @@ struct Server::Impl {
                                     httplib::Response& res) {
         auto body = json::parse(req.body);
         if (!body.contains("metadata") || !body["metadata"].is_object()) {
-            Diskerror::logger::debug("POST /search_by_metadata 400");
+            Diskerror::Logger::debug("POST /search_by_metadata 400");
             res.status = 400; res.set_content(lang::HTTP_MISSING_METADATA, "text/plain"); return;
         }
         auto results = _get_memory(user.username).search_by_metadata(
             body["metadata"], body.value("limit", 0),
             body.value("after", ""), body.value("before", ""));
-        Diskerror::logger::debug("POST /search_by_metadata 200");
+        Diskerror::Logger::debug("POST /search_by_metadata 200");
         res.set_content(json{{"results", search_results_to_json(results)},
                              {"count",   results.size()}}.dump(), "application/json");
     }
@@ -621,7 +621,7 @@ struct Server::Impl {
                                  {"commit",   RAGGER_COMMIT},
                                  {"built",    RAGGER_BUILD_DATE},
                                  {"memories", memory.count()}}.dump(), "application/json");
-            Diskerror::logger::debug("GET /health 200");
+            Diskerror::Logger::debug("GET /health 200");
         });
 
         // Wrap a handler with bearer auth + uniform error handling.
@@ -629,7 +629,7 @@ struct Server::Impl {
             return [this, handler](const httplib::Request& req, httplib::Response& res) {
                 auto user = _check_auth(req);
                 if (!user) {
-                    Diskerror::logger::debug(std::format("{} {} 401", req.method, req.path));
+                    Diskerror::Logger::debug(std::format("{} {} 401", req.method, req.path));
                     res.status = 401;
                     res.set_content("Unauthorized", "text/plain");
                     return;
@@ -637,11 +637,11 @@ struct Server::Impl {
                 try {
                     handler(*user, req, res);
                 } catch (const json::exception& e) {
-                    Diskerror::logger::debug(std::format("{} {} 400", req.method, req.path));
+                    Diskerror::Logger::debug(std::format("{} {} 400", req.method, req.path));
                     res.status = 400;
                     res.set_content(std::string("JSON error: ") + e.what(), "text/plain");
                 } catch (const std::exception& e) {
-                    Diskerror::logger::critical(std::format("{} {} failed: {}", req.method, req.path, e.what()));
+                    Diskerror::Logger::critical(std::format("{} {} failed: {}", req.method, req.path, e.what()));
                     res.status = 500;
                     res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
                 }
@@ -652,7 +652,7 @@ struct Server::Impl {
                                          httplib::Response& res) {
             res.set_content(json{{"count", _get_memory(user.username).count()}}.dump(),
                             "application/json");
-            Diskerror::logger::debug("GET /count 200");
+            Diskerror::Logger::debug("GET /count 200");
         }));
 
         svr.Post("/store",              guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_store(u, req, res); }));
@@ -675,7 +675,7 @@ struct Server::Impl {
             size_t s = token.find_first_not_of(" \t\r\n");
             size_t e = token.find_last_not_of(" \t\r\n");
             if (s != std::string::npos) token = token.substr(s, e - s + 1);
-            Diskerror::logger::debug("GET /user/token 200");
+            Diskerror::Logger::debug("GET /user/token 200");
             res.set_content(json{{"token", token}, {"username", user.username}}.dump(),
                             "application/json");
         }));
@@ -686,7 +686,7 @@ struct Server::Impl {
         svr.Get("/dashboard", guarded([this](const UserInfo&, const httplib::Request&,
                                              httplib::Response& res) {
             res.set_content(DASHBOARD_HTML, "text/html; charset=utf-8");
-            Diskerror::logger::debug("GET /dashboard 200");
+            Diskerror::Logger::debug("GET /dashboard 200");
         }));
 
         // ---- Config API (dashboard + programmatic) -----------------------
@@ -697,7 +697,7 @@ struct Server::Impl {
         svr.Get("/config", guarded([this](const UserInfo&, const httplib::Request&,
                                           httplib::Response& res) {
             res.set_content(build_config_json().dump(), "application/json");
-            Diskerror::logger::debug("GET /config 200");
+            Diskerror::Logger::debug("GET /config 200");
         }));
 
         svr.Get(R"(/config/([A-Za-z0-9_]+))", guarded([this](const UserInfo&,
@@ -727,7 +727,7 @@ struct Server::Impl {
                     case ConfigSetError::InvalidValue:
                         res.status = 400; res.set_content(R"({"error":"invalid value"})", "application/json"); break;
                 }
-                Diskerror::logger::debug(std::format("PUT /config/{} {}", key, res.status));
+                Diskerror::Logger::debug(std::format("PUT /config/{} {}", key, res.status));
                 return;
             }
             // Echo the resolved (post-default) value plus apply flags.
@@ -736,7 +736,7 @@ struct Server::Impl {
                         {"restart_required", r->restart_required},
                         {"rebuild_required", r->rebuild_required}};
             res.set_content(out.dump(), "application/json");
-            Diskerror::logger::debug(std::format("PUT /config/{} 200", key));
+            Diskerror::Logger::debug(std::format("PUT /config/{} 200", key));
         }));
 
         // GET /stats -> one-shot status snapshot (server + table sizes).
@@ -792,7 +792,7 @@ struct Server::Impl {
             std::thread([this]() {
                 try { memory.update_embeddings(); }
                 catch (const std::exception& e) {
-                    Diskerror::logger::critical(std::format("re-embed failed: {}", e.what()));
+                    Diskerror::Logger::critical(std::format("re-embed failed: {}", e.what()));
                 }
             }).detach();
             res.set_content(R"({"status":"started","reembedding":true})", "application/json");
@@ -841,7 +841,7 @@ struct Server::Impl {
             res.set_content(json{{"status", "restarting"},
                                  {"reconnect_url", url},
                                  {"port", new_port}}.dump(), "application/json");
-            Diskerror::logger::info("POST /restart -> re-exec requested");
+            Diskerror::Logger::info("POST /restart -> re-exec requested");
             // Trigger after the response flushes; the timer loop stops the
             // listeners and run() returns true so main() re-execs.
             g_restart_requested.store(true, std::memory_order_relaxed);
@@ -1014,7 +1014,7 @@ bool Server::run() {
     const bool want_tcp  = cfg.tcp_enabled && !pImpl->host.empty();
 
     if (want_tcp && !is_port_available(pImpl->host, pImpl->port)) {
-        Diskerror::logger::critical(std::format(lang::ERR_PORT_IN_USE, pImpl->port));
+        Diskerror::Logger::critical(std::format(lang::ERR_PORT_IN_USE, pImpl->port));
         std::exit(1);
     }
 
@@ -1026,13 +1026,13 @@ bool Server::run() {
     } else {
         addr = pImpl->host + ":" + std::to_string(pImpl->port);
     }
-    Diskerror::logger::info(std::format(lang::MSG_SERVER_STARTING, addr));
+    Diskerror::Logger::info(std::format(lang::MSG_SERVER_STARTING, addr));
     if (want_tcp) {
-        Diskerror::logger::info(std::format(lang::MSG_HEALTH_CHECK_TCP,
+        Diskerror::Logger::info(std::format(lang::MSG_HEALTH_CHECK_TCP,
                                             pImpl->host + ":" + std::to_string(pImpl->port)));
     }
     if (want_unix) {
-        Diskerror::logger::info(std::format(lang::MSG_HEALTH_CHECK_UNIX, cfg.resolved_socket_path()));
+        Diskerror::Logger::info(std::format(lang::MSG_HEALTH_CHECK_UNIX, cfg.resolved_socket_path()));
     }
 
     // Write PID file (per-port)
@@ -1043,7 +1043,7 @@ bool Server::run() {
         std::ofstream pf(pImpl->pid_file_);
         if (pf) {
             pf << getpid();
-            Diskerror::logger::info(std::format(lang::MSG_PID_FILE, pImpl->pid_file_));
+            Diskerror::Logger::info(std::format(lang::MSG_PID_FILE, pImpl->pid_file_));
         }
     }
 
@@ -1080,10 +1080,10 @@ bool Server::run() {
     // and main blocks on the unix listener.
     std::thread tcp_thread;
     auto run_tcp = [this]() {
-        Diskerror::logger::info(std::format(ragger::lang::MSG_BIND_TCP, pImpl->host, std::to_string(pImpl->port)));
+        Diskerror::Logger::info(std::format(ragger::lang::MSG_BIND_TCP, pImpl->host, std::to_string(pImpl->port)));
         bool ok = pImpl->tcp_svr->listen(pImpl->host, pImpl->port);
         if (!ok) {
-            Diskerror::logger::error(std::format(ragger::lang::ERR_LISTEN_TCP, std::to_string(errno)));
+            Diskerror::Logger::error(std::format(ragger::lang::ERR_LISTEN_TCP, std::to_string(errno)));
         }
     };
     auto run_unix = [this, &cfg]() {
@@ -1102,18 +1102,18 @@ bool Server::run() {
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
             }
-            Diskerror::logger::info(std::format(lang::MSG_UNIX_CHMOD_TIMEOUT, sock_path));
+            Diskerror::Logger::info(std::format(lang::MSG_UNIX_CHMOD_TIMEOUT, sock_path));
         });
         chmod_thread.detach();
 
-        Diskerror::logger::info(std::format(lang::MSG_BIND_UNIX_SOCKET, sock_path));
+        Diskerror::Logger::info(std::format(lang::MSG_BIND_UNIX_SOCKET, sock_path));
         // NOTE: port must be non-zero even for AF_UNIX. httplib's bind_internal
         // only calls getsockname() when port==0, and that path only handles
         // AF_INET/AF_INET6 — for AF_UNIX it returns UnsupportedAddressFamily
         // AFTER a successful bind, causing listen() to fail silently.
         bool ok = pImpl->unix_svr.listen(sock_path, 80);  // port value ignored for AF_UNIX
         if (!ok) {
-            Diskerror::logger::error(std::format(ragger::lang::ERR_LISTEN_UNIX, sock_path, std::to_string(errno)));
+            Diskerror::Logger::error(std::format(ragger::lang::ERR_LISTEN_UNIX, sock_path, std::to_string(errno)));
         }
     };
 

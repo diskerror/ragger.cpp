@@ -1,9 +1,9 @@
 /**
  * HTTP client for Ragger Memory daemon
  */
-#include "ragger/client.h"
+#include "client.h"
 
-#include "ragger/lang.h"
+#include "lang.h"
 
 #include <format>
 #include <stdexcept>

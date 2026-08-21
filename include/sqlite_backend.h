@@ -10,8 +10,8 @@
 #include <string>
 #include <vector>
 
-#include "ragger/storage_types.h"
-#include "ragger/storage_backend.h"
+#include "storage_types.h"
+#include "storage_backend.h"
 #include "nlohmann_json.hpp"
 
 namespace ragger {
@@ -173,6 +173,8 @@ public:
     /// Rebuild embeddings for all stored documents. Returns doc count.
     int rebuild_embeddings(Embedder& embedder) override;
     int backfill_embeddings(Embedder& embedder) override;
+    uint8_t embedding_version() const override;
+    uint8_t increment_embedding_version() override;
     int rebuild_phon(bool only_missing, bool progress) override;
 
     /// Get distinct collection names.

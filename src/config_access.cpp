@@ -6,10 +6,10 @@
  * is the single place that knows "key X lives in field Y"; everything else
  * (CLI, dashboard, DB overlay) goes through the generic get/validate/apply.
  */
-#include "ragger/config_access.h"
-#include "ragger/lang.h"          // ragger::lang::config_schema / config_meta
-#include "ragger/user_store.h"
-#include "ragger/util/fs.h"
+#include "config_access.h"
+#include "lang.h"          // ragger::lang::config_schema / config_meta
+#include "user_store.h"
+#include "util/fs.h"
 
 #include <charconv>
 #include <cstdlib>

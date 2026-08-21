@@ -7,16 +7,16 @@
  */
 #ifdef RAGGER_STATS
 
-#include "ragger/stats_logger.h"
+#include "stats_logger.h"
 
 #include <sqlite3.h>
 
 #include <algorithm>
 
-#include "ragger/config.h"      // expand_path
-#include "ragger/util/time.h"   // db_timestamp
-#include "ragger/util/sqlite.h" // Stmt (RAII)
-#include "diskerror/logger.h"
+#include "config.h"      // expand_path
+#include "util/time.h"   // db_timestamp
+#include "util/sqlite.h" // Stmt (RAII)
+#include "Logger.h"
 
 namespace ragger {
 
@@ -75,7 +75,7 @@ StatsLogger::StatsLogger(const std::string& db_path) {
         db_path.empty() ? config().resolved_stats_db_path() : expand_path(db_path);
     try {
         if (sqlite3_open(path.c_str(), &db_) != SQLITE_OK) {
-            Diskerror::logger::warn(std::string("stats: open failed: ") +
+            Diskerror::Logger::warn(std::string("stats: open failed: ") +
                                     (db_ ? sqlite3_errmsg(db_) : "unknown"));
             if (db_) { sqlite3_close(db_); db_ = nullptr; }
             return;
@@ -83,7 +83,7 @@ StatsLogger::StatsLogger(const std::string& db_path) {
         sqlite3_busy_timeout(db_, 2000);
         char* err = nullptr;
         if (sqlite3_exec(db_, kSchema, nullptr, nullptr, &err) != SQLITE_OK) {
-            Diskerror::logger::warn(std::string("stats: schema failed: ") +
+            Diskerror::Logger::warn(std::string("stats: schema failed: ") +
                                     (err ? err : "unknown"));
             sqlite3_free(err);
             sqlite3_close(db_);
@@ -109,7 +109,7 @@ StatsLogger::StatsLogger(const std::string& db_path) {
                 sqlite3_exec(db_, alter.c_str(), nullptr, nullptr, nullptr);  // best-effort
             }
         }
-        Diskerror::logger::debug("stats: logging enabled → " + path);
+        Diskerror::Logger::debug("stats: logging enabled → " + path);
     } catch (...) {
         if (db_) { sqlite3_close(db_); db_ = nullptr; }
     }
@@ -180,7 +180,7 @@ void StatsLogger::log_lookup(const std::string& query,
         sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr);
     } catch (const std::exception& e) {
         sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
-        Diskerror::logger::debug(std::string("stats: log_lookup swallowed: ") + e.what());
+        Diskerror::Logger::debug(std::string("stats: log_lookup swallowed: ") + e.what());
     } catch (...) {
         sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
     }

@@ -1,10 +1,10 @@
 /**
  * EmbedExecutor implementation — spawn `ragger embed` per call with a timeout.
  */
-#include "ragger/embed_executor.h"
-#include "ragger/config.h"
-#include "ragger/lang.h"
-#include "diskerror/logger.h"
+#include "embed_executor.h"
+#include "config.h"
+#include "lang.h"
+#include "Logger.h"
 
 #include "nlohmann_json.hpp"
 
@@ -142,7 +142,7 @@ EmbedExecutor::one(const std::string& text) const {
     for (int attempt = 0; attempt <= retries_; ++attempt) {
         auto out = run_once(exe_path_, text, timeout_ms_);
         if (!out) {
-            Diskerror::logger::warn(std::format(lang::WARN_EMBED_SUBPROCESS,
+            Diskerror::Logger::warn(std::format(lang::WARN_EMBED_SUBPROCESS,
                                                 attempt + 1, retries_ + 1));
             continue;
         }

@@ -1,10 +1,10 @@
 /**
  * Configuration loader — INI file parser
  */
-#include "ragger/config.h"
-#include "ragger/config_access.h"
-#include "ragger/lang.h"
-#include "ragger/util/fs.h"
+#include "config.h"
+#include "config_access.h"
+#include "lang.h"
+#include "util/fs.h"
 
 #include <cstdlib>
 #include <ctime>
@@ -654,7 +654,7 @@ int reload_config() {
     }
 
     // Logging
-    // (log_level itself is not hot-reloadable — Diskerror::logger is
+    // (log_level itself is not hot-reloadable — Diskerror::Logger is
     // constructed once at startup with the level fixed.)
 
     // Paths

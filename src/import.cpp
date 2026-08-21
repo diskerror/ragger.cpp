@@ -2,7 +2,7 @@
  * Import utilities — heading-aware paragraph chunking and conversation /
  * summary ingest from external sources.
  */
-#include "ragger/import.h"
+#include "import.h"
 #include "nlohmann_json.hpp"
 
 #include <algorithm>
@@ -135,23 +135,61 @@ std::vector<ImportChunk> chunk_markdown(const std::string& raw_text, int min_chu
     return chunks;
 }
 
+/// Replace horizontal whitespace runs (including tabs, NBSP, other Unicode
+/// spaces) with a single regular space. Also removes zero-width and invisible
+/// characters that don't contribute to content. Works on multi-byte UTF-8 by
+/// treating any byte >= 128 as part of a non-whitespace character unless it's
+/// explicitly one of the known whitespace sequences.
+static std::string normalize_whitespace(const std::string& s) {
+    // Use Unicode property class [:space:] to match all space-like characters,
+    // including tabs, newlines, NBSP, etc. This is portable and handles multi-byte UTF-8.
+    static const std::regex hspace_re(R"(\s+)");
+
+    return std::regex_replace(s.c_str(), hspace_re, " ");
+}
+
+/// Cap any run of dashes on a single line to at most 3 characters. This
+/// prevents extremely long sequences (from formatted tables or separators)
+/// from dominating chunks while still keeping valid Markdown table-separator
+/// syntax (`---`).
+static void cap_dashes(std::string& s) {
+    static const std::regex many_dashes(R"(-----+)");  // 5+ dashes -> replace
+    s = std::regex_replace(s.c_str(), many_dashes, "---");
+}
+
 std::string clean_document_text(const std::string& text) {
+    // Phase 1: line-level cleanup.
     std::istringstream lines(text);
     std::string line;
-    std::string out;
-    bool first = true;
+    std::vector<std::string> cleaned_lines;
     while (std::getline(lines, line)) {
-        // Strip a trailing \r left over from CRLF input.
-        if (!line.empty() && line.back() == '\r') line.pop_back();
+        // Normalize horizontal whitespace on the line (handles tabs, NBSP, etc.).
+        line = normalize_whitespace(line);
+
+        // Cap long runs of dashes for MD table safety.
+        cap_dashes(line);
+
         // Strip leading spaces and '#' characters, in any mix.
         size_t start = line.find_first_not_of(" #");
         line = (start == std::string::npos) ? std::string() : line.substr(start);
         // Strip trailing spaces.
         while (!line.empty() && line.back() == ' ') line.pop_back();
-        if (!first) out += "\n";
-        out += line;
+
+        cleaned_lines.push_back(line);
+    }
+
+    // Phase 2: join all lines with exactly one newline between them.
+    // No blank lines — double newlines are collapsed to single.
+    std::string out;
+    bool first = true;
+    for (const auto& l : cleaned_lines) {
+        if (!first) {
+            out += "\n";
+        }
+        out += l;
         first = false;
     }
+
     return out;
 }
 

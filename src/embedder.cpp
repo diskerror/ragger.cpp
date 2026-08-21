@@ -1,10 +1,10 @@
 /**
  * Embedder implementation using ONNX Runtime
  */
-#include "ragger/embedder.h"
-#include "ragger/config.h"
-#include "ragger/lang.h"
-#include "ragger/tokenizer_wrapper.h"
+#include "embedder.h"
+#include "config.h"
+#include "lang.h"
+#include "tokenizer_wrapper.h"
 #include <onnxruntime_cxx_api.h>
 #include <cmath>
 #include <filesystem>

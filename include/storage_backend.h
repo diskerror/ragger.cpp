@@ -25,7 +25,7 @@
 #include <utility>
 #include <vector>
 
-#include "ragger/storage_types.h"
+#include "storage_types.h"
 #include "nlohmann_json.hpp"
 
 namespace ragger {
@@ -436,10 +436,17 @@ public:
     /// Rebuild embeddings for all stored documents. Returns doc count.
     virtual int rebuild_embeddings(Embedder& embedder) = 0;
 
-    /// Embed only rows whose embedding column is NULL. Cheap; intended to
-    /// run on startup and after deferred-embedding writes. Returns the
-    /// number of rows updated.
+    /// Embed only rows whose embedding is NULL or has a stale version byte.
+    /// Cheap; intended to run on startup and after deferred-embedding writes.
+    /// Returns the number of rows updated.
     virtual int backfill_embeddings(Embedder& embedder) = 0;
+
+    /// Get the current embedding version from the settings table.
+    virtual uint8_t embedding_version() const = 0;
+
+    /// Increment the embedding version (mod 256) in the settings table and
+    /// update the in-memory cached value. Returns the new version.
+    virtual uint8_t increment_embedding_version() = 0;
 
     /// (Re)compute the phon (Double Metaphone "sounds-like") column for every
     /// context-table row. only_missing=true does only phon-NULL rows (cheap

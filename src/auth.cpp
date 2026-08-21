@@ -1,10 +1,10 @@
 /**
  * Authentication utilities implementation
  */
-#include "ragger/auth.h"
-#include "ragger/config.h"
-#include "ragger/lang.h"
-#include "ragger/user_store.h"
+#include "auth.h"
+#include "config.h"
+#include "lang.h"
+#include "user_store.h"
 
 #include <openssl/sha.h>
 #include <openssl/evp.h>

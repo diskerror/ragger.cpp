@@ -143,3 +143,77 @@ If Ragger ever grows a true ANN index (HNSW/IVF) over a much larger corpus,
 revisit binary-first + f32-rerank then — that's the regime where it wins. Until
 there's telemetry showing the f16 scan is a bottleneck, it's speculative
 complexity. Re-run the benchmark to regenerate these numbers on any corpus.
+
+## Why int8 works: embedding distribution and cosine geometry
+
+**Embedding value distribution.** For mean-pooled, L2-normalized embeddings
+(the kind Ragger produces), individual components are approximately Gaussian
+and symmetric around zero:
+
+- Mean ≈ 0 (within ±0.01)
+- Std dev ≈ 1/√dims — e.g., ~0.051 for 384-dim, ~0.036 for 768-dim
+- Typical range −0.15 to +0.15 with most values between −0.05 and +0.05
+
+This symmetry is why simple max-abs int8 quantization works: a single scale
+factor (`max|x| / 127`) maps the distribution cleanly onto [−127, +127] without
+needing an offset/zero-point. Zero-point becomes relevant only for asymmetric
+ranges (uint8 [0,255], or non-symmetric float embeddings).
+
+**Cosine similarity is scale-invariant.** `cos(θ) = A·B / (|A||B|)` — multiply
+either vector by any scalar and the result doesn't change. Only direction/shape
+matters, not absolute magnitude. This has two practical consequences:
+
+1. **int8 quantization preserves what matters.** Rounding each dimension
+   independently keeps relative proportions within a vector intact; the overall
+   direction is maintained even though individual values are noisier.
+2. **Binary embeddings fail for a specific reason.** Not because they lose
+   absolute values (cosine doesn't care about those) but because they destroy
+   *relative* proportions — every dim becomes ±1 regardless of original
+   magnitude, so you can't distinguish "slightly positive" from "very positive."
+
+**Int8 rounding error math.** Per-dim step size = 2/127 ≈ 0.0157; uniform
+rounding error std dev = step/√12 ≈ 0.0045. Norm drift accumulates in quadrature
+across dims:
+
+```
+E[|v_quantized|²] = |v_original|² + N × σ_error²
+```
+
+- 384-dim int8: `|v| ≈ √(1 + 0.0078) ≈ 1.0039` (0.39% drift)
+- 768-dim int8: `|v| ≈ √(1 + 0.0156) ≈ 1.0078` (0.78% drift)
+
+But cosine similarity barely cares about this norm drift because rounding errors
+are mostly *orthogonal* to the original vector — they add noise perpendicular to
+the signal rather than along it. Typical angular error for int8 at these dims is
+~0.5–1°, giving cosine sim to the original around 0.999+. This explains why
+skipping renormalization costs <0.002 recall@10 on int8 despite the norm drift:
+the direction is preserved well enough that the magnitude correction barely
+matters for ranking purposes.
+
+**Renormalize-on-load.** Still worth doing because (a) it corrects the small
+norm drift so cosine comparisons operate on vectors as close to unit-norm as
+possible, and (b) floating-point precision in `dot/(|a||b|)` means dividing by a
+slightly wrong denominator. Cost is one sqrt + one division per vector at load —
+negligible compared to embedding computation. For f16/bf16 the drift is tiny
+enough that renormalizing barely matters; for int8 it's worth doing because the
+rounding error is larger.
+
+## 768-dim/int8 vs 384-dim/f16 — same byte count, different tradeoff
+
+Same total data volume (768×8 = 384×16 bits) but fundamentally different:
+
+- **More dims = more information capacity.** A 768-dim vector can represent
+  finer distinctions in the embedding space.
+- **Lower precision per dim = more quantization noise.** int8 has ~256 levels vs
+  f16's ~65k, so each dimension is noisier.
+
+For most modern embedding models (BGE, E5, GTE), dimensions matter more than
+precision because the model was trained in that dimensional space and can't
+recover lost dims from higher precision. A 768-dim int8 vector preserves all
+structural info the model produced; a 384-dim f16 has perfect precision on only
+half the dims.
+
+**Caveats:** you'd need to re-embed everything with the larger model, and query
+embeddings must come from the same model (different models produce incompatible
+vector spaces). Worth benchmarking with `bench_vector_quant.py` — at Ragger's
+corpus scale (~18k vectors) the difference is measurable but not dramatic.

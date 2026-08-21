@@ -2,18 +2,18 @@
  * RaggerMemory - high-level facade implementation
  */
 
-#include "ragger/memory.h"
-#include "ragger/sqlite_backend.h"
-#include "ragger/embedder.h"
-#include "ragger/config.h"
-#include "ragger/util/fs.h"
-#include "diskerror/logger.h"
-#include "ragger/lang.h"
-#include "ragger/recipe.h"
-#include "ragger/summarizer.h"
-#include "ragger/vector_codec.h"
+#include "memory.h"
+#include "sqlite_backend.h"
+#include "embedder.h"
+#include "config.h"
+#include "util/fs.h"
+#include "Logger.h"
+#include "lang.h"
+#include "recipe.h"
+#include "summarizer.h"
+#include "vector_codec.h"
 #ifdef RAGGER_STATS
-#include "ragger/stats_logger.h"
+#include "stats_logger.h"
 #endif
 #include <algorithm>
 #include <format>
@@ -88,7 +88,7 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     // a no-op when nothing is NULL; embedder is already loaded above.
     int filled = backend_->backfill_embeddings(*embedder_);
     if (filled > 0) {
-        Diskerror::logger::info(std::format(lang::MSG_BACKFILLED_EMBEDDINGS, filled));
+        Diskerror::Logger::info(std::format(lang::MSG_BACKFILLED_EMBEDDINGS, filled));
     }
 
     // Backfill any NULL phon (dolphining sounds-like) rows — self-heals rows
@@ -98,7 +98,7 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     // contention that silently swallows UPDATEs when the daemon holds the DB.
     int phoned = backend_->rebuild_phon(/*only_missing=*/true, /*progress=*/false);
     if (phoned > 0) {
-        Diskerror::logger::info(std::format("Backfilled phonetic codes for {} row(s)", phoned));
+        Diskerror::Logger::info(std::format("Backfilled phonetic codes for {} row(s)", phoned));
     }
 #ifdef RAGGER_STATS
     // Opt-in retrieval instrumentation. Construction never throws into the
@@ -323,6 +323,9 @@ int RaggerMemory::update_embeddings() {
                 : config().desired_embedding_model;
         const std::string desired_model_dir =
             ragger_base_dir() + "/models/" + config().resolve_model(desired_model_name);
+
+        // Increment the embedding version so all existing blobs become stale.
+        backend_->increment_embedding_version();
 
         // Build an embedder for the DESIRED model and re-encode every row on
         // the existing backend (no second backend -> no write contention).

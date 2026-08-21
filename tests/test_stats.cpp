@@ -15,8 +15,8 @@
 
 #ifdef RAGGER_STATS
 
-#include "ragger/stats_logger.h"
-#include "ragger/storage_types.h"
+#include "stats_logger.h"
+#include "storage_types.h"
 
 #include <sqlite3.h>
 

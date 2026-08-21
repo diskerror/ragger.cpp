@@ -3,10 +3,10 @@
  *
  * Tests token generation, hashing, and persistence.
  */
-#include "ragger/auth.h"
-#include "ragger/config.h"
-#include "ragger/user_store.h"
-#include "ragger/util/fs.h"
+#include "auth.h"
+#include "config.h"
+#include "user_store.h"
+#include "util/fs.h"
 #include <cassert>
 #include <cstdlib>
 #include <filesystem>

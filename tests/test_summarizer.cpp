@@ -1,5 +1,5 @@
-#include "ragger/summarizer.h"
-#include "ragger/inference.h"
+#include "summarizer.h"
+#include "inference.h"
 
 #include <cassert>
 #include <print>

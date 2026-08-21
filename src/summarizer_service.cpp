@@ -2,14 +2,14 @@
  * SummarizerService implementation. See include/ragger/summarizer_service.h.
  */
 
-#include "ragger/summarizer_service.h"
+#include "summarizer_service.h"
 
-#include "ragger/config.h"
-#include "ragger/inference.h"
-#include "ragger/lang.h"
-#include "ragger/storage_backend.h"
-#include "ragger/summarizer.h"
-#include "diskerror/logger.h"
+#include "config.h"
+#include "inference.h"
+#include "lang.h"
+#include "storage_backend.h"
+#include "summarizer.h"
+#include "Logger.h"
 
 #include <algorithm>
 #include <chrono>
@@ -71,7 +71,7 @@ void SummarizerService::stop() {
     if (worker_thread_.joinable())      worker_thread_.join();
     if (pause_timer_thread_.joinable()) pause_timer_thread_.join();
 
-    Diskerror::logger::info(lang::MSG_SUMMARIZER_STOP);
+    Diskerror::Logger::info(lang::MSG_SUMMARIZER_STOP);
 }
 
 void SummarizerService::enqueue_turn(int turn_id,
@@ -176,13 +176,13 @@ void SummarizerService::enqueue_catch_up() {
         ++ep_n;
     }
 
-    Diskerror::logger::info(std::format(
+    Diskerror::Logger::info(std::format(
         lang::MSG_SUMMARIZER_START, turn_n, draft_n, sess_close_n));
     if (proj_close_n)
-        Diskerror::logger::info(std::format(
+        Diskerror::Logger::info(std::format(
             "[summarizer] catch-up queued {} project close(s)", proj_close_n));
     if (ep_n)
-        Diskerror::logger::info(std::format(
+        Diskerror::Logger::info(std::format(
             "[summarizer] catch-up queued {} episode close(s)", ep_n));
     cv_.notify_all();
 }
@@ -208,10 +208,10 @@ void SummarizerService::worker_loop() {
             }
         } catch (const std::exception& e) {
             if (job.kind == JobKind::DraftRetry)
-                Diskerror::logger::warn(std::format(
+                Diskerror::Logger::warn(std::format(
                     lang::WARN_SUMMARIZER_DRAFT, job.summary_id, e.what()));
             else
-                Diskerror::logger::warn(std::format(
+                Diskerror::Logger::warn(std::format(
                     lang::WARN_SUMMARIZER_L2, job.turn_id, e.what()));
         }
     }
@@ -242,7 +242,7 @@ void SummarizerService::pause_timer_loop() {
             // inference is back.
             enqueue_catch_up();
         } catch (const std::exception& e) {
-            Diskerror::logger::warn(std::format(
+            Diskerror::Logger::warn(std::format(
                 lang::WARN_SUMMARIZER_L3, std::string("(catch-up)"), e.what()));
         }
     }
@@ -286,7 +286,7 @@ bool SummarizerService::handle_l2(const Job& j) {
                 inference_ ? inference_->memory_model : "";
             if (!summarizer_model.empty())
                 backend_.mark_turn_summarized(j.turn_id, summarizer_model);
-            Diskerror::logger::info(std::format(
+            Diskerror::Logger::info(std::format(
                 "[summarizer] skipping trivial turn (turn_id={}, session={}, ts={}, "
                 "combined_chars={})",
                 j.turn_id, j.session_guid.empty() ? "-" : j.session_guid,
@@ -337,7 +337,7 @@ bool SummarizerService::handle_l2(const Job& j) {
                     std::lock_guard<std::mutex> lk(mutex_);
                     turn_failures_.erase(j.turn_id);
                 }
-                Diskerror::logger::warn(std::format(
+                Diskerror::Logger::warn(std::format(
                     "[summarizer] abandoned turn after {} failures "
                     "(turn_id={}, session={}, ts={})", n, j.turn_id, display_guid, ts));
                 return true;  // consumed — won't retry
@@ -345,7 +345,7 @@ bool SummarizerService::handle_l2(const Job& j) {
         }
         // No turn_summaries row is created on inference failure — the turn
         // stays in the unsummarized queue and the next catch-up pass retries.
-        Diskerror::logger::info(std::format(
+        Diskerror::Logger::info(std::format(
             lang::MSG_SUMMARIZER_DRAFT, display_guid, ts));
         return false;
     }
@@ -353,7 +353,7 @@ bool SummarizerService::handle_l2(const Job& j) {
     // Insert the turn_summaries row: real summary text + summarizer model.
     bool ok = backend_.finalize_turn_summary(j.turn_id, summary, summarizer_model);
     if (!ok) {
-        Diskerror::logger::warn(std::format(
+        Diskerror::Logger::warn(std::format(
             "[summarizer] finalize_turn_summary failed for turn_id={} "
             "(session={}, ts={})", j.turn_id, display_guid, ts));
         return false;
@@ -363,7 +363,7 @@ bool SummarizerService::handle_l2(const Job& j) {
         std::lock_guard<std::mutex> lk(mutex_);
         turn_failures_.erase(j.turn_id);
     }
-    Diskerror::logger::info(std::format(
+    Diskerror::Logger::info(std::format(
         lang::MSG_SUMMARIZER_L2, display_guid, ts));
 
     // Phase 2: no per-turn running-L3 update. The session rollup is rebuilt
@@ -402,14 +402,14 @@ bool SummarizerService::handle_session_close(const Job& j) {
     int id = backend_.store_session_summary(summary, summarizer_model, j.session_guid,
                                             j.first_ts, j.last_ts);
     if (id <= 0) {
-        Diskerror::logger::warn(std::format(
+        Diskerror::Logger::warn(std::format(
             "[summarizer] store_session_summary failed for session {} ({} -> {})",
             j.session_guid, j.first_ts, j.last_ts));
         return false;  // retry -- watermark NOT advanced
     }
 
     backend_.advance_session_boundary_watermark(j.turn_id /* = last_turn_id */);
-    Diskerror::logger::info(std::format(
+    Diskerror::Logger::info(std::format(
         "[summarizer] session boundary closed for {} ({} -> {})",
         j.session_guid, j.first_ts, j.last_ts));
     return true;
@@ -439,14 +439,14 @@ bool SummarizerService::handle_project_close(const Job& j) {
 
     int id = backend_.store_project_summary(summary, summarizer_model, j.first_ts, j.last_ts);
     if (id <= 0) {
-        Diskerror::logger::warn(std::format(
+        Diskerror::Logger::warn(std::format(
             "[summarizer] store_project_summary failed ({} -> {})",
             j.first_ts, j.last_ts));
         return false;  // retry -- watermark NOT advanced
     }
 
     backend_.advance_project_boundary_watermark(j.turn_id /* = last_turn_id */);
-    Diskerror::logger::info(std::format(
+    Diskerror::Logger::info(std::format(
         "[summarizer] project boundary closed ({} -> {})", j.first_ts, j.last_ts));
     return true;
 }
@@ -556,13 +556,13 @@ bool SummarizerService::handle_episode_close(const Job& j) {
     for (const auto& seg : segments) {
         backend_.store_episode(seg.summary, summarizer_model, j.session_guid,
                                seg.first_ts, seg.last_ts);
-        Diskerror::logger::info(std::format(
+        Diskerror::Logger::info(std::format(
             "[summarizer] episode closed for session {} ({} turns, {} → {})",
             j.session_guid, seg.turn_count, seg.first_ts, seg.last_ts));
     }
 
     if (segments.size() > 1)
-        Diskerror::logger::info(std::format(
+        Diskerror::Logger::info(std::format(
             "[summarizer] session {} split into {} episodes by similarity threshold",
             j.session_guid, segments.size()));
 
@@ -603,7 +603,7 @@ bool SummarizerService::handle_draft(const Job& j) {
         return false;
     }
     backend->set_summary_tags(j.summary_id, "");
-    Diskerror::logger::info(std::format(
+    Diskerror::Logger::info(std::format(
         lang::MSG_SUMMARIZER_REDRAFT, j.summary_id));
     return true;
 }

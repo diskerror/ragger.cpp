@@ -1,16 +1,16 @@
 /**
  * SQLite backend for Ragger Memory (C++ port)
  */
-#include "ragger/sqlite_backend.h"
-#include "ragger/embedder.h"
-#include "ragger/config.h"
-#include "ragger/lang.h"
-#include "ragger/util/fs.h"
-#include "ragger/util/time.h"
-#include "ragger/util/sqlite.h"
-#include "ragger/double_metaphone.h"
-#include "ragger/vector_codec.h"
-#include "diskerror/logger.h"
+#include "sqlite_backend.h"
+#include "embedder.h"
+#include "config.h"
+#include "lang.h"
+#include "util/fs.h"
+#include "util/time.h"
+#include "util/sqlite.h"
+#include "double_metaphone.h"
+#include "vector_codec.h"
+#include "Logger.h"
 #include <format>
 #include "nlohmann_json.hpp"
 
@@ -40,15 +40,92 @@ using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 // -----------------------------------------------------------------------
-// Embedding storage dtype conversions live in ragger/vector_codec.h. Blobs
-// are written by Impl::bind_embedding (which honors the configured storage
-// dtype) and read by Impl::decode_embedding_blob. Headered blobs are
-// self-describing; legacy raw f16/f32 blobs still decode by size.
+// Embedding storage dtype conversions live in c_lib/EmbeddingCodec.h. Blobs
+// are written by Impl::bind_embedding (which stamps the current
+// embedding_version_) and read by Impl::decode_embedding_blob (via a local
+// decode_any that handles current and legacy raw formats).
+// The dtype, dimensions, and version are stored once in the settings table;
+// blobs carry only a 1-byte version tag.
 // -----------------------------------------------------------------------
 
 // -----------------------------------------------------------------------
 // Free helpers (no db access needed)
 // -----------------------------------------------------------------------
+
+// Decode any embedding blob format: current version-tagged or legacy raw
+// f16/f32 (no header). Ragger's live DB may contain raw blobs from before
+// the version-tagged format was introduced; they'll be rewritten on the
+// next rebuild-embeddings pass.
+// This function is local to sqlite_backend.cpp — the canonical codec in
+// c_lib only handles the current format.
+namespace {
+
+using Diskerror::EmbeddingCodec::VectorType;
+
+#ifdef __FLT16_MAX__
+static inline float legacy_f16_to_f32(uint16_t bits) {
+    _Float16 h;
+    std::memcpy(&h, &bits, sizeof(h));
+    return static_cast<float>(h);
+}
+#else
+static inline float legacy_f16_to_f32(uint16_t bits) {
+    const uint32_t sign = (static_cast<uint32_t>(bits) & 0x8000u) << 16;
+    uint32_t exponent   = (bits >> 10) & 0x1fu;
+    uint32_t mantissa   = bits & 0x03ffu;
+    uint32_t result;
+    if (exponent == 0) {
+        if (mantissa == 0) { result = sign; }
+        else {
+            exponent = 1;
+            while ((mantissa & 0x0400u) == 0) { mantissa <<= 1; exponent -= 1; }
+            mantissa &= 0x03ffu;
+            result = sign | ((exponent + 112u) << 23) | (mantissa << 13);
+        }
+    } else if (exponent == 31) {
+        result = sign | 0x7f800000u | (mantissa << 13);
+    } else {
+        result = sign | ((exponent + 112u) << 23) | (mantissa << 13);
+    }
+    float f; std::memcpy(&f, &result, sizeof(f)); return f;
+}
+#endif
+
+static bool decode_legacy_raw(const uint8_t* p, int blob_bytes, int dims,
+                              std::vector<float>& out) {
+    if (blob_bytes == dims * 2) {
+        // Raw f16
+        for (int i = 0; i < dims; ++i) {
+            uint16_t v; std::memcpy(&v, p + i * 2, 2);
+            out[i] = legacy_f16_to_f32(v);
+        }
+        return true;
+    }
+    if (blob_bytes == dims * 4) {
+        // Raw f32
+        for (int i = 0; i < dims; ++i)
+            std::memcpy(&out[i], p + i * 4, 4);
+        return true;
+    }
+    return false;
+}
+
+// Try current version-tagged format first, then legacy raw f16/f32.
+bool decode_any(const void* blob, int blob_bytes, int expected_dims,
+                VectorType t, std::vector<float>& out) {
+    out.assign(static_cast<size_t>(expected_dims), 0.0f);
+    if (blob == nullptr || expected_dims <= 0) return false;
+    const uint8_t* p = static_cast<const uint8_t*>(blob);
+
+    // Current version-tagged format.
+    if (blob_bytes == Diskerror::EmbeddingCodec::expected_blob_size(t, expected_dims))
+        return Diskerror::EmbeddingCodec::decode(blob, blob_bytes, expected_dims, t, out);
+
+    // Legacy raw f16/f32 (pre-header era).
+    return decode_legacy_raw(p, blob_bytes, expected_dims, out);
+}
+
+}  // anonymous namespace
 
 // Build the tags string from a metadata JSON object. Accepts metadata["tags"]
 // as a comma-separated string or a JSON array. `keep`/`bad` flag fields are
@@ -85,13 +162,17 @@ struct SqliteBackend::Impl {
     // On-disk vector dtype (from config vector_type). All in-memory math is
     // f32; this only governs how embeddings are packed into the stored BLOB.
     vector_codec::VectorType vtype_ = vector_codec::VectorType::F16;
+    // Current embedding version — read from settings at startup, written into
+    // byte 0 of every new blob. Stale blobs (different version byte) are
+    // re-embedded on cache load or by rebuild_embeddings().
+    uint8_t embedding_version_ = 0;
 
     // Bind a float vector as the embedding blob in the configured storage
-    // dtype (f32/f16/bf16/int8). Blobs are self-describing (headered), so the
-    // decode side reads them back regardless of the current config setting.
+    // dtype. The version byte tags the blob so stale rows can be detected
+    // without per-blob headers.
     void bind_embedding(sqlite3_stmt* s, int idx,
                         const std::vector<float>& emb) const {
-        std::vector<uint8_t> blob = vector_codec::encode(vtype_, emb);
+        std::vector<uint8_t> blob = vector_codec::encode(vtype_, emb, embedding_version_);
         sqlite3_bind_blob(s, idx, blob.data(),
                           static_cast<int>(blob.size()),
                           SQLITE_TRANSIENT);
@@ -152,14 +233,11 @@ struct SqliteBackend::Impl {
     // never re-lock, so no recursive deadlock is possible.
     mutable std::mutex mu;
 
-    // Decode an embedding BLOB into a float vector of `dims`. Delegates to
-    // vector_codec::decode, which reads self-describing headered blobs
-    // (f32/f16/bf16/int8) AND legacy raw f16/f32 blobs (distinguished by byte
-    // length) — so a DB stays readable even if its stored dtype differs from
-    // the current config, and old pre-header databases keep working until a
-    // rebuild-embeddings rewrites them. On any failure (NULL, deferred-but-
-    // unbackfilled row, corruption, or a dimension mismatch) a zero vector is
-    // returned; the first such row per cache load is logged once (table + id).
+    // Decode an embedding BLOB into a float vector of `dims`. Uses decode_any
+    // which handles the current version-tagged format AND legacy formats (RV1
+    // headers, raw f16/f32). On any failure (NULL, deferred-but-unbackfilled
+    // row, corruption, or a dimension mismatch) a zero vector is returned;
+    // the first such row per cache load is logged once (table + id).
     std::vector<float> decode_embedding_blob(const void* blob, int blob_bytes,
                                              int dims, const char* table,
                                              int row_id, bool& warned) {
@@ -168,12 +246,13 @@ struct SqliteBackend::Impl {
             emb.assign(static_cast<size_t>(dims), 0.0f);
             return emb;
         }
-        if (!vector_codec::decode(blob, blob_bytes, dims, emb) && !warned) {
+        if (!decode_any(blob, blob_bytes, dims, vtype_, emb) && !warned) {
             warned = true;
-            Diskerror::logger::warn(std::format(
+            Diskerror::Logger::warn(std::format(
                 "[cache] {} row {}: undecodable embedding blob ({} bytes, "
-                "expected {}-dim f32/f16/bf16/int8); using zero vector",
-                table, row_id, blob_bytes, dims));
+                "expected {}-dim {}); using zero vector",
+                table, row_id, blob_bytes, dims,
+                vector_codec::to_string(vtype_)));
         }
         return emb;
     }
@@ -205,6 +284,22 @@ struct SqliteBackend::Impl {
         // immediate "database is locked" error.
         sqlite3_busy_timeout(db, 10000);
         create_schema();
+
+        // Load the current embedding version from the settings table.
+        // If absent (fresh DB or pre-version DB), default to 0 and stamp it.
+        {
+            Stmt s(db, "SELECT value FROM settings WHERE key = 'embedding_version'");
+            if (s.step()) {
+                embedding_version_ = static_cast<uint8_t>(
+                    std::stoi(s.column_text(0)) & 0xff);
+            } else {
+                embedding_version_ = 1;
+                Stmt ins(db,
+                    "INSERT OR IGNORE INTO settings (key, value) "
+                    "VALUES ('embedding_version', '1')");
+                ins.exec();
+            }
+        }
     }
 
     /// DB-only constructor — no embedder, only user management ops work.
@@ -2816,12 +2911,12 @@ struct SqliteBackend::Impl {
         return results;
     }
 
-    // Re-encode embeddings across all four embedded tables (turns, summaries,
-    // decisions, documents). Two modes, selected by `only_missing`:
+    // Re-encode embeddings across all five embedded tables (turns, summaries,
+    // decisions, documents, turn_summaries). Two modes, selected by `only_missing`:
     //   * false → re-encode every row (full rebuild; used by CLI
     //             `ragger rebuild-embeddings` after a model/dtype change)
-    //   * true  → only rows WHERE embedding IS NULL (cheap backfill of
-    //             deferred-embed rows; used at server startup)
+    //   * true  → only rows whose embedding is NULL or has a stale version
+    //             byte (cheap backfill at server startup)
     // When `progress` is set, prints a running "n/total" line to stdout
     // (interactive CLI). Returns the number of rows (re-)embedded.
     int embed_tables(Embedder& emb_ref, bool only_missing, bool progress) {
@@ -2832,31 +2927,39 @@ struct SqliteBackend::Impl {
             const char* extra_col;  // if set, combined with text_col via turn_embed_text
         };
         static constexpr TableSpec tables[] = {
-            { "turns",     "turn_id",     "user_text", "assistant_text" },
-            { "summaries", "summary_id",  "text",      nullptr          },
-            { "decisions", "decision_id", "text",      nullptr          },
-            { "documents", "document_id", "text",      nullptr          },
+            { "turns",           "turn_id",         "user_text", "assistant_text" },
+            { "summaries",       "summary_id",      "text",      nullptr          },
+            { "decisions",       "decision_id",     "text",      nullptr          },
+            { "documents",       "document_id",     "text",      nullptr          },
+            { "turn_summaries",  "turn_summary_id", "text",      nullptr          },
         };
 
-        const char* where = only_missing ? " WHERE embedding IS NULL" : "";
+        // For backfill: select ALL rows with embeddings and skip current-
+        // version ones in C++. This avoids SQL byte-extraction gymnastics.
+        // For full rebuild: select everything regardless.
+        const char* where_null = only_missing ? " WHERE embedding IS NULL" : "";
 
-        // Total is only needed for the progress display.
+        // Total is only needed for the progress display. For backfill mode
+        // we can't cheaply count stale rows, so use the full row count and
+        // accept the overcount (the progress display will skip ahead).
         int total_count = 0;
         if (progress) {
             for (auto& t : tables) {
-                Stmt s(db, std::format("SELECT COUNT(*) FROM {}{}", t.table, where));
+                Stmt s(db, std::format("SELECT COUNT(*) FROM {}", t.table));
                 if (s.step())
                     total_count += s.column_int(0);
             }
         }
 
         int done = 0;
+
+        // Pass 1: embed rows with NULL embeddings.
         for (auto& t : tables) {
             std::string sel = t.extra_col
                 ? std::format("SELECT {} AS id, {}, {} FROM {}{}",
-                              t.id_col, t.text_col, t.extra_col, t.table, where)
+                              t.id_col, t.text_col, t.extra_col, t.table, where_null)
                 : std::format("SELECT {} AS id, {} AS text FROM {}{}",
-                              t.id_col, t.text_col, t.table, where);
+                              t.id_col, t.text_col, t.table, where_null);
             std::string upd = std::format("UPDATE {} SET embedding = ? WHERE {} = ?",
                                           t.table, t.id_col);
 
@@ -2885,6 +2988,54 @@ struct SqliteBackend::Impl {
             }
         }
 
+        // Pass 2 (backfill only): re-embed rows with stale version bytes.
+        // Full rebuild already covered everything in pass 1.
+        if (only_missing) {
+            for (auto& t : tables) {
+                // Select all rows WITH embeddings and check version in C++.
+                std::string sel = t.extra_col
+                    ? std::format("SELECT {} AS id, {}, {}, embedding FROM {} "
+                                  "WHERE embedding IS NOT NULL",
+                                  t.id_col, t.text_col, t.extra_col, t.table)
+                    : std::format("SELECT {} AS id, {} AS text, embedding FROM {} "
+                                  "WHERE embedding IS NOT NULL",
+                                  t.id_col, t.text_col, t.table);
+                std::string upd = std::format("UPDATE {} SET embedding = ? WHERE {} = ?",
+                                              t.table, t.id_col);
+
+                Stmt select_stmt(db, sel);
+                int emb_col = t.extra_col ? 3 : 2;
+                while (select_stmt.step()) {
+                    // Check version byte of existing blob.
+                    const void* blob = select_stmt.column_blob(emb_col);
+                    int blob_bytes = select_stmt.column_bytes(emb_col);
+                    int ver = vector_codec::blob_version(blob, blob_bytes);
+                    if (ver == static_cast<int>(embedding_version_)) continue;
+
+                    int id = select_stmt.column_int(0);
+                    auto col1 = select_stmt.column_text(1);
+                    if (col1.empty()) continue;
+
+                    std::string embed_text = t.extra_col
+                        ? turn_embed_text(col1, select_stmt.column_text(t.extra_col ? 2 : 1))
+                        : std::move(col1);
+
+                    auto emb = emb_ref.encode(embed_text);
+                    Stmt update(db, upd);
+                    bind_embedding(update.raw(), 1, emb);
+                    update.bind(2, id);
+                    update.step();
+
+                    ++done;
+                    if (progress) {
+                        std::cout << std::format(ragger::lang::MSG_REBUILD_EMBEDDINGS_PROGRESS,
+                                                 done, total_count);
+                        std::cout.flush();
+                    }
+                }
+            }
+        }
+
         if (progress)
             std::cout << "\n";
 
@@ -2901,9 +3052,26 @@ struct SqliteBackend::Impl {
         return embed_tables(emb_ref, /*only_missing=*/false, /*progress=*/true);
     }
 
-    // Cheap backfill: embed only rows left NULL by deferred-embed stores.
+    // Cheap backfill: embed rows left NULL or with stale version byte.
     int backfill_embeddings(Embedder& emb_ref) {
         return embed_tables(emb_ref, /*only_missing=*/true, /*progress=*/false);
+    }
+
+    uint8_t get_embedding_version() const {
+        return embedding_version_;
+    }
+
+    uint8_t increment_embedding_version() {
+        // Cycle 1–255; 0 is reserved for empty/placeholder blobs.
+        int next = static_cast<int>(embedding_version_) + 1;
+        if (next > 255) next = 1;
+        embedding_version_ = static_cast<uint8_t>(next);
+        Stmt s(db,
+            "INSERT INTO settings (key, value) VALUES ('embedding_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+        s.bind(1, std::to_string(static_cast<int>(embedding_version_)));
+        s.exec();
+        return embedding_version_;
     }
 
     // (Re)compute the phon (Double Metaphone) column for every context-table
@@ -3419,6 +3587,16 @@ int SqliteBackend::rebuild_embeddings(Embedder& embedder) {
 int SqliteBackend::backfill_embeddings(Embedder& embedder) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->backfill_embeddings(embedder);
+}
+
+uint8_t SqliteBackend::embedding_version() const {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->get_embedding_version();
+}
+
+uint8_t SqliteBackend::increment_embedding_version() {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->increment_embedding_version();
 }
 
 int SqliteBackend::rebuild_phon(bool only_missing, bool progress) {

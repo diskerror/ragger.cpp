@@ -5,9 +5,9 @@
  * Uses store + load_all to verify normalization through the public API
  * (normalize_path is a private static method in SqliteBackend).
  */
-#include "ragger/config.h"
-#include "ragger/embedder.h"
-#include "ragger/sqlite_backend.h"
+#include "config.h"
+#include "embedder.h"
+#include "sqlite_backend.h"
 #include <cassert>
 #include <cstdlib>
 #include <filesystem>

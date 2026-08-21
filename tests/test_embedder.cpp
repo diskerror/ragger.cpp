@@ -5,8 +5,8 @@
  * output shape, determinism, differentiation, normalization.
  * Requires ONNX model files at the configured model_dir.
  */
-#include "ragger/config.h"
-#include "ragger/embedder.h"
+#include "config.h"
+#include "embedder.h"
 #include <cassert>
 #include <cmath>
 #include <filesystem>

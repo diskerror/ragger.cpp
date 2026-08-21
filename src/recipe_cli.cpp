@@ -2,11 +2,11 @@
  * `ragger recipe` implementation. See include/ragger/recipe_cli.h.
  */
 
-#include "ragger/recipe_cli.h"
+#include "recipe_cli.h"
 
-#include "ragger/config.h"
-#include "ragger/recipe.h"
-#include "ragger/user_store.h"
+#include "config.h"
+#include "recipe.h"
+#include "user_store.h"
 
 #include <iostream>
 #include <print>

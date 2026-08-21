@@ -1,7 +1,7 @@
 /**
  * Import chunking tests
  */
-#include "ragger/import.h"
+#include "import.h"
 #include <cassert>
 #include <iostream>
 #include <print>
