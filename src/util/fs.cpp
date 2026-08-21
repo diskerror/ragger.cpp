@@ -29,6 +29,20 @@ std::string home_dir() {
     return {};
 }
 
+std::string collapse_home(const std::string& path) {
+    std::string home = home_dir();
+    if (home.empty()) return path;
+    // Ensure home doesn't end with '/' for a clean prefix check.
+    if (home.back() == '/') home.pop_back();
+    if (path.size() > home.size() &&
+        path.compare(0, home.size(), home) == 0 &&
+        path[home.size()] == '/') {
+        return "~" + path.substr(home.size());
+    }
+    if (path == home) return "~";
+    return path;
+}
+
 // Testing-only base-dir override, set once at startup from the hidden
 // --ragger-base CLI flag. No env var equivalent — CLI-only, by design.
 static std::string _ragger_base_override;

@@ -22,6 +22,11 @@ std::string read_file_to_string(const std::string& path);
 /// current uid. Returns empty string if neither is available.
 std::string home_dir();
 
+/// Replace a leading home-directory prefix with "~/". Paths outside the home
+/// directory are returned unchanged. Use when storing human-facing paths
+/// (document imports, etc.) so they stay portable across machines.
+std::string collapse_home(const std::string& path);
+
 /// Set the Ragger base-directory override. Testing-only escape hatch, set
 /// once at startup from the hidden `--ragger-base <path>` CLI flag before
 /// any config/path resolution happens. No environment-variable equivalent

@@ -100,7 +100,7 @@ static void do_import(ragger::RaggerMemory &memory,
         doc.title       = doc_title;
         doc.tags        = tags;
         doc.year        = year;
-        doc.path        = filepath;
+        doc.path        = ragger::collapse_home(filepath);
         doc.chunk_index = i + 1;
         doc.imported_at = import_ts;
 
