@@ -478,6 +478,32 @@ class RaggerMemoryProvider(MemoryProvider):
         thread = threading.Thread(target=_post_async, daemon=True, name="ragger-post-turn")
         thread.start()
 
+    def _get_session_title(self, session_id: str) -> str:
+        """Look up the current Hermes session title from ~/.hermes/state.db.
+
+        Hermes sets sessions.title once auto-titling completes (usually a few
+        turns in), so early turns in a session will get empty/NULL back —
+        that's expected, not an error. Best-effort: any failure (locked DB,
+        missing file, etc.) returns "" rather than raising, since this must
+        never block turn capture.
+        """
+        if not session_id:
+            return ""
+        try:
+            import sqlite3
+            state_db = Path.home() / ".hermes" / "state.db"
+            conn = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True, timeout=1.0)
+            try:
+                row = conn.execute(
+                    "SELECT title FROM sessions WHERE id = ? LIMIT 1", (session_id,)
+                ).fetchone()
+                return row[0] if row and row[0] else ""
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.debug("Ragger: session title lookup failed for %s: %s", session_id, exc)
+            return ""
+
     def _post_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Internal: POST a turn to Ragger's /turn endpoint.
         
@@ -485,12 +511,17 @@ class RaggerMemoryProvider(MemoryProvider):
         """
         if self._breaker_open() or not user_content:
             return
-        result = self._post("/turn", {
+        payload = {
             "user": user_content,
             "assistant": assistant_content,
             "model": self._model,
             "session_id": session_id,
-        }, timeout=4.0)
+        }
+        title = self._get_session_title(session_id)
+        if title:
+            payload["session_name"] = title
+            payload["name_source"] = "hermes_title"
+        result = self._post("/turn", payload, timeout=4.0)
         if result is None:
             self._record_fail()
         else:
