@@ -853,6 +853,7 @@ struct SqliteBackend::Impl {
                 CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding,
                 CASE WHEN phon      IS NULL THEN 0 ELSE 1 END AS has_phon
             FROM turn_summaries
+            WHERE text IS NOT NULL
         )");
         exec(R"(
             CREATE VIEW IF NOT EXISTS summaries_view AS
@@ -1959,7 +1960,7 @@ struct SqliteBackend::Impl {
             "       datetime(s.turn_datetime,'unixepoch','localtime') "
             "FROM turn_summaries s "
             "JOIN sessions ss ON s.session_id = ss.session_id "
-            "WHERE ss.guid = ? ";
+            "WHERE ss.guid = ? AND s.text IS NOT NULL ";
         if (!since_ts.empty()) sql += "AND s.turn_datetime > ? ";
         sql += "ORDER BY s.turn_datetime ASC, s.turn_summary_id ASC";
         Stmt s(db, sql);
