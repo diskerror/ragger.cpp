@@ -300,6 +300,11 @@ async function refreshEmbedding() {
     EMBED_STATUS = await r.json();
   } catch (e) { return; }
   renderEmbeddingBanner();
+  // Refresh trashcan visibility for all desired_embedding_* fields since
+  // their comparison depends on the current values in EMBED_STATUS.
+  for (const entry of CONFIG) {
+    if (entry.key in DESIRED_TO_CURRENT) updateResetVisibility(entry);
+  }
 }
 
 function renderEmbeddingBanner() {
@@ -356,6 +361,32 @@ async function populateModelChoices() {
     if ((m.path || m) === chosen) o.selected = true;
     sel.appendChild(o);
   }
+  // When model selection changes, commit + fetch model info for dimensions.
+  sel.onchange = async () => {
+    await commit(entry, sel.value, sel);
+    fetchModelDimensions(sel.value);
+  };
+  // Fetch dimensions for the currently selected model on first load.
+  if (sel.value) fetchModelDimensions(sel.value);
+}
+
+// Fetch local model config.json to get native dimensions, then update the
+// desired_embedding_dimensions field. For non-MRL models the field is locked
+// to the native size; for MRL it would allow free input (future).
+async function fetchModelDimensions(modelPath) {
+  const dimsEntry = CONFIG.find(e => e.key === "desired_embedding_dimensions");
+  if (!dimsEntry || !dimsEntry.__field) return;
+  try {
+    const r = await fetch(api("/models/info") +
+      (qs ? "&" : "?") + "path=" + encodeURIComponent(modelPath));
+    if (!r.ok) return;
+    const data = await r.json();
+    if (data.dimensions) {
+      dimsEntry.__field.value = String(data.dimensions);
+      dimsEntry.__field.disabled = true;  // locked to native size (non-MRL)
+      commit(dimsEntry, String(data.dimensions), dimsEntry.__field);
+    }
+  } catch (e) { /* model info unavailable */ }
 }
 
 // ---- HuggingFace model search & download -----------------------------------
@@ -463,7 +494,7 @@ async function populateSummarizerModels() {
 
 // ---- engine-aware visibility -----------------------------------------------
 // Keys only meaningful for internal engine:
-const INTERNAL_KEYS = ["desired_embedding_model", "embed_timeout_ms", "embed_retries", "embed_max_workers"];
+const INTERNAL_KEYS = ["desired_embedding_model"];
 // Keys only meaningful for external engine:
 const EXTERNAL_KEYS = ["embedding_external_host", "embedding_external_port",
                        "embedding_external_api_key", "embedding_external_model"];
@@ -491,6 +522,88 @@ function updateEngineVisibility() {
   if (connectPanel) connectPanel.style.display = isExternal ? "" : "none";
   const hfPanel = document.getElementById("hf-download-panel");
   if (hfPanel) hfPanel.style.display = isExternal ? "none" : "";
+
+  // Engine switch: refresh the model list for the newly selected engine and
+  // re-resolve dimensions from whichever model is selected under it.
+  if (isExternal) {
+    populateExternalModelChoices();   // probes dims for the selected model
+  } else {
+    populateModelChoices();           // fetches dims for the selected model
+  }
+}
+
+// Populate the External Model field from the local inference endpoint,
+// filtered to embedding models only.
+async function populateExternalModelChoices() {
+  let models = [];
+  try {
+    const r = await fetch(api("/models/embedding-external"));
+    if (r.ok) models = (await r.json()).models || [];
+  } catch (e) { return; }
+  const entry = CONFIG.find(e => e.key === "embedding_external_model");
+  if (!entry || !entry.__field) return;
+  const field = entry.__field;
+  const parent = field.parentNode;
+  // Replace text input with a select if not already one.
+  const sel = (field.tagName === "SELECT") ? field : document.createElement("select");
+  sel.style.width = "200px";
+  const chosen = entry.value;
+  sel.innerHTML = "";
+  if (models.length === 0) {
+    const o = document.createElement("option");
+    o.value = chosen; o.textContent = chosen || "(no embedding models found)";
+    o.selected = true;
+    sel.appendChild(o);
+  } else {
+    for (const m of models) {
+      const o = document.createElement("option");
+      o.value = m; o.textContent = m;
+      if (m === chosen) o.selected = true;
+      sel.appendChild(o);
+    }
+  }
+  sel.onchange = async () => {
+    await commit(entry, sel.value, sel);
+    probeExternalModelDimensions(sel.value);
+  };
+  if (field.tagName !== "SELECT") {
+    parent.replaceChild(sel, field);
+    entry.__field = sel;
+  }
+  // Probe dimensions for the currently selected model on first load.
+  if (sel.value && models.length > 0) probeExternalModelDimensions(sel.value);
+}
+
+// Probe an external embedding model via the configured inference endpoint.
+async function probeExternalModelDimensions(model) {
+  const dimsEntry = CONFIG.find(e => e.key === "desired_embedding_dimensions");
+  if (!dimsEntry || !dimsEntry.__field) return;
+  try {
+    const r = await fetch(api("/models/embedding-external/probe"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    });
+    if (!r.ok) return;
+    const data = await r.json();
+    // Warn when the endpoint served a different model than requested —
+    // the dimensions then belong to the served model, not the chosen one.
+    const st = document.getElementById("ext-connect-status");
+    if (data.model_mismatch) {
+      if (st) {
+        st.textContent = "⚠ Endpoint served '" + data.served_model +
+          "' instead of '" + model + "' — dimensions reflect the served model.";
+        st.className = "embed-status pending";
+      }
+    } else if (st && st.textContent.indexOf("⚠") === 0) {
+      st.textContent = ""; st.className = "embed-status";
+    }
+    if (data.dimensions) {
+      dimsEntry.__field.value = String(data.dimensions);
+      dimsEntry.__field.disabled = true;
+      commit(dimsEntry, String(data.dimensions), dimsEntry.__field);
+    }
+  } catch (e) { /* probe failed */ }
 }
 
 // Connect to external endpoint: fetch model list, populate external model dropdown
@@ -594,6 +707,10 @@ async function refreshRestart() {
     RESTART_STATUS = await r.json();
   } catch (e) { return; }
   renderRestartBanner();
+  // Refresh trashcan visibility for server keys that compare against bound state.
+  for (const entry of CONFIG) {
+    if (entry.key in DESIRED_TO_CURRENT) updateResetVisibility(entry);
+  }
 }
 
 function renderRestartBanner() {
@@ -692,13 +809,21 @@ function renderRow(entry) {
   // editable. Clicking commits the previous value.
   const reset = document.createElement("button");
   reset.className = "reset";
-  reset.title = "Undo — revert to previous value";
+  reset.title = "Revert to current value";
   reset.textContent = "🗑";
   reset.style.visibility = "hidden";
   reset.onclick = () => {
+    // For desired/bind keys: revert to the current running value.
+    const mapper = DESIRED_TO_CURRENT[entry.key];
+    if (mapper) {
+      const cur = mapper();
+      if (cur !== undefined) commit(entry, String(cur), field, /*isUndo=*/true);
+      return;
+    }
+    // For all other keys: one-step undo to previous value.
     if (entry.__prev === undefined) return;
     const target = entry.__prev;
-    entry.__prev = undefined;          // one-step undo: consume the history
+    entry.__prev = undefined;
     commit(entry, target, field, /*isUndo=*/true);
   };
 
@@ -721,12 +846,32 @@ function renderRow(entry) {
   return row;
 }
 
-// Show the trash-can only when there's a previous value to undo to.
+// Map "desired" keys to their current counterpart, drawn from live status objects.
+// Embedding keys read from EMBED_STATUS; server keys read from RESTART_STATUS.
+const DESIRED_TO_CURRENT = {
+  "desired_embedding_model":       () => EMBED_STATUS?.current?.model,
+  "desired_embedding_engine":      () => EMBED_STATUS?.current?.engine,
+  "desired_embedding_dimensions":  () => EMBED_STATUS?.current ? String(EMBED_STATUS.current.dimensions) : undefined,
+  "desired_embedding_vector_type": () => EMBED_STATUS?.current?.vector_type,
+  "desired_port":                  () => RESTART_STATUS ? String(RESTART_STATUS.bound_port) : undefined,
+  "bind":                          () => RESTART_STATUS?.bound_bind,
+};
+
+// Show the trash-can when a field differs from its reference value:
+// For desired_embedding_* keys: compare against the CURRENT embedding identity.
+// For all other keys: compare against the previous value (one-step undo).
 function updateResetVisibility(entry) {
   if (!entry.__reset) return;
-  const hasPrev = entry.__prev !== undefined &&
-                  String(entry.__prev) !== String(entry.value);
-  entry.__reset.style.visibility = (hasPrev && entry.edit !== "locked")
+  let showReset = false;
+  const mapper = DESIRED_TO_CURRENT[entry.key];
+  if (mapper) {
+    const cur = mapper();
+    showReset = cur !== undefined && String(cur) !== String(entry.value);
+  } else {
+    showReset = entry.__prev !== undefined &&
+                String(entry.__prev) !== String(entry.value);
+  }
+  entry.__reset.style.visibility = (showReset && entry.edit !== "locked")
     ? "visible" : "hidden";
 }
 

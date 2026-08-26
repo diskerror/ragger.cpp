@@ -5,8 +5,10 @@ working with them. Think of it as **running compaction with tiered
 recall**: every turn your agent has gets captured and summarized in the
 background while it stays warm, then served back as a layered "what just
 happened?" payload that fades the way a person's memory fades — while
-keeping the verbatim transcript a single query away. All embeddings are
-local. The whole database is one SQLite file you own.
+keeping the verbatim transcript a single query away. Embeddings run
+locally by default (ONNX, no network); an external engine is optional for
+those who'd rather point at their own inference server. The whole
+database is one SQLite file you own.
 
 C++ port of the original Python [Ragger Memory](https://github.com/diskerror/ragger),
 diverged at v0.9.4 — now the sole focus.
@@ -21,17 +23,20 @@ diverged at v0.9.4 — now the sole focus.
 - **Hybrid search.** BM25/FTS5 keyword search blended with dense vector
   cosine via Eigen3, plus an optional phonetic ("sounds-like") signal.
   Configurable weights; all signals normalized before blending.
-- **Local embeddings.** `all-MiniLM-L6-v2` via ONNX Runtime (384-dim).
-  Stored as IEEE half (f16) by default to halve disk; in-memory math
-  stays f32. Re-encode any time with `ragger rebuild-embeddings`.
+- **Local or external embeddings.** Internal engine runs an ONNX model on
+  disk (`all-MiniLM-L6-v2`, `all-MiniLM-L12-v2`, etc., 384-dim by default);
+  external engine calls any OpenAI-compatible `/v1/embeddings` endpoint
+  (llama.cpp, llama-swap, LM Studio, OpenAI). Stored as IEEE half (f16) by
+  default to halve disk; in-memory math stays f32. Re-encode any time with
+  `ragger rebuild-embeddings` or the dashboard's "Update now".
 - **HTTP and MCP, same data.** Daemon serves a REST API; `ragger mcp`
   speaks JSON-RPC over stdio. Bearer-token auth on remote requests;
   unix-socket and loopback are pre-authenticated.
 - **Markdown-aware import.** Heading-aware chunking; Claude Code and
   claude.ai conversation archives import with original timestamps.
 
-Single binary. Single-user out of the box. No external services, no
-network calls once the embedding model is on disk.
+Single binary. Single-user out of the box. No external services required;
+internal embeddings mean no network calls once the model is on disk.
 
 ## Quick start
 
@@ -46,6 +51,11 @@ ragger start              # start the daemon
 `install.sh` is idempotent — re-run after a rebuild to refresh the
 binary, the service unit, and the shipped recipes. Your config, database,
 and any custom recipe files are preserved.
+
+Pass `--stats` to `build.sh` and `deploy.sh` to enable retrieval-stats
+instrumentation (`RAGGER_STATS`, logged to `~/.ragger/stats.db`); it builds
+into a separate `build-stats/` tree so a stats and non-stats binary can
+coexist.
 
 ```bash
 ragger store "The deploy script needs Node 18+"
@@ -78,13 +88,36 @@ elsewhere if you need the data on a different disk.
 | Binary | `~/.local/bin/ragger` |
 | Config | `~/.ragger/settings.ini` |
 | Database | `~/.ragger/memories.db` |
-| Embedding model | `~/.ragger/models/` |
+| Embedding models | `~/.ragger/models/<provider>/<model>/` |
 | Recipes | `~/.ragger/recipes/` |
 | Inference formats | `~/.ragger/formats/` |
 | Log | `~/.ragger/logs/activity.log` |
 | Bearer token | `~/.ragger/token` |
 | Unix socket | `~/.ragger/ragger.sock` |
 | Retrieval stats (opt-in build) | `~/.ragger/stats.db` |
+
+## Embedding models
+
+Ragger supports two embedding engines, switchable from the dashboard or
+`settings.ini` (`embedding_engine` / `desired_embedding_engine`):
+
+- **internal** — ONNX models on disk under `~/.ragger/models/<provider>/<model>/`,
+  e.g. `sentence-transformers/all-MiniLM-L6-v2/`. `install.sh` downloads a
+  starter set from HuggingFace; the dashboard's Embedding tab can search
+  HuggingFace and download additional ONNX models directly.
+- **external** — any OpenAI-compatible `/v1/embeddings` endpoint. The
+  dashboard queries `/v1/models` and auto-probes the selected model with a
+  test embedding to determine its actual dimensions.
+
+**Caveat with LM Studio as an external endpoint:** LM Studio does not
+reliably honor the `model` field on `/v1/embeddings` requests — it may
+silently serve whichever embedding model is already loaded, regardless of
+what you asked for, instead of returning an error. Ragger's probe compares
+the model it requested against the model the server actually reports back
+and surfaces a mismatch warning in the dashboard when they differ. If you
+see this warning, either load the desired embedding model explicitly in
+LM Studio first, or point the external engine at a stricter endpoint
+(llama.cpp / llama-swap honor per-request model selection correctly).
 
 ## Build dependencies
 
@@ -121,7 +154,7 @@ Then:
 
 ```bash
 ./scripts/build.sh          # check deps, configure, build
-./scripts/install.sh        # places binary + downloads ~90 MB embedding model
+./scripts/install.sh        # places binary + downloads starter ONNX embedding models
 ```
 
 ### Dev build (local c_lib)

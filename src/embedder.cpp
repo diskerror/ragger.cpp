@@ -38,6 +38,7 @@ struct Embedder::Impl {
     std::string ext_model;
     std::string ext_api_key;
     int         ext_dims = 0;       // 0 = not yet known
+    mutable std::string last_served_model;  // model reported by the last response
 
     // ---- Internal constructor ----
     explicit Impl(const std::string& model_dir) {
@@ -216,6 +217,11 @@ struct Embedder::Impl {
             throw std::runtime_error("Embedding response missing 'embedding' array");
         }
 
+        // Record which model the server says actually served the request —
+        // llama-swap / LM Studio may answer with a different loaded model
+        // than the one requested. The probe route surfaces this mismatch.
+        last_served_model = j.value("model", "");
+
         std::vector<float> vec;
         vec.reserve(emb.size());
         for (const auto& v : emb) {
@@ -318,6 +324,10 @@ std::vector<std::string> Embedder::list_remote_models() const {
 
 int Embedder::probe_dimensions() const {
     return pImpl->probe_dimensions();
+}
+
+std::string Embedder::last_served_model() const {
+    return pImpl->last_served_model;
 }
 
 } // namespace ragger

@@ -28,7 +28,7 @@ port   = 8432                     # TCP port (used when `bind` is set)
 # `bind` is empty/missing, the daemon falls back to bind = 127.0.0.1 so
 # there's always at least one listener. A malformed `bind` value is a
 # startup error (invalid IPv4/IPv6/hostname).
-# server_name =                   # hostname for cpp-httplib (optional)
+server_name = ragger            # hostname for cpp-httplib (optional)
 
 # TLS — only relevant if you expose Ragger beyond localhost (e.g. bind to a
 # LAN/public address, or reverse-proxy from a remote machine). Both must be

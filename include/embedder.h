@@ -48,6 +48,11 @@ public:
     /// request. Returns the vector dimensionality, or 0 on failure.
     int probe_dimensions() const;
 
+    /// (External only) The model name the server reported in its last
+    /// embedding response. May differ from the requested model when the
+    /// endpoint (llama-swap, LM Studio) serves whatever is loaded.
+    std::string last_served_model() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> pImpl;

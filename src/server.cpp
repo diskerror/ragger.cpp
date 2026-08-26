@@ -815,6 +815,40 @@ struct Server::Impl {
             res.set_content(json{{"models", arr}}.dump(), "application/json");
         }));
 
+        // GET /models/info?path=<provider/model> -> read config.json from a
+        // local model dir and return embedding dimensions and metadata.
+        // Returns {dimensions: N, model_type: "...", hidden_size: N}
+        svr.Get("/models/info", guarded([this](const UserInfo&, const httplib::Request& req,
+                                                httplib::Response& res) {
+            std::string model_path = req.get_param_value("path");
+            if (model_path.empty()) {
+                res.status = 400;
+                res.set_content(R"({"error":"path required"})", "application/json");
+                return;
+            }
+            std::string dir = ragger_base_dir() + "/models/" + model_path;
+            std::string cfg_file = dir + "/config.json";
+            if (!std::filesystem::exists(cfg_file)) {
+                res.status = 404;
+                res.set_content(R"({"error":"config.json not found"})", "application/json");
+                return;
+            }
+            std::ifstream ifs(cfg_file);
+            auto cfg_json = json::parse(ifs, nullptr, false);
+            if (cfg_json.is_discarded()) {
+                res.status = 500;
+                res.set_content(R"({"error":"failed to parse config.json"})", "application/json");
+                return;
+            }
+            int hidden_size = cfg_json.value("hidden_size", 0);
+            std::string model_type = cfg_json.value("model_type", "");
+            res.set_content(json{
+                {"dimensions", hidden_size},
+                {"model_type", model_type},
+                {"hidden_size", hidden_size}
+            }.dump(), "application/json");
+        }));
+
         // GET /models/external?host=X&port=Y&key=Z -> query a remote
         // /v1/models endpoint and return available model names.
         svr.Get("/models/external", guarded([this](const UserInfo&, const httplib::Request& req,
@@ -863,7 +897,13 @@ struct Server::Impl {
                                 "application/json");
                 return;
             }
-            res.set_content(json{{"dimensions", dims}}.dump(), "application/json");
+            std::string served = probe_emb.last_served_model();
+            bool mismatch = !served.empty() && served != model;
+            res.set_content(json{
+                {"dimensions", dims},
+                {"served_model", served},
+                {"model_mismatch", mismatch}
+            }.dump(), "application/json");
         }));
 
         // GET /models/huggingface?q=<search> -> search HuggingFace for ONNX
@@ -1023,6 +1063,82 @@ struct Server::Impl {
                 arr.push_back(id);
             }
             res.set_content(json{{"models", arr}}.dump(), "application/json");
+        }));
+
+        // GET /models/embedding-external -> query the local inference endpoint
+        // for embedding models only (the inverse of /models/summarizer).
+        svr.Get("/models/embedding-external", guarded([this](const UserInfo&, const httplib::Request&,
+                                                              httplib::Response& res) {
+            std::string url = config().summarizer_api_url;
+            if (url.empty()) url = config().inference_api_url;
+            if (url.empty()) {
+                res.set_content(R"({"models":[]})", "application/json");
+                return;
+            }
+            Endpoint ep("embedding-external", url);
+            auto ids = ep.list_models();
+            json arr = json::array();
+            for (const auto& id : ids) {
+                std::string lower = id;
+                std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                if (lower.find("embed") != std::string::npos ||
+                    lower.find("minilm") != std::string::npos) {
+                    arr.push_back(id);
+                }
+            }
+            res.set_content(json{{"models", arr}}.dump(), "application/json");
+        }));
+
+        // POST /models/embedding-external/probe -> send a test embedding to
+        // the local inference endpoint and return the vector dimensions.
+        // Body: {"model": "text-embedding-nomic-embed-text-v1.5"}
+        svr.Post("/models/embedding-external/probe", guarded([this](const UserInfo&, const httplib::Request& req,
+                                                                     httplib::Response& res) {
+            auto body = json::parse(req.body, nullptr, false);
+            std::string model = body.is_object() ? body.value("model", "") : "";
+            if (model.empty()) {
+                res.status = 400;
+                res.set_content(R"({"error":"model required"})", "application/json");
+                return;
+            }
+            // Use the configured inference/summarizer URL as the embedding endpoint.
+            std::string url = config().summarizer_api_url;
+            if (url.empty()) url = config().inference_api_url;
+            if (url.empty()) {
+                res.status = 400;
+                res.set_content(R"({"error":"no inference endpoint configured"})", "application/json");
+                return;
+            }
+            // Parse host/port from URL (http://host:port/v1)
+            std::string host; int port = 0;
+            auto proto_end = url.find("://");
+            std::string rest = (proto_end != std::string::npos) ? url.substr(proto_end + 3) : url;
+            auto slash = rest.find('/');
+            std::string hp = (slash != std::string::npos) ? rest.substr(0, slash) : rest;
+            auto colon = hp.rfind(':');
+            if (colon != std::string::npos) {
+                host = hp.substr(0, colon);
+                try { port = std::stoi(hp.substr(colon + 1)); } catch (...) {}
+            } else {
+                host = hp; port = 80;
+            }
+
+            Embedder probe_emb(host, port, model, "");
+            int dims = probe_emb.probe_dimensions();
+            if (dims <= 0) {
+                res.status = 502;
+                res.set_content(R"({"error":"probe failed"})", "application/json");
+                return;
+            }
+            // Surface which model the server actually used — llama-swap /
+            // LM Studio may serve a different loaded model than requested.
+            std::string served = probe_emb.last_served_model();
+            bool mismatch = !served.empty() && served != model;
+            res.set_content(json{
+                {"dimensions", dims},
+                {"served_model", served},
+                {"model_mismatch", mismatch}
+            }.dump(), "application/json");
         }));
 
         // GET /embedding/status -> current vs desired identity + flags.
