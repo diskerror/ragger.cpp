@@ -1432,8 +1432,18 @@ int main(int argc, char **argv) {
                 return 1;
             }
             try {
-                ragger::Embedder embedder(cfg.resolved_model_dir());
-                std::vector<float> vec = embedder.encode(text);
+                std::unique_ptr<ragger::Embedder> embedder;
+                if (cfg.embedding_engine == "external") {
+                    embedder = std::make_unique<ragger::Embedder>(
+                        cfg.embedding_external_host,
+                        cfg.embedding_external_port,
+                        cfg.embedding_external_model,
+                        cfg.embedding_external_api_key,
+                        cfg.embedding_dimensions);
+                } else {
+                    embedder = std::make_unique<ragger::Embedder>(cfg.resolved_model_dir());
+                }
+                std::vector<float> vec = embedder->encode(text);
                 nlohmann::json arr = vec;
                 std::cout << arr.dump() << "\n";
             } catch (const std::exception &e) {

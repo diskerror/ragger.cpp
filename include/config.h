@@ -56,6 +56,17 @@ struct Config {
     // protection — a whole DB must use one type (model+type are paired).
     std::string embedding_vector_type = "f16";
 
+    // --- Embedding engine: "internal" (ONNX, default) or "external" -------
+    // When "external", embeddings are computed via an OpenAI-compatible
+    // /v1/embeddings endpoint at embedding_external_host:port. The internal
+    // ONNX embedder is not loaded; model management is the external engine's
+    // concern.
+    std::string embedding_engine = "internal";  // "internal" or "external"
+    std::string embedding_external_host = "";   // IP or hostname
+    int         embedding_external_port = 0;    // 0 = not configured
+    std::string embedding_external_api_key = "";
+    std::string embedding_external_model = "";  // model name from the endpoint
+
     // --- Desired embedding identity (staged target for re-embedding) -------
     // Editable via dashboard/CLI. The CURRENT identity above is what the
     // stored vectors actually are (written by the drift guard / rebuild) and
@@ -65,6 +76,7 @@ struct Config {
     std::string desired_embedding_model       = "";
     int         desired_embedding_dimensions  = 0;    // 0 = same as current
     std::string desired_embedding_vector_type = "";   // "" = same as current
+    std::string desired_embedding_engine      = "";   // "" = same as current
 
     // --- Search ---
     int   default_search_limit = 5;

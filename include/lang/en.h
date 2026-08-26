@@ -438,7 +438,7 @@ constexpr const char* ERR_PERMISSION_DENIED_SIGNAL= "Permission denied: cannot s
 // Sections drive the dashboard's left-hand tabs (server, embedding,
 // search, summarizer, logging, housekeeping, import).
 // =====================================================================
-inline constexpr std::array<ConfigMeta, 49> kConfigSchema = {{
+inline constexpr std::array<ConfigMeta, 56> kConfigSchema = {{
     // ---- server ----
     {"socket_enable", "server", "Socket Enable", CfgType::Boolean, CfgEdit::RestartRequired,
      "true", "",
@@ -497,6 +497,25 @@ inline constexpr std::array<ConfigMeta, 49> kConfigSchema = {{
     {"desired_embedding_dimensions", "embedding", "Desired Dimensions", CfgType::Integer, CfgEdit::RebuildRequired,
      "", "",
      "Target vector dimensionality. Model-determined; usually leave as the model's native size."},
+    // Engine selection: internal (ONNX) or external (remote /v1/embeddings).
+    {"embedding_engine", "embedding", "Current Engine", CfgType::Enum, CfgEdit::Locked,
+     "internal", "internal,external",
+     "Embedding engine the stored vectors were built with. Read-only — change the desired engine below."},
+    {"desired_embedding_engine", "embedding", "Desired Engine", CfgType::Enum, CfgEdit::RebuildRequired,
+     "", "internal,external",
+     "Target engine. 'internal' runs ONNX models locally; 'external' calls a remote OpenAI-compatible /v1/embeddings endpoint."},
+    {"embedding_external_host", "embedding", "External Host", CfgType::String, CfgEdit::RebuildRequired,
+     "", "",
+     "IP address or hostname of the external embedding server."},
+    {"embedding_external_port", "embedding", "External Port", CfgType::Integer, CfgEdit::RebuildRequired,
+     "0", "",
+     "Port of the external embedding server."},
+    {"embedding_external_api_key", "embedding", "External API Key", CfgType::String, CfgEdit::RebuildRequired,
+     "", "",
+     "API key for the external embedding endpoint, if required."},
+    {"embedding_external_model", "embedding", "External Model", CfgType::String, CfgEdit::RebuildRequired,
+     "", "",
+     "Model name served by the external embedding endpoint."},
     {"embed_timeout_ms", "embedding", "Embed Timeout (ms)", CfgType::Integer, CfgEdit::Live,
      "10000", "",
      "Per-embed subprocess timeout in milliseconds."},

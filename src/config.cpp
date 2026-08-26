@@ -336,6 +336,11 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             if      (key == "model")      cfg.embedding_model = val;
             else if (key == "dimensions") cfg.embedding_dimensions = std::stoi(val);
             else if (key == "vector_type") cfg.embedding_vector_type = val;
+            else if (key == "engine")     cfg.embedding_engine = val;
+            else if (key == "external_host") cfg.embedding_external_host = val;
+            else if (key == "external_port") cfg.embedding_external_port = std::stoi(val);
+            else if (key == "external_api_key") cfg.embedding_external_api_key = val;
+            else if (key == "external_model") cfg.embedding_external_model = val;
         }
         else if (section == "search") {
             if      (key == "default_limit")    cfg.default_search_limit = std::stoi(val);
@@ -605,6 +610,7 @@ int reload_config() {
     warn_restart("embedding_model", fresh.embedding_model != cfg.embedding_model);
     warn_restart("embedding_dimensions", fresh.embedding_dimensions != cfg.embedding_dimensions);
     warn_restart("embedding_vector_type", fresh.embedding_vector_type != cfg.embedding_vector_type);
+    warn_restart("embedding_engine", fresh.embedding_engine != cfg.embedding_engine);
 
     // Hot-reloadable fields
     #define RELOAD(field) do { \

@@ -156,9 +156,9 @@ public:
 
     // ---- Embedding identity: current vs desired + re-embed control -------
     struct EmbeddingStatus {
-        std::string current_model, current_vtype;
+        std::string current_model, current_vtype, current_engine;
         int         current_dims = 0;
-        std::string desired_model, desired_vtype;
+        std::string desired_model, desired_vtype, desired_engine;
         int         desired_dims = 0;
         bool        needs_update = false;   // current != desired
         bool        reembedding  = false;   // an update is in progress

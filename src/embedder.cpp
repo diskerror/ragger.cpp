@@ -1,5 +1,5 @@
 /**
- * Embedder implementation using ONNX Runtime
+ * Embedder implementation — ONNX (internal) and HTTP (external) modes.
  */
 #include "embedder.h"
 #include "config.h"
@@ -11,135 +11,292 @@
 #include <format>
 #include <stdexcept>
 
+// --- External mode: libcurl + JSON -----------------------------------------
+#include <curl/curl.h>
+#include "nlohmann_json.hpp"
+
 namespace ragger {
 
-// PIMPL implementation
+using json = nlohmann::json;
+
+// ====================================================================
+// PIMPL — holds either an ONNX session or HTTP endpoint details.
+// ====================================================================
 struct Embedder::Impl {
-    Ort::Env env;
+    bool external = false;
+
+    // ---- Internal (ONNX) state ----
+    Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "ragger"};
     Ort::SessionOptions session_options;
     std::unique_ptr<Ort::Session> session;
     std::unique_ptr<TokenizerWrapper> tokenizer;
-    
-    explicit Impl(const std::string& model_dir)
-        : env(ORT_LOGGING_LEVEL_WARNING, "ragger") {
-        
-        // Construct paths
+    int onnx_dims = 0;
+
+    // ---- External (HTTP) state ----
+    std::string ext_host;
+    int         ext_port = 0;
+    std::string ext_model;
+    std::string ext_api_key;
+    int         ext_dims = 0;       // 0 = not yet known
+
+    // ---- Internal constructor ----
+    explicit Impl(const std::string& model_dir) {
         std::filesystem::path model_path = std::filesystem::path(model_dir) / "model.onnx";
+        // Some HuggingFace repos put the ONNX model in an onnx/ subdirectory.
+        if (!std::filesystem::exists(model_path)) {
+            model_path = std::filesystem::path(model_dir) / "onnx" / "model.onnx";
+        }
         std::filesystem::path tokenizer_path = std::filesystem::path(model_dir) / "tokenizer.json";
-        
-        // Check files exist
+
         if (!std::filesystem::exists(model_path)) {
             throw std::runtime_error(std::format(lang::ERR_MODEL_NOT_FOUND, model_path.string()));
         }
         if (!std::filesystem::exists(tokenizer_path)) {
             throw std::runtime_error(std::format(lang::ERR_TOKENIZER_NOT_FOUND, tokenizer_path.string()));
         }
-        
-        // Load tokenizer
+
         tokenizer = std::make_unique<TokenizerWrapper>(tokenizer_path.string());
-        
-        // Load ONNX model
         session = std::make_unique<Ort::Session>(env, model_path.c_str(), session_options);
+        onnx_dims = config().embedding_dimensions;
     }
-    
-    std::vector<float> encode(const std::string& text) const {
-        // 1. Tokenize
+
+    // ---- External constructor ----
+    Impl(const std::string& host, int port, const std::string& model,
+         const std::string& api_key, int dims)
+        : external(true), ext_host(host), ext_port(port),
+          ext_model(model), ext_api_key(api_key), ext_dims(dims) {}
+
+    // ---- ONNX encode ----
+    std::vector<float> encode_onnx(const std::string& text) const {
         auto encoded = tokenizer->encode_with_mask(text);
         const auto& input_ids = encoded.input_ids;
         const auto& attention_mask = encoded.attention_mask;
-        
+
         size_t seq_len = input_ids.size();
         if (seq_len == 0) {
             throw std::runtime_error(lang::ERR_EMPTY_TOKENIZATION);
         }
-        
-        // 2. Create ONNX tensors
+
         Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-        
-        // Input shapes: {1, seq_len}
         std::vector<int64_t> shape = {1, static_cast<int64_t>(seq_len)};
-        
-        // Convert int32_t vectors to int64_t for ONNX
+
         std::vector<int64_t> input_ids_i64(input_ids.begin(), input_ids.end());
         std::vector<int64_t> attention_mask_i64(attention_mask.begin(), attention_mask.end());
-        std::vector<int64_t> token_type_ids_i64(seq_len, 0);  // All zeros
-        
-        // Create tensors
+        std::vector<int64_t> token_type_ids_i64(seq_len, 0);
+
         Ort::Value input_ids_tensor = Ort::Value::CreateTensor<int64_t>(
             memory_info, input_ids_i64.data(), input_ids_i64.size(), shape.data(), shape.size());
-        
         Ort::Value attention_mask_tensor = Ort::Value::CreateTensor<int64_t>(
             memory_info, attention_mask_i64.data(), attention_mask_i64.size(), shape.data(), shape.size());
-        
         Ort::Value token_type_ids_tensor = Ort::Value::CreateTensor<int64_t>(
             memory_info, token_type_ids_i64.data(), token_type_ids_i64.size(), shape.data(), shape.size());
-        
-        // 3. Run inference
+
         const char* input_names[] = {"input_ids", "attention_mask", "token_type_ids"};
         const char* output_names[] = {"last_hidden_state"};
-        
+
         std::vector<Ort::Value> input_tensors;
         input_tensors.push_back(std::move(input_ids_tensor));
         input_tensors.push_back(std::move(attention_mask_tensor));
         input_tensors.push_back(std::move(token_type_ids_tensor));
-        
+
         auto output_tensors = session->Run(
             Ort::RunOptions{nullptr},
             input_names, input_tensors.data(), 3,
             output_names, 1
         );
-        
-        // 4. Extract output tensor
+
         float* output_data = output_tensors[0].GetTensorMutableData<float>();
         auto output_shape = output_tensors[0].GetTensorTypeAndShapeInfo().GetShape();
-        
-        // Shape should be {1, seq_len, 384}
-        if (output_shape.size() != 3 || output_shape[0] != 1 || output_shape[2] != config().embedding_dimensions) {
+
+        if (output_shape.size() != 3 || output_shape[0] != 1 || output_shape[2] != onnx_dims) {
             throw std::runtime_error(lang::ERR_OUTPUT_SHAPE);
         }
-        
+
         size_t output_seq_len = output_shape[1];
         size_t hidden_size = output_shape[2];
-        
-        // 5. Mean pooling with attention mask
+
+        // Mean pooling with attention mask
         std::vector<float> pooled(hidden_size, 0.0f);
         float mask_sum = 0.0f;
-        
+
         for (size_t i = 0; i < output_seq_len; ++i) {
             float mask_value = static_cast<float>(attention_mask[i]);
             mask_sum += mask_value;
-            
             for (size_t j = 0; j < hidden_size; ++j) {
                 pooled[j] += output_data[i * hidden_size + j] * mask_value;
             }
         }
-        
+
         if (mask_sum > 0.0f) {
-            for (auto& val : pooled) {
-                val /= mask_sum;
-            }
+            for (auto& val : pooled) val /= mask_sum;
         }
-        
-        // 6. L2 normalization
+
+        // L2 normalization
         float norm = 0.0f;
-        for (float val : pooled) {
-            norm += val * val;
-        }
+        for (float val : pooled) norm += val * val;
         norm = std::sqrt(norm);
-        
         if (norm > 1e-12f) {
-            for (auto& val : pooled) {
-                val /= norm;
+            for (auto& val : pooled) val /= norm;
+        }
+
+        return pooled;
+    }
+
+    // ---- curl write callback ----
+    static size_t write_cb(char* ptr, size_t sz, size_t n, std::string* out) {
+        out->append(ptr, sz * n);
+        return sz * n;
+    }
+
+    // ---- build base URL ----
+    std::string base_url() const {
+        return "http://" + ext_host + ":" + std::to_string(ext_port);
+    }
+
+    // ---- External encode via /v1/embeddings ----
+    std::vector<float> encode_external(const std::string& text) const {
+        CURL* curl = curl_easy_init();
+        if (!curl) throw std::runtime_error("Failed to init curl");
+
+        json body = {
+            {"input", text},
+            {"model", ext_model}
+        };
+        // Pass dimensions if explicitly set (MRL / truncated models).
+        if (ext_dims > 0) {
+            body["dimensions"] = ext_dims;
+        }
+        std::string payload = body.dump();
+
+        std::string url = base_url() + "/v1/embeddings";
+        std::string response;
+
+        struct curl_slist* headers = nullptr;
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+        if (!ext_api_key.empty()) {
+            headers = curl_slist_append(headers,
+                ("Authorization: Bearer " + ext_api_key).c_str());
+        }
+
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+
+        CURLcode rc = curl_easy_perform(curl);
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
+        if (rc != CURLE_OK) {
+            throw std::runtime_error(std::format("Embedding request failed: {}",
+                                                 curl_easy_strerror(rc)));
+        }
+
+        auto j = json::parse(response, nullptr, false);
+        if (j.is_discarded()) {
+            throw std::runtime_error("Failed to parse embedding response");
+        }
+
+        // OpenAI format: { "data": [ { "embedding": [...] } ] }
+        if (!j.contains("data") || !j["data"].is_array() || j["data"].empty()) {
+            // Check for error
+            if (j.contains("error")) {
+                std::string msg = j["error"].is_string()
+                    ? j["error"].get<std::string>()
+                    : j["error"].value("message", "unknown error");
+                throw std::runtime_error("Embedding API error: " + msg);
+            }
+            throw std::runtime_error("Unexpected embedding response format");
+        }
+
+        auto& emb = j["data"][0]["embedding"];
+        if (!emb.is_array()) {
+            throw std::runtime_error("Embedding response missing 'embedding' array");
+        }
+
+        std::vector<float> vec;
+        vec.reserve(emb.size());
+        for (const auto& v : emb) {
+            vec.push_back(v.get<float>());
+        }
+        return vec;
+    }
+
+    // ---- Dispatch ----
+    std::vector<float> encode(const std::string& text) const {
+        if (external) return encode_external(text);
+        return encode_onnx(text);
+    }
+
+    int dimensions() const {
+        if (external) return ext_dims;
+        return onnx_dims;
+    }
+
+    std::vector<std::string> list_remote_models() const {
+        if (!external) return {};
+
+        CURL* curl = curl_easy_init();
+        if (!curl) return {};
+
+        std::string url = base_url() + "/v1/models";
+        std::string response;
+
+        struct curl_slist* headers = nullptr;
+        if (!ext_api_key.empty()) {
+            headers = curl_slist_append(headers,
+                ("Authorization: Bearer " + ext_api_key).c_str());
+        }
+
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+
+        CURLcode rc = curl_easy_perform(curl);
+        if (headers) curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
+        if (rc != CURLE_OK) return {};
+
+        auto j = json::parse(response, nullptr, false);
+        if (j.is_discarded() || !j.contains("data") || !j["data"].is_array())
+            return {};
+
+        std::vector<std::string> models;
+        for (const auto& m : j["data"]) {
+            if (m.contains("id") && m["id"].is_string()) {
+                models.push_back(m["id"].get<std::string>());
             }
         }
-        
-        return pooled;
+        return models;
+    }
+
+    int probe_dimensions() const {
+        if (!external) return 0;
+        try {
+            auto vec = encode_external("dimension probe");
+            return static_cast<int>(vec.size());
+        } catch (...) {
+            return 0;
+        }
     }
 };
 
+// ====================================================================
+// Public API
+// ====================================================================
+
 Embedder::Embedder(const std::string& model_dir)
-    : pImpl(std::make_unique<Impl>(model_dir)) {
-}
+    : pImpl(std::make_unique<Impl>(model_dir)) {}
+
+Embedder::Embedder(const std::string& host, int port,
+                   const std::string& model_name,
+                   const std::string& api_key, int dimensions)
+    : pImpl(std::make_unique<Impl>(host, port, model_name, api_key, dimensions)) {}
 
 Embedder::~Embedder() = default;
 
@@ -148,7 +305,19 @@ std::vector<float> Embedder::encode(const std::string& text) const {
 }
 
 int Embedder::dimensions() const {
-    return config().embedding_dimensions;
+    return pImpl->dimensions();
+}
+
+bool Embedder::is_external() const {
+    return pImpl->external;
+}
+
+std::vector<std::string> Embedder::list_remote_models() const {
+    return pImpl->list_remote_models();
+}
+
+int Embedder::probe_dimensions() const {
+    return pImpl->probe_dimensions();
 }
 
 } // namespace ragger

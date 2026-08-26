@@ -52,6 +52,7 @@ const std::unordered_map<std::string_view, int Config::*>& int_fields() {
         {"desired_port",          &Config::desired_port},
         {"embedding_dimensions",  &Config::embedding_dimensions},
         {"desired_embedding_dimensions", &Config::desired_embedding_dimensions},
+        {"embedding_external_port",     &Config::embedding_external_port},
         {"embed_timeout_ms",      &Config::embed_timeout_ms},
         {"embed_retries",         &Config::embed_retries},
         {"embed_max_workers",     &Config::embed_max_workers},
@@ -96,6 +97,11 @@ const std::unordered_map<std::string_view, std::string Config::*>& string_fields
         {"embedding_vector_type", &Config::embedding_vector_type},
         {"desired_embedding_model",       &Config::desired_embedding_model},
         {"desired_embedding_vector_type", &Config::desired_embedding_vector_type},
+        {"desired_embedding_engine",      &Config::desired_embedding_engine},
+        {"embedding_engine",              &Config::embedding_engine},
+        {"embedding_external_host",       &Config::embedding_external_host},
+        {"embedding_external_api_key",    &Config::embedding_external_api_key},
+        {"embedding_external_model",      &Config::embedding_external_model},
         {"summarizer_model",      &Config::summarizer_model},
         {"summarizer_api_url",    &Config::summarizer_api_url},
         {"summarizer_api_key",    &Config::summarizer_api_key},
@@ -285,6 +291,8 @@ void overlay_settings_from_db(Config& cfg, const std::string& db_path) {
         cfg.desired_embedding_vector_type = cfg.embedding_vector_type;
     if (cfg.desired_embedding_dimensions == 0)
         cfg.desired_embedding_dimensions = cfg.embedding_dimensions;
+    if (cfg.desired_embedding_engine.empty())
+        cfg.desired_embedding_engine = cfg.embedding_engine;
 
     // Seed desired_port from the committed port when unset, so the dashboard
     // shows the live port as the starting target. The startup rectify (see

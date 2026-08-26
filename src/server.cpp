@@ -11,8 +11,11 @@
 #include "auth.h"
 #include "config.h"
 #include "config_access.h"
+#include "embedder.h"
 #include "util/fs.h"
 #include "inference.h"
+
+#include <curl/curl.h>
 #include "summarizer.h"
 #include "summarizer_service.h"
 #include "nlohmann_json.hpp"
@@ -27,6 +30,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <mutex>
 #include <iostream>
 #include <optional>
@@ -754,17 +758,269 @@ struct Server::Impl {
             res.set_content(build_stats_json().dump(), "application/json");
         }));
 
-        // GET /models -> embedding model choices (contents of ~/.ragger/models).
+        // GET /models -> ONNX embedding model choices from ~/.ragger/models/.
+        // Scans for provider/model dirs (two-level: sentence-transformers/all-MiniLM-L6-v2)
+        // and legacy flat dirs (all-MiniLM-L6-v2). A directory is a valid ONNX model
+        // when it contains tokenizer.json AND (model.onnx or onnx/model.onnx).
+        // Returns {models: [{name:"all-MiniLM-L6-v2", path:"sentence-transformers/all-MiniLM-L6-v2"}, ...]}
+        // "name" is the display name (model only, unless two providers share a
+        // model name — then "provider/model"). "path" is the canonical key to
+        // store in the config and resolve with resolved_model_dir().
         svr.Get("/models", guarded([this](const UserInfo&, const httplib::Request&,
                                           httplib::Response& res) {
-            json arr = json::array();
+            namespace fs = std::filesystem;
             std::error_code ec;
             const std::string dir = ragger_base_dir() + "/models";
-            for (auto& e : std::filesystem::directory_iterator(dir, ec)) {
-                if (!e.is_directory(ec)) continue;                 // model = a subdir
-                std::string name = e.path().filename().string();
-                if (!name.empty() && name[0] == '.') continue;     // skip dotfiles
-                arr.push_back(name);
+
+            auto is_onnx_model = [](const fs::path& p) -> bool {
+                return fs::exists(p / "tokenizer.json") &&
+                       (fs::exists(p / "model.onnx") || fs::exists(p / "onnx" / "model.onnx"));
+            };
+
+            // Collect all valid models as (display_name, canonical_path) pairs.
+            // canonical_path is relative to the models dir.
+            struct ModelInfo { std::string name; std::string path; };
+            std::vector<ModelInfo> models;
+            // Track model-name frequency for collision detection.
+            std::map<std::string, int> name_count;
+
+            for (auto& top : fs::directory_iterator(dir, ec)) {
+                if (!top.is_directory(ec)) continue;
+                std::string top_name = top.path().filename().string();
+                if (!top_name.empty() && top_name[0] == '.') continue;
+
+                // Only scan provider/model two-level layout. Legacy flat
+                // model dirs (e.g. all-MiniLM-L6-v2/ at the top level) are
+                // kept for backward compat but not offered as new choices.
+                for (auto& sub : fs::directory_iterator(top.path(), ec)) {
+                    if (!sub.is_directory(ec)) continue;
+                    std::string sub_name = sub.path().filename().string();
+                    if (!sub_name.empty() && sub_name[0] == '.') continue;
+                    if (is_onnx_model(sub.path())) {
+                        models.push_back({sub_name, top_name + "/" + sub_name});
+                        name_count[sub_name]++;
+                    }
+                }
+            }
+
+            // Build response: disambiguate colliding display names with provider prefix.
+            json arr = json::array();
+            for (auto& m : models) {
+                std::string display = (name_count[m.name] > 1) ? m.path : m.name;
+                arr.push_back(json{{"name", display}, {"path", m.path}});
+            }
+            // Sort by display name for stable UI ordering.
+            std::sort(arr.begin(), arr.end(),
+                [](const json& a, const json& b) { return a["name"] < b["name"]; });
+            res.set_content(json{{"models", arr}}.dump(), "application/json");
+        }));
+
+        // GET /models/external?host=X&port=Y&key=Z -> query a remote
+        // /v1/models endpoint and return available model names.
+        svr.Get("/models/external", guarded([this](const UserInfo&, const httplib::Request& req,
+                                                    httplib::Response& res) {
+            std::string host = req.get_param_value("host");
+            std::string port_s = req.get_param_value("port");
+            std::string key = req.get_param_value("key");
+            if (host.empty() || port_s.empty()) {
+                res.status = 400;
+                res.set_content(R"({"error":"host and port required"})", "application/json");
+                return;
+            }
+            int port = std::stoi(port_s);
+            Embedder probe_emb(host, port, "", key);
+            auto models = probe_emb.list_remote_models();
+            json arr = json::array();
+            for (const auto& m : models) arr.push_back(m);
+            res.set_content(json{{"models", arr}}.dump(), "application/json");
+        }));
+
+        // POST /models/external/probe -> send a test embedding request to a
+        // remote endpoint and return the vector dimensionality.
+        // Body: {"host":"...", "port":N, "model":"...", "key":"..."}
+        svr.Post("/models/external/probe", guarded([this](const UserInfo&, const httplib::Request& req,
+                                                          httplib::Response& res) {
+            auto body = json::parse(req.body, nullptr, false);
+            if (body.is_discarded()) {
+                res.status = 400;
+                res.set_content(R"({"error":"invalid JSON"})", "application/json");
+                return;
+            }
+            std::string host = body.value("host", "");
+            int port = body.value("port", 0);
+            std::string model = body.value("model", "");
+            std::string key = body.value("key", "");
+            if (host.empty() || port == 0 || model.empty()) {
+                res.status = 400;
+                res.set_content(R"({"error":"host, port, and model required"})", "application/json");
+                return;
+            }
+            Embedder probe_emb(host, port, model, key);
+            int dims = probe_emb.probe_dimensions();
+            if (dims == 0) {
+                res.status = 502;
+                res.set_content(R"({"error":"probe failed — endpoint unreachable or returned no embedding"})",
+                                "application/json");
+                return;
+            }
+            res.set_content(json{{"dimensions", dims}}.dump(), "application/json");
+        }));
+
+        // GET /models/huggingface?q=<search> -> search HuggingFace for ONNX
+        // embedding models. Returns {models: [{id, downloads}, ...]} sorted
+        // by popularity. Combines sentence-similarity + feature-extraction.
+        svr.Get("/models/huggingface", guarded([this](const UserInfo&, const httplib::Request& req,
+                                                       httplib::Response& res) {
+            std::string query = req.get_param_value("q");
+            // Build HF API URL — search both pipeline tags for embedding models.
+            auto fetch_hf = [&](const std::string& tag) -> json {
+                std::string url = "https://huggingface.co/api/models?"
+                    "pipeline_tag=" + tag +
+                    "&library=onnx&sort=downloads&direction=-1&limit=20";
+                if (!query.empty()) url += "&search=" + query;
+                CURL* curl = curl_easy_init();
+                if (!curl) return json::array();
+                std::string buf;
+                curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+                curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+                curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
+                    +[](char* p, size_t s, size_t n, void* ud) -> size_t {
+                        static_cast<std::string*>(ud)->append(p, s * n);
+                        return s * n;
+                    });
+                curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
+                CURLcode rc = curl_easy_perform(curl);
+                curl_easy_cleanup(curl);
+                if (rc != CURLE_OK) return json::array();
+                auto j = json::parse(buf, nullptr, false);
+                return j.is_array() ? j : json::array();
+            };
+
+            // Merge results from both pipeline tags, dedup by modelId.
+            json results = json::array();
+            std::set<std::string> seen;
+            for (const auto& tag : {"sentence-similarity", "feature-extraction"}) {
+                for (const auto& m : fetch_hf(tag)) {
+                    std::string mid = m.value("modelId", "");
+                    if (mid.empty() || seen.count(mid)) continue;
+                    seen.insert(mid);
+                    results.push_back(json{
+                        {"id", mid},
+                        {"downloads", m.value("downloads", 0)}
+                    });
+                }
+            }
+            res.set_content(json{{"models", results}}.dump(), "application/json");
+        }));
+
+        // POST /models/download -> download an ONNX model from HuggingFace
+        // to ~/.ragger/models/<provider>/<model>/.
+        // Body: {"repo": "sentence-transformers/all-MiniLM-L6-v2"}
+        svr.Post("/models/download", guarded([this](const UserInfo&, const httplib::Request& req,
+                                                     httplib::Response& res) {
+            auto body = json::parse(req.body, nullptr, false);
+            if (body.is_discarded() || !body.contains("repo")) {
+                res.status = 400;
+                res.set_content(R"({"error":"'repo' required"})", "application/json");
+                return;
+            }
+            std::string repo = body["repo"].get<std::string>();
+            // Validate repo format: "provider/model"
+            auto slash = repo.find('/');
+            if (slash == std::string::npos || slash == 0 || slash == repo.size() - 1) {
+                res.status = 400;
+                res.set_content(R"({"error":"repo must be 'provider/model'"})", "application/json");
+                return;
+            }
+
+            std::string dest = ragger_base_dir() + "/models/" + repo;
+            std::string hf_base = "https://huggingface.co/" + repo + "/resolve/main";
+
+            // Check if already present (model.onnx or onnx/model.onnx)
+            if (std::filesystem::exists(dest + "/model.onnx") ||
+                std::filesystem::exists(dest + "/onnx/model.onnx")) {
+                res.set_content(json{{"status", "already_present"}, {"path", repo}}.dump(),
+                                "application/json");
+                return;
+            }
+
+            std::filesystem::create_directories(dest);
+            std::filesystem::create_directories(dest + "/onnx");
+
+            auto dl = [&](const std::string& remote, const std::string& local) -> bool {
+                CURL* curl = curl_easy_init();
+                if (!curl) return false;
+                FILE* fp = fopen(local.c_str(), "wb");
+                if (!fp) { curl_easy_cleanup(curl); return false; }
+                curl_easy_setopt(curl, CURLOPT_URL, remote.c_str());
+                curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+                curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+                curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
+                CURLcode rc = curl_easy_perform(curl);
+                long http = 0;
+                curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
+                curl_easy_cleanup(curl);
+                fclose(fp);
+                if (rc != CURLE_OK || http != 200) {
+                    std::filesystem::remove(local);  // clean up partial
+                    return false;
+                }
+                return true;
+            };
+
+            // Download metadata files (small, quick).
+            std::vector<std::string> meta = {
+                "config.json", "tokenizer.json", "tokenizer_config.json",
+                "special_tokens_map.json", "vocab.txt"
+            };
+            for (const auto& f : meta) {
+                dl(hf_base + "/" + f, dest + "/" + f);
+                // Non-fatal — some models don't have all files.
+            }
+
+            // Download model.onnx — try onnx/model.onnx first, fall back to root.
+            bool got_onnx = dl(hf_base + "/onnx/model.onnx", dest + "/onnx/model.onnx");
+            if (!got_onnx) {
+                // Try root-level model.onnx
+                got_onnx = dl(hf_base + "/model.onnx", dest + "/model.onnx");
+            }
+
+            if (!got_onnx) {
+                res.status = 502;
+                res.set_content(json{{"error", "Failed to download model.onnx from " + repo}}.dump(),
+                                "application/json");
+                return;
+            }
+
+            res.set_content(json{{"status", "downloaded"}, {"path", repo}}.dump(),
+                            "application/json");
+        }));
+
+        // GET /models/summarizer -> query the summarizer endpoint's /v1/models
+        // (or the inference endpoint if summarizer URL is not separately set).
+        // Returns {models: ["model-name", ...]} for the dashboard to populate
+        // the summarizer_model dropdown.
+        svr.Get("/models/summarizer", guarded([this](const UserInfo&, const httplib::Request&,
+                                                      httplib::Response& res) {
+            // Resolve which URL to probe: summarizer_api_url if set, else
+            // inference_api_url (the summarizer falls back to it at runtime).
+            std::string url = config().summarizer_api_url;
+            if (url.empty()) url = config().inference_api_url;
+            if (url.empty()) {
+                res.set_content(R"({"models":[]})", "application/json");
+                return;
+            }
+            // Use an Endpoint object to probe — it already handles /v1/models.
+            Endpoint ep("summarizer", url);
+            auto ids = ep.list_models();
+            json arr = json::array();
+            for (const auto& id : ids) {
+                // Skip embedding models — they aren't useful for summarization.
+                std::string lower = id;
+                std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                if (lower.find("embed") != std::string::npos) continue;
+                if (lower.find("minilm") != std::string::npos) continue;
+                arr.push_back(id);
             }
             res.set_content(json{{"models", arr}}.dump(), "application/json");
         }));
@@ -775,9 +1031,9 @@ struct Server::Impl {
             auto s = memory.embedding_status();
             res.set_content(json{
                 {"current", {{"model", s.current_model}, {"vector_type", s.current_vtype},
-                             {"dimensions", s.current_dims}}},
+                             {"dimensions", s.current_dims}, {"engine", s.current_engine}}},
                 {"desired", {{"model", s.desired_model}, {"vector_type", s.desired_vtype},
-                             {"dimensions", s.desired_dims}}},
+                             {"dimensions", s.desired_dims}, {"engine", s.desired_engine}}},
                 {"needs_update", s.needs_update},
                 {"reembedding",  s.reembedding},
                 {"degraded",     memory.embeddings_degraded()},

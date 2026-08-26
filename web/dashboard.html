@@ -241,10 +241,52 @@ function renderSection(section) {
     document.getElementById("embed-update").onclick = doEmbeddingUpdate;
     refreshEmbedding();
     populateModelChoices();
+
+    // External engine: Connect button + status line (inserted after banner)
+    const extPanel = document.createElement("div");
+    extPanel.className = "embed-banner";
+    extPanel.id = "ext-connect-panel";
+    extPanel.innerHTML =
+      '<div class="embed-row">' +
+        '<span class="embed-status" id="ext-connect-status"></span>' +
+        '<button class="btn" id="ext-connect-btn" style="display:none">Connect</button>' +
+      '</div>';
+    main.appendChild(extPanel);
+    document.getElementById("ext-connect-btn").onclick = connectExternal;
+
+    // HuggingFace download panel (visible for internal engine)
+    const hfPanel = document.createElement("div");
+    hfPanel.className = "embed-banner";
+    hfPanel.id = "hf-download-panel";
+    hfPanel.innerHTML =
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
+        '<input type="text" id="hf-search" placeholder="Search HuggingFace embedding models…" style="flex:1">' +
+        '<button class="btn" id="hf-search-btn">Search</button>' +
+      '</div>' +
+      '<div id="hf-results"></div>' +
+      '<div class="embed-row">' +
+        '<span class="embed-status" id="hf-status"></span>' +
+      '</div>';
+    main.appendChild(hfPanel);
+    document.getElementById("hf-search-btn").onclick = searchHuggingFace;
+    document.getElementById("hf-search").addEventListener("keydown",
+      (e) => { if (e.key === "Enter") searchHuggingFace(); });
   }
 
   for (const entry of CONFIG.filter(e => e.section === section)) {
-    main.appendChild(renderRow(entry));
+    const rowEl = renderRow(entry);
+    entry.__row = rowEl;
+    main.appendChild(rowEl);
+  }
+
+  // After rendering rows, apply engine-based visibility for embedding tab.
+  if (section === "embedding") {
+    updateEngineVisibility();
+  }
+
+  // Summarizer tab: populate model dropdown from the inference endpoint.
+  if (section === "summarizer") {
+    populateSummarizerModels();
   }
 }
 
@@ -268,7 +310,8 @@ function renderEmbeddingBanner() {
   if (!s || !cur) return;
   const c = s.current || {};
   cur.innerHTML = "Current vectors: <b>" + escapeHtml(c.model) + "</b> · " +
-    escapeHtml(c.vector_type) + " · " + escapeHtml(String(c.dimensions)) + "-dim";
+    escapeHtml(c.vector_type) + " · " + escapeHtml(String(c.dimensions)) + "-dim" +
+    " · engine: <b>" + escapeHtml(c.engine || "internal") + "</b>";
   if (s.reembedding) {
     st.className = "embed-status busy";
     st.textContent = "Re-embedding in progress… search is paused.";
@@ -294,6 +337,7 @@ async function doEmbeddingUpdate() {
 }
 
 // Fill the Desired Model dropdown from the models directory (GET /models).
+// Response format: {models: [{name:"display", path:"provider/model"}, ...]}
 async function populateModelChoices() {
   let models = [];
   try {
@@ -307,10 +351,237 @@ async function populateModelChoices() {
   sel.innerHTML = "";
   for (const m of models) {
     const o = document.createElement("option");
-    o.value = m; o.textContent = m;
-    if (m === chosen) o.selected = true;
+    // path is the canonical value stored in config; name is the display label.
+    o.value = m.path || m; o.textContent = m.name || m;
+    if ((m.path || m) === chosen) o.selected = true;
     sel.appendChild(o);
   }
+}
+
+// ---- HuggingFace model search & download -----------------------------------
+async function searchHuggingFace() {
+  const q = (document.getElementById("hf-search") || {}).value || "";
+  const st = document.getElementById("hf-status");
+  const results = document.getElementById("hf-results");
+  if (st) { st.textContent = "Searching…"; st.className = "embed-status busy"; }
+  if (results) results.innerHTML = "";
+
+  try {
+    const r = await fetch(api("/models/huggingface") +
+      (qs ? "&" : "?") + "q=" + encodeURIComponent(q));
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const data = await r.json();
+    const models = data.models || [];
+    if (models.length === 0) {
+      if (st) { st.textContent = "No ONNX embedding models found."; st.className = "embed-status pending"; }
+      return;
+    }
+    if (st) { st.textContent = models.length + " model(s) found."; st.className = "embed-status ok"; }
+
+    // Render results as a list with download buttons.
+    if (results) {
+      for (const m of models) {
+        const row = document.createElement("div");
+        row.style.cssText = "display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid #eaeef2";
+        const label = document.createElement("span");
+        label.style.cssText = "font-size:14px;font-family:'SF Mono',Monaco,monospace";
+        label.textContent = m.id + (m.downloads ? "  (" + humanCount(m.downloads) + "↓)" : "");
+        const btn = document.createElement("button");
+        btn.className = "btn";
+        btn.style.cssText = "padding:4px 12px;font-size:12px";
+        btn.textContent = "Download";
+        btn.onclick = () => downloadHFModel(m.id, btn, st);
+        row.appendChild(label);
+        row.appendChild(btn);
+        results.appendChild(row);
+      }
+    }
+  } catch (e) {
+    if (st) { st.textContent = "Search failed: " + e.message; st.className = "embed-status pending"; }
+  }
+}
+
+async function downloadHFModel(repo, btn, st) {
+  btn.disabled = true; btn.textContent = "Downloading…";
+  if (st) { st.textContent = "Downloading " + repo + "…"; st.className = "embed-status busy"; }
+  try {
+    const r = await fetch(api("/models/download"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repo }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      btn.disabled = false; btn.textContent = "Retry";
+      if (st) { st.textContent = "Failed: " + (data.error || "unknown error"); st.className = "embed-status pending"; }
+      return;
+    }
+    btn.textContent = data.status === "already_present" ? "Already present" : "✓ Downloaded";
+    if (st) { st.textContent = "✓ " + repo + " ready."; st.className = "embed-status ok"; }
+    // Refresh the local model dropdown so the new model appears.
+    populateModelChoices();
+  } catch (e) {
+    btn.disabled = false; btn.textContent = "Retry";
+    if (st) { st.textContent = "Download failed: " + e.message; st.className = "embed-status pending"; }
+  }
+}
+
+// Fill the Summarizer Model field from the summarizer/inference endpoint.
+// Queries GET /models/summarizer and replaces the text input with a dropdown.
+async function populateSummarizerModels() {
+  let models = [];
+  try {
+    const r = await fetch(api("/models/summarizer"));
+    if (r.ok) models = (await r.json()).models || [];
+  } catch (e) { return; }
+  const entry = CONFIG.find(e => e.key === "summarizer_model");
+  if (!entry || !entry.__field) return;
+  const field = entry.__field;
+  const parent = field.parentNode;
+  // Replace text input with a select populated from the endpoint.
+  const sel = document.createElement("select");
+  sel.style.width = "200px";
+  const chosen = entry.value;
+  // Always offer a blank option (use default / leave empty).
+  if (models.length === 0) {
+    const o = document.createElement("option");
+    o.value = chosen; o.textContent = chosen || "(no models found)";
+    o.selected = true;
+    sel.appendChild(o);
+  } else {
+    for (const m of models) {
+      const o = document.createElement("option");
+      o.value = m; o.textContent = m;
+      if (m === chosen) o.selected = true;
+      sel.appendChild(o);
+    }
+  }
+  sel.onchange = () => commit(entry, sel.value, sel);
+  parent.replaceChild(sel, field);
+  entry.__field = sel;
+}
+
+// ---- engine-aware visibility -----------------------------------------------
+// Keys only meaningful for internal engine:
+const INTERNAL_KEYS = ["desired_embedding_model", "embed_timeout_ms", "embed_retries", "embed_max_workers"];
+// Keys only meaningful for external engine:
+const EXTERNAL_KEYS = ["embedding_external_host", "embedding_external_port",
+                       "embedding_external_api_key", "embedding_external_model"];
+// Keys shown for both but may need different behavior:
+// desired_embedding_dimensions, desired_embedding_vector_type — always visible
+
+function updateEngineVisibility() {
+  const engineEntry = CONFIG.find(e => e.key === "desired_embedding_engine");
+  const engine = engineEntry ? engineEntry.value : "internal";
+  const isExternal = engine === "external";
+
+  for (const entry of CONFIG) {
+    if (!entry.__row) continue;
+    if (INTERNAL_KEYS.includes(entry.key)) {
+      entry.__row.style.display = isExternal ? "none" : "";
+    } else if (EXTERNAL_KEYS.includes(entry.key)) {
+      entry.__row.style.display = isExternal ? "" : "none";
+    }
+  }
+
+  // Show/hide the Connect button
+  const connectBtn = document.getElementById("ext-connect-btn");
+  if (connectBtn) connectBtn.style.display = isExternal ? "" : "none";
+  const connectPanel = document.getElementById("ext-connect-panel");
+  if (connectPanel) connectPanel.style.display = isExternal ? "" : "none";
+  const hfPanel = document.getElementById("hf-download-panel");
+  if (hfPanel) hfPanel.style.display = isExternal ? "none" : "";
+}
+
+// Connect to external endpoint: fetch model list, populate external model dropdown
+async function connectExternal() {
+  const hostEntry = CONFIG.find(e => e.key === "embedding_external_host");
+  const portEntry = CONFIG.find(e => e.key === "embedding_external_port");
+  const keyEntry = CONFIG.find(e => e.key === "embedding_external_api_key");
+  const modelEntry = CONFIG.find(e => e.key === "embedding_external_model");
+
+  const host = hostEntry ? (hostEntry.__field ? hostEntry.__field.value : hostEntry.value) : "";
+  const port = portEntry ? (portEntry.__field ? portEntry.__field.value : portEntry.value) : "";
+  const key = keyEntry ? (keyEntry.__field ? keyEntry.__field.value : keyEntry.value) : "";
+
+  if (!host || !port) {
+    const st = document.getElementById("ext-connect-status");
+    if (st) { st.textContent = "Host and port required."; st.className = "embed-status pending"; }
+    return;
+  }
+
+  const btn = document.getElementById("ext-connect-btn");
+  const st = document.getElementById("ext-connect-status");
+  if (btn) { btn.disabled = true; btn.textContent = "Connecting…"; }
+  if (st) { st.textContent = ""; st.className = "embed-status"; }
+
+  try {
+    const url = api("/models/external") +
+      (qs ? "&" : "?") + "host=" + encodeURIComponent(host) +
+      "&port=" + encodeURIComponent(port) +
+      (key ? "&key=" + encodeURIComponent(key) : "");
+    const r = await fetch(url);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const data = await r.json();
+    const models = data.models || [];
+
+    if (models.length === 0) {
+      if (st) { st.textContent = "Connected but no models found."; st.className = "embed-status pending"; }
+    } else {
+      if (st) { st.textContent = "Connected — " + models.length + " model(s) found."; st.className = "embed-status ok"; }
+    }
+
+    // Populate the external model field as a dropdown
+    if (modelEntry && modelEntry.__field) {
+      const field = modelEntry.__field;
+      const parent = field.parentNode;
+      // Replace text input with a select
+      const sel = document.createElement("select");
+      sel.style.width = "200px";
+      const chosen = modelEntry.value;
+      for (const m of models) {
+        const o = document.createElement("option");
+        o.value = m; o.textContent = m;
+        if (m === chosen) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.onchange = async () => {
+        await commit(modelEntry, sel.value, sel);
+        // Auto-probe dimensions when model is selected
+        probeExternalDimensions(host, port, sel.value, key);
+      };
+      parent.replaceChild(sel, field);
+      modelEntry.__field = sel;
+
+      // Auto-probe if a model is already selected
+      if (models.length > 0) {
+        const selectedModel = sel.value || models[0];
+        probeExternalDimensions(host, port, selectedModel, key);
+      }
+    }
+  } catch (e) {
+    if (st) { st.textContent = "Connection failed: " + e.message; st.className = "embed-status pending"; }
+  }
+  if (btn) { btn.disabled = false; btn.textContent = "Connect"; }
+}
+
+async function probeExternalDimensions(host, port, model, key) {
+  const dimsEntry = CONFIG.find(e => e.key === "desired_embedding_dimensions");
+  if (!dimsEntry || !dimsEntry.__field) return;
+
+  try {
+    const r = await fetch(api("/models/external/probe"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host, port: parseInt(port), model, key }),
+    });
+    if (!r.ok) return;
+    const data = await r.json();
+    if (data.dimensions) {
+      dimsEntry.__field.value = String(data.dimensions);
+      commit(dimsEntry, String(data.dimensions), dimsEntry.__field);
+    }
+  } catch (e) { /* probe failed silently */ }
 }
 
 // ---- server restart panel --------------------------------------------------
@@ -541,6 +812,7 @@ async function commit(entry, value, field, isUndo) {
     updateNote(entry, data);
     updateResetVisibility(entry);
     if (entry.key.indexOf("desired_embedding") === 0) refreshEmbedding();
+    if (entry.key === "desired_embedding_engine") updateEngineVisibility();
     if (entry.key === "desired_port" || entry.key === "bind") refreshRestart();
     flash(field, true);
   } catch (e) {
@@ -635,6 +907,22 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => (
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
   ));
+}
+
+// Human-readable count: 256M, 1.2M, 15K, 842
+function humanCount(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(n >= 1e10 ? 0 : 1) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "K";
+  return String(n);
+}
+
+// Human-readable bytes: 127 MB, 1.2 GB, 42 KB
+function humanBytes(b) {
+  if (b >= 1e9) return (b / 1e9).toFixed(1) + " GB";
+  if (b >= 1e6) return (b / 1e6).toFixed(0) + " MB";
+  if (b >= 1e3) return (b / 1e3).toFixed(0) + " KB";
+  return b + " B";
 }
 
 // ---- boot ------------------------------------------------------------------

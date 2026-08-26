@@ -190,7 +190,7 @@ std::string pick_from_list(const std::vector<std::string>& options,
 
 bool embedding_model_present() {
     std::string mdir = config().resolved_model_dir();
-    return fs::exists(mdir + "/model.onnx");
+    return fs::exists(mdir + "/model.onnx") || fs::exists(mdir + "/onnx/model.onnx");
 }
 
 } // namespace
@@ -222,8 +222,18 @@ int run_onboard(const std::vector<std::string>& /*args*/,
     section("Storage");
     std::println("Ragger keeps everything under ~/.ragger/:");
     std::println("  db:        {}", config().resolved_db_path());
-    std::println("  models:    {}", config().resolved_model_dir());
+    std::println("  models:    {}", ragger_base_dir() + "/models/<provider>/<model>/");
     std::println("  recipes:   {}", config().resolved_recipes_dir());
+    std::println("");
+    std::println("Models directory layout (provider/model, like LM Studio):");
+    std::println("  ~/.ragger/models/");
+    std::println("  └── sentence-transformers/");
+    std::println("      ├── all-MiniLM-L6-v2/");
+    std::println("      │   ├── model.onnx");
+    std::println("      │   └── tokenizer.json");
+    std::println("      └── all-MiniLM-L12-v2/");
+    std::println("          ├── onnx/model.onnx");
+    std::println("          └── tokenizer.json");
     std::println("");
     std::println("To put any of these on a different disk, symlink the path:");
     std::println("  ln -s /mnt/big/ragger ~/.ragger");
@@ -320,17 +330,75 @@ int run_onboard(const std::vector<std::string>& /*args*/,
     }
     std::println("Wrote {}", ini_path);
 
-    // -------- 6. Embedding model --------
-    section("Embedding model");
-    if (embedding_model_present()) {
-        std::println("✓ all-MiniLM-L6-v2 already present at ~/.ragger/models/");
+    // -------- 6. Embedding engine & model --------
+    section("Embedding engine");
+    std::println("Ragger computes vector embeddings for semantic search.");
+    std::println("  internal — runs an ONNX model locally (~90 MB, CPU-only).");
+    std::println("  external — calls a remote OpenAI-compatible /v1/embeddings endpoint");
+    std::println("             (llama.cpp, Ollama, LM Studio, OpenAI, etc.).");
+    std::println("");
+
+    std::string cur_engine = config().embedding_engine;
+    if (cur_engine.empty()) cur_engine = "internal";
+    std::string new_engine = prompt("Engine (internal/external)", cur_engine);
+    if (new_engine != "internal" && new_engine != "external") {
+        std::println("  Unknown engine '{}' — defaulting to 'internal'.", new_engine);
+        new_engine = "internal";
+    }
+
+    if (new_engine == "external") {
+        // --- External engine setup ---
+        std::println("");
+        std::string cur_host = config().embedding_external_host;
+        std::string cur_port = config().embedding_external_port > 0
+            ? std::to_string(config().embedding_external_port) : "";
+        std::string cur_key  = config().embedding_external_api_key;
+
+        std::string ext_host = prompt("External host (IP or hostname)", cur_host);
+        std::string ext_port_s = prompt("External port", cur_port);
+        std::string ext_key  = prompt("API key (blank if none)", cur_key);
+
+        int ext_port = 0;
+        try { ext_port = std::stoi(ext_port_s); } catch (...) {}
+
+        if (!ext_host.empty() && ext_port > 0) {
+            // Probe for available models
+            std::string probe_url = "http://" + ext_host + ":" + ext_port_s + "/v1";
+            std::println("");
+            std::println("Probing {}...", probe_url);
+            auto models = probe_models(probe_url);
+            std::string ext_model;
+            if (models.empty()) {
+                std::println("  No models found. Enter the model name manually.");
+                ext_model = prompt("Embedding model name",
+                                   config().embedding_external_model);
+            } else {
+                std::println("  Found {} model(s).", models.size());
+                std::println("");
+                ext_model = pick_from_list(models, "Pick the embedding model");
+            }
+
+            // Persist external settings via the DB (they're schema keys).
+            // We don't use the INI for these — they go straight through
+            // set_config_persisted, same as the dashboard.
+            std::println("");
+            std::println("External embedding: {}:{} model={}", ext_host, ext_port, ext_model);
+        }
     } else {
-        std::println("The all-MiniLM-L6-v2 ONNX model (~90 MB) isn't installed.");
-        std::println("install.sh handles this in one pass:");
-        std::println("");
-        std::println("  cd /path/to/ragger && ./scripts/install.sh");
-        std::println("");
-        std::println("(Re-running install.sh is safe — it skips anything already done.)");
+        // --- Internal (ONNX) engine ---
+        if (embedding_model_present()) {
+            std::println("");
+            std::println("✓ ONNX embedding model already present at {}",
+                         config().resolved_model_dir());
+        } else {
+            std::println("");
+            std::println("No ONNX embedding model found.");
+            std::println("Run the installer to download sentence-transformers/all-MiniLM-L12-v2:");
+            std::println("  cd /path/to/ragger && ./scripts/install.sh");
+            std::println("");
+            std::println("The default model (384-dim, f16) is downloaded to:");
+            std::println("  ~/.ragger/models/sentence-transformers/all-MiniLM-L12-v2/");
+        }
     }
 
     // -------- 7. Daemon --------

@@ -124,21 +124,58 @@ if [ -d "$SRC/recipes" ]; then
     cp -R "$SRC/recipes/." "$RECIPES_DIR/"
 fi
 
-# Embedding model — fetch from HuggingFace if not already present. The six
-# files together are ~90 MB; one-time download, idempotent re-runs.
-EMBED_MODEL="all-MiniLM-L6-v2"
-EMBED_DIR="$MODEL_DIR/$EMBED_MODEL"
-if [ ! -f "$EMBED_DIR/model.onnx" ]; then
-    info "Downloading $EMBED_MODEL embedding model to $EMBED_DIR"
-    mkdir -p "$EMBED_DIR"
-    HF_BASE="https://huggingface.co/sentence-transformers/$EMBED_MODEL/resolve/main"
+# Embedding models — fetch from HuggingFace if not already present.
+# Provider/model layout mirrors LM Studio and HuggingFace conventions:
+#   ~/.ragger/models/<provider>/<model>/
+#
+# Legacy flat dirs (e.g. all-MiniLM-L6-v2/ at the top level) still work
+# for backward compat but aren't offered as new choices in the dashboard.
+# New installs use the provider layout exclusively.
+
+# Helper: download one ONNX embedding model from HuggingFace.
+# Usage: download_model <hf_repo> <model_dir> [onnx_subdir]
+#   hf_repo    — HuggingFace repo (e.g. sentence-transformers/all-MiniLM-L6-v2)
+#   model_dir  — local target directory under $MODEL_DIR
+#   onnx_subdir— subdirectory containing model.onnx in the HF repo (default: "")
+#                If set, the ONNX file is stored at $model_dir/onnx/model.onnx
+download_model() {
+    local hf_repo="$1" model_dir="$2" onnx_sub="${3:-}"
+    local dest="$MODEL_DIR/$model_dir"
+    local hf_base="https://huggingface.co/$hf_repo/resolve/main"
+
+    # Determine where model.onnx goes locally
+    local onnx_local="$dest/model.onnx"
+    local onnx_remote="$hf_base/model.onnx"
+    if [ -n "$onnx_sub" ]; then
+        onnx_local="$dest/$onnx_sub/model.onnx"
+        onnx_remote="$hf_base/$onnx_sub/model.onnx"
+    fi
+
+    if [ -f "$onnx_local" ]; then
+        info "✓ $model_dir already present"
+        return
+    fi
+
+    info "Downloading $model_dir from $hf_repo"
+    mkdir -p "$(dirname "$onnx_local")"
+    mkdir -p "$dest"
+
     for f in config.json special_tokens_map.json tokenizer_config.json tokenizer.json vocab.txt; do
-        curl -sSLfo "$EMBED_DIR/$f" "$HF_BASE/$f" || \
-            warn "  failed: $f (you can rerun this script later to retry)"
+        curl -sSLfo "$dest/$f" "$hf_base/$f" || \
+            warn "  failed: $f (rerun install.sh to retry)"
     done
-    curl -#Lfo "$EMBED_DIR/model.onnx" "$HF_BASE/onnx/model.onnx" || \
+    curl -#Lfo "$onnx_local" "$onnx_remote" || \
         warn "  failed: model.onnx (rerun install.sh once you have a network)"
-fi
+}
+
+download_model "sentence-transformers/all-MiniLM-L6-v2" \
+               "sentence-transformers/all-MiniLM-L6-v2" "onnx"
+
+download_model "sentence-transformers/all-MiniLM-L12-v2" \
+               "sentence-transformers/all-MiniLM-L12-v2" "onnx"
+
+download_model "onnx-community/all-MiniLM-L12-v2-qa-all-ONNX" \
+               "onnx-community/all-MiniLM-L12-v2-qa-all-ONNX" "onnx"
 
 # ============================================================
 # PHASE 3: Install executable

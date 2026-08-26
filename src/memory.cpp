@@ -31,10 +31,19 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
 
     // Model directory always comes from config — hardcoded relative to
     // ragger_base_dir() (see config.cpp), same as every other Ragger path.
-    std::string resolved_model_dir = config().resolved_model_dir();
-
-    // Create embedder
-    embedder_ = std::make_unique<Embedder>(resolved_model_dir);
+    // Engine choice: "external" uses a remote /v1/embeddings endpoint;
+    // "internal" (default) loads an ONNX model from the models directory.
+    if (config().embedding_engine == "external") {
+        embedder_ = std::make_unique<Embedder>(
+            config().embedding_external_host,
+            config().embedding_external_port,
+            config().embedding_external_model,
+            config().embedding_external_api_key,
+            config().embedding_dimensions);
+    } else {
+        std::string resolved_model_dir = config().resolved_model_dir();
+        embedder_ = std::make_unique<Embedder>(resolved_model_dir);
+    }
 
     // The resolved path — used for both the storage backend and the user store.
     const std::string resolved_db = expand_path(db_path);
@@ -311,6 +320,7 @@ RaggerMemory::EmbeddingStatus RaggerMemory::embedding_status() {
                           .value_or(config().embedding_vector_type);
     s.current_dims  = std::stoi(user_store_->get_setting("dimensions")
                           .value_or(std::to_string(config().embedding_dimensions)));
+    s.current_engine = config().embedding_engine;
     // Desired = staged config target (seeded from current when unset).
     s.desired_model = config().desired_embedding_model.empty()
                           ? s.current_model
@@ -319,9 +329,12 @@ RaggerMemory::EmbeddingStatus RaggerMemory::embedding_status() {
                           ? s.current_vtype : config().desired_embedding_vector_type;
     s.desired_dims  = config().desired_embedding_dimensions == 0
                           ? s.current_dims : config().desired_embedding_dimensions;
+    s.desired_engine = config().desired_embedding_engine.empty()
+                          ? s.current_engine : config().desired_embedding_engine;
     s.needs_update = (s.current_model != s.desired_model) ||
                      (s.current_vtype != s.desired_vtype) ||
-                     (s.current_dims  != s.desired_dims);
+                     (s.current_dims  != s.desired_dims)  ||
+                     (s.current_engine != s.desired_engine);
     s.reembedding = is_reembedding();
     return s;
 }
@@ -384,9 +397,24 @@ int RaggerMemory::update_embeddings() {
         // Increment the embedding version so all existing blobs become stale.
         backend_->increment_embedding_version();
 
-        // Build an embedder for the DESIRED model and re-encode every row on
-        // the existing backend (no second backend -> no write contention).
-        auto desired_embedder = std::make_unique<Embedder>(desired_model_dir);
+        // Build an embedder for the DESIRED identity and re-encode every row.
+        const std::string desired_engine =
+            config().desired_embedding_engine.empty()
+                ? config().embedding_engine
+                : config().desired_embedding_engine;
+
+        std::unique_ptr<Embedder> desired_embedder;
+        if (desired_engine == "external") {
+            desired_embedder = std::make_unique<Embedder>(
+                config().embedding_external_host,
+                config().embedding_external_port,
+                config().embedding_external_model,
+                config().embedding_external_api_key,
+                config().desired_embedding_dimensions > 0
+                    ? config().desired_embedding_dimensions : 0);
+        } else {
+            desired_embedder = std::make_unique<Embedder>(desired_model_dir);
+        }
         int count = backend_->rebuild_embeddings(*desired_embedder);
 
         // Promote current := desired in the drift-guard settings keys.
@@ -406,6 +434,7 @@ int RaggerMemory::update_embeddings() {
         mutable_config().embedding_model = desired_model_name;
         mutable_config().embedding_vector_type = vtype;
         mutable_config().embedding_dimensions = dims;
+        mutable_config().embedding_engine = desired_engine;
 
         user_store_->set_setting("reembedding", "false");
         return count;
