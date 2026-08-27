@@ -48,7 +48,7 @@ struct Config {
     // --ragger-base CLI flag (testing only; no env var equivalent).
 
     // --- Embedding ---
-    std::string embedding_model = "all-MiniLM-L6-v2";
+    std::string embedding_model = "sentence-transformers/all-MiniLM-L6-v2";
     int         embedding_dimensions = 384;
     // On-disk vector storage precision: "f16" (half, default — half the size)
     // or "f32" (full). In-memory math is always f32; this only affects the

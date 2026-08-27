@@ -478,7 +478,7 @@ inline constexpr std::array<ConfigMeta, 56> kConfigSchema = {{
     // Current identity: what the stored vectors ARE. Read-only display; the
     // drift guard / rebuild owns these. Editing happens on the desired_* keys.
     {"embedding_model", "embedding", "Current Model", CfgType::String, CfgEdit::Locked,
-     "all-MiniLM-L6-v2", "",
+     "sentence-transformers/all-MiniLM-L6-v2", "",
      "The embedding model the stored vectors were built with. Read-only — change the desired model below and re-embed to switch."},
     {"embedding_engine", "embedding", "Current Engine", CfgType::Enum, CfgEdit::Locked,
      "internal", "internal,external",

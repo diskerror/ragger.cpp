@@ -55,13 +55,13 @@ SCHEMA = [
     ("capture_turns", "server", "Capture Turns", "boolean", "live", "true", "",
      "Accept agent-pushed turns into the turns table."),
     # embedding — current (read-only) + desired (editable) + embed subprocess
-    ("embedding_model", "embedding", "Current Model", "string", "locked", "all-MiniLM-L6-v2", "",
+    ("embedding_model", "embedding", "Current Model", "string", "locked", "sentence-transformers/all-MiniLM-L6-v2", "",
      "The embedding model the stored vectors were built with. Read-only."),
     ("embedding_dimensions", "embedding", "Current Dimensions", "integer", "locked", "384", "",
      "Vector dimensionality of the stored vectors. Read-only."),
     ("embedding_vector_type", "embedding", "Current Vector Type", "enum", "locked", "f16", "f16,f32",
      "On-disk precision of the stored vectors. Read-only."),
-    ("desired_embedding_model", "embedding", "Desired Model", "enum", "rebuild", "all-MiniLM-L6-v2", "all-MiniLM-L6-v2",
+    ("desired_embedding_model", "embedding", "Desired Model", "enum", "rebuild", "sentence-transformers/all-MiniLM-L6-v2", "sentence-transformers/all-MiniLM-L6-v2",
      "The embedding model to switch to. Choices come from ~/.ragger/models/."),
     ("desired_embedding_vector_type", "embedding", "Desired Vector Type", "enum", "rebuild", "f16", "f16,f32",
      "Target on-disk vector precision: f16 or f32."),
@@ -141,7 +141,7 @@ SCHEMA = [
 VALUES = {row[0]: row[5] for row in SCHEMA}
 
 # Mock embedding state for the preview.
-MOCK_MODELS = ["all-MiniLM-L6-v2"]
+MOCK_MODELS = ["sentence-transformers/all-MiniLM-L6-v2"]
 EMBED = {"reembedding": False}
 # Mock restart state: the port the "daemon" is bound to (vs config port).
 BOUND = {"port": 8432, "bind": "127.0.0.1"}
@@ -256,7 +256,7 @@ class Handler(BaseHTTPRequestHandler):
     def _embed_status(self):
         cur_vt = VALUES.get("embedding_vector_type", "f16")
         des_vt = VALUES.get("desired_embedding_vector_type", "f16")
-        cur_model = VALUES.get("embedding_model", "all-MiniLM-L6-v2")
+        cur_model = VALUES.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2")
         des_model = VALUES.get("desired_embedding_model", cur_model)
         cur_dim = int(VALUES.get("embedding_dimensions", "384"))
         des_dim = int(VALUES.get("desired_embedding_dimensions", "384"))

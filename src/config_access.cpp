@@ -207,6 +207,12 @@ std::expected<void, ConfigSetError> validate_config_value(std::string_view key,
         case CfgType::Enum: {
             // value must be one of the comma-separated options.
             std::string_view opts = meta->options;
+            // Empty options list => choices are populated dynamically at
+            // runtime (e.g. desired_embedding_model, sourced from the models
+            // dir via GET /models). There is no static set to check against,
+            // so accept any non-empty value; the dashboard already constrains
+            // the user to real choices client-side.
+            if (opts.empty()) return {};
             size_t pos = 0;
             while (pos <= opts.size()) {
                 size_t comma = opts.find(',', pos);
