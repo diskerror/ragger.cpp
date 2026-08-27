@@ -50,7 +50,24 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
 
     backend_    = std::make_unique<SqliteBackend>(*embedder_, resolved_db);
     user_store_ = std::make_unique<UserStore>(resolved_db);
-    
+
+    // --- Legacy model-name migration --------------------------------------
+    // Older DBs recorded embedding_model as a bare name ("all-MiniLM-L6-v2")
+    // before the canonical provider/model layout existed. The rest of the
+    // system now uses the resolved provider-prefixed form
+    // ("sentence-transformers/all-MiniLM-L6-v2"), so a bare stored value would
+    // read as a mismatch against config forever. Heal it in place: if the
+    // stored value has no provider prefix (no '/'), prepend the legacy
+    // provider. One-time, idempotent — prefixed values are left untouched.
+    if (auto stored_model = user_store_->get_setting("embedding_model");
+        stored_model.has_value() && !stored_model->empty() &&
+        stored_model->find('/') == std::string::npos) {
+        const std::string migrated = "sentence-transformers/" + *stored_model;
+        user_store_->set_setting("embedding_model", migrated);
+        Diskerror::Logger::info(std::format(
+            "Migrated legacy embedding_model '{}' -> '{}'", *stored_model, migrated));
+    }
+
     // --- Embedding identity drift guard (model + dtype + dimensions) -------
     // The settings table records what built this DB. On startup we compare it
     // to the current config; thereafter the stored values are authoritative.
