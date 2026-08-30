@@ -236,7 +236,6 @@ add_library(ragger_core STATIC
     src/summarizer_service.cpp
     src/recipe.cpp
     src/recipe_cli.cpp
-    src/onboard.cpp
     src/embedder.cpp
     src/embed_executor.cpp
     src/tokenizer_wrapper.cpp

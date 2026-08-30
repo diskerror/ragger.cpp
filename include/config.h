@@ -1,7 +1,8 @@
 /**
  * Configuration for Ragger Memory (C++ port)
  *
- * Loaded from settings.ini at runtime.
+ * Defaults are compiled in from default-settings.txt; the settings table in
+ * memories.db overlays them at runtime. No config file is read or written.
  * 
  */
 #pragma once
@@ -38,6 +39,17 @@ struct Config {
     // `desired_port` so a UI port change is adopted by ANY restart path, not
     // just the dashboard button. 0 = "same as port" (seeded on first load).
     int         desired_port   = 0;
+    // NOT WIRED UP. Parsed, dashboard-editable, and settable — but no consumer
+    // reads it, so setting it does nothing today.
+    //
+    // Kept deliberately. The blocker is intent, not effort: cpp-httplib has no
+    // hostname or virtual-host concept to bind this to, and it sends no
+    // "Server:" response header, so there is nothing for the value to mean
+    // until we decide what it should do. The plausible reading — advertise it
+    // as the Server: header — is one line at the httplib setup in server.cpp
+    // (svr.set_default_headers({{"Server", cfg.server_name}})), but that is a
+    // guess about the original intent and a visible protocol change, so it
+    // should be a decision rather than a cleanup.
     std::string server_name;   // hostname for cpp-httplib (e.g. "ragger.local")
 
     // --- Storage ---
@@ -221,8 +233,6 @@ struct Config {
     // Default 3; set 0 to disable (retry forever — old behaviour).
     int   max_turn_failures      = 3;
 
-    // --- System ceilings (0 = no limit) ---
-    int  max_search_limit             = 0;
 
     /// Resolved paths — all hardcoded relative to ragger_base_dir() (see
     /// util/fs.h), so every on-disk location Ragger ever touches is defined
@@ -244,24 +254,16 @@ struct Config {
 };
 
 /// Expand a leading ~ to the real $HOME in a path string. This is for
-/// user-supplied paths only (CLI --db/--config args, settings.ini
-/// socket_path/bind_address, etc.) — it is NOT how Ragger's own hardcoded
+/// user-supplied paths only (the CLI --db argument, socket_path/bind_address
+/// values from the settings table, etc.) — it is NOT how Ragger's own hardcoded
 /// paths are resolved; those go through Config::resolved_XX() /
 /// ragger_base_dir() instead (see util/fs.h).
 std::string expand_path(const std::string& path);
 
-/// Find system config file using search order. Returns path or throws.
-/// @param cli_path  Path from --config (empty if not given)
-std::expected<std::string, ConfigError> find_system_config(const std::string& cli_path = "");
-
-/// Find user config file. Returns empty string if not found.
-std::expected<std::string, ConfigError> find_user_config();
-
-/// Load config from an INI file.
+/// Parse config from an INI file. Ragger does not read a config file during
+/// normal startup — defaults are compiled in and the settings table is the
+/// only store. This remains for the one-time settings.ini -> DB migration.
 std::expected<Config, ConfigError> load_config(const std::string& path);
-
-/// Apply user overrides to a config. Only allows specific fields.
-void apply_user_overrides(Config& cfg, const Config& user);
 
 /// Global config instance. Must call init_config() before use.
 const Config& config();
@@ -269,7 +271,7 @@ const Config& config();
 Config& mutable_config();
 
 /// Initialize global config. Call once at startup.
-void init_config(const std::string& cli_config_path = "");
+void init_config();
 
 /// Reload config from INI file(s). Updates hot-reloadable values in-place.
 /// Returns number of values changed. Logs restart-required changes without applying.

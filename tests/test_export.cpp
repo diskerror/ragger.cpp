@@ -205,7 +205,7 @@ void test_export_roundtrip() {
 // -----------------------------------------------------------------------
 
 int main() {
-    ragger::init_config("");
+    ragger::init_config();
 
     std::println("Running export tests:");
     test_export_all_no_embeddings();

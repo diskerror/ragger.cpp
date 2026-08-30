@@ -38,7 +38,6 @@
 #include "mcp.h"
 #include "memory.h"
 #include "vector_codec.h"
-#include "onboard.h"
 #include "recipe_cli.h"
 #include "embed_executor.h"
 #include "sqlite_backend.h"
@@ -227,7 +226,6 @@ int main(int argc, char **argv) {
     opts.add_options()
             ("help,h", CLI_HELP)
             ("version,V", CLI_VERSION)
-            ("config", Diskerror::po::value<std::string>()->default_value(""), CLI_CONFIG_FILE)
             ("host", Diskerror::po::value<std::string>(), CLI_HOST)
             ("port,p", Diskerror::po::value<int>(), CLI_PORT)
             ("min-chunk-size", Diskerror::po::value<int>(), CLI_MIN_CHUNK_SIZE)
@@ -304,15 +302,14 @@ int main(int argc, char **argv) {
 
     // Undocumented, testing-only --ragger-base: relocate the entire ~/.ragger
     // base directory before ANY config/path resolution happens (this must run
-    // before init_config(), since settings.ini's own location depends on it).
+    // before init_config(), since the DB's own location depends on it).
     if (auto rh = opts["ragger-base"].as<std::string>(); !rh.empty()) {
         ragger::set_ragger_base_override(rh);
     }
 
-    // Load config file
+    // Load config: compiled-in defaults overlaid with the settings table.
     try {
-        bool server_cmd = (command == "serve");
-        ragger::init_config(opts["config"].as<std::string>());
+        ragger::init_config();
     }
     catch (const std::exception &e) {
         std::cerr << std::format(ragger::lang::ERR_INFERENCE, e.what()) << "\n";
@@ -1312,12 +1309,6 @@ int main(int argc, char **argv) {
             // to DB `settings.recipe`. Sentinel "default" tracks the INI.
             auto recipe_args = opts.getParams("args");
             return ragger::run_recipe_cli(recipe_args, db_path);
-        }
-        else if (command == "onboard") {
-            // Guided first-run setup — capture/build, recipe, inference,
-            // memory model, daemon start. Idempotent.
-            auto ob_args = opts.getParams("args");
-            return ragger::run_onboard(ob_args, db_path);
         }
         else if (command == "rebuild-embeddings") {
 

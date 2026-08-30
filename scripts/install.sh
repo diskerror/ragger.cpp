@@ -91,9 +91,10 @@ fi
 # ============================================================
 # PHASE 2: Config
 # ============================================================
-# settings.ini is bootstrapped by the daemon itself on first run (from the
-# compiled-in default, sourced from default-settings.txt at build time) —
-# install.sh no longer copies a template file onto disk.
+# No config file is written. Defaults are compiled into the binary from
+# default-settings.txt (see cmake/embed_ini.cmake) and the settings table in
+# memories.db is the only store, so there is nothing here to install, template,
+# or leave behind stale. Configuration is done from the dashboard.
 
 # Agent memory-usage instructions (served by `ragger mcp` via the MCP
 # initialize `instructions` field). Install if missing — preserves user edits.
@@ -284,8 +285,6 @@ if [ "$OS" = "Darwin" ]; then
 EOF
     chmod 0644 "$PLIST"
 
-    echo ""
-    echo "To start the daemon now:  ragger start"
 
 elif [ "$OS" = "Linux" ]; then
     UNIT_DIR="$HOME/.config/systemd/user"
@@ -313,8 +312,6 @@ EOF
     systemctl --user enable ragger.service 2>/dev/null || true
 
     echo ""
-    echo "To start the daemon now:  ragger start"
-    echo ""
     echo "To keep it running when you're not logged in:"
     echo "    sudo loginctl enable-linger $USER"
 else
@@ -323,6 +320,11 @@ fi
 
 echo ""
 info "Installed to $RAGGER_BASE"
+echo ""
+echo "  To start the daemon:              ragger start"
+echo "  To open the configuration dashboard:  ragger dashboard --browser"
+echo ""
+echo "  (\`ragger dashboard\` prints the URL instead of opening a browser.)"
 
 if [ -d "$HOME/.openclaw" ]; then
     echo ""

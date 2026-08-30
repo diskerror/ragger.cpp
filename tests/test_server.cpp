@@ -34,7 +34,7 @@ void test_server_instantiation() {
 
     // Verify we can create a Server object without crashing
     // This tests the basic pImpl pattern and constructor
-    ragger::init_config("");
+    ragger::init_config();
     auto model_dir = ragger::config().resolved_model_dir();
 
     // Skip if no model

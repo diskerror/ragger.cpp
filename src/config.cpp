@@ -96,91 +96,40 @@ std::string Config::resolve_model(const std::string& name) const {
 // -----------------------------------------------------------------------
 #include "default_config.inc"
 
-// -----------------------------------------------------------------------
-// Bootstrap ~/.ragger/ on first run
-// -----------------------------------------------------------------------
-static std::string bootstrap_user_config() {
-    std::string ragger_dir = ragger_base_dir();
-    std::string conf_path  = ragger_dir + "/settings.ini";
+// Defined below, after the Config struct's field table.
+static std::expected<Config, ConfigError> parse_config(std::istream& file);
 
-    fs::create_directories(ragger_dir);
-
-    // Never clobber an existing config — just return its path.
-    if (fs::exists(conf_path)) {
-        return conf_path;
-    }
-
-    std::ofstream out(conf_path);
-    if (!out.is_open()) {
-        throw std::runtime_error(std::format(lang::ERR_CONFIG_OPEN, conf_path));
-    }
-    out << DEFAULT_CONFIG;
-    out.close();
-
-//  std::cout << " [INFO] " << lang::MSG_CONFIG_CREATED << conf_path << std::endl;
-    return conf_path;
-}
-
-// -----------------------------------------------------------------------
-// Config file search
-// -----------------------------------------------------------------------
-std::expected<std::string, ConfigError> find_system_config(const std::string& cli_path) {
-    // 1. Explicit --config= takes highest priority
-    if (!cli_path.empty()) {
-        std::string resolved = expand_path(cli_path);
-        if (!fs::exists(resolved)) {
-            return std::unexpected(ConfigError::NotFound);
-        }
-        return resolved;
-    }
-
-    // 2. First run — bootstrap default user config (acts as system config)
-    try {
-        return bootstrap_user_config();
-    } catch (...) {
+// Parse an INI file from disk. Only the one-time settings.ini -> DB migration
+// uses this now; nothing reads a config file during normal startup.
+std::expected<Config, ConfigError> load_config(const std::string& path) {
+    std::ifstream file(path);
+    if (!file.is_open()) {
         return std::unexpected(ConfigError::IOError);
     }
+    return parse_config(file);
 }
 
-std::expected<std::string, ConfigError> find_user_config() {
-    std::string user_conf = ragger_base_dir() + "/settings.ini";
-    try {
-        if (fs::exists(user_conf)) {
-            return user_conf;
-        }
-    } catch (const fs::filesystem_error&) {
-        // Permission denied or inaccessible — skip user config silently
-    }
-    return std::unexpected(ConfigError::NotFound);
+// The shipped defaults, parsed from the string compiled in from
+// default-settings.txt (see cmake/embed_ini.cmake). This is the base layer for
+// every run: a user who deletes everything under ~/.ragger still gets a
+// working configuration, because the defaults were never on disk to delete.
+static Config load_default_config() {
+    std::istringstream in{std::string(DEFAULT_CONFIG)};
+    auto parsed = parse_config(in);
+    // The embedded defaults are generated at build time and parsed by the same
+    // code that produced them, so a failure here is a build error, not a
+    // runtime condition — fall back to the struct's own initialisers.
+    return parsed.has_value() ? *parsed : Config{};
 }
 
-// Server infrastructure keys — system config always wins (blacklist)
-// Match the Python SERVER_LOCKED set
-struct ServerLockedKey {
-    const char* section;
-    const char* key;
-};
+// NOTE: the SERVER_LOCKED key table and clamp_to_ceiling() lived here to
+// police a two-layer config — a system settings.ini overlaid by a user one,
+// where apply_user_overrides() refused locked keys and clamped the rest to
+// system ceilings. There is only one layer now (the settings table), so there
+// is no "user config" to police and both are gone. Per-key write permission is
+// still enforced, by CfgEdit::Locked in the config schema, which is what the
+// dashboard's PUT /config/<key> checks.
 
-static const ServerLockedKey SERVER_LOCKED[] = {
-    {"server", "port"},
-    {"embedding", "model"},
-    {"embedding", "dimensions"},
-    {"embedding", "vector_type"},
-    // System ceilings
-    {"search", "max_search_limit"},
-    // Inference endpoints (user can only pick model)
-    {"inference", "api_url"},
-    {"inference", "api_key"},
-    {"inference", "provider"},
-    {"inference", "max_tokens"},
-};
-
-/// Clamp a value to a ceiling. Ceiling of 0 = no limit.
-/// Value of 0 = "unlimited" — ceiling applies (becomes ceiling).
-static void clamp_to_ceiling(int& value, int ceiling) {
-    if (ceiling <= 0) return;
-    if (value <= 0 || value > ceiling) value = ceiling;
-}
 
 /// Validate a bind address: must be a valid IPv4/IPv6 literal, or a
 /// hostname made of alnum/hyphen/dot characters. Throws std::runtime_error
@@ -210,40 +159,6 @@ static void validate_bind_address(const std::string& addr) {
     }
 }
 
-void apply_user_overrides(Config& cfg, const Config& user) {
-    // New pattern: user config overrides everything EXCEPT server-locked fields
-    // Server-locked fields stay as loaded from system config
-    
-    // User can override everything except SERVER_LOCKED:
-    // ✗ server.host, server.port
-    // ✗ embedding.model, embedding.dimensions, embedding.vector_type
-    // ✓ Everything else
-    
-    // Search (all user-overridable)
-    cfg.default_search_limit = user.default_search_limit;
-    cfg.default_min_score = user.default_min_score;
-    cfg.bm25_enabled = user.bm25_enabled;
-    cfg.bm25_weight = user.bm25_weight;
-    cfg.vector_weight = user.vector_weight;
-    cfg.phon_weight = user.phon_weight;
-
-    // Inference (user can only pick model)
-    cfg.inference_model = user.inference_model;
-    cfg.inference_default = user.inference_default;
-    
-    // Paths (all user-overridable)
-    cfg.normalize_home_path = user.normalize_home_path;
-    
-    // Import (all user-overridable)
-    cfg.minimum_chunk_size = user.minimum_chunk_size;
-
-    // Search (reserved toggle)
-    cfg.inject_data = user.inject_data;
-
-    // Apply system ceilings
-    clamp_to_ceiling(cfg.default_search_limit, cfg.max_search_limit);
-}
-
 // -----------------------------------------------------------------------
 // INI parser
 // -----------------------------------------------------------------------
@@ -260,12 +175,10 @@ static bool parse_bool(const std::string& val) {
     return lower == "true" || lower == "yes" || lower == "1";
 }
 
-std::expected<Config, ConfigError> load_config(const std::string& path) {
-    std::ifstream file(path);
-    if (!file.is_open()) {
-        return std::unexpected(ConfigError::IOError);
-    }
-
+// Parse INI text from any stream. Split out from load_config() so the
+// compiled-in defaults can be parsed straight from memory — Ragger no longer
+// writes a settings.ini to disk, so there is no file to read on startup.
+static std::expected<Config, ConfigError> parse_config(std::istream& file) {
     Config cfg;
     std::string section;
     std::string line;
@@ -349,7 +262,6 @@ std::expected<Config, ConfigError> load_config(const std::string& path) {
             else if (key == "bm25_weight")      cfg.bm25_weight = std::stof(val);
             else if (key == "vector_weight")    cfg.vector_weight = std::stof(val);
             else if (key == "phon_weight")      cfg.phon_weight = std::stof(val);
-            else if (key == "max_search_limit") cfg.max_search_limit = std::stoi(val);
             else if (key == "inject_data")      cfg.inject_data = parse_bool(val);
         }
         else if (section == "inference") {
@@ -513,48 +425,21 @@ Config& mutable_config() {
     return *g_config;
 }
 
-void init_config(const std::string& cli_config_path) {
-    // Load system config first
-    auto system_result = find_system_config(cli_config_path);
-    if (!system_result.has_value()) {
-        throw std::runtime_error(lang::ERR_CONFIG_SYSTEM_NOT_FOUND);
-    }
-    std::string system_path = *system_result;
-    
-    auto sys_cfg_result = load_config(system_path);
-    if (!sys_cfg_result.has_value()) {
-        switch (sys_cfg_result.error()) {
-            case ConfigError::IOError:
-                throw std::runtime_error(std::format(lang::ERR_CONFIG_SYSTEM_LOAD, system_path));
-            case ConfigError::ParseError:
-                throw std::runtime_error(std::format(lang::ERR_CONFIG_SYSTEM_PARSE, system_path));
-            default:
-                throw std::runtime_error(std::format(lang::ERR_CONFIG_SYSTEM_UNKNOWN, system_path));
-        }
-    }
-    static Config cfg = *sys_cfg_result;
-//  std::cout << " [INFO] " << lang::MSG_CONFIG_LOADED << system_path << std::endl;
-    
-    // Then overlay user-specific overrides
-    auto user_result = find_user_config();
-    if (user_result.has_value()) {
-        std::string user_path = *user_result;
-        if (user_path != system_path) {
-            auto user_cfg_result = load_config(user_path);
-            if (user_cfg_result.has_value()) {
-                Config user_cfg = *user_cfg_result;
-                apply_user_overrides(cfg, user_cfg);
-            } else {
-                // Log but don't fail on user config errors
-            }
-        }
-    }
+void init_config() {
+    // Base layer: the compiled-in defaults. Ragger used to bootstrap a
+    // settings.ini into ~/.ragger and read it back as the base layer, with the
+    // DB overlaid on top. That left the file half-live — stale for every key
+    // the dashboard had written a row for, still authoritative for every key
+    // it had not — and it was regenerated from defaults whenever it was
+    // deleted, so it silently reappeared as a stale layer. The settings table
+    // is now the only store; defaults live in the binary.
+    static Config cfg = load_default_config();
 
     cfg.log_file = cfg.resolved_log_file_path();
 
     // DB is the source of truth for user config: overlay any rows present in
-    // the settings table on top of the INI-seeded values. No-op if the DB
-    // doesn't exist yet (first run before serve creates it).
+    // the settings table on top of the defaults. No-op if the DB doesn't exist
+    // yet (first run before serve creates it).
     overlay_settings_from_db(cfg, cfg.resolved_db_path());
 
     g_config = &cfg;
@@ -563,34 +448,11 @@ void init_config(const std::string& cli_config_path) {
 int reload_config() {
     if (!g_config) return 0;
 
-    // Re-read from the same files
-    std::string sys_path, user_path;
-    auto sys_result = find_system_config("");
-    if (!sys_result.has_value()) {
-        return 0;
-    }
-    sys_path = *sys_result;
-    
-    auto user_result = find_user_config();
-    if (user_result.has_value()) {
-        user_path = *user_result;
-    }
-
-    auto fresh_result = load_config(sys_path);
-    if (!fresh_result.has_value()) {
-        return 0;
-    }
-    Config fresh = *fresh_result;
-    if (user_result.has_value()) {
-        std::string user_path = *user_result;
-        if (!user_path.empty() && user_path != sys_path) {
-            auto user_cfg_result = load_config(user_path);
-            if (user_cfg_result.has_value()) {
-                Config user_cfg = *user_cfg_result;
-                apply_user_overrides(fresh, user_cfg);
-            }
-        }
-    }
+    // Re-read the defaults and re-overlay the settings table — same two layers
+    // init_config() uses, so a SIGHUP reload and a fresh start agree.
+    Config fresh = load_default_config();
+    fresh.log_file = fresh.resolved_log_file_path();
+    overlay_settings_from_db(fresh, fresh.resolved_db_path());
 
     Config& cfg = *g_config;
     int changes = 0;
@@ -687,7 +549,6 @@ int reload_config() {
     RELOAD(default_recipe);
 
     // System ceilings
-    RELOAD(max_search_limit);
 
     #undef RELOAD
 

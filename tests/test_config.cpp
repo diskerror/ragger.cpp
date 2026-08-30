@@ -13,88 +13,8 @@ namespace fs = std::filesystem;
 // New tests
 // -----------------------------------------------------------------------
 
-void test_server_locked_override() {
-    std::print("  test_server_locked_override...");
 
-    std::string sys_path = "/tmp/ragger_test_system.ini";
-    std::string usr_path = "/tmp/ragger_test_user.ini";
 
-    {
-        std::ofstream f(sys_path);
-        f << "[server]\nport = 8432\n"
-          << "[search]\ndefault_limit = 5\nmax_search_limit = 0\n";
-    }
-    {
-        std::ofstream f(usr_path);
-        f << "[server]\nport = 9999\n"
-          << "[search]\ndefault_limit = 20\n";
-    }
-
-    ragger::Config sys_cfg = ragger::load_config(sys_path).value();
-    ragger::Config usr_cfg = ragger::load_config(usr_path).value();
-    ragger::apply_user_overrides(sys_cfg, usr_cfg);
-
-    assert(sys_cfg.port == 8432);  // SERVER_LOCKED — not overridden
-    assert(sys_cfg.default_search_limit == 20);  // user-overridable
-
-    fs::remove(sys_path);
-    fs::remove(usr_path);
-    std::println(" OK");
-}
-
-void test_system_ceilings() {
-    std::print("  test_system_ceilings...");
-
-    std::string sys_path = "/tmp/ragger_test_ceil_sys.ini";
-    std::string usr_path = "/tmp/ragger_test_ceil_usr.ini";
-
-    {
-        std::ofstream f(sys_path);
-        f << "[server]\nport = 8432\n"
-          << "[search]\nmax_search_limit = 10\ndefault_limit = 5\n";
-    }
-    {
-        std::ofstream f(usr_path);
-        f << "[search]\ndefault_limit = 50\n";
-    }
-
-    ragger::Config sys_cfg = ragger::load_config(sys_path).value();
-    ragger::Config usr_cfg = ragger::load_config(usr_path).value();
-    ragger::apply_user_overrides(sys_cfg, usr_cfg);
-
-    assert(sys_cfg.default_search_limit == 10);  // clamped to ceiling
-
-    fs::remove(sys_path);
-    fs::remove(usr_path);
-    std::println(" OK");
-}
-
-void test_ceiling_zero_means_no_limit() {
-    std::print("  test_ceiling_zero_means_no_limit...");
-
-    std::string sys_path = "/tmp/ragger_test_ceil0_sys.ini";
-    std::string usr_path = "/tmp/ragger_test_ceil0_usr.ini";
-
-    {
-        std::ofstream f(sys_path);
-        f << "[server]\nport = 8432\n"
-          << "[search]\nmax_search_limit = 0\ndefault_limit = 5\n";
-    }
-    {
-        std::ofstream f(usr_path);
-        f << "[search]\ndefault_limit = 999\n";
-    }
-
-    ragger::Config sys_cfg = ragger::load_config(sys_path).value();
-    ragger::Config usr_cfg = ragger::load_config(usr_path).value();
-    ragger::apply_user_overrides(sys_cfg, usr_cfg);
-
-    assert(sys_cfg.default_search_limit == 999);  // no ceiling applied
-
-    fs::remove(sys_path);
-    fs::remove(usr_path);
-    std::println(" OK");
-}
 
 void test_housekeeping_section_parsing() {
     std::print("  test_housekeeping_section_parsing...");
@@ -393,7 +313,6 @@ void test_default_values() {
     assert(cfg.capture_turns == true);
     assert(cfg.build_context == false);
     assert(cfg.embedding_vector_type == "f16");
-    assert(cfg.max_search_limit == 0);
     assert(cfg.inference_max_tokens == 4096);
     assert(cfg.minimum_chunk_size == 300);
 
@@ -433,10 +352,6 @@ void test_ragger_base_override() {
 
 int main() {
     std::print("Running config tests:\n");
-
-    test_server_locked_override();
-    test_system_ceilings();
-    test_ceiling_zero_means_no_limit();
     test_housekeeping_section_parsing();
     test_catch_up_batch_size_default();
     test_catch_up_batch_size_ignores_nonpositive();
@@ -494,16 +409,6 @@ int main() {
     assert(cfg.normalize_home_path == true);
 
     std::filesystem::remove(tmp_conf);
-
-    // Test find_system_config — explicit path takes priority (and returns error if missing)
-    auto result_find = ragger::find_system_config("/nonexistent/settings.ini");
-    assert(!result_find.has_value());
-    assert(result_find.error() == ragger::ConfigError::NotFound);
-
-    // Test find_system_config — no explicit path finds /etc/ragger.ini or ~/.ragger/settings.ini (or bootstraps)
-    auto result_found = ragger::find_system_config("");
-    assert(result_found.has_value());
-    assert(!result_found->empty());
 
     // Test load_config with nonexistent file
     auto result_load = ragger::load_config("/nonexistent/settings.ini");

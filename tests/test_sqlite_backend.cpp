@@ -1436,7 +1436,7 @@ void test_turn_summary_search_metadata(ragger::Embedder& emb) {
 // -----------------------------------------------------------------------
 int main() {
     // Need config for model dir
-    ragger::init_config("");
+    ragger::init_config();
     auto model_dir = ragger::config().resolved_model_dir();
 
     if (!fs::exists(model_dir + "/model.onnx")) {

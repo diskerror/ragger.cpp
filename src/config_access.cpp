@@ -57,7 +57,6 @@ const std::unordered_map<std::string_view, int Config::*>& int_fields() {
         {"embed_retries",         &Config::embed_retries},
         {"embed_max_workers",     &Config::embed_max_workers},
         {"default_limit",         &Config::default_search_limit},
-        {"max_search_limit",      &Config::max_search_limit},
         {"summarizer_max_tokens", &Config::summarizer_max_tokens},
         {"summarizer_target_pct", &Config::summarizer_target_pct},
         {"summarizer_max_pct",    &Config::summarizer_max_pct},

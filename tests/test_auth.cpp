@@ -211,7 +211,7 @@ int main() {
     // test binary so nothing here ever touches the real ~/.ragger.
     std::string isolated_base = "/tmp/ragger_test_auth_base_" + std::to_string(getpid()) + "/.ragger";
     ragger::set_ragger_base_override(isolated_base);
-    ragger::init_config("");
+    ragger::init_config();
 
     test_hash_token();
     test_generate_token();

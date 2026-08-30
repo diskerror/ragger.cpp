@@ -115,7 +115,7 @@ void test_empty_db_path_throws() {
 }
 
 int main() {
-    ragger::init_config("");
+    ragger::init_config();
     auto model_dir = ragger::config().resolved_model_dir();
 
     if (!fs::exists(model_dir + "/model.onnx")) {

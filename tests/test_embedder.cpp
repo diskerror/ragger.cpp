@@ -109,7 +109,7 @@ void test_semantic_similarity(ragger::Embedder& emb) {
 int main() {
     std::println("Running embedder tests:");
 
-    ragger::init_config("");
+    ragger::init_config();
     auto cfg = ragger::config();
     auto model_dir = cfg.resolved_model_dir();
     if (!std::filesystem::exists(model_dir + "/model.onnx")) {

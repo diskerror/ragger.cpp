@@ -33,7 +33,6 @@ namespace ragger::lang {
 constexpr const char* CLI_DESCRIPTION         = "ragger — Ragger Memory";
 constexpr const char* CLI_HELP                = "Show help";
 constexpr const char* CLI_VERSION             = "Show version";
-constexpr const char* CLI_CONFIG_FILE         = "Path to config file";
 constexpr const char* CLI_HOST                = "Server bind address (overrides config)";
 constexpr const char* CLI_PORT                = "Server port (overrides config)";
 constexpr const char* CLI_COMMAND             = "Command";
@@ -140,8 +139,6 @@ constexpr const char* WARN_FORMAT_LOAD_FAILED        = "Failed to load format {}
 constexpr const char* MSG_STORED_WITH_ID      = "Stored with id: {}";
 constexpr const char* MSG_SERVER_STARTING     = "Starting Ragger server on {}";
 constexpr const char* ERR_PORT_IN_USE         = "Error: port {} is already in use";
-constexpr const char* MSG_CONFIG_LOADED       = "Config loaded from {}";
-constexpr const char* MSG_CONFIG_CREATED      = "Created default config: {}";
 
 // --- Import ---
 constexpr const char* MSG_IMPORTING_CHUNKS    = "Importing {} chunks from {}...";
@@ -239,13 +236,8 @@ constexpr const char* WARN_SUMMARY            = "Warning: summary generation fai
 constexpr const char* ERR_INFERENCE           = "Error: {}";
 
 // --- Errors: config ---
-constexpr const char* ERR_CONFIG_OPEN         = "Cannot open config file: {}";
 constexpr const char* ERR_CONFIG_NOT_INIT     = "Config not initialized — call init_config() first";
 constexpr const char* ERR_CONFIG_SOCKET_OR_BIND = "Config error: either [server] socket or bind must be configured";
-constexpr const char* ERR_CONFIG_SYSTEM_NOT_FOUND = "Failed to find system config";
-constexpr const char* ERR_CONFIG_SYSTEM_LOAD  = "Failed to load system config: {}";
-constexpr const char* ERR_CONFIG_SYSTEM_PARSE = "Failed to parse system config: {}";
-constexpr const char* ERR_CONFIG_SYSTEM_UNKNOWN = "Unknown error loading system config: {}";
 
 // --- Errors: database ---
 constexpr const char* ERR_SQLITE_OPEN         = "SQLite open failed: {}";
@@ -308,9 +300,6 @@ constexpr const char* HELP_SCREEN             = R"(
 
 Usage: ragger <command> [options] [args]
 Commands:
-  onboard            Guided first-run setup — capture/build flags, recipe,
-                     inference endpoint + model, daemon start. Re-run any
-                     time to change one section. Start here.
   start              Start the background daemon (user LaunchAgent / systemd --user)
   stop               Stop the background daemon
   restart            Restart the background daemon
@@ -534,7 +523,7 @@ inline constexpr std::array<ConfigMeta, 56> kConfigSchema = {{
      "The TCP port to bind on the next restart. When it differs from the running port the Server tab shows 'restart required'. Any restart (dashboard, service manager, or 'ragger serve') adopts it."},
     {"server_name", "server", "Server Name", CfgType::String, CfgEdit::RestartRequired,
      "", "",
-     "Hostname for cpp-httplib (optional)."},
+     "Hostname for cpp-httplib (optional). Reserved — not currently used."},
     {"cert", "server", "TLS Certificate", CfgType::Path, CfgEdit::RestartRequired,
      "", "",
      "TLS certificate chain (PEM). Only relevant when exposing Ragger beyond localhost. Both cert and key must be set to enable HTTPS; leave both unset for plain HTTP."},
@@ -624,9 +613,6 @@ inline constexpr std::array<ConfigMeta, 56> kConfigSchema = {{
     {"phon_weight", "search", "Phonetic Weight", CfgType::Float, CfgEdit::Live,
      "1", "",
      "\"Sounds-like\" (dolphining) weight — matches on how a phrase sounds (Double Metaphone) alongside meaning and keywords. 0 disables."},
-    {"max_search_limit", "search", "Max Search Limit", CfgType::Integer, CfgEdit::Locked,
-     "0", "",
-     "System ceiling on default_limit (0 = no ceiling)."},
 
     // ---- summarizer ----
     {"summarizer_model", "summarizer", "Model", CfgType::String, CfgEdit::Live,
