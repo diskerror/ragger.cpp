@@ -58,7 +58,7 @@ max_tokens = 4096                 # max tokens for inference
 # recorded in the DB. Changing any of them once the DB holds data requires
 # 'ragger rebuild-embeddings' to re-encode everything.
 [embedding]
-model       = all-MiniLM-L6-v2
+model       = sentence-transformers/all-MiniLM-L12-v2
 dimensions  = 384
 vector_type = f16              # on-disk vector precision: f32 (lossless, 4B/dim),
                                #   f16 (IEEE half, 2B/dim), bf16 (bfloat16, 2B/dim),

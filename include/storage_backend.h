@@ -439,7 +439,7 @@ public:
     virtual std::vector<SearchResult> load_all(const std::string& collection = "") = 0;
 
     /// Rebuild embeddings for all stored documents. Returns doc count.
-    virtual int rebuild_embeddings(Embedder& embedder) = 0;
+    virtual int rebuild_embeddings(Embedder& embedder, bool progress = true) = 0;
 
     /// Embed only rows whose embedding is NULL or has a stale version byte.
     /// Cheap; intended to run on startup and after deferred-embedding writes.

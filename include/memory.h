@@ -152,7 +152,10 @@ public:
     std::vector<SearchResult> load_all(const std::string& collection = "");
 
     /// Rebuild embeddings for all documents. Returns doc count.
-    int rebuild_embeddings();
+    /// `progress` writes a \r-updated counter to stdout — right for the CLI,
+    /// wrong for the daemon (it lands in the activity log as one enormous
+    /// line); daemon callers pass false and get periodic Logger lines instead.
+    int rebuild_embeddings(bool progress = true);
 
     // ---- Embedding identity: current vs desired + re-embed control -------
     struct EmbeddingStatus {
@@ -162,11 +165,19 @@ public:
         int         desired_dims = 0;
         bool        needs_update = false;   // current != desired
         bool        reembedding  = false;   // an update is in progress
+        bool        repair_pending = false; // a previous update was interrupted
     };
 
     /// Snapshot of current vs desired embedding identity, read from the
     /// settings table (current) and config (desired).
     EmbeddingStatus embedding_status();
+
+    /// True when no usable embedding model is loaded: new rows are stored with
+    /// a NULL embedding and search is keyword-only. Distinct from
+    /// embeddings_degraded(), which also covers a drift mismatch where the
+    /// model itself loads fine. Surfaced to agents via MCP because a log line
+    /// is not something the user will ever see.
+    bool embeddings_unavailable() const;
 
     /// True when the embedding drift guard failed at startup — vectors are
     /// unusable but FTS5 text + phonetic search still works. Log the error
@@ -187,6 +198,17 @@ public:
     /// in the settings table, swap the live embedder, then clear the flag.
     /// Returns rows re-encoded. Throws on failure (flag is always cleared).
     int update_embeddings();
+
+    /// True when a re-embed was interrupted and the remaining rows still
+    /// carry the previous model's vectors. Search degrades to text-only while
+    /// this is set, and housekeeping finishes the job.
+    bool repair_pending();
+
+    /// Finish an interrupted re-embed. Resumes rather than restarts: only rows
+    /// whose version byte is stale get re-encoded, using the identity that was
+    /// promoted before the interrupted run began. No-op unless repair_pending()
+    /// and no re-embed is currently running. Returns rows re-encoded.
+    int resume_interrupted_reembed();
 
     /// Embed only rows whose embedding column is NULL. Returns count.
     int backfill_embeddings();

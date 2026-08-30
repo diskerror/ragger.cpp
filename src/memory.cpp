@@ -16,9 +16,13 @@
 #include "stats_logger.h"
 #endif
 #include <algorithm>
+#include <cerrno>
 #include <format>
 #include <mutex>
 #include <stdexcept>
+#include <utility>
+#include <csignal>
+#include <unistd.h>
 
 namespace ragger {
 
@@ -33,16 +37,46 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     // ragger_base_dir() (see config.cpp), same as every other Ragger path.
     // Engine choice: "external" uses a remote /v1/embeddings endpoint;
     // "internal" (default) loads an ONNX model from the models directory.
-    if (config().embedding_engine == "external") {
-        embedder_ = std::make_unique<Embedder>(
-            config().embedding_external_host,
-            config().embedding_external_port,
-            config().embedding_external_model,
-            config().embedding_external_api_key,
-            config().embedding_dimensions);
-    } else {
-        std::string resolved_model_dir = config().resolved_model_dir();
-        embedder_ = std::make_unique<Embedder>(resolved_model_dir);
+    // A bad embedding-model configuration must NOT stop the daemon. Ragger's
+    // job is to record conversations; losing vector search is a degradation,
+    // losing capture is data loss. So on failure we log a loud, actionable
+    // error and fall back to a disabled Embedder: turns keep being recorded,
+    // their embedding column is left NULL, and the housekeeping backfill
+    // re-embeds them the moment the configuration is corrected.
+    // Ragger-managed ONNX models live at ~/.ragger/models/<provider>/<model>/,
+    // so a valid internal model name is always "provider/model". The dashboard
+    // only ever offers paths that exist in that layout, so a bare name means
+    // the value was hand-edited. Diagnose it explicitly — the generic load
+    // failure below would just report a missing directory — but never repair
+    // it by assuming a provider: a wrong guess resolves to a real model that
+    // is not the one whose vectors are in the DB.
+    if (config().embedding_engine != "external") {
+        const std::string& m = config().embedding_model;
+        if (!m.empty() && m.find('/') == std::string::npos) {
+            Diskerror::Logger::critical(std::format(
+                lang::ERR_EMBED_MODEL_NO_PROVIDER, m, m));
+        }
+    }
+
+    try {
+        if (config().embedding_engine == "external") {
+            embedder_ = std::make_unique<Embedder>(
+                config().embedding_external_host,
+                config().embedding_external_port,
+                config().embedding_external_model,
+                config().embedding_external_api_key,
+                config().embedding_dimensions);
+        } else {
+            std::string resolved_model_dir = config().resolved_model_dir();
+            embedder_ = std::make_unique<Embedder>(resolved_model_dir);
+        }
+    } catch (const std::exception& e) {
+        Diskerror::Logger::critical(std::format(
+            lang::ERR_EMBED_MODEL_UNUSABLE,
+            config().resolve_model(config().embedding_model),
+            config().resolved_model_dir(), e.what()));
+        embedder_ = std::make_unique<Embedder>();   // disabled
+        embeddings_degraded_ = true;
     }
 
     // The resolved path — used for both the storage backend and the user store.
@@ -51,22 +85,10 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     backend_    = std::make_unique<SqliteBackend>(*embedder_, resolved_db);
     user_store_ = std::make_unique<UserStore>(resolved_db);
 
-    // --- Legacy model-name migration --------------------------------------
-    // Older DBs recorded embedding_model as a bare name ("all-MiniLM-L6-v2")
-    // before the canonical provider/model layout existed. The rest of the
-    // system now uses the resolved provider-prefixed form
-    // ("sentence-transformers/all-MiniLM-L6-v2"), so a bare stored value would
-    // read as a mismatch against config forever. Heal it in place: if the
-    // stored value has no provider prefix (no '/'), prepend the legacy
-    // provider. One-time, idempotent — prefixed values are left untouched.
-    if (auto stored_model = user_store_->get_setting("embedding_model");
-        stored_model.has_value() && !stored_model->empty() &&
-        stored_model->find('/') == std::string::npos) {
-        const std::string migrated = "sentence-transformers/" + *stored_model;
-        user_store_->set_setting("embedding_model", migrated);
-        Diskerror::Logger::info(std::format(
-            "Migrated legacy embedding_model '{}' -> '{}'", *stored_model, migrated));
-    }
+    // NOTE: no legacy "prepend a provider" migration here. A stored value that
+    // is not in provider/model form is reported (above) and left alone; the
+    // drift guard below then degrades to text-only search rather than
+    // re-embedding the corpus against a model nobody chose.
 
     // --- Embedding identity drift guard (model + dtype + dimensions) -------
     // The settings table records what built this DB. On startup we compare it
@@ -279,23 +301,21 @@ SearchResponse RaggerMemory::search(const std::string& query,
                                     float min_score,
                                     std::vector<std::string> collections) {
     // While a re-embed is in progress the vectors are being rewritten, so a
-    // query would mix old/new spaces or hit half-updated rows. Short-circuit
-    // with a single explanatory record instead.
-    if (is_reembedding()) {
-        SearchResponse busy;
-        busy.results.push_back(SearchResult{
-            /*id*/ 0,
-            /*text*/ "Search not available. Re-embedding in progress.",
-            /*score*/ 0.0f,
-            /*metadata*/ json::object(),
-            /*timestamp*/ ""});
-        busy.timing = json{{"reembedding", true}};
+    // vector query would mix old/new spaces or hit half-updated rows. Fall
+    // back to text-only search (FTS5 keyword + phonetic) exactly like the
+    // degraded path below, rather than returning a stub record — callers
+    // (MCP clients especially) get real, if unranked, results instead of a
+    // single unusable row.
+    if (is_reembedding() || repair_pending()) {
+        SearchResponse busy = backend_->search_text_only(query, limit);
+        if (!busy.timing.is_object()) busy.timing = json::object();
+        busy.timing["reembedding"] = true;
         return busy;
     }
     // When embeddings are degraded (drift mismatch at startup), fall back to
     // text-only search (FTS5 keyword + phonetic). Vector similarity is
     // unavailable but lookups still work.
-    if (embeddings_degraded_) {
+    if (embeddings_degraded_ || !embedder_->ready()) {
         return backend_->search_text_only(query, limit);
     }
     SearchResponse resp = backend_->search(query, limit, min_score, std::move(collections));
@@ -324,8 +344,8 @@ std::vector<SearchResult> RaggerMemory::load_all(const std::string& collection) 
     return backend_->load_all(collection);
 }
 
-int RaggerMemory::rebuild_embeddings() {
-    return backend_->rebuild_embeddings(*embedder_);
+int RaggerMemory::rebuild_embeddings(bool progress) {
+    return backend_->rebuild_embeddings(*embedder_, progress);
 }
 
 RaggerMemory::EmbeddingStatus RaggerMemory::embedding_status() {
@@ -353,7 +373,12 @@ RaggerMemory::EmbeddingStatus RaggerMemory::embedding_status() {
                      (s.current_dims  != s.desired_dims)  ||
                      (s.current_engine != s.desired_engine);
     s.reembedding = is_reembedding();
+    s.repair_pending = repair_pending();
     return s;
+}
+
+bool RaggerMemory::embeddings_unavailable() const {
+    return !embedder_ || !embedder_->ready();
 }
 
 bool RaggerMemory::try_recover_embeddings() {
@@ -373,6 +398,33 @@ bool RaggerMemory::try_recover_embeddings() {
         stored_vtype.value_or("") != current_vtype ||
         stored_dims.value_or("")  != current_dims) {
         return false;  // still mismatched
+    }
+
+    // If we came up with a disabled embedder (bad model path at startup), the
+    // identity matching again is not enough — there is still nothing that can
+    // embed. Build the real one now. Until this succeeds we stay degraded, so
+    // a config that is merely self-consistent but still wrong does not flip
+    // semantic search back on and start writing vectors nobody can use.
+    if (!embedder_->ready()) {
+        try {
+            if (config().embedding_engine == "external") {
+                embedder_ = std::make_unique<Embedder>(
+                    config().embedding_external_host,
+                    config().embedding_external_port,
+                    config().embedding_external_model,
+                    config().embedding_external_api_key,
+                    config().embedding_dimensions);
+            } else {
+                embedder_ = std::make_unique<Embedder>(config().resolved_model_dir());
+            }
+            Diskerror::Logger::warn(std::format(
+                lang::MSG_EMBED_MODEL_RECOVERED, current_model));
+        } catch (const std::exception& e) {
+            Diskerror::Logger::error(std::format(
+                lang::ERR_EMBED_MODEL_UNUSABLE, current_model,
+                config().resolved_model_dir(), e.what()));
+            return false;   // still unusable — stay degraded
+        }
     }
 
     // Settings match config — embeddings are valid again.
@@ -396,13 +448,54 @@ bool RaggerMemory::try_recover_embeddings() {
 
 bool RaggerMemory::is_reembedding() {
     auto v = user_store_->get_setting("reembedding");
-    return v.has_value() && *v == "true";
+    if (!v.has_value() || *v != "true") return false;
+
+    // The flag is persisted so a crash mid-update is visible on restart — but
+    // that also means a killed process leaves it set forever, wedging search
+    // (which short-circuits on it) and /embedding/update (which 409s on it).
+    // Nothing else clears it, so self-heal here: the writer records its PID
+    // alongside the flag, and a flag whose owner is gone is stale by
+    // definition. Checking the PID rather than clearing unconditionally at
+    // startup matters because several processes share the DB (daemon, CLI,
+    // `ragger mcp`) — an MCP subprocess starting up must not clear a flag the
+    // daemon legitimately holds.
+    auto owner = user_store_->get_setting("reembedding_pid");
+    if (owner.has_value() && !owner->empty()) {
+        pid_t pid = 0;
+        try { pid = static_cast<pid_t>(std::stol(*owner)); } catch (...) { pid = 0; }
+        if (pid > 0 && pid != ::getpid()) {
+            // kill(pid, 0) succeeds for a live process we own; EPERM means it
+            // exists but belongs to someone else — also "alive".
+            if (::kill(pid, 0) == 0 || errno == EPERM) return true;
+        } else if (pid == ::getpid()) {
+            return true;   // this process is the one doing the work
+        }
+    }
+
+    Diskerror::Logger::error(std::format(
+        lang::WARN_REEMBED_STALE_FLAG, owner.value_or("<unset>")));
+    user_store_->set_setting("reembedding", "false");
+    user_store_->set_setting("reembedding_pid", "");
+    // The run was interrupted, so rows are half-converted. Mark the repair as
+    // owed: search degrades to keyword-only and housekeeping finishes the job.
+    user_store_->set_setting("reembed_repair_pending", "true");
+    return false;
 }
 
 int RaggerMemory::update_embeddings() {
     // Guard: the flag is persisted so a crash mid-update is visible on
     // restart, and search short-circuits for anyone reading concurrently.
+    // The PID goes with it so is_reembedding() can tell "in progress" from
+    // "the owner died and never cleared it" — see is_reembedding().
     user_store_->set_setting("reembedding", "true");
+    user_store_->set_setting("reembedding_pid", std::to_string(::getpid()));
+
+    // Set once the identity has been promoted. After that point the old
+    // embedder must NOT be restored on failure — settings now name the new
+    // model, so putting the old one back would make the live embedder
+    // disagree with the recorded identity.
+    bool promoted = false;
+    std::unique_ptr<Embedder> previous_embedder;
     try {
         const std::string desired_model_name =
             config().desired_embedding_model.empty()
@@ -410,16 +503,15 @@ int RaggerMemory::update_embeddings() {
                 : config().desired_embedding_model;
         const std::string desired_model_dir =
             ragger_base_dir() + "/models/" + config().resolve_model(desired_model_name);
-
-        // Increment the embedding version so all existing blobs become stale.
-        backend_->increment_embedding_version();
-
-        // Build an embedder for the DESIRED identity and re-encode every row.
         const std::string desired_engine =
             config().desired_embedding_engine.empty()
                 ? config().embedding_engine
                 : config().desired_embedding_engine;
 
+        // Build the embedder BEFORE touching any persisted state. A missing or
+        // unreadable model must fail here, with nothing promoted — promoting
+        // first would record an identity the daemon cannot load, and the next
+        // startup would throw out of the constructor and refuse to boot.
         std::unique_ptr<Embedder> desired_embedder;
         if (desired_engine == "external") {
             desired_embedder = std::make_unique<Embedder>(
@@ -432,33 +524,141 @@ int RaggerMemory::update_embeddings() {
         } else {
             desired_embedder = std::make_unique<Embedder>(desired_model_dir);
         }
-        int count = backend_->rebuild_embeddings(*desired_embedder);
+        Embedder& active = *desired_embedder;
 
-        // Promote current := desired in the drift-guard settings keys.
         const std::string vtype = vector_codec::canonical(
             config().desired_embedding_vector_type.empty()
                 ? config().embedding_vector_type
                 : config().desired_embedding_vector_type);
         const int dims = config().desired_embedding_dimensions == 0
-            ? desired_embedder->dimensions() : config().desired_embedding_dimensions;
+            ? active.dimensions() : config().desired_embedding_dimensions;
+
+        // Increment the embedding version so every existing blob reads stale.
+        backend_->increment_embedding_version();
+
+        // --- Promote the identity UP FRONT, before re-encoding a single row.
+        //
+        // This is what makes an interrupted run resumable. The rebuild is a
+        // "re-encode every row whose version byte is old" operation, and the
+        // only thing that says which model those rows should be re-encoded
+        // WITH is the recorded identity. Promote afterwards and an interrupted
+        // run leaves the DB half-converted while the settings still name the
+        // OLD model — so the daemon restarts on the old model and the
+        // housekeeping backfill happily "resumes" by writing old-model vectors
+        // under the new version byte. Same width, same blob format, no way to
+        // tell them apart afterwards: it would quietly poison every row the
+        // interrupted run hadn't reached yet.
+        //
+        // Promoting first also swaps the live embedder before any re-encoding,
+        // so turns captured *during* the rebuild land in the new space too.
+        //
+        // The safety this gives up — an aborted rebuild used to leave
+        // settings != config so the startup drift guard degraded to text-only
+        // search — is replaced by the repair_pending marker below, which
+        // degrades search the same way but is also actionable: housekeeping
+        // knows to finish the job instead of waiting for a human.
+        user_store_->set_setting("reembed_repair_pending", "true");
         user_store_->set_setting("embedding_model", config().resolve_model(desired_model_name));
         user_store_->set_setting("vector_type", vtype);
         user_store_->set_setting("dimensions", std::to_string(dims));
-
-        // Swap the live embedder so subsequent queries use the new model.
-        embedder_ = std::move(desired_embedder);
-        // Keep the live config's current identity in sync with what we promoted.
-        mutable_config().embedding_model = desired_model_name;
+        // resolve_model() on both sides: the settings table and the live
+        // config must record the identity in the same form, or the startup
+        // drift guard compares two spellings of the same model and degrades.
+        // (It is a pass-through today — see config.cpp — but the guard reads
+        // resolve_model(config().embedding_model), so keep them symmetric.)
+        mutable_config().embedding_model = config().resolve_model(desired_model_name);
         mutable_config().embedding_vector_type = vtype;
         mutable_config().embedding_dimensions = dims;
         mutable_config().embedding_engine = desired_engine;
+        previous_embedder = std::exchange(embedder_, std::move(desired_embedder));
+        promoted = true;
 
+        // warn, not info: the daemon's default log_level is "warn", and an
+        // operation that takes vector search offline for minutes should not be
+        // invisible at the default level. The 1000-row progress lines stay at
+        // info for anyone who turns the level up.
+        Diskerror::Logger::warn(std::format(
+            lang::MSG_REEMBED_STARTED,
+            config().resolve_model(desired_model_name), desired_engine));
+
+        int count = backend_->rebuild_embeddings(active, /*progress=*/false);
+
+        // Verify rather than trust. A rebuild that stops partway leaves rows
+        // at the previous embedding version — same width, same blob format,
+        // silently a different vector space. backfill_embeddings() re-encodes
+        // exactly those rows, so a non-zero return means the main pass came up
+        // short and we just repaired it. Say so loudly; a quiet partial
+        // rebuild is what made this failure so hard to see.
+        int repaired = backend_->backfill_embeddings(active);
+        if (repaired > 0) {
+            Diskerror::Logger::warn(std::format(
+                lang::WARN_REEMBED_REPAIRED, repaired));
+            count += repaired;
+        }
+
+        user_store_->set_setting("reembed_repair_pending", "false");
         user_store_->set_setting("reembedding", "false");
+        user_store_->set_setting("reembedding_pid", "");
+        Diskerror::Logger::warn(std::format(
+            lang::MSG_REEMBED_FINISHED, count,
+            config().resolve_model(desired_model_name), vtype, dims));
         return count;
     } catch (...) {
+        // Only unwind the embedder if we never promoted. Once promoted, the
+        // new model IS the recorded identity and repair_pending stays set so
+        // housekeeping finishes the remaining rows.
+        if (!promoted) {
+            if (previous_embedder) embedder_ = std::move(previous_embedder);
+            user_store_->set_setting("reembed_repair_pending", "false");
+        }
         user_store_->set_setting("reembedding", "false");
+        user_store_->set_setting("reembedding_pid", "");
+        try { throw; }
+        catch (const std::exception& e) {
+            Diskerror::Logger::critical(std::format(lang::ERR_REEMBED_FAILED, e.what()));
+        }
+        catch (...) {
+            Diskerror::Logger::critical(lang::ERR_REEMBED_FAILED_UNKNOWN);
+        }
         throw;
     }
+}
+
+bool RaggerMemory::repair_pending() {
+    auto v = user_store_->get_setting("reembed_repair_pending");
+    return v.has_value() && *v == "true";
+}
+
+int RaggerMemory::resume_interrupted_reembed() {
+    if (!repair_pending() || is_reembedding()) return 0;
+
+    // Resume, don't restart. Every row the interrupted run finished already
+    // carries the current version byte; backfill_embeddings() re-encodes only
+    // the ones that don't, so the work left is exactly the work that remains.
+    // The identity was promoted before the rebuild began, so embedder_ is
+    // already the right model to finish with.
+    Diskerror::Logger::warn(lang::MSG_REEMBED_RESUMING);
+
+    int total = 0;
+    // backfill is idempotent and converges: the first pass fixes the stale
+    // rows, a second confirms none are left. Loop rather than wait for the
+    // next housekeeping tick, but bound it so a row that somehow never
+    // stabilises can't spin forever.
+
+    constexpr int kMaxPasses = 5;
+    for (int pass = 0; pass < kMaxPasses; ++pass) {
+        int n = backend_->backfill_embeddings(*embedder_);
+        total += n;
+        if (n == 0) {
+            user_store_->set_setting("reembed_repair_pending", "false");
+            Diskerror::Logger::warn(std::format(
+                lang::MSG_REEMBED_RESUME_DONE, total));
+            return total;
+        }
+    }
+    Diskerror::Logger::error(std::format(
+        lang::ERR_REEMBED_RESUME_STUCK, kMaxPasses, total));
+    return total;
 }
 
 int RaggerMemory::backfill_embeddings() {

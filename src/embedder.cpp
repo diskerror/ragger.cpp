@@ -24,6 +24,7 @@ using json = nlohmann::json;
 // ====================================================================
 struct Embedder::Impl {
     bool external = false;
+    bool disabled = false;   // default-constructed: cannot embed, never throws
 
     // ---- Internal (ONNX) state ----
     Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "ragger"};
@@ -39,6 +40,9 @@ struct Embedder::Impl {
     std::string ext_api_key;
     int         ext_dims = 0;       // 0 = not yet known
     mutable std::string last_served_model;  // model reported by the last response
+
+    // ---- Disabled constructor ----
+    Impl() : disabled(true) {}
 
     // ---- Internal constructor ----
     explicit Impl(const std::string& model_dir) {
@@ -232,11 +236,16 @@ struct Embedder::Impl {
 
     // ---- Dispatch ----
     std::vector<float> encode(const std::string& text) const {
+        // Empty, not an exception: callers gate on ready() and defer the
+        // write. Returning empty keeps a stray call from taking the daemon
+        // down, but an empty vector must never reach bind_embedding().
+        if (disabled) return {};
         if (external) return encode_external(text);
         return encode_onnx(text);
     }
 
     int dimensions() const {
+        if (disabled) return 0;
         if (external) return ext_dims;
         return onnx_dims;
     }
@@ -296,6 +305,9 @@ struct Embedder::Impl {
 // Public API
 // ====================================================================
 
+Embedder::Embedder()
+    : pImpl(std::make_unique<Impl>()) {}
+
 Embedder::Embedder(const std::string& model_dir)
     : pImpl(std::make_unique<Impl>(model_dir)) {}
 
@@ -312,6 +324,10 @@ std::vector<float> Embedder::encode(const std::string& text) const {
 
 int Embedder::dimensions() const {
     return pImpl->dimensions();
+}
+
+bool Embedder::ready() const {
+    return !pImpl->disabled;
 }
 
 bool Embedder::is_external() const {

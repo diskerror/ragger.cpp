@@ -262,6 +262,58 @@ void test_rebuild_embeddings_count_matches(ragger::Embedder& emb) {
     cleanup();
 }
 
+// search_text_only() is the fallback used when vector search is unusable —
+// embedding drift at startup, and while a re-embed is running. It queries every
+// FTS corpus including turn_summaries, which has no created_at column; naming
+// the wrong timestamp column there threw out of the whole function, so the
+// fallback returned nothing at all and the failure only showed up in a log line
+// nobody was reading. Exercise every corpus so a column rename can't do it again.
+void test_search_text_only(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    db.store("A summary about harpsichord tuning.");
+    ragger::DocumentChunk doc;
+    doc.text  = "A document about harpsichord maintenance.";
+    doc.title = "Harpsichords";
+    doc.path  = "harpsichord.md";
+    db.store_document(doc);
+    db.store_decision("Decided to buy a harpsichord.", "current", "music");
+    int turn_id = db.store_turn("What is a harpsichord?",
+                                "A plucked keyboard instrument.", "test-model");
+    // An L2 turn summary is the corpus that carried the bug. It only matters
+    // if the query actually HITS it — the bad column sat in the per-row fetch,
+    // which never runs when a corpus has no matches, so an empty
+    // turn_summaries table would let the bug through.
+    db.finalize_turn_summary(turn_id, "User asked about the harpsichord.",
+                             "test-model");
+    assert(db.turn_summary_exists(turn_id));
+
+    // Must not throw, and must actually find the keyword across corpora.
+    auto resp = db.search_text_only("harpsichord", 10);
+    assert(resp.timing.contains("text_only"));
+    assert(!resp.results.empty());
+
+    // Every hit carries a source label and no vector signal.
+    bool saw_turn_summary = false;
+    for (const auto& r : resp.results) {
+        assert(r.metadata.contains("source"));
+        assert(r.vec_score < 0.0f);
+        if (r.metadata["source"] == "turn_summary") {
+            saw_turn_summary = true;
+            assert(!r.timestamp.empty());   // resolved from turn_datetime
+        }
+    }
+    assert(saw_turn_summary);
+
+    // A query that matches nothing returns cleanly rather than throwing.
+    auto none = db.search_text_only("zzzzznotawordzzzzz", 5);
+    assert(none.results.empty());
+
+    db.close();
+    cleanup();
+}
+
 void test_search_timing(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
@@ -1406,6 +1458,7 @@ int main() {
     test_rebuild_embeddings(emb);
     test_rebuild_embeddings_empty_db(emb);
     test_rebuild_embeddings_count_matches(emb);
+    test_search_text_only(emb);
     test_search_timing(emb);
     test_delete_memory(emb);
     test_delete_batch(emb);

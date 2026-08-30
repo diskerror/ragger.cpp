@@ -173,10 +173,18 @@ static nlohmann::json tool_call(RaggerMemory& memory,
     const auto tool_name = params.value("name", "");
     const auto arguments = params.value("arguments", nlohmann::json::object());
 
-    auto text_result = [](const std::string& text) {
-        return nlohmann::json{
-            {"content", nlohmann::json::array({{{"type", "text"}, {"text", text}}})}
-        };
+    // When embeddings are unavailable the agent is the only channel the user
+    // is likely to notice, so every tool result carries the warning as a
+    // second content block. Kept separate from the payload block so callers
+    // that parse the first block as JSON are unaffected.
+    const bool no_embeddings = memory.embeddings_unavailable();
+    auto text_result = [&](const std::string& text) {
+        auto content = nlohmann::json::array({{{"type", "text"}, {"text", text}}});
+        if (no_embeddings) {
+            content.push_back({{"type", "text"},
+                               {"text", ragger::lang::MCP_WARN_NO_EMBEDDINGS}});
+        }
+        return nlohmann::json{{"content", content}};
     };
     auto error_result = [](const std::string& msg) {
         return nlohmann::json{

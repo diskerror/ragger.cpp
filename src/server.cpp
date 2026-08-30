@@ -249,6 +249,10 @@ struct Server::Impl {
         }
         if (!memory.embeddings_degraded()) {
             try {
+                // Finish an interrupted re-embed before the ordinary backfill.
+                // This resumes the remaining rows with the promoted identity;
+                // the plain backfill below then handles deferred stores.
+                memory.resume_interrupted_reembed();
                 int filled = memory.backfill_embeddings();
                 if (filled > 0) {
                     Diskerror::Logger::info(std::format(
@@ -1152,6 +1156,7 @@ struct Server::Impl {
                              {"dimensions", s.desired_dims}, {"engine", s.desired_engine}}},
                 {"needs_update", s.needs_update},
                 {"reembedding",  s.reembedding},
+                {"repair_pending", s.repair_pending},
                 {"degraded",     memory.embeddings_degraded()},
             }.dump(), "application/json");
         }));

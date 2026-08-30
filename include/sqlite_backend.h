@@ -175,7 +175,7 @@ public:
     std::vector<SearchResult> load_all(const std::string& collection = "") override;
 
     /// Rebuild embeddings for all stored documents. Returns doc count.
-    int rebuild_embeddings(Embedder& embedder) override;
+    int rebuild_embeddings(Embedder& embedder, bool progress = true) override;
     int backfill_embeddings(Embedder& embedder) override;
     uint8_t embedding_version() const override;
     uint8_t increment_embedding_version() override;

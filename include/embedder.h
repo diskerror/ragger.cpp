@@ -17,6 +17,18 @@ namespace ragger {
 
 class Embedder {
 public:
+    /// Disabled mode. Constructs successfully but cannot embed: ready() is
+    /// false, dimensions() is 0, and encode() returns an empty vector.
+    ///
+    /// This exists so a bad embedding-model configuration degrades instead of
+    /// killing the daemon. Ragger keeps accepting and recording conversations;
+    /// the rows are stored with a NULL embedding and the housekeeping backfill
+    /// picks them up once the configuration is corrected. Callers that write
+    /// embeddings must check ready() and defer when it is false — never store
+    /// the empty vector, which would encode as a zero-length blob and read
+    /// back as a real (but meaningless) embedding.
+    Embedder();
+
     /// Internal (ONNX) mode: construct with path to model directory
     /// (containing model.onnx + tokenizer.json).
     explicit Embedder(const std::string& model_dir);
@@ -36,6 +48,10 @@ public:
     /// Embedding dimensions. For internal mode, read from config/model.
     /// For external mode, determined by probing or from constructor arg.
     int dimensions() const;
+
+    /// True if this embedder can actually produce embeddings. False only for
+    /// the disabled instance built by the default constructor.
+    bool ready() const;
 
     /// True if this embedder uses an external endpoint.
     bool is_external() const;

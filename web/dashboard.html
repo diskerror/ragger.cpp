@@ -1,6 +1,18 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<!--
+  TRANSLATOR NOTE — this file holds the browser half of Ragger's UI text.
+
+  All user-visible English here is static: field labels, section headings,
+  button captions, banner text, and the status strings built in the JavaScript
+  below. There is no lookup mechanism on this side.
+
+  The other half — CLI help, daemon status/progress, warnings, errors — lives
+  in include/lang/en.h. Translating one file leaves the other in English, so a
+  complete translation means both.
+-->
+
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ragger Memory Dashboard</title>
@@ -67,6 +79,14 @@
   input[type=text] { width: 200px; }
   textarea { width: 320px; resize: vertical; }
   select { width: 160px; }
+  /* Model dropdowns hold names the 160px default badly truncated: canonical
+     provider/model paths, and served-model names from the inference endpoint
+     that run to 65 characters ("qwen3.6-40b-grand-intelligence-..."). Size to
+     the widest option instead of a fixed width, with a floor so a short list
+     still lines up with the other controls and a ceiling matching the help
+     text so a long name can't push the row off the panel. .row .info has
+     min-width:0, so it yields the space. */
+  select.model-name { width: auto; min-width: 240px; max-width: 560px; }
   input:disabled, select:disabled, textarea:disabled { background: #f0f1f3; color: var(--muted); }
   .flash-ok { border-color: var(--ok-fg) !important; box-shadow: 0 0 0 3px var(--ok-bg); }
   .flash-err { border-color: var(--err-fg) !important; box-shadow: 0 0 0 3px var(--err-bg); }
@@ -292,6 +312,22 @@ function renderSection(section) {
 
 // ---- embedding panel -------------------------------------------------------
 let EMBED_STATUS = null;
+let EMBED_POLL = null;
+
+// While a re-embed runs, keep polling /embedding/status so the banner and the
+// "Current vectors:" line follow the job to completion. Without this the panel
+// only refreshes on a section switch, a field edit, or the single call right
+// after clicking Update — so it froze on "in progress" showing the OLD current
+// model, and stayed that way until a manual reload no matter how long ago the
+// job had actually finished.
+function scheduleEmbeddingPoll(active) {
+  if (active) {
+    if (EMBED_POLL === null) EMBED_POLL = setInterval(refreshEmbedding, 2000);
+  } else if (EMBED_POLL !== null) {
+    clearInterval(EMBED_POLL);
+    EMBED_POLL = null;
+  }
+}
 
 async function refreshEmbedding() {
   try {
@@ -299,6 +335,7 @@ async function refreshEmbedding() {
     if (!r.ok) return;
     EMBED_STATUS = await r.json();
   } catch (e) { return; }
+  scheduleEmbeddingPoll(!!(EMBED_STATUS.reembedding || EMBED_STATUS.repair_pending));
   renderEmbeddingBanner();
   // Refresh trashcan visibility for all desired_embedding_* fields since
   // their comparison depends on the current values in EMBED_STATUS.
@@ -319,8 +356,15 @@ function renderEmbeddingBanner() {
     " · engine: <b>" + escapeHtml(c.engine || "internal") + "</b>";
   if (s.reembedding) {
     st.className = "embed-status busy";
-    st.textContent = "Re-embedding in progress… search is paused.";
+    st.textContent = "Re-embedding in progress… semantic search is temporarily " +
+      "keyword-only. This usually takes a few minutes.";
     btn.disabled = true; btn.textContent = "Updating…";
+  } else if (s.repair_pending) {
+    st.className = "embed-status busy";
+    st.textContent = "A previous re-embed was interrupted. Finishing the " +
+      "remaining rows in the background — semantic search is keyword-only " +
+      "until it completes.";
+    btn.disabled = true; btn.textContent = "Repairing…";
   } else if (s.needs_update) {
     st.className = "embed-status pending";
     st.textContent = "Needs re-embedding — desired settings differ from current.";
@@ -352,12 +396,16 @@ async function populateModelChoices() {
   const entry = CONFIG.find(e => e.key === "desired_embedding_model");
   if (!entry || !entry.__field || entry.__field.tagName !== "SELECT") return;
   const sel = entry.__field;
+  sel.classList.add("model-name");
   const chosen = entry.value;
   sel.innerHTML = "";
   for (const m of models) {
     const o = document.createElement("option");
-    // path is the canonical value stored in config; name is the display label.
-    o.value = m.path || m; o.textContent = m.name || m;
+    // Show the full canonical provider/model path, not the bare model name.
+    // The provider is part of the identity — ~/.ragger/models/<provider>/<model>
+    // — and two providers can ship the same model name, so a bare label makes
+    // the choice ambiguous and hides which one the DB was built with.
+    o.value = m.path || m; o.textContent = m.path || m.name || m;
     if ((m.path || m) === chosen) o.selected = true;
     sel.appendChild(o);
   }
@@ -471,7 +519,7 @@ async function populateSummarizerModels() {
   const parent = field.parentNode;
   // Replace text input with a select populated from the endpoint.
   const sel = document.createElement("select");
-  sel.style.width = "200px";
+  sel.classList.add("model-name");
   const chosen = entry.value;
   // Always offer a blank option (use default / leave empty).
   if (models.length === 0) {
@@ -546,7 +594,7 @@ async function populateExternalModelChoices() {
   const parent = field.parentNode;
   // Replace text input with a select if not already one.
   const sel = (field.tagName === "SELECT") ? field : document.createElement("select");
-  sel.style.width = "200px";
+  sel.classList.add("model-name");
   const chosen = entry.value;
   sel.innerHTML = "";
   if (models.length === 0) {
@@ -650,7 +698,7 @@ async function connectExternal() {
       const parent = field.parentNode;
       // Replace text input with a select
       const sel = document.createElement("select");
-      sel.style.width = "200px";
+      sel.classList.add("model-name");
       const chosen = modelEntry.value;
       for (const m of models) {
         const o = document.createElement("option");

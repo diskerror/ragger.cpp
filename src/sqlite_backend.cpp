@@ -173,6 +173,19 @@ struct SqliteBackend::Impl {
     // without per-blob headers.
     void bind_embedding(sqlite3_stmt* s, int idx,
                         const std::vector<float>& emb) const {
+        // An empty vector means the embedder could not produce one — the
+        // configured model is missing or unloadable, so Embedder is in its
+        // disabled state and encode() returns {}. Store NULL rather than
+        // encoding an empty vector, which would write a version-byte-only
+        // blob that reads back as a real embedding. NULL is what the
+        // housekeeping backfill looks for, so these rows are re-embedded
+        // automatically once the configuration is fixed. This is the single
+        // choke point for every write path, so no individual store()
+        // needs to know the embedder is unavailable.
+        if (emb.empty()) {
+            sqlite3_bind_null(s, idx);
+            return;
+        }
         std::vector<uint8_t> blob = vector_codec::encode(vtype_, emb, embedding_version_);
         sqlite3_bind_blob(s, idx, blob.data(),
                           static_cast<int>(blob.size()),
@@ -2927,10 +2940,15 @@ struct SqliteBackend::Impl {
         score_fts_corpus("decisions", "decision_id", "text",
                          "decisions_fts", "decisions_phon_fts", "decision",
                          "datetime(created_at,'unixepoch','localtime')");
-        // Turn summaries
+        // Turn summaries. NOTE: this table has no created_at — an L2 summary
+        // inherits its source turn's timestamp in turn_datetime (the
+        // (session_id, turn_datetime) pair is the join back to the turn). The
+        // wrong column name here threw "no such column: created_at" out of the
+        // whole function, so text-only search never returned anything: both
+        // the drift-degraded fallback and the startup warmup were dead.
         score_fts_corpus("turn_summaries", "turn_summary_id", "text",
                          "turn_summaries_fts", "turn_summaries_phon_fts", "turn_summary",
-                         "datetime(created_at,'unixepoch','localtime')");
+                         "datetime(turn_datetime,'unixepoch','localtime')");
 
         // Rank by blended score, top-k
         std::sort(candidates.begin(), candidates.end(),
@@ -3054,110 +3072,135 @@ struct SqliteBackend::Impl {
             { "turn_summaries",  "turn_summary_id", "text",      nullptr          },
         };
 
-        // For backfill: select ALL rows with embeddings and skip current-
-        // version ones in C++. This avoids SQL byte-extraction gymnastics.
-        // For full rebuild: select everything regardless.
-        const char* where_null = only_missing ? " WHERE embedding IS NULL" : "";
-
         // Total is only needed for the progress display. For backfill mode
         // we can't cheaply count stale rows, so use the full row count and
         // accept the overcount (the progress display will skip ahead).
+        // Counted unconditionally: the non-interactive path logs "done/total"
+        // every 1000 rows, and skipping the count there produced "5000/0".
         int total_count = 0;
-        if (progress) {
-            for (auto& t : tables) {
-                Stmt s(db, std::format("SELECT COUNT(*) FROM {}", t.table));
-                if (s.step())
-                    total_count += s.column_int(0);
-            }
+        for (auto& t : tables) {
+            Stmt s(db, std::format("SELECT COUNT(*) FROM {}", t.table));
+            if (s.step()) total_count += s.column_int(0);
         }
 
         int done = 0;
 
-        // Pass 1: embed rows with NULL embeddings.
-        for (auto& t : tables) {
-            std::string sel = t.extra_col
-                ? std::format("SELECT {} AS id, {}, {} FROM {}{}",
-                              t.id_col, t.text_col, t.extra_col, t.table, where_null)
-                : std::format("SELECT {} AS id, {} AS text FROM {}{}",
-                              t.id_col, t.text_col, t.table, where_null);
+        // Key-paginated scan. The obvious implementation — open one SELECT
+        // over the table and UPDATE each row as the cursor walks it — writes
+        // to the very b-tree being scanned on the same connection. SQLite
+        // leaves that undefined: the cursor can be invalidated mid-scan and
+        // sqlite3_step() returns an error, which the old `while (s.step())`
+        // read as "no more rows". The loop exited cleanly, the caller reported
+        // success, and the rebuild had silently stopped partway (on 2026-08-26
+        // and again on 2026-08-29 it quit at documents id 1632 of 5654, leaving
+        // two vector spaces in one table). Reading a bounded batch, finalizing
+        // the statement, and only then writing keeps every write outside an
+        // open scan. step_checked() makes a genuine failure throw instead of
+        // masquerading as end-of-data.
+        constexpr int kBatch = 500;
+
+        struct Row { int id; std::string text; };
+
+        auto process = [&](const TableSpec& t, bool stale_only) {
+            const char* filter = stale_only ? "embedding IS NOT NULL"
+                               : only_missing ? "embedding IS NULL"
+                                              : "1";
+            std::string cols = t.extra_col
+                ? std::format("{}, {}, {}", t.id_col, t.text_col, t.extra_col)
+                : std::format("{}, {}", t.id_col, t.text_col);
+            if (stale_only) cols += ", embedding";
+            const int emb_col = stale_only ? (t.extra_col ? 3 : 2) : -1;
+
+            std::string sel = std::format(
+                "SELECT {} FROM {} WHERE {} AND {} > ? ORDER BY {} LIMIT {}",
+                cols, t.table, filter, t.id_col, t.id_col, kBatch);
             std::string upd = std::format("UPDATE {} SET embedding = ? WHERE {} = ?",
                                           t.table, t.id_col);
 
-            Stmt select_stmt(db, sel);
-            while (select_stmt.step()) {
-                int id = select_stmt.column_int(0);
-                auto col1 = select_stmt.column_text(1);
-                if (col1.empty()) continue;
+            int last_id = 0;
+            for (;;) {
+                std::vector<Row> batch;
+                batch.reserve(kBatch);
+                {
+                    Stmt select_stmt(db, sel);
+                    select_stmt.bind(1, last_id);
+                    while (select_stmt.step_checked()) {
+                        int id = select_stmt.column_int(0);
+                        last_id = id;
 
-                std::string embed_text = t.extra_col
-                    ? turn_embed_text(col1, select_stmt.column_text(2))
-                    : std::move(col1);
+                        if (stale_only) {
+                            const void* blob = select_stmt.column_blob(emb_col);
+                            int blob_bytes = select_stmt.column_bytes(emb_col);
+                            if (vector_codec::blob_version(blob, blob_bytes)
+                                == static_cast<int>(embedding_version_)) continue;
+                        }
 
-                auto emb = emb_ref.encode(embed_text);
-                Stmt update(db, upd);
-                bind_embedding(update.raw(), 1, emb);
-                update.bind(2, id);
-                update.step();
+                        // Build the text FIRST, then test it. Testing the
+                        // first column alone skipped assistant-only turns
+                        // (empty user_text) even though turn_embed_text()
+                        // would happily use assistant_text — those rows kept
+                        // whatever blob they had forever, which no rebuild or
+                        // backfill would ever revisit.
+                        auto col1 = select_stmt.column_text(1);
+                        std::string embed_text = t.extra_col
+                            ? turn_embed_text(col1, select_stmt.column_text(2))
+                            : std::move(col1);
+                        if (embed_text.empty()) continue;
 
-                ++done;
-                if (progress) {
-                    std::cout << std::format(ragger::lang::MSG_REBUILD_EMBEDDINGS_PROGRESS,
-                                             done, total_count);
-                    std::cout.flush();
+                        batch.push_back(Row{id, std::move(embed_text)});
+                    }
+                }   // select_stmt finalized before any write below
+                if (batch.empty()) {
+                    // A batch can come back empty while rows remain (every row
+                    // in it was skipped as up-to-date or textless), so only
+                    // stop when the scan itself is exhausted.
+                    Stmt more(db, std::format(
+                        "SELECT 1 FROM {} WHERE {} AND {} > ? LIMIT 1",
+                        t.table, filter, t.id_col));
+                    more.bind(1, last_id);
+                    if (!more.step_checked()) break;
+                    continue;
                 }
-            }
-        }
 
-        // Pass 2 (backfill only): re-embed rows with stale version bytes.
-        // Full rebuild already covered everything in pass 1.
-        if (only_missing) {
-            for (auto& t : tables) {
-                // Select all rows WITH embeddings and check version in C++.
-                std::string sel = t.extra_col
-                    ? std::format("SELECT {} AS id, {}, {}, embedding FROM {} "
-                                  "WHERE embedding IS NOT NULL",
-                                  t.id_col, t.text_col, t.extra_col, t.table)
-                    : std::format("SELECT {} AS id, {} AS text, embedding FROM {} "
-                                  "WHERE embedding IS NOT NULL",
-                                  t.id_col, t.text_col, t.table);
-                std::string upd = std::format("UPDATE {} SET embedding = ? WHERE {} = ?",
-                                              t.table, t.id_col);
-
-                Stmt select_stmt(db, sel);
-                int emb_col = t.extra_col ? 3 : 2;
-                while (select_stmt.step()) {
-                    // Check version byte of existing blob.
-                    const void* blob = select_stmt.column_blob(emb_col);
-                    int blob_bytes = select_stmt.column_bytes(emb_col);
-                    int ver = vector_codec::blob_version(blob, blob_bytes);
-                    if (ver == static_cast<int>(embedding_version_)) continue;
-
-                    int id = select_stmt.column_int(0);
-                    auto col1 = select_stmt.column_text(1);
-                    if (col1.empty()) continue;
-
-                    std::string embed_text = t.extra_col
-                        ? turn_embed_text(col1, select_stmt.column_text(t.extra_col ? 2 : 1))
-                        : std::move(col1);
-
-                    auto emb = emb_ref.encode(embed_text);
+                for (auto& r : batch) {
+                    auto emb = emb_ref.encode(r.text);
                     Stmt update(db, upd);
                     bind_embedding(update.raw(), 1, emb);
-                    update.bind(2, id);
-                    update.step();
-
+                    update.bind(2, r.id);
+                    if (!update.exec()) {
+                        throw std::runtime_error(std::format(
+                            ragger::lang::ERR_EMBED_UPDATE_FAILED,
+                            t.table, r.id, sqlite3_errmsg(db)));
+                    }
                     ++done;
                     if (progress) {
-                        std::cout << std::format(ragger::lang::MSG_REBUILD_EMBEDDINGS_PROGRESS,
-                                                 done, total_count);
+                        std::cout << std::format(
+                            ragger::lang::MSG_REBUILD_EMBEDDINGS_PROGRESS,
+                            done, total_count);
                         std::cout.flush();
+                    }
+                    else if (done % 1000 == 0) {
+                        // Non-interactive callers (the daemon) get an audit
+                        // trail instead of \r spam, so a run that dies partway
+                        // leaves a record of how far it got.
+                        Diskerror::Logger::info(std::format(
+                            ragger::lang::MSG_REBUILD_EMBEDDINGS_LOG,
+                            done, total_count));
                     }
                 }
             }
+        };
+
+        // Pass 1: rows with no embedding (or every row, on a full rebuild).
+        for (auto& t : tables) process(t, /*stale_only=*/false);
+
+        // Pass 2 (backfill only): re-embed rows with stale version bytes.
+        // A full rebuild already covered everything in pass 1.
+        if (only_missing) {
+            for (auto& t : tables) process(t, /*stale_only=*/true);
         }
 
-        if (progress)
-            std::cout << "\n";
+        if (progress) std::cout << "\n";
 
         if (done > 0 || !only_missing) {
             invalidate_cache();
@@ -3168,13 +3211,25 @@ struct SqliteBackend::Impl {
     }
 
     // Full re-encode of every embedded row (interactive, with progress).
-    int rebuild_embeddings(Embedder& emb_ref) {
-        return embed_tables(emb_ref, /*only_missing=*/false, /*progress=*/true);
+    int rebuild_embeddings(Embedder& emb_ref, bool progress) {
+        if (!embedder_usable(emb_ref)) return 0;
+        return embed_tables(emb_ref, /*only_missing=*/false, progress);
     }
 
     // Cheap backfill: embed rows left NULL or with stale version byte.
     int backfill_embeddings(Embedder& emb_ref) {
+        if (!embedder_usable(emb_ref)) return 0;
         return embed_tables(emb_ref, /*only_missing=*/true, /*progress=*/false);
+    }
+
+    // A disabled embedder returns {} from encode(), which bind_embedding()
+    // turns into NULL. That is right for a single store, but catastrophic for
+    // a bulk pass: a full rebuild would walk every table replacing good
+    // vectors with NULL. Refuse instead.
+    bool embedder_usable(const Embedder& emb_ref) const {
+        if (emb_ref.ready()) return true;
+        Diskerror::Logger::error(ragger::lang::ERR_EMBED_NO_MODEL_BULK);
+        return false;
     }
 
     uint8_t get_embedding_version() const {
@@ -3705,9 +3760,9 @@ std::vector<SearchResult> SqliteBackend::load_all(const std::string& collection)
     return pImpl->load_all(collection);
 }
 
-int SqliteBackend::rebuild_embeddings(Embedder& embedder) {
+int SqliteBackend::rebuild_embeddings(Embedder& embedder, bool progress) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->rebuild_embeddings(embedder);
+    return pImpl->rebuild_embeddings(embedder, progress);
 }
 
 int SqliteBackend::backfill_embeddings(Embedder& embedder) {

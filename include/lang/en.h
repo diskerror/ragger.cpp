@@ -3,6 +3,24 @@
  *
  * To add a new language: copy this file to xx.h, translate values,
  * and include that file in lang.h instead.
+ *
+ * SCOPE — this file is NOT the whole UI.
+ *
+ * It covers the CLI and the daemon: help screens, status and progress
+ * messages, warnings, and errors. It does NOT cover the browser dashboard.
+ *
+ * `web/dashboard.html` carries its own user-visible English inline — field
+ * labels, section headings, button captions, banner text ("Up to date.",
+ * "Needs re-embedding — desired settings differ from current.", "Re-embedding
+ * in progress…"), and status strings built in JavaScript. Those are static by
+ * design; there is no lookup mechanism on the browser side. Translating this
+ * file alone therefore leaves the dashboard in English, which is the more
+ * visible half for a non-technical user.
+ *
+ * So a translation is two files: this one, and the literals in
+ * `web/dashboard.html`. Anyone ADDING user-visible text should put it here if
+ * the CLI or daemon prints it, and inline in the dashboard if the browser
+ * renders it — and keep this note accurate if that ever changes.
  */
 #pragma once
 
@@ -94,6 +112,30 @@ constexpr const char* MSG_BACKFILLED_EMBEDDINGS  = "Backfilled embeddings for {}
 // (The schema is declarative — there is no in-place migration. Pre-v2 data is
 //  copied into a fresh v2 DB out-of-band.)
 constexpr const char* MSG_REBUILD_EMBEDDINGS_PROGRESS = "\rRebuilding embeddings: {}/{}";
+// Same counter for non-interactive callers (the daemon): no leading \r, since
+// it goes to the activity log one line at a time rather than over itself.
+constexpr const char* MSG_REBUILD_EMBEDDINGS_LOG = "Rebuilding embeddings: {}/{}";
+
+// --- Re-embed (staged model change: promote identity, re-encode, verify) ---
+constexpr const char* MSG_REEMBED_STARTED     = "re-embed started: model '{}', engine '{}'";
+constexpr const char* MSG_REEMBED_FINISHED    =
+    "re-embed finished: {} row(s) re-encoded; identity promoted to '{}' {} {}-dim";
+constexpr const char* WARN_REEMBED_REPAIRED   =
+    "re-embed verification repaired {} row(s) the main pass left stale — please report this";
+constexpr const char* ERR_REEMBED_FAILED      = "re-embed failed: {}";
+constexpr const char* ERR_REEMBED_FAILED_UNKNOWN = "re-embed failed: unknown exception";
+constexpr const char* WARN_REEMBED_STALE_FLAG =
+    "Stale re-embed flag found (owner pid {} is gone) — a previous re-embed was "
+    "interrupted. Clearing the flag; vectors may be a mix of the old and new "
+    "model, so run the re-embed again to make them consistent.";
+constexpr const char* MSG_REEMBED_RESUMING    =
+    "Resuming an interrupted re-embed — re-encoding the rows it did not reach "
+    "(semantic search stays keyword-only until this completes).";
+constexpr const char* MSG_REEMBED_RESUME_DONE =
+    "Re-embed resume complete: {} row(s) re-encoded.";
+constexpr const char* ERR_REEMBED_RESUME_STUCK =
+    "Re-embed resume did not converge after {} passes ({} row(s) re-encoded); "
+    "leaving the repair marker set for the next tick.";
 constexpr const char* WARN_FORMAT_LOAD_FAILED        = "Failed to load format {}: {}";
 constexpr const char* MSG_STORED_WITH_ID      = "Stored with id: {}";
 constexpr const char* MSG_SERVER_STARTING     = "Starting Ragger server on {}";
@@ -208,6 +250,7 @@ constexpr const char* ERR_CONFIG_SYSTEM_UNKNOWN = "Unknown error loading system 
 // --- Errors: database ---
 constexpr const char* ERR_SQLITE_OPEN         = "SQLite open failed: {}";
 constexpr const char* ERR_SQL                 = "SQL error: {}";
+constexpr const char* ERR_EMBED_UPDATE_FAILED = "embed_tables: UPDATE {} id {} failed: {}";
 constexpr const char* ERR_STORE_FAILED        = "Failed to store: {}";
 
 // --- Errors: embedder ---
@@ -217,6 +260,40 @@ constexpr const char* ERR_EMPTY_TOKENIZATION  = "Empty tokenization result";
 constexpr const char* ERR_OUTPUT_SHAPE        = "Unexpected output shape from model";
 constexpr const char* ERR_EMBEDDING_MISMATCH  = "Embedding model mismatch: database was built with '{}' but config specifies '{}'. Reorganise your models directory and run 'ragger rebuild' to re-embed.";
 constexpr const char* ERR_VECTOR_TYPE_MISMATCH = "Vector dtype mismatch: database was built with '{}' embeddings but config specifies '{}'. Run 'ragger rebuild-embeddings' to re-encode at the new precision.";
+// Ragger-managed ONNX models live at ~/.ragger/models/<provider>/<model>/, so
+// a valid internal model name is always "provider/model". These report a bad
+// value; nothing repairs one by guessing a provider.
+constexpr const char* ERR_EMBED_MODEL_NO_PROVIDER =
+    "Embedding model '{}' has no provider. Ragger models live in "
+    "~/.ragger/models/<provider>/<model>, so the name must be the full "
+    "'provider/model' path (for example 'sentence-transformers/{}'). Pick one "
+    "from the dashboard's Embedding panel, which only lists models it can "
+    "find. Conversations are still being recorded, but nothing will be "
+    "embedded and semantic search stays keyword-only until this is fixed.";
+constexpr const char* ERR_EMBED_MODEL_UNUSABLE =
+    "Embedding model '{}' could not be loaded from '{}': {}. Conversations are "
+    "still being recorded, but nothing will be embedded and semantic search "
+    "stays keyword-only until this is fixed. Choose a model in the dashboard's "
+    "Embedding panel; rows stored meanwhile are embedded automatically once it "
+    "works.";
+constexpr const char* ERR_EMBED_NO_MODEL_BULK =
+    "Refusing to re-encode embeddings: no usable embedding model is loaded. "
+    "Fix the embedding model first — running now would erase every stored "
+    "vector.";
+constexpr const char* MSG_EMBED_MODEL_RECOVERED =
+    "Embedding model '{}' loaded — semantic search re-enabled; backfilling "
+    "rows stored while it was unavailable.";
+
+// Agent-facing (MCP): the user is far more likely to hear about a problem
+// from their assistant than to read a log file, so tool results carry it.
+constexpr const char* MCP_WARN_NO_EMBEDDINGS =
+    "[ragger] Embeddings are unavailable — the configured embedding model "
+    "cannot be loaded. Conversations are still being recorded, but new entries "
+    "are stored without embeddings and this search used keyword matching only, "
+    "so results may be less relevant. Tell the user to open the Ragger "
+    "dashboard and set a valid embedding model in the Embedding panel; stored "
+    "entries will be embedded automatically once it is fixed.";
+
 constexpr const char* ERR_DIMENSIONS_MISMATCH = "Vector length mismatch: database was built with {}-dim embeddings but config specifies {}. Run 'ragger rebuild-embeddings' to re-encode at the new dimensions.";
 
 // --- Errors: tokenizer wrapper ---

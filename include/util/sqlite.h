@@ -66,6 +66,21 @@ public:
     /// INSERT/UPDATE/DELETE use exec(), which returns true on SQLITE_DONE.)
     bool step() { return sqlite3_step(stmt_) == SQLITE_ROW; }
 
+    /// Same as step(), but throws on an actual error instead of reporting it
+    /// as end-of-rows. step() cannot distinguish SQLITE_DONE from
+    /// SQLITE_ERROR/BUSY/ABORT, so `while (s.step())` silently truncates when
+    /// a scan fails partway — a read loop that half-finishes and reports
+    /// success. Use this in loops where a short read is a correctness bug
+    /// (bulk rebuilds, exports, migrations) rather than a cosmetic one.
+    bool step_checked() {
+        int rc = sqlite3_step(stmt_);
+        if (rc == SQLITE_ROW)  return true;
+        if (rc == SQLITE_DONE) return false;
+        throw std::runtime_error(
+            std::string("sqlite step failed (rc=") + std::to_string(rc) + "): " +
+            sqlite3_errmsg(sqlite3_db_handle(stmt_)));
+    }
+
     /// Run an INSERT/UPDATE/DELETE to completion. Returns true on SQLITE_DONE
     /// (success), false on any error code — so `if (!s.exec()) throw ...`
     /// mirrors the old `if (sqlite3_step(stmt) != SQLITE_DONE) throw ...`.

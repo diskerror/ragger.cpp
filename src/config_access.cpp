@@ -287,19 +287,17 @@ void overlay_settings_from_db(Config& cfg, const std::string& db_path) {
         (void)apply_config_value(cfg, meta.key, *v, /*allow_locked=*/true);
     }
 
-    // Legacy heal: older DBs stored embedding_model as a bare name
-    // ("all-MiniLM-L6-v2") before the canonical provider/model layout. The
-    // overlay above would then leave config.embedding_model bare, which reads
-    // as a drift mismatch against the resolved provider-prefixed form and
-    // sends the server degraded. Prefix the legacy provider when there's no
-    // '/' so the live config is canonical this run. (The DB row itself is
-    // rewritten once in RaggerMemory's ctor.) Idempotent — prefixed values
-    // and the external engine's remote model names are left untouched.
-    if (cfg.embedding_engine != "external" &&
-        !cfg.embedding_model.empty() &&
-        cfg.embedding_model.find('/') == std::string::npos) {
-        cfg.embedding_model = "sentence-transformers/" + cfg.embedding_model;
-    }
+    // NOTE: no provider is prepended to a bare embedding_model.
+    //
+    // Ragger-managed ONNX models live at ~/.ragger/models/<provider>/<model>/,
+    // and the dashboard only offers paths that exist in that layout, so a
+    // valid internal model name always contains '/'. A bare name is a broken
+    // value, and assuming "sentence-transformers/" silently resolves it to a
+    // real but *different* model — wrong for anything under onnx-community/ or
+    // any other provider, and enough to re-embed the corpus against a model
+    // nobody chose. Leave it bare: RaggerMemory reports it, the model fails to
+    // load, and the server degrades to keyword-only search while still
+    // recording conversations.
 
     // Seed the desired_* embedding identity from current when unset, so the
     // dashboard shows the live values as the starting target rather than
