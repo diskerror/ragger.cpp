@@ -3,12 +3,12 @@
 import_gemini.py — Import Gemini memory into ~/.ragger/memories.db
 
 Source: ~/.gemini/GEMINI.md
+        Pass a path argument to override.
 
 The LLM cleans up and individually extracts each bullet as a decision row.
 
 Usage:
     python3 scripts/import/import_gemini.py [--dry-run] [--verbose] [--no-llm]
-    python3 scripts/import/import_gemini.py --settings /path/to/settings.ini
 """
 
 import argparse
@@ -18,13 +18,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from helpers import (
-    RaggerConfig, open_db, mtime_ts, is_after_birthday,
+    RaggerConfig, add_base_arg, add_source_arg, resolve_source, config_from_args, open_db, mtime_ts,
     llm_classify_flat_bullets,
     decision_exists_by_text,
     insert_decision,
 )
 
-GEMINI_MD = Path.home() / ".gemini" / "GEMINI.md"
+DEFAULT_SOURCE = Path.home() / ".gemini" / "GEMINI.md"
 
 
 def naive_bullets(text: str) -> list:
@@ -45,30 +45,28 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--verbose", "-v", action="store_true")
     ap.add_argument("--no-llm", action="store_true")
-    ap.add_argument("--settings", default=None)
+    add_source_arg(ap, DEFAULT_SOURCE, "file", "Gemini GEMINI.md")
+    add_base_arg(ap)
     args = ap.parse_args()
 
-    cfg = RaggerConfig(Path(args.settings).expanduser()) if args.settings else RaggerConfig()
+    cfg = config_from_args(args)
+    SOURCE = resolve_source(args.source, DEFAULT_SOURCE, "file", "Gemini GEMINI.md")
 
-    if not GEMINI_MD.exists():
-        print(f"ERROR: {GEMINI_MD} not found", file=sys.stderr)
+    if not SOURCE.exists():
+        print(f"ERROR: {SOURCE} not found", file=sys.stderr)
         sys.exit(1)
 
     con = open_db(cfg)
     cur = con.cursor()
 
-    ts   = mtime_ts(GEMINI_MD)
-    text = GEMINI_MD.read_text(encoding="utf-8").strip()
+    ts   = mtime_ts(SOURCE)
+    text = SOURCE.read_text(encoding="utf-8").strip()
     tags = "imported,gemini"
 
     mode = "DRY RUN — " if args.dry_run else ""
     print(f"{mode}Gemini GEMINI.md import")
-    print(f"Source: {GEMINI_MD}  ({ts})")
+    print(f"Source: {SOURCE}  ({ts})")
     print(f"DB:     {cfg.db_path}\n")
-
-    if not is_after_birthday(ts):
-        # File is older than birthday — still import, it was written during setup
-        pass
 
     if args.no_llm:
         items = naive_bullets(text)

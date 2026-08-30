@@ -1,22 +1,26 @@
 """
 helpers.py — Shared utilities for Ragger memory import scripts.
 
-Configuration is read from ~/.ragger/settings.ini (the same file the Ragger
-daemon uses), so inference endpoint, model, DB path, etc. are all in one place.
+Configuration comes from the same place the daemon gets it: the `settings`
+table in memories.db. Ragger stopped reading or writing settings.ini on
+2026-08-29 — defaults are compiled into the binary from default-settings.txt
+and the DB is the only store — so an import script that parsed the INI was
+reading a file that no longer exists, and before that a stale one.
 
-Relevant INI sections used:
-  [storage]    db_path          → memories.db location
-  [summarizer] api_url          → LLM base URL (e.g. http://192.168.0.107:1234/v1)
-               model            → model name / alias
-               api_key          → bearer token (may be empty)
-               max_tokens       → cap on LLM response (default 1024)
-  [models]     <alias> = <id>   → model alias resolution
-  [import]     minimum_chunk_size → min chars to bother storing (default 300)
+Everything hangs off one base directory, ~/.ragger, exactly as the daemon does
+(see ragger_base_dir() in src/util/fs.cpp). The DB is always <base>/memories.db;
+there is no separate db_path setting to disagree with it.
 
-Birthday cutoff: 2026-02-13 (confirmed "Day One" from OpenClaw 2026-02-13.md)
+Settings read from the DB (with the default-settings.txt fallbacks applied when
+a row is absent, since the daemon's compiled-in defaults are not visible here):
+  summarizer_api_url    LLM base URL
+  summarizer_model      model name
+  summarizer_api_key    bearer token (may be empty)
+  summarizer_max_tokens cap on LLM response
+  minimum_chunk_size    min chars to bother storing
 """
 
-import configparser
+import argparse
 import json
 import re
 import sqlite3
@@ -28,83 +32,134 @@ from typing import Optional
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-SETTINGS_PATH = Path.home() / ".ragger" / "settings.ini"
-BIRTHDAY = datetime(2026, 2, 13)
+DEFAULT_BASE_DIR = Path.home() / ".ragger"
+
+# Mirrors default-settings.txt. Kept in sync by hand: the daemon's defaults are
+# compiled into the binary, so there is no file for Python to read them from.
+_DEFAULTS = {
+    "summarizer_api_url":    "http://localhost:1234/v1",
+    "summarizer_model":      "qwen3-4b-instruct-2507",
+    "summarizer_api_key":    "",
+    "summarizer_max_tokens": "1024",
+    "minimum_chunk_size":    "300",
+}
 
 
-def _load_settings(path: Path = SETTINGS_PATH) -> configparser.ConfigParser:
-    cfg = configparser.ConfigParser(
-        inline_comment_prefixes=(";",),   # the INI uses ; for inline comments
-        comment_prefixes=("#", ";"),
-    )
-    cfg.read(str(path))
-    return cfg
+def add_source_arg(ap: argparse.ArgumentParser, default: Path, kind: str,
+                   label: str) -> None:
+    """
+    Register the optional source path.
+
+    Every importer reads from its tool's conventional location under $HOME
+    (~/.claude, ~/.gemini, ...), so the common case takes no argument. The
+    positional exists for when that location has moved — a relocated OpenClaw
+    workspace, a copy restored from a backup, a second profile.
+
+    `kind` is "file" or "dir"; it drives both the metavar and the validation.
+    """
+    ap.add_argument("source", nargs="?", default=None,
+                    metavar=kind.upper(),
+                    help=f"{label} (default: {default})")
 
 
-def _expand(value: str) -> str:
-    """Expand ~ in a settings value (configparser doesn't do this)."""
-    return str(Path(value.strip()).expanduser()) if value.strip() else value
+def resolve_source(given, default: Path, kind: str, label: str) -> Path:
+    """Validate the source path and fail with a usable message if it is wrong."""
+    p = Path(given).expanduser() if given else default
+    if not p.exists():
+        raise SystemExit(
+            f"ERROR: {label} not found at {p}\n"
+            f"       Pass the path explicitly if it has moved."
+        )
+    if kind == "dir" and not p.is_dir():
+        raise SystemExit(f"ERROR: {p} is not a directory ({label})")
+    if kind == "file" and not p.is_file():
+        raise SystemExit(f"ERROR: {p} is not a file ({label})")
+    return p
+
+
+def add_base_arg(ap: argparse.ArgumentParser) -> None:
+    """
+    Register the undocumented --ragger-base override.
+
+    Mirrors the daemon's own testing-only flag (see main.cpp / ragger_base_dir)
+    so a test run can point every script at a throwaway tree instead of the
+    real ~/.ragger. Hidden from --help for the same reason it is hidden there:
+    it is for testing, not for users.
+    """
+    ap.add_argument("--ragger-base", default=None, help=argparse.SUPPRESS)
+
+
+def config_from_args(args: argparse.Namespace) -> "RaggerConfig":
+    """Build a RaggerConfig honouring --ragger-base if it was given."""
+    base = getattr(args, "ragger_base", None)
+    return RaggerConfig(Path(base).expanduser() if base else None)
 
 
 class RaggerConfig:
     """
-    Thin wrapper around settings.ini that exposes the values the import
-    scripts need.  Falls back to sensible defaults if a key is absent.
+    The settings the import scripts need, read from the `settings` table in
+    <base>/memories.db. Absent rows fall back to _DEFAULTS.
     """
 
-    def __init__(self, settings_path: Optional[Path] = None):
-        path = settings_path if settings_path is not None else SETTINGS_PATH
-        if not path.exists():
-            raise FileNotFoundError(f"settings.ini not found at {path}")
-        self._cfg = _load_settings(path)
-        self._path = path
+    def __init__(self, base_dir: Optional[Path] = None):
+        self.base_dir = Path(base_dir) if base_dir is not None else DEFAULT_BASE_DIR
+        self.db_path = self.base_dir / "memories.db"
+        if not self.db_path.exists():
+            raise FileNotFoundError(
+                f"memories.db not found at {self.db_path}. "
+                f"Run `ragger start` once to create it, or pass --ragger-base."
+            )
+        self._settings = self._read_settings()
 
-    # storage
-    @property
-    def db_path(self) -> Path:
-        raw = self._cfg.get("storage", "db_path", fallback="~/.ragger/memories.db")
-        return Path(_expand(raw))
+    def _read_settings(self) -> dict:
+        # Read-only: an import script must never be the thing that creates or
+        # migrates the settings table.
+        con = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        try:
+            rows = con.execute("SELECT key, value FROM settings").fetchall()
+        except sqlite3.OperationalError:
+            rows = []          # no settings table yet — defaults will do
+        finally:
+            con.close()
+        return {k: v for k, v in rows}
+
+    def _get(self, key: str) -> str:
+        v = self._settings.get(key)
+        if v is None or v == "":
+            return _DEFAULTS.get(key, "")
+        return v
 
     # summarizer / inference
     @property
     def llm_base_url(self) -> str:
-        return self._cfg.get("summarizer", "api_url",
-                             fallback="http://192.168.0.107:1234/v1").rstrip("/")
-
-    @property
-    def llm_model_raw(self) -> str:
-        """Model name as written in [summarizer] model = ..."""
-        return self._cfg.get("summarizer", "model", fallback="").strip()
+        return self._get("summarizer_api_url").rstrip("/")
 
     @property
     def llm_model(self) -> str:
-        """Resolve model aliases defined in [models]."""
-        raw = self.llm_model_raw
-        if not raw:
-            return ""
-        # check [models] section for an alias
-        if self._cfg.has_section("models"):
-            resolved = self._cfg.get("models", raw, fallback="").strip()
-            if resolved:
-                return resolved
-        return raw
+        # No alias resolution: the [models] aliasing section was removed from
+        # Ragger, and Config::resolve_model() is a pass-through.
+        return self._get("summarizer_model").strip()
+
+    # Retained so callers that distinguished the raw value keep working; with
+    # aliasing gone the two are the same thing.
+    llm_model_raw = llm_model
 
     @property
     def llm_api_key(self) -> str:
-        return self._cfg.get("summarizer", "api_key", fallback="").strip()
+        return self._get("summarizer_api_key").strip()
 
     @property
     def llm_max_tokens(self) -> int:
-        return int(self._cfg.get("summarizer", "max_tokens", fallback="1024"))
+        return int(self._get("summarizer_max_tokens"))
 
     # import
     @property
     def minimum_chunk_size(self) -> int:
-        return int(self._cfg.get("import", "minimum_chunk_size", fallback="300"))
+        return int(self._get("minimum_chunk_size"))
 
     def __repr__(self):
         return (
-            f"RaggerConfig(db={self.db_path}, "
+            f"RaggerConfig(base={self.base_dir}, db={self.db_path}, "
             f"llm={self.llm_base_url}, model={self.llm_model!r})"
         )
 
@@ -129,22 +184,12 @@ def mtime_ts(path: Path) -> str:
     t = datetime.fromtimestamp(path.stat().st_mtime)
     return t.strftime("%Y-%m-%d %H:%M:%S")
 
-
-def is_after_birthday(ts_str: str) -> bool:
-    """True if timestamp >= birthday (2026-02-13)."""
-    try:
-        dt = datetime.strptime(ts_str[:10], "%Y-%m-%d")
-        return dt >= BIRTHDAY
-    except Exception:
-        return True   # unparseable → let it through
-
-
 # ── LLM call ─────────────────────────────────────────────────────────────────
 
 def llm_call(system: str, user: str, cfg: Optional[RaggerConfig] = None,
              max_tokens: Optional[int] = None) -> str:
     """
-    POST to the configured LLM endpoint (reads [summarizer] from settings.ini).
+    POST to the configured LLM endpoint (reads the summarizer_* settings).
     Returns the assistant message text, or raises RuntimeError on failure.
     """
     if cfg is None:
@@ -179,7 +224,8 @@ def llm_call(system: str, user: str, cfg: Optional[RaggerConfig] = None,
     except urllib.error.URLError as e:
         raise RuntimeError(
             f"LLM endpoint unreachable ({cfg.llm_base_url}): {e}\n"
-            f"Check [summarizer] api_url in {SETTINGS_PATH}"
+            f"Check the summarizer_api_url setting in {cfg.db_path} "
+            f"(or set it in the Ragger dashboard)."
         )
 
 
@@ -311,8 +357,8 @@ def is_junk_content(text: str) -> bool:
 
 def summary_exists(cur: sqlite3.Cursor, timestamp: str, level: str) -> bool:
     cur.execute(
-        "SELECT 1 FROM summaries WHERE timestamp=? AND level=?",
-        (timestamp, level),
+        "SELECT 1 FROM summaries WHERE created_at=? AND level=?",
+        (to_epoch(timestamp), level),
     )
     return cur.fetchone() is not None
 
@@ -334,6 +380,31 @@ def decision_exists_by_text(cur: sqlite3.Cursor, text: str) -> bool:
 
 # ── Insert helpers ────────────────────────────────────────────────────────────
 
+def to_epoch(ts) -> int:
+    """
+    Normalise a timestamp to the Unix epoch seconds the schema stores.
+
+    Schema 0.12 keeps every time column as INTEGER unixepoch (turns.created_at,
+    summaries.created_at/updated_at, decisions.created_at). These scripts were
+    written against an older schema whose columns were named `timestamp` and
+    held 'YYYY-MM-DD HH:MM:SS' text, so callers still pass strings.
+    """
+    if isinstance(ts, (int, float)):
+        return int(ts)
+    t = str(ts).strip()
+    if not t:
+        return int(datetime.now().timestamp())
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return int(datetime.strptime(t[:len(datetime.now().strftime(fmt))], fmt).timestamp())
+        except ValueError:
+            continue
+    try:
+        return int(datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return int(datetime.now().timestamp())
+
+
 def get_or_create_model(cur: sqlite3.Cursor, name: str) -> int:
     """Return model_id for name, inserting a new row if needed."""
     cur.execute("SELECT model_id FROM models WHERE name=?", (name,))
@@ -350,15 +421,20 @@ def insert_summary(
     level: str,
     timestamp: str,
     tags: str,
-    status: str = "complete",
+    status: str = "complete",     # accepted and ignored; see below
     session_id: Optional[int] = None,
     model_id: Optional[int] = None,
 ) -> None:
+    # Schema 0.12 dropped summaries.status and renamed timestamp -> created_at
+    # (INTEGER unixepoch), adding a NOT NULL updated_at. `status` is kept in the
+    # signature so existing callers keep working; it has nowhere to go.
+    epoch = to_epoch(timestamp)
     cur.execute(
         """INSERT INTO summaries
-               (model_id, text, embedding, level, status, tags, timestamp, session_id)
+               (model_id, text, embedding, level, tags, created_at, updated_at,
+                session_id)
            VALUES (?, ?, NULL, ?, ?, ?, ?, ?)""",
-        (model_id, text, level, status, tags, timestamp, session_id),
+        (model_id, text, level, tags, epoch, epoch, session_id),
     )
 
 
@@ -367,10 +443,15 @@ def insert_decision(
     text: str,
     tags: str,
     timestamp: str,
-    status: str = "decision",
+    status: str = "current",
 ) -> None:
+    # status must be one of current | roadmap | superseded | deprecated — the
+    # recall pipeline only surfaces 'current'. The old default here was
+    # "decision", which is not a valid status, so every imported decision was
+    # invisible to search. (Three rows in the live DB still carry the older
+    # 'fact' / 'lesson' values from that era.)
     cur.execute(
-        """INSERT INTO decisions (text, embedding, status, tags, timestamp)
+        """INSERT INTO decisions (text, embedding, status, tags, created_at)
            VALUES (?, NULL, ?, ?, ?)""",
-        (text, status, tags, timestamp),
+        (text, status, tags, to_epoch(timestamp)),
     )

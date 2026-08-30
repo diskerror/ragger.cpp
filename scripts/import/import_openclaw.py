@@ -2,9 +2,10 @@
 """
 import_openclaw.py — Import OpenClaw daily notes into ~/.ragger/memories.db
 
-Source: ~/OpenClawBU2026-05-10/workspace/memory/*.md  (canonical — superset of OpenClawOrig)
+Source: ~/.openclaw/workspace/memory/*.md
+        Pass a directory argument if the workspace has moved.
 
-The LLM (configured via [summarizer] in ~/.ragger/settings.ini) reads each note and returns:
+The LLM (configured by the summarizer_* settings in ~/.ragger/memories.db) reads each note and returns:
   - decisions[]:  durable choices/facts  → decisions table
   - summary:      narrative of the day   → summaries (level=session)
 
@@ -14,11 +15,9 @@ Dedup:
 
 Usage:
     python3 scripts/import/import_openclaw.py [--dry-run] [--verbose] [--no-llm]
-    python3 scripts/import/import_openclaw.py --settings /path/to/settings.ini
 
     --no-llm   Insert raw text as session summaries only (no decision extraction).
                Useful when the inference endpoint is offline.
-    --settings Override the settings.ini path (default ~/.ragger/settings.ini).
 """
 
 import argparse
@@ -28,14 +27,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from helpers import (
-    RaggerConfig, open_db, mtime_ts, is_after_birthday,
+    RaggerConfig, add_base_arg, add_source_arg, resolve_source, config_from_args, open_db, mtime_ts,
     llm_classify_daily_note,
     summary_exists, decision_exists_by_text,
     insert_summary, insert_decision,
     is_junk_content, get_or_create_model,
 )
 
-BU_MEMORY = Path.home() / "OpenClawBU2026-05-10" / "workspace" / "memory"
+DEFAULT_SOURCE = Path.home() / ".openclaw" / "workspace" / "memory"
 
 
 def ts_from_stem(stem: str):
@@ -129,14 +128,15 @@ def main():
     ap.add_argument("--verbose", "-v", action="store_true")
     ap.add_argument("--no-llm", action="store_true",
                     help="Skip LLM pass; import raw text as session summaries only")
-    ap.add_argument("--settings", default=None,
-                    help="Path to settings.ini (default: ~/.ragger/settings.ini)")
+    add_source_arg(ap, DEFAULT_SOURCE, "dir", "OpenClaw memory directory")
+    add_base_arg(ap)
     args = ap.parse_args()
 
-    cfg = RaggerConfig(Path(args.settings).expanduser()) if args.settings else RaggerConfig()
+    cfg = config_from_args(args)
+    SOURCE = resolve_source(args.source, DEFAULT_SOURCE, "dir", "OpenClaw memory directory")
 
-    if not BU_MEMORY.exists():
-        print(f"ERROR: {BU_MEMORY} not found", file=sys.stderr)
+    if not SOURCE.exists():
+        print(f"ERROR: {SOURCE} not found", file=sys.stderr)
         sys.exit(1)
 
     con = open_db(cfg)
@@ -147,10 +147,10 @@ def main():
     mode = "DRY RUN — " if args.dry_run else ""
     llm_note = " (--no-llm: raw text only)" if args.no_llm else f" (LLM: {cfg.llm_model!r} @ {cfg.llm_base_url})"
     print(f"{mode}OpenClaw daily notes import{llm_note}")
-    print(f"Source: {BU_MEMORY}")
+    print(f"Source: {SOURCE}")
     print(f"DB:     {cfg.db_path}\n")
 
-    files = sorted(BU_MEMORY.glob("*.md"))
+    files = sorted(SOURCE.glob("*.md"))
     n_sum_ins = n_sum_skip = n_dec_ins = n_dec_skip = 0
 
     for f in files:
@@ -159,12 +159,6 @@ def main():
             print(f"  [SKIP] can't parse timestamp: {f.name}")
             n_sum_skip += 1
             continue
-        if not is_after_birthday(ts):
-            if args.verbose:
-                print(f"  [SKIP] {f.name} — before birthday")
-            n_sum_skip += 1
-            continue
-
         text = f.read_text(encoding="utf-8").strip()
         if not text or len(text) < cfg.minimum_chunk_size:
             if args.verbose:

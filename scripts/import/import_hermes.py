@@ -3,13 +3,13 @@
 import_hermes.py — Import Hermes MEMORY.md into ~/.ragger/memories.db
 
 Source: ~/.hermes/memories/MEMORY.md
+        Pass a path argument to override.
 
 Hermes MEMORY.md is § -delimited blocks. The LLM cleans each block into a
 self-contained decision/fact string and inserts it into the decisions table.
 
 Usage:
     python3 scripts/import/import_hermes.py [--dry-run] [--verbose] [--no-llm]
-    python3 scripts/import/import_hermes.py --settings /path/to/settings.ini
 """
 
 import argparse
@@ -18,13 +18,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from helpers import (
-    RaggerConfig, open_db, mtime_ts, is_after_birthday,
+    RaggerConfig, add_base_arg, add_source_arg, resolve_source, config_from_args, open_db, mtime_ts,
     llm_classify_flat_bullets,
     decision_exists_by_text,
     insert_decision,
 )
 
-HERMES_MEMORY = Path.home() / ".hermes" / "memories" / "MEMORY.md"
+DEFAULT_SOURCE = Path.home() / ".hermes" / "memories" / "MEMORY.md"
 
 
 def main():
@@ -32,25 +32,27 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--verbose", "-v", action="store_true")
     ap.add_argument("--no-llm", action="store_true")
-    ap.add_argument("--settings", default=None)
+    add_source_arg(ap, DEFAULT_SOURCE, "file", "Hermes MEMORY.md")
+    add_base_arg(ap)
     args = ap.parse_args()
 
-    cfg = RaggerConfig(Path(args.settings).expanduser()) if args.settings else RaggerConfig()
+    cfg = config_from_args(args)
+    SOURCE = resolve_source(args.source, DEFAULT_SOURCE, "file", "Hermes MEMORY.md")
 
-    if not HERMES_MEMORY.exists():
-        print(f"ERROR: {HERMES_MEMORY} not found", file=sys.stderr)
+    if not SOURCE.exists():
+        print(f"ERROR: {SOURCE} not found", file=sys.stderr)
         sys.exit(1)
 
     con = open_db(cfg)
     cur = con.cursor()
 
-    ts   = mtime_ts(HERMES_MEMORY)
-    text = HERMES_MEMORY.read_text(encoding="utf-8").strip()
+    ts   = mtime_ts(SOURCE)
+    text = SOURCE.read_text(encoding="utf-8").strip()
     tags = "imported,hermes"
 
     mode = "DRY RUN — " if args.dry_run else ""
     print(f"{mode}Hermes MEMORY.md import")
-    print(f"Source: {HERMES_MEMORY}  ({ts})")
+    print(f"Source: {SOURCE}  ({ts})")
     print(f"DB:     {cfg.db_path}\n")
 
     # Split on § — each block is one memory entry

@@ -3,7 +3,9 @@
 import_claude_export.py — Import Claude.ai conversation export into ~/.ragger/memories.db
 
 Sources:
-  ~/Desktop/claude convo/data-*/conversations.json
+  One or more unzipped Claude.ai export directories, named on the command line.
+  Each must contain a conversations.json (a directory holding several such
+  export directories works too — they are discovered one level down).
 
 Each conversation becomes a session. Human+assistant message pairs become turns
 inserted with model_id=NULL and embedding=NULL — exactly like live captures.
@@ -21,13 +23,13 @@ Dedup:
 Filtering:
   - Conversations with 0 messages skipped
   - Turns where both user and assistant text are empty skipped
-  - Conversations before birthday (2026-02-13) skipped unless --all
 
 Usage:
-    python3 scripts/import/import_claude_export.py [--dry-run] [--verbose] [--all]
-    python3 scripts/import/import_claude_export.py --settings /path/to/settings.ini
+    python3 scripts/import/import_claude_export.py DIR [DIR ...] [--dry-run]
+                                                   [--verbose]
 
-    --all    Include conversations before 2026-02-13 (default: skip pre-birthday)
+    DIR      An unzipped export directory (contains conversations.json), or a
+             directory containing several of them.
 """
 
 import argparse
@@ -37,15 +39,43 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from helpers import RaggerConfig, open_db, BIRTHDAY, is_junk_content
+from helpers import (RaggerConfig, add_base_arg, config_from_args, open_db,
+                     to_epoch, is_junk_content)
 
-EXPORT_BASE = Path.home() / "Desktop" / "claude convo"
-EXPORT_DIRS = [
-    "data-78037790-ba82-4dfe-b096-592b723f805f-1780344373-2468d4bb-batch-0000",
-    "data-90174c9a-ca89-4ced-9ccf-926233989df8-1780344573-79dc889c-batch-0000",
-]
-# Also pick up any unzipped batch dir we haven't listed
 MODEL_NAME = "claude.ai-export"
+
+
+def resolve_export_dirs(paths) -> list:
+    """
+    Turn the directories named on the command line into a list of export dirs.
+
+    A path is taken as an export directory when it holds a conversations.json;
+    otherwise its immediate children are scanned for one, so both
+    "the batch I just unzipped" and "the folder I unzip everything into" work.
+    Order is preserved and duplicates dropped, so overlapping arguments are
+    harmless.
+    """
+    found, seen = [], set()
+
+    def add(d: Path):
+        r = d.resolve()
+        if r not in seen and (r / "conversations.json").exists():
+            seen.add(r)
+            found.append(r)
+
+    for raw in paths:
+        p = Path(raw).expanduser()
+        if not p.exists():
+            print(f"WARNING: {p} not found — skipping", file=sys.stderr)
+            continue
+        if not p.is_dir():
+            print(f"WARNING: {p} is not a directory — skipping", file=sys.stderr)
+            continue
+        add(p)
+        for child in sorted(p.iterdir()):
+            if child.is_dir():
+                add(child)
+    return found
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -155,9 +185,10 @@ def insert_turn(cur, user_text: str, asst_text: str,
     """Insert a raw turn with NULL embedding — daemon backfills it."""
     cur.execute(
         """INSERT INTO turns
-               (user_text, assistant_text, embedding, model_id, session_id, timestamp)
+               (user_text, assistant_text, embedding, model_id, session_id,
+                created_at)
            VALUES (?, ?, NULL, ?, ?, ?)""",
-        (user_text, asst_text, model_id, session_id, timestamp),
+        (user_text, asst_text, model_id, session_id, to_epoch(timestamp)),
     )
 
 
@@ -173,10 +204,15 @@ def insert_placeholder_summary(cur, user_text: str, asst_text: str,
     if asst_text:
         raw += f"Assistant: {asst_text}"
     cur.execute(
+        # level 'turn' predates schema 0.12, which moved per-turn (L2) summaries
+        # into their own turn_summaries table and left summaries for
+        # episode/session/project. Import these as 'episode' — the coarsest
+        # level that still means "one exchange's worth of context".
         """INSERT INTO summaries
-               (model_id, text, embedding, level, status, tags, timestamp, session_id)
-           VALUES (NULL, ?, NULL, 'turn', 'complete', 'imported,claude-export', ?, ?)""",
-        (raw.strip(), timestamp, session_id),
+               (model_id, text, embedding, level, tags, created_at, updated_at,
+                session_id)
+           VALUES (NULL, ?, NULL, 'episode', 'imported,claude-export', ?, ?, ?)""",
+        (raw.strip(), to_epoch(timestamp), to_epoch(timestamp), session_id),
     )
 
 
@@ -186,31 +222,19 @@ def main():
     ap = argparse.ArgumentParser(
         description="Import Claude.ai conversation exports into Ragger")
     ap.add_argument("--dry-run",  action="store_true")
+    ap.add_argument("dirs", nargs="+", metavar="DIR",
+                    help="Unzipped Claude.ai export directory (contains "
+                         "conversations.json), or a directory holding several")
     ap.add_argument("--verbose",  "-v", action="store_true")
-    ap.add_argument("--all",      action="store_true",
-                    help="Include conversations before birthday (2026-02-13)")
-    ap.add_argument("--settings", default=None)
+    add_base_arg(ap)
     args = ap.parse_args()
 
-    cfg = RaggerConfig(Path(args.settings).expanduser()) if args.settings else RaggerConfig()
+    cfg = config_from_args(args)
 
-    if not EXPORT_BASE.exists():
-        print(f"ERROR: {EXPORT_BASE} not found", file=sys.stderr)
-        sys.exit(1)
-
-    # Collect all export dirs (listed + any others present)
-    dirs = []
-    for name in EXPORT_DIRS:
-        d = EXPORT_BASE / name
-        if d.exists():
-            dirs.append(d)
-    for d in EXPORT_BASE.iterdir():
-        if d.is_dir() and d not in dirs:
-            if (d / "conversations.json").exists():
-                dirs.append(d)
-
+    dirs = resolve_export_dirs(args.dirs)
     if not dirs:
-        print("ERROR: no export directories found", file=sys.stderr)
+        print("ERROR: no export directory containing conversations.json found "
+              "in: " + ", ".join(str(d) for d in args.dirs), file=sys.stderr)
         sys.exit(1)
 
     con = open_db(cfg)
@@ -248,9 +272,9 @@ def main():
                         "SELECT 1 FROM decisions WHERE substr(text,1,120)=?", (key,))
                     if not cur.fetchone():
                         cur.execute(
-                            "INSERT INTO decisions (text, embedding, status, tags, timestamp)"
-                            " VALUES (?, NULL, 'decision', 'imported,claude-export,memory',"
-                            " datetime('now'))",
+                            "INSERT INTO decisions (text, embedding, status, tags, created_at)"
+                            " VALUES (?, NULL, 'current', 'imported,claude-export,memory',"
+                            " unixepoch())",
                             (blob,))
                         if args.verbose:
                             print(f"  [MEM] imported memories.json ({len(blob)} chars)")
@@ -268,16 +292,6 @@ def main():
                 continue
 
             conv_ts = iso_to_ts(created)
-            if not args.all:
-                try:
-                    dt = datetime.strptime(conv_ts[:10], "%Y-%m-%d")
-                    if dt < BIRTHDAY:
-                        if args.verbose:
-                            print(f"  [SKIP] {name[:50]} — before birthday ({conv_ts[:10]})")
-                        total_skipped_conv += 1
-                        continue
-                except Exception:
-                    pass
 
             pairs = pair_turns(messages)
             if not pairs:

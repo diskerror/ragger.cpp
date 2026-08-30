@@ -2,11 +2,11 @@
 """
 import_all.py — Run all agent memory import scripts in sequence.
 
-Passes --dry-run / --verbose / --no-llm / --settings through to each script.
+Passes --dry-run / --verbose / --no-llm through to each script (and
+--ragger-base, when given, so a test run points every child at the same tree).
 
 Usage:
     python3 scripts/import/import_all.py [--dry-run] [--verbose] [--no-llm]
-    python3 scripts/import/import_all.py --settings /path/to/settings.ini
 
 Order:
   1. import_openclaw.py  — OpenClaw daily notes (biggest, most structured)
@@ -19,6 +19,9 @@ import argparse
 import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from helpers import add_base_arg
 
 SCRIPTS = [
     "import_openclaw.py",
@@ -35,14 +38,14 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--verbose", "-v", action="store_true")
     ap.add_argument("--no-llm", action="store_true")
-    ap.add_argument("--settings", default=None)
+    add_base_arg(ap)
     args = ap.parse_args()
 
     flags = []
     if args.dry_run:  flags.append("--dry-run")
     if args.verbose:  flags.append("--verbose")
     if args.no_llm:   flags.append("--no-llm")
-    if args.settings: flags += ["--settings", args.settings]
+    if args.ragger_base: flags += ["--ragger-base", args.ragger_base]
 
     overall_ok = True
     for script in SCRIPTS:

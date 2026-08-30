@@ -33,3 +33,6 @@ models/model.onnx
 .DS_Store
 scripts/deploy.sh
 scripts/import/*.session
+
+# Python bytecode from scripts/import/
+__pycache__/

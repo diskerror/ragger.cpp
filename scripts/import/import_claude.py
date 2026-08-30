@@ -3,14 +3,14 @@
 import_claude.py — Import Claude Code project memory files into ~/.ragger/memories.db
 
 Source: ~/.claude/projects/*/memory/*.md
+        Pass a path argument to override.
 
-The LLM (configured via [summarizer] in ~/.ragger/settings.ini) reads each file and
+The LLM (configured by the summarizer_* settings in ~/.ragger/memories.db) reads each file and
 classifies it as either:
   - "decision" → individual items split into decisions table rows
   - "summary"  → whole file as a project-level summary row
 
 Skips:
-  - Files with mtime before birthday (2026-02-13)
   - Files shorter than minimum_chunk_size (from [import] section)
   - Index/TOC files (only contain links to other files, no real content)
 
@@ -20,7 +20,6 @@ Dedup:
 
 Usage:
     python3 scripts/import/import_claude.py [--dry-run] [--verbose] [--no-llm]
-    python3 scripts/import/import_claude.py --settings /path/to/settings.ini
 """
 
 import argparse
@@ -30,13 +29,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from helpers import (
-    RaggerConfig, open_db, mtime_ts, is_after_birthday,
+    RaggerConfig, add_base_arg, add_source_arg, resolve_source, config_from_args, open_db, mtime_ts,
     llm_classify_project_memory,
     summary_exists_by_text, decision_exists_by_text,
     insert_summary, insert_decision, get_or_create_model,
 )
 
-CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
+DEFAULT_SOURCE = Path.home() / ".claude" / "projects"
 
 
 def is_index_file(text: str) -> bool:
@@ -71,14 +70,15 @@ def main():
     ap.add_argument("--verbose", "-v", action="store_true")
     ap.add_argument("--no-llm", action="store_true",
                     help="Skip LLM pass; import all files as project summaries")
-    ap.add_argument("--settings", default=None,
-                    help="Path to settings.ini (default: ~/.ragger/settings.ini)")
+    add_source_arg(ap, DEFAULT_SOURCE, "dir", "Claude Code projects directory")
+    add_base_arg(ap)
     args = ap.parse_args()
 
-    cfg = RaggerConfig(Path(args.settings).expanduser()) if args.settings else RaggerConfig()
+    cfg = config_from_args(args)
+    SOURCE = resolve_source(args.source, DEFAULT_SOURCE, "dir", "Claude Code projects directory")
 
-    if not CLAUDE_PROJECTS.exists():
-        print(f"ERROR: {CLAUDE_PROJECTS} not found", file=sys.stderr)
+    if not SOURCE.exists():
+        print(f"ERROR: {SOURCE} not found", file=sys.stderr)
         sys.exit(1)
 
     con = open_db(cfg)
@@ -89,12 +89,12 @@ def main():
     mode     = "DRY RUN — " if args.dry_run else ""
     llm_note = " (--no-llm)" if args.no_llm else f" (LLM: {cfg.llm_model!r} @ {cfg.llm_base_url})"
     print(f"{mode}Claude project memory import{llm_note}")
-    print(f"Source: {CLAUDE_PROJECTS}")
+    print(f"Source: {SOURCE}")
     print(f"DB:     {cfg.db_path}\n")
 
     n_sum_ins = n_sum_skip = n_dec_ins = n_dec_skip = 0
 
-    for proj_dir in sorted(CLAUDE_PROJECTS.iterdir()):
+    for proj_dir in sorted(SOURCE.iterdir()):
         mem_dir = proj_dir / "memory"
         if not mem_dir.exists():
             continue
@@ -104,11 +104,6 @@ def main():
             ts   = mtime_ts(f)
             text = f.read_text(encoding="utf-8").strip()
 
-            if not is_after_birthday(ts):
-                if args.verbose:
-                    print(f"  [SKIP] {slug}/{f.name} — before birthday")
-                n_sum_skip += 1
-                continue
             if len(text) < cfg.minimum_chunk_size:
                 if args.verbose:
                     print(f"  [SKIP] {slug}/{f.name} — too short ({len(text)} chars)")
