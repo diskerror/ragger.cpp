@@ -123,6 +123,11 @@ struct Server::Impl {
         bootstrap_auth();
         init_inference();
         tcp_svr = make_tcp_server();
+        if (!config().server_name.empty()) {
+            httplib::Headers server_header{{"Server", config().server_name}};
+            unix_svr.set_default_headers(server_header);
+            tcp_svr->set_default_headers(server_header);
+        }
         setup_routes(unix_svr);
         setup_routes(*tcp_svr);
         warmup();

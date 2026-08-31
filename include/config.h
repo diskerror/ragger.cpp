@@ -39,18 +39,11 @@ struct Config {
     // `desired_port` so a UI port change is adopted by ANY restart path, not
     // just the dashboard button. 0 = "same as port" (seeded on first load).
     int         desired_port   = 0;
-    // NOT WIRED UP. Parsed, dashboard-editable, and settable — but no consumer
-    // reads it, so setting it does nothing today.
-    //
-    // Kept deliberately. The blocker is intent, not effort: cpp-httplib has no
-    // hostname or virtual-host concept to bind this to, and it sends no
-    // "Server:" response header, so there is nothing for the value to mean
-    // until we decide what it should do. The plausible reading — advertise it
-    // as the Server: header — is one line at the httplib setup in server.cpp
-    // (svr.set_default_headers({{"Server", cfg.server_name}})), but that is a
-    // guess about the original intent and a visible protocol change, so it
-    // should be a decision rather than a cleanup.
-    std::string server_name;   // hostname for cpp-httplib (e.g. "ragger.local")
+    // Sent as the "Server:" response header (see make_tcp_server() /
+    // Impl::Impl() in server.cpp). Cosmetic only — cpp-httplib has no
+    // hostname/virtual-host concept, so this does not affect routing,
+    // binding, or DNS/mDNS resolution.
+    std::string server_name = "ragger";
 
     // --- Storage ---
     // formats_dir, model_dir, recipes_dir, and log_dir are no longer
