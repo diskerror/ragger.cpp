@@ -50,30 +50,42 @@ guarantees it.
 Delete it, or rename it to something honest (`model_name_as_configured()`).
 Deleting is a mechanical substitution of the argument at each call site.
 
-## 3. Three lang constants exist but the call sites hardcode the literal
+## 3. ~~Three lang constants exist but the call sites hardcode the literal~~ — resolved 2026-09-01
 
-Extracted into `include/lang/en.h`, never wired up — so translating them
-changes nothing.
+All three call sites now use their `en.h` constants instead of the raw
+literal: `HTTP_UNAUTHORIZED` (`src/server.cpp` 401 handler),
+`HTTP_NO_TOKEN_FILE`, and `HTTP_SYSTEM_USER_NOT_FOUND` (both in the
+`/user/token` handler). Folded into the #4 pass below since fixing one
+required auditing the whole file for the same disease.
 
-| Constant | Literal | Site |
-|---|---|---|
-| `HTTP_UNAUTHORIZED` | `"Unauthorized"` | `src/server.cpp:651` |
-| `HTTP_NO_TOKEN_FILE` | `"no token file"` | `src/server.cpp:689` |
-| `HTTP_SYSTEM_USER_NOT_FOUND` | `"system user not found"` | `src/server.cpp` |
+## 4. ~~~33 unreferenced lang constants~~ — resolved 2026-09-01
 
-## 4. ~33 unreferenced lang constants
+Audited every constant in `include/lang/en.h` against `src/` + `include/`
+call sites using the regenerate-the-list script below. Two kinds of drift,
+fixed differently:
 
-Nothing reads them. Two groups worth separating:
+- **Constant exists, call site hardcodes the literal instead** (this was
+  item #3, and turned up more of the same pattern while auditing #4):
+  wired 5 call sites to their constants — `HTTP_UNAUTHORIZED`,
+  `HTTP_JSON_ERROR`, `HTTP_SYSTEM_USER_NOT_FOUND`, `HTTP_NO_TOKEN_FILE`
+  (all `src/server.cpp`), and `MSG_SUMMARIZER_L3`
+  (`src/summarizer_service.cpp`, replacing an ad-hoc `[summarizer] session
+  boundary closed for {} ({} -> {})` log line) and `ERR_ROUTE_FAILED`
+  (`src/server.cpp`'s catch-all handler, replacing an inline `"{} {}
+  failed: {}"` format string).
+- **Constant describes a feature that doesn't exist in the code** (login
+  endpoint, session/turn-storage-specific error wrapping, a payload-dump
+  directory, low-level socket client errors, a `--dump-payloads` CLI
+  flag, a generic `MSG_WARNING`, an `ERR_LOG_OPEN` string already owned by
+  c_lib's `Logger.cp` and never duplicated here): deleted 27 dead
+  constants outright rather than wire them to nothing. This is more than
+  the ~33 estimated in the original note because the estimate lumped in
+  constants already deleted in the 2026-08-29 file-config removal (see
+  the "Resolved in the same pass" note at the top of this file) — the
+  actual live-but-dead count in this pass was 27.
 
-- **Orphaned 2026-08-29** by removing the file-based config path — already
-  deleted in the same commit, listed only so the count below reconciles:
-  `ERR_CONFIG_OPEN`, `ERR_CONFIG_SYSTEM_NOT_FOUND`, `ERR_CONFIG_SYSTEM_LOAD`,
-  `ERR_CONFIG_SYSTEM_PARSE`, `ERR_CONFIG_SYSTEM_UNKNOWN`, `MSG_CONFIG_CREATED`,
-  `MSG_CONFIG_LOADED`.
-- **Older, still present**: the whole `HTTP_*` block, all `ERR_CLIENT_*`, `ERR_LOG_OPEN`,
-  `MSG_WARNING`, `CLI_DUMP_PAYLOADS`, `MSG_SUMMARIZER_L3`,
-  `MSG_SUMMARIZED_SESSION`, and others. Check whether each names a feature
-  that was removed or one that was never finished before deleting.
+Verified with the regenerate script (0 unreferenced afterward) plus a
+full build + `ctest` run (15/15 passing).
 
 Regenerate the list with:
 

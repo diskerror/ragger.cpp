@@ -100,7 +100,6 @@ constexpr const char* CLI_USAGE_IMPORT_CONVERSATIONS =
     "  ragger import-conversations tg_export.json --format=telegram --self=\"Jane Doe\"\n"
     "  ragger import-conversations ~/Downloads/memories.json --fdate";
 constexpr const char* CLI_USAGE_EXPORT        = "Usage: ragger export <all|table> [-e|--embeddings] [--output file]";
-constexpr const char* CLI_USAGE_EMBED           = "Usage: ragger embed";
 constexpr const char* CLI_UNKNOWN_COMMAND     = "Unknown command: {}";
 
 // --- Status messages ---
@@ -150,8 +149,6 @@ constexpr const char* MSG_EXPORT_DONE         = "✓ Exported {} rows";
 constexpr const char* MSG_EXPORT_TABLE_NOT_FOUND = "Error: table '{}' not found. Available: {}";
 constexpr const char* MSG_EXPORT_WROTE_FILE   = "Wrote {}";
 constexpr const char* CLI_EMBEDDINGS          = "Include embedding column in export";
-constexpr const char* ERR_PAYLOAD_DUMP_DIR    = "Error: cannot create payload dump directory '{}': {}";
-constexpr const char* MSG_PAYLOAD_DUMP_CREATED= "Created payload dump directory: {}";
 
 // --- Daemon control ---
 constexpr const char* ERR_HOME_NOT_FOUND      = "Error: cannot resolve $HOME";
@@ -237,7 +234,6 @@ constexpr const char* ERR_INFERENCE           = "Error: {}";
 
 // --- Errors: config ---
 constexpr const char* ERR_CONFIG_NOT_INIT     = "Config not initialized — call init_config() first";
-constexpr const char* ERR_CONFIG_SOCKET_OR_BIND = "Config error: either [server] socket or bind must be configured";
 
 // --- Errors: database ---
 constexpr const char* ERR_SQLITE_OPEN         = "SQLite open failed: {}";
@@ -362,9 +358,6 @@ constexpr const char* MSG_WARMUP_EMBEDDING_CACHE = "Warmup: embedding cache load
 constexpr const char* MSG_WARMUP_ERROR          = "Warmup: {}";
 constexpr const char* MSG_PRELOADED_MODEL       = "Preloaded model: {}";
 constexpr const char* MSG_MODEL_PRELOAD_SKIPPED = "Model preload skipped: {}";
-constexpr const char* MSG_SUMMARIZED_SESSION    = "Summarized session {} ({} turns)";
-constexpr const char* ERR_SESSION_SUMMARY_FAIL  = "Session summarization failed: {}";
-constexpr const char* MSG_CLEANED               = "Cleaned {} expired conversations from main DB";
 constexpr const char* ERR_CLEANUP_DB            = "Cleanup failed for main DB: {}";
 constexpr const char* MSG_HOUSEKEEPING_EXPIRED  = "Housekeeping: {} sessions expired, {} conversations cleaned";
 constexpr const char* MSG_HOUSEKEEPING_OWNER    = "Housekeeping owner for user '{}'";
@@ -377,7 +370,6 @@ constexpr const char* MSG_CONFIG_RELOADED_NONE  = "Config reloaded: no changes";
 constexpr const char* MSG_INFERENCE_ENABLED     = "Inference: enabled ({} endpoint(s))";
 constexpr const char* MSG_CREATED_USER          = "Created user: {} (id={})";
 constexpr const char* MSG_SINGLE_USER_MODE      = "Single-user mode initialized";
-constexpr const char* ERR_LOGIN                 = "Login error: {}";
 constexpr const char* MSG_BIND_UNIX_SOCKET      = "Binding AF_UNIX socket: {}";
 constexpr const char* ERR_LISTEN_UNIX           = "listen() on unix socket returned false: {} (errno={})";
 constexpr const char* MSG_BIND_TCP              = "Binding TCP {}:{}";
@@ -385,7 +377,6 @@ constexpr const char* ERR_LISTEN_TCP            = "listen() on TCP returned fals
 
 // --- Server: debug HTTP logging ---
 constexpr const char* DBG_HTTP                  = "{} {} {}";
-constexpr const char* DBG_HTTP_DETAIL           = "{} {} {} ({})";
 constexpr const char* DBG_QUERY_LOG             = "query=\"{}\" results={} time={}ms";
 
 // --- Server: HTTP response bodies ---
@@ -394,17 +385,10 @@ constexpr const char* HTTP_MISSING_TEXT         = "Missing 'text' field";
 constexpr const char* HTTP_MISSING_QUERY        = "Missing 'query' field";
 constexpr const char* HTTP_MISSING_IDS          = "Missing or invalid 'ids' field";
 constexpr const char* HTTP_MISSING_METADATA     = "Missing or invalid 'metadata' field";
-constexpr const char* HTTP_MISSING_MODEL        = "Missing 'model' field";
 constexpr const char* HTTP_JSON_ERROR           = "JSON error: {}";
 constexpr const char* HTTP_MEMORY_NOT_FOUND     = "Memory not found";
-constexpr const char* HTTP_INFERENCE_NOT_CONFIGURED = "inference not configured";
-constexpr const char* HTTP_MESSAGE_REQUIRED     = "message required";
 constexpr const char* HTTP_SYSTEM_USER_NOT_FOUND = "system user not found";
 constexpr const char* HTTP_NO_TOKEN_FILE        = "no token file";
-constexpr const char* HTTP_LOGIN_CREDENTIALS_REQ = "username and password required";
-constexpr const char* HTTP_LOGIN_INVALID        = "invalid credentials";
-constexpr const char* HTTP_LOGIN_NO_PASSWORD    = "no password set — use 'ragger passwd' first";
-constexpr const char* HTTP_LOGIN_FAILED         = "login failed";
 
 // --- Server: startup/runtime ---
 constexpr const char* MSG_HEALTH_CHECK_TCP      = "  Health check: curl http://{}/health";
@@ -418,8 +402,6 @@ constexpr const char* MSG_UNIX_CHMOD_TIMEOUT    = "Unix socket chmod 0600 timed 
 
 // --- Server: error logging ---
 constexpr const char* ERR_ROUTE_FAILED          = "{} {} failed: {}";
-constexpr const char* ERR_SESSION_SAVE_FAIL     = "Session save failed: {}";
-constexpr const char* ERR_TURN_STORAGE_FAIL     = "Turn storage failed: {}";
 
 // --- MCP ---
 constexpr const char* ERR_MCP_TEXT_REQUIRED     = "Error: text parameter required";
@@ -437,18 +419,12 @@ constexpr const char* ERR_CLIENT_DELETE_BATCH = "Delete batch failed: HTTP {}";
 constexpr const char* ERR_CLIENT_SEARCH_META  = "Search by metadata failed: HTTP {}";
 constexpr const char* ERR_CLIENT_REGISTER     = "Register failed: HTTP {}";
 constexpr const char* ERR_CLIENT_SOCKET       = "Failed to create socket: {}";
-constexpr const char* ERR_CLIENT_ADDRESS      = "Invalid address: {}";
 constexpr const char* ERR_CLIENT_CONNECT      = "Connection failed: {}";
-constexpr const char* ERR_CLIENT_SEND         = "Failed to send request: {}";
-constexpr const char* ERR_CLIENT_READ         = "Failed to read response: {}";
-constexpr const char* ERR_CLIENT_NO_STATUS    = "Invalid HTTP response: no status line";
-constexpr const char* ERR_CLIENT_BAD_STATUS   = "Invalid HTTP response: malformed status line";
 
 // --- Inference errors ---
 constexpr const char* ERR_CURL_INIT           = "Failed to initialize libcurl";
 constexpr const char* ERR_HTTP_REQUEST        = "HTTP request failed: {}";
 constexpr const char* ERR_INFERENCE_API       = "Inference API error {}: {}";
-constexpr const char* ERR_INFERENCE_API_STATUS = "Inference API error {}";
 constexpr const char* ERR_PARSE_RESPONSE      = "Failed to parse response: {}";
 constexpr const char* ERR_UNKNOWN_ENDPOINT    = "Unknown endpoint: {}";
 constexpr const char* ERR_NO_ENDPOINTS        = "No inference endpoints configured";
@@ -474,16 +450,12 @@ constexpr const char* ERR_MCP_UNKNOWN_TOOL    = "Unknown tool: {}";
 constexpr const char* ERR_FILE_NOT_FOUND      = "File not found: {}";
 constexpr const char* ERR_USER_NOT_FOUND      = "User not found: {}";
 
-// --- Logger errors ---
-constexpr const char* ERR_LOG_OPEN            = "failed to open log file: \"{}\"";
-
 // --- CLI option descriptions ---
 constexpr const char* CLI_MIN_CHUNK_SIZE      = "Min chunk size for import";
 constexpr const char* CLI_TITLE               = "Document title (import; default: filename)";
 constexpr const char* CLI_YEAR                = "Document publish year (import)";
 constexpr const char* CLI_TAGS                = "Document tags/subjects, comma-separated (import)";
 constexpr const char* CLI_YES                 = "Skip confirmation prompts (for scripting)";
-constexpr const char* CLI_DUMP_PAYLOADS       = "Write raw request JSON to this directory (one file per prompt)";
 
 // --- Main.cpp specific strings (useradd/userdel/add-self) ---
 constexpr const char* MSG_EMBEDDING_DIMENSIONS  = "Dimensions: {}";
@@ -491,7 +463,6 @@ constexpr const char* MSG_EMBEDDING_MODEL_NAME  = "Model name: {}";
 constexpr const char* MSG_EMBEDDING_PATH        = "Path: {}";
 constexpr const char* MSG_EMBEDDING_PATH_DEFAULT= "(default)";
 constexpr const char* MSG_HOUSEKEEPING_TRIGGERED= "Housekeeping triggered";
-constexpr const char* MSG_WARNING               = "Warning";
 
 // --- Main.cpp specific (daemon control) ---
 constexpr const char* ERR_DAEMON_PID_NOT_RUNNING= "Daemon not running (pid {} not found)";

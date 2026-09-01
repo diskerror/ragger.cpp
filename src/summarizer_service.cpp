@@ -410,8 +410,7 @@ bool SummarizerService::handle_session_close(const Job& j) {
 
     backend_.advance_session_boundary_watermark(j.turn_id /* = last_turn_id */);
     Diskerror::Logger::info(std::format(
-        "[summarizer] session boundary closed for {} ({} -> {})",
-        j.session_guid, j.first_ts, j.last_ts));
+        lang::MSG_SUMMARIZER_L3, j.session_guid));
     return true;
 }
 

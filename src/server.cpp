@@ -653,7 +653,7 @@ struct Server::Impl {
                 if (!user) {
                     Diskerror::Logger::debug(std::format("{} {} 401", req.method, req.path));
                     res.status = 401;
-                    res.set_content("Unauthorized", "text/plain");
+                    res.set_content(lang::HTTP_UNAUTHORIZED, "text/plain");
                     return;
                 }
                 try {
@@ -661,9 +661,9 @@ struct Server::Impl {
                 } catch (const json::exception& e) {
                     Diskerror::Logger::debug(std::format("{} {} 400", req.method, req.path));
                     res.status = 400;
-                    res.set_content(std::string("JSON error: ") + e.what(), "text/plain");
+                    res.set_content(std::format(lang::HTTP_JSON_ERROR, e.what()), "text/plain");
                 } catch (const std::exception& e) {
-                    Diskerror::Logger::critical(std::format("{} {} failed: {}", req.method, req.path, e.what()));
+                    Diskerror::Logger::critical(std::format(lang::ERR_ROUTE_FAILED, req.method, req.path, e.what()));
                     res.status = 500;
                     res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
                 }
@@ -688,10 +688,10 @@ struct Server::Impl {
         svr.Get("/user/token", guarded([this](const UserInfo& user, const httplib::Request&,
                                               httplib::Response& res) {
             struct passwd* pw = getpwnam(user.username.c_str());
-            if (!pw) { res.status = 404; res.set_content(R"({"error":"system user not found"})", "application/json"); return; }
+            if (!pw) { res.status = 404; res.set_content(std::format(R"({{"error":"{}"}})", lang::HTTP_SYSTEM_USER_NOT_FOUND), "application/json"); return; }
             std::string token_file = std::string(pw->pw_dir) + "/.ragger/token";
             std::ifstream f(token_file);
-            if (!f) { res.status = 404; res.set_content(R"({"error":"no token file"})", "application/json"); return; }
+            if (!f) { res.status = 404; res.set_content(std::format(R"({{"error":"{}"}})", lang::HTTP_NO_TOKEN_FILE), "application/json"); return; }
             std::string token;
             std::getline(f, token);
             size_t s = token.find_first_not_of(" \t\r\n");
