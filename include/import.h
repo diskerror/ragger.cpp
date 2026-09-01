@@ -38,17 +38,6 @@ std::vector<ImportChunk> chunk_markdown(const std::string& text, int min_chunk_s
 /// callers apply only when the destination is a stored document body.
 std::string clean_document_text(const std::string& text);
 
-/// Normalize whitespace characters in a string: replace runs of horizontal
-/// whitespace (including tabs, NBSP, other Unicode spaces) with a single
-/// regular space; remove zero-width and invisible characters that don't
-/// contribute to content. Works on multi-byte UTF-8 by using Unicode property
-/// classes via regex. Also caps any run of dashes on a single line to at most
-/// three characters (prevents extremely long sequences from formatted tables
-/// or separators from dominating chunks while keeping valid Markdown table-
-/// separator syntax (`---`)). Applied during document import before storing
-/// and embedding; called by clean_document_text().
-void normalize_whitespace_and_cap_dashes(std::string& text);
-
 /// Walk a JSON document and concatenate every string leaf worth keeping
 /// into plain text (double-newline separated), preferring values under
 /// keys that read as prose ("text", "content", "description",
