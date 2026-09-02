@@ -261,6 +261,15 @@ public:
                                         const std::string& summary_model_name) = 0;
     virtual bool mark_turn_summarized(int turn_id, const std::string& model_name) = 0;
 
+    /// Delete poison-abandoned turn_summaries rows (summary_model_id ->
+    /// model "bad", text NULL) so the underlying turn falls back into
+    /// unsummarized_turns()'s candidate set on the next catch-up pass.
+    /// Housekeeping retry for turns that hit max_turn_failures before
+    /// whatever caused the failures was fixed. Returns rows deleted.
+    /// Does NOT touch legitimate trivial-turn skips (tagged with the real
+    /// summarizer model name, never "bad").
+    virtual int reset_abandoned_turn_summaries(int limit = 0) = 0;
+
     /// Summary rows tagged 'draft' (heuristic fallback writes that the
     /// summarizer should rewrite when inference is back). Returned
     /// oldest-first, capped at `limit` (0 = unbounded).

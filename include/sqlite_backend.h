@@ -106,6 +106,7 @@ public:
     bool finalize_turn_summary(int turn_id, const std::string& text,
                                const std::string& summary_model_name) override;
     bool mark_turn_summarized(int turn_id, const std::string& model_name) override;
+    int  reset_abandoned_turn_summaries(int limit = 0) override;
 
     std::vector<DraftSummary> draft_summaries(int limit = 0) override;
     std::vector<std::string> sessions_needing_close(int pause_minutes) override;

@@ -692,9 +692,10 @@ void test_store_turn(ragger::Embedder& emb) {
         int emb_bytes = sqlite3_column_int(st, 2);
         const char* model = reinterpret_cast<const char*>(sqlite3_column_text(st, 3));
         assert(u && a && a[0] != '\0');          // assistant filled in
-        // Embedded as f16 in the version-tagged format:
-        // 1-byte version + 384 dims * 2 bytes/dim.
-        assert(emb_bytes == 1 + 384 * 2);
+        // Embedded as f16, payload-only (db_version 0.15+; no version byte —
+        // that tag lives in the sibling embedding_version column now):
+        // 384 dims * 2 bytes/dim.
+        assert(emb_bytes == 384 * 2);
         assert(model && std::string(model) == "test-model");
         ++rows;
     }
@@ -1014,8 +1015,9 @@ void test_unsummarized_turns_excludes_summarized(ragger::Embedder& emb) {
 }
 
 // mark_turn_summarized() marks a trivial/skip-worthy turn as done WITHOUT
-// real summary text -- text must remain NULL while summary_model_id gets
-// resolved to the given model name.
+// real summary text -- text must be set to '' (empty string, unambiguously
+// "intentionally blank" rather than looking like a data error) while
+// summary_model_id gets resolved to the given model name.
 void test_mark_turn_summarized_trivial_turn(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
@@ -1036,7 +1038,11 @@ void test_mark_turn_summarized_trivial_turn(ragger::Embedder& emb) {
         "WHERE ts.turn_id = ?", -1, &st, nullptr);
     sqlite3_bind_int(st, 1, t1);
     assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_type(st, 0) == SQLITE_NULL);   // text stays NULL
+    assert(sqlite3_column_type(st, 0) == SQLITE_TEXT);   // text is '' (not NULL)
+    {
+        const char* txt = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+        assert(txt && std::string(txt).empty());
+    }
     {
         const char* model = reinterpret_cast<const char*>(sqlite3_column_text(st, 1));
         assert(model && std::string(model) == "trivial-skip-model");
@@ -1047,6 +1053,65 @@ void test_mark_turn_summarized_trivial_turn(ragger::Embedder& emb) {
     db.close();
     cleanup();
 }
+
+// reset_abandoned_turn_summaries() must delete ONLY "bad"-tagged rows
+// (poison-abandon markers, text = '') and leave legitimate trivial-turn
+// skips (any other model name, also text = '') untouched. Deleting a
+// poison-abandon row must free the turn_id to reappear in
+// unsummarized_turns() so housekeeping can retry it for real.
+void test_reset_abandoned_turn_summaries(ragger::Embedder& emb) {
+    cleanup();
+    ragger::SqliteBackend db(emb, TEMP_DB);
+
+    // A genuine trivial-turn skip: must survive the reset untouched.
+    int t_trivial = db.store_turn("hi", "hi", "test-model");
+    assert(db.mark_turn_summarized(t_trivial, "trivial-skip-model"));
+
+    // A poison-abandoned turn: tagged with the "bad" sentinel model, text
+    // NULL. This is what summarizer_service.cpp writes when a turn hits
+    // max_turn_failures.
+    int t_bad = db.store_turn(
+        "this turn kept failing to summarize before the fix landed",
+        "and this is a long enough assistant reply to not be trivial-skipped",
+        "test-model");
+    assert(db.mark_turn_summarized(t_bad, "bad"));
+    assert(db.turn_summary_exists(t_bad));
+
+    // Both turns currently have a turn_summaries row, so neither shows up
+    // as unsummarized yet.
+    {
+        auto pending = db.unsummarized_turns(0);
+        for (auto& p : pending) assert(p.turn_id != t_trivial && p.turn_id != t_bad);
+    }
+
+    int reset_count = db.reset_abandoned_turn_summaries(0);
+    assert(reset_count == 1);  // only the "bad" row, not the trivial-skip row
+
+    // The trivial-skip row must still exist, untouched.
+    assert(db.turn_summary_exists(t_trivial));
+    // The poison-abandoned row must be gone.
+    assert(!db.turn_summary_exists(t_bad));
+
+    // t_bad must now be back in the unsummarized-turns candidate set;
+    // t_trivial must NOT (it's legitimately done).
+    {
+        auto pending = db.unsummarized_turns(0);
+        bool found_bad = false, found_trivial = false;
+        for (auto& p : pending) {
+            if (p.turn_id == t_bad) found_bad = true;
+            if (p.turn_id == t_trivial) found_trivial = true;
+        }
+        assert(found_bad);
+        assert(!found_trivial);
+    }
+
+    // Re-running with nothing left to reset is a clean no-op.
+    assert(db.reset_abandoned_turn_summaries(0) == 0);
+
+    db.close();
+    cleanup();
+}
+
 
 // Summary primitives (issue #22): store_summary, update_summary_text —
 // the deterministic backbone the summarization pipeline drives.
@@ -1479,6 +1544,7 @@ int main() {
     test_turn_summary_survives_turn_deletion(emb);
     test_unsummarized_turns_excludes_summarized(emb);
     test_mark_turn_summarized_trivial_turn(emb);
+    test_reset_abandoned_turn_summaries(emb);
     test_summary_primitives(emb);
     test_episode_rollup_no_dup(emb);
     test_session_close_no_lookback_before_existing_summary(emb);

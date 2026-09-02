@@ -1,6 +1,6 @@
 // Unit tests for ragger::vector_codec — round-trip fidelity across storage
-// dtypes, version-tagged format, and legacy blob decoding. main()-based per
-// this project's test convention.
+// dtypes, offset-parameterized format, and legacy blob decoding. main()-based
+// per this project's test convention.
 
 #include "vector_codec.h"
 
@@ -23,13 +23,14 @@ static void check(bool cond, const char* what) {
     }
 }
 
-// Mean absolute error of a round-trip through dtype `t` at version `ver`.
+// Mean absolute error of a round-trip through dtype `t` with a 1-byte
+// version-tag header (offset=1), matching the legacy on-disk format.
 static float roundtrip_mae(VectorType t, const std::vector<float>& v,
                            uint8_t ver = 42) {
-    std::vector<uint8_t> blob = encode(t, v, ver);
+    std::vector<uint8_t> blob = encode(t, v, /*offset=*/1, ver);
     std::vector<float> back;
     bool ok = decode(blob.data(), static_cast<int>(blob.size()),
-                     static_cast<int>(v.size()), t, back);
+                     static_cast<int>(v.size()), t, back, /*offset=*/1);
     if (!ok || back.size() != v.size()) return 1e9f;
     float acc = 0.0f;
     for (size_t i = 0; i < v.size(); ++i) acc += std::fabs(v[i] - back[i]);
@@ -71,30 +72,30 @@ int main() {
     check(mae_f16 < mae_bf16, "f16 more accurate than bf16 for small values");
 
     // --- blob sizes (version byte + payload, int8 gets +2 for f16 scale) --
-    check(encode(VectorType::F32,  v, 0).size() == 1u + 384u * 4, "f32 blob size");
-    check(encode(VectorType::F16,  v, 0).size() == 1u + 384u * 2, "f16 blob size");
-    check(encode(VectorType::BF16, v, 0).size() == 1u + 384u * 2, "bf16 blob size");
-    check(encode(VectorType::INT8, v, 0).size() == 1u + 384u * 1 + 2u, "int8 blob size");
+    check(encode(VectorType::F32,  v, 1, 0).size() == 1u + 384u * 4, "f32 blob size");
+    check(encode(VectorType::F16,  v, 1, 0).size() == 1u + 384u * 2, "f16 blob size");
+    check(encode(VectorType::BF16, v, 1, 0).size() == 1u + 384u * 2, "bf16 blob size");
+    check(encode(VectorType::INT8, v, 1, 0).size() == 1u + 384u * 1 + 2u, "int8 blob size");
 
     // --- expected_blob_size matches actual encode output ----------------
     for (auto t : {VectorType::F32, VectorType::F16, VectorType::BF16, VectorType::INT8}) {
-        check(static_cast<int>(encode(t, v, 7).size()) == expected_blob_size(t, 384),
+        check(static_cast<int>(encode(t, v, 1, 7).size()) == expected_blob_size(t, 384, 1),
               "expected_blob_size matches encode");
     }
 
     // --- version byte is correctly stored and read ----------------------
     {
-        auto blob = encode(VectorType::F16, v, 99);
+        auto blob = encode(VectorType::F16, v, 1, 99);
         check(blob_version(blob.data(), (int)blob.size()) == 99, "version byte stored");
         // Decode with correct dtype should succeed regardless of version value.
         std::vector<float> back;
-        bool ok = decode(blob.data(), (int)blob.size(), 384, VectorType::F16, back);
+        bool ok = decode(blob.data(), (int)blob.size(), 384, VectorType::F16, back, 1);
         check(ok, "decode succeeds for version-tagged blob");
     }
 
     // --- version byte 0 works (edge case) ------------------------------
     {
-        auto blob = encode(VectorType::F16, v, 0);
+        auto blob = encode(VectorType::F16, v, 1, 0);
         check(blob_version(blob.data(), (int)blob.size()) == 0, "version 0 works");
     }
 
@@ -102,9 +103,9 @@ int main() {
     // (caller gets dtype from settings, not from the blob itself)
     {
         std::vector<float> one = {2.5f};
-        auto bf = encode(VectorType::BF16, one, 1);
+        auto bf = encode(VectorType::BF16, one, 1, 1);
         std::vector<float> back;
-        check(decode(bf.data(), (int)bf.size(), 1, VectorType::BF16, back) &&
+        check(decode(bf.data(), (int)bf.size(), 1, VectorType::BF16, back, 1) &&
               std::fabs(back[0] - 2.5f) < 1e-6f,
               "bf16 decodes correctly with dtype hint");
         // Decoding bf16 blob as f16 should fail (size matches but produces wrong answer
@@ -114,9 +115,9 @@ int main() {
 
     // --- dimension-mismatch rejection ----------------------------------
     {
-        auto blob = encode(VectorType::F16, v, 5);
+        auto blob = encode(VectorType::F16, v, 1, 5);
         std::vector<float> back;
-        bool ok = decode(blob.data(), (int)blob.size(), 128 /*wrong*/, VectorType::F16, back);
+        bool ok = decode(blob.data(), (int)blob.size(), 128 /*wrong*/, VectorType::F16, back, 1);
         check(!ok, "dim mismatch rejected");
         check(back.size() == 128 && back[0] == 0.0f, "dim mismatch -> zero vector");
     }
@@ -124,7 +125,7 @@ int main() {
     // --- null / empty ---------------------------------------------------
     {
         std::vector<float> back;
-        check(!decode(nullptr, 0, 384, VectorType::F16, back), "null blob rejected");
+        check(!decode(nullptr, 0, 384, VectorType::F16, back, 1), "null blob rejected");
         check(back.size() == 384, "null -> zero vector of expected dims");
     }
 
@@ -148,6 +149,62 @@ int main() {
         float mae = roundtrip_mae(VectorType::INT8, vn);
         std::printf("MAE  int8 unit-norm=%.6g\n", mae);
         check(mae < 5e-3f, "int8 unit-norm round-trip within tolerance");
+    }
+
+    // --- offset=0 (payload-only) encode/decode (Ragger db_version 0.15+:
+    // version tag moved out of the blob into its own embedding_version
+    // column) ------------------------------------------------------------
+    {
+        for (auto t : {VectorType::F32, VectorType::F16, VectorType::BF16, VectorType::INT8}) {
+            // expected_blob_size(t, dims, 0) is exactly expected_blob_size(t,
+            // dims, 1) minus 1 (the version byte) for every dtype.
+            check(expected_blob_size(t, 384, 0) == expected_blob_size(t, 384, 1) - 1,
+                  "offset=0 size == offset=1 size - 1");
+
+            auto payload = encode(t, v, /*offset=*/0);
+            check(static_cast<int>(payload.size()) == expected_blob_size(t, 384, 0),
+                  "offset=0 encode size matches expected_blob_size");
+
+            // offset=0 encode's bytes must equal offset=1 encode()'s bytes
+            // with the leading version byte stripped -- same encoding, just
+            // no tag.
+            auto tagged = encode(t, v, /*offset=*/1, 123);
+            check(std::vector<uint8_t>(tagged.begin() + 1, tagged.end()) == payload,
+                  "offset=0 encode matches offset=1 encode() minus version byte");
+
+            std::vector<float> back;
+            bool ok = decode(payload.data(), static_cast<int>(payload.size()),
+                             static_cast<int>(v.size()), t, back, /*offset=*/0);
+            check(ok, "offset=0 decode succeeds");
+            check(back.size() == v.size(), "offset=0 decode produces expected_dims");
+
+            // Cross-check against offset=1 decode() on the tagged blob --
+            // both must agree exactly (same payload bytes, same dequant math).
+            std::vector<float> back_tagged;
+            decode(tagged.data(), static_cast<int>(tagged.size()),
+                  static_cast<int>(v.size()), t, back_tagged, /*offset=*/1);
+            check(back == back_tagged,
+                  "offset=0 decode agrees with offset=1 decode() on the equivalent tagged blob");
+        }
+
+        // Size-mismatch rejection mirrors decode()'s behavior.
+        {
+            auto payload = encode(VectorType::F16, v, /*offset=*/0);
+            std::vector<float> back;
+            bool ok = decode(payload.data(), static_cast<int>(payload.size()),
+                             128 /*wrong*/, VectorType::F16, back, /*offset=*/0);
+            check(!ok, "offset=0 decode dim mismatch rejected");
+            check(back.size() == 128 && back[0] == 0.0f,
+                  "offset=0 decode dim mismatch -> zero vector");
+        }
+
+        // Null blob rejection.
+        {
+            std::vector<float> back;
+            check(!decode(nullptr, 0, 384, VectorType::F16, back, /*offset=*/0),
+                  "offset=0 decode null blob rejected");
+            check(back.size() == 384, "offset=0 decode null -> zero vector of expected dims");
+        }
     }
 
     if (failures == 0) std::printf("all vector_codec tests passed\n");

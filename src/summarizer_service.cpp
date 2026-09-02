@@ -139,6 +139,16 @@ void SummarizerService::enqueue_catch_up() {
         ++draft_n;
     }
 
+    // Poison-abandon retry: delete "bad"-tagged turn_summaries rows so the
+    // underlying turns fall back into unsummarized_turns()'s candidate set.
+    // Whatever caused max_turn_failures consecutive failures (inference
+    // outage, bad config) may since be fixed; this is the only path back
+    // for a turn that was permanently abandoned. Reset on this tick, picked
+    // up as ordinary L2 catch-up on the NEXT tick (unsummarized_turns() was
+    // already queried above this tick, before the reset took effect).
+    size_t reset_n = static_cast<size_t>(
+        backend->reset_abandoned_turn_summaries(catch_up_cap));
+
     // Session boundary closes: housekeeping-only trigger (no fast-path from
     // store_turn -- Reid's explicit design: summarization work spawns from
     // turns but housekeeping is what catches/retries it reliably).
@@ -178,6 +188,10 @@ void SummarizerService::enqueue_catch_up() {
 
     Diskerror::Logger::info(std::format(
         lang::MSG_SUMMARIZER_START, turn_n, draft_n, sess_close_n));
+    if (reset_n)
+        Diskerror::Logger::info(std::format(
+            "[summarizer] housekeeping reset {} poison-abandoned turn_summaries "
+            "row(s) for retry", reset_n));
     if (proj_close_n)
         Diskerror::Logger::info(std::format(
             "[summarizer] catch-up queued {} project close(s)", proj_close_n));
