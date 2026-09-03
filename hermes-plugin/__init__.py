@@ -7,10 +7,10 @@ uses stdlib urllib throughout.
 Prerequisites:
     ragger start        # bring the daemon up (install.sh sets this up)
 
-Configuration is read from ~/.ragger/settings.ini [server]:
-    port       = 8432       # HTTP port  (default: 8432)
-    bind       =            # bind address (default: 127.0.0.1)
-    auth_token =            # bearer token (optional; leave unset for localhost)
+Configuration is resolved live from the running daemon over its
+pre-authenticated Unix socket (GET /config), falling back to the DB settings
+table when the daemon is down, then to built-in defaults. No config file is
+read — a gateway restart re-learns host/port/socket/auto_recall automatically.
 
 To activate in Hermes, set in ~/.hermes/config.yaml:
     memory:
@@ -26,7 +26,6 @@ import http.client
 import socket
 import urllib.error
 import urllib.request
-from configparser import ConfigParser
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -60,55 +59,122 @@ class _UnixSocketHTTPConnection(http.client.HTTPConnection):
 # Config reader
 # ---------------------------------------------------------------------------
 
+def _read_token() -> str:
+    """Read the daemon bearer token from ~/.ragger/token (empty if absent).
+
+    Needed only for TCP requests; the Unix socket is pre-authenticated.
+    """
+    try:
+        return (Path.home() / ".ragger" / "token").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _config_from_daemon(socket_path: str, token: str) -> Optional[dict]:
+    """Fetch live settings from a running daemon over the Unix socket.
+
+    The socket is deterministic (~/.ragger/ragger.sock) and pre-authenticated,
+    so this needs no prior knowledge of host/port/token — it is the bootstrap
+    channel an agent-framework gateway can hit on restart to learn Ragger's
+    live config instead of reading a file. Returns None if the daemon is down.
+    """
+    if not Path(socket_path).exists():
+        return None
+    conn = _UnixSocketHTTPConnection(socket_path, timeout=2.0)
+    try:
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        conn.request("GET", "/config", headers=headers)
+        resp = conn.getresponse()
+        if resp.status >= 400:
+            return None
+        entries = json.loads(resp.read()).get("config", [])
+    except Exception as exc:
+        logger.debug("Ragger GET /config (socket): %s", exc)
+        return None
+    finally:
+        conn.close()
+    return {e["key"]: e.get("value", "") for e in entries if "key" in e}
+
+
+def _config_from_db(db_path: Path) -> dict:
+    """Read the settings table directly when the daemon is down.
+
+    Offline fallback: the DB is the source of truth the daemon itself overlays,
+    so reading it gives the same effective values without a running server.
+    Missing rows simply fall through to built-in defaults. Never raises.
+    """
+    out: dict = {}
+    if not db_path.exists():
+        return out
+    try:
+        import sqlite3
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        try:
+            for key, value in con.execute("SELECT key, value FROM settings"):
+                out[key] = value
+        finally:
+            con.close()
+    except Exception as exc:
+        logger.debug("Ragger settings DB read failed: %s", exc)
+    return out
+
+
+def _as_bool(value: str, default: bool) -> bool:
+    v = str(value).split("#")[0].strip().lower()
+    if v in ("true", "1", "yes", "on"):
+        return True
+    if v in ("false", "0", "no", "off"):
+        return False
+    return default
+
+
 def _load_ragger_config() -> dict:
-    """Read host/port/auth_token/auto_recall from ~/.ragger/settings.ini.
+    """Resolve the plugin's connection + behavior settings from the daemon.
 
-    auto_recall (bool, default True) gates the *recall/injection* side only
-    (queue_prefetch/prefetch → the <memory-context> block stuffed into every
-    prompt). It never touches sync_turn/post_turn_finalized — turn capture
-    stays always-on regardless of this setting, by design (Reid: "ragger-
-    memory must always be capturing turns").
+    Source of truth is the running daemon, queried over the deterministic,
+    pre-authenticated Unix socket (GET /config). This replaces the old
+    settings.ini reader: an agent-framework gateway that restarts can re-learn
+    Ragger's live config (host/port/socket/auto_recall) with no config file.
 
-    Ragger now defaults to a Unix domain socket at <ragger_base>/ragger.sock
-    (settings.ini [server] socket_enable=true, the default since the
-    --ragger-base refactor). TCP (host/port, gated by [server] bind=) is now
-    opt-in. Prefer the socket when socket_enable is true; only fall back to
-    TCP when the server was explicitly configured for it (bind= set).
+    Resolution order per value:
+      1. Live daemon over the socket (GET /config)
+      2. The DB settings table read directly (daemon down)
+      3. Built-in defaults below
+
+    The bearer token still comes from ~/.ragger/token (the socket path is
+    pre-authed, so bootstrapping needs no token; token is for later TCP use).
+
+    auto_recall gates the recall/injection side only (prefetch → the
+    <memory-context> block). It never gates turn capture, which is always-on.
     """
     ragger_base = Path.home() / ".ragger"
+    socket_path = str(ragger_base / "ragger.sock")
+    token = _read_token()
+
     cfg = {
         "host": "127.0.0.1",
         "port": "8432",
-        "auth_token": "",
+        "auth_token": token,
         "auto_recall": True,
         "socket_enable": True,
-        "socket_path": str(ragger_base / "ragger.sock"),
+        "socket_path": socket_path,
     }
-    cfg_path = ragger_base / "settings.ini"
-    if cfg_path.exists():
-        parser = ConfigParser()
-        try:
-            parser.read(cfg_path, encoding="utf-8")
-            if parser.has_section("server"):
-                srv = parser["server"]
-                raw_port = srv.get("port", cfg["port"]).split("#")[0].strip()
-                if raw_port:
-                    cfg["port"] = raw_port
-                raw_bind = srv.get("bind", "").split("#")[0].strip()
-                if raw_bind and raw_bind != "0.0.0.0":
-                    cfg["host"] = raw_bind
-                raw_token = srv.get("auth_token", "").split("#")[0].strip()
-                cfg["auth_token"] = raw_token
-                raw_recall = srv.get("auto_recall", "").split("#")[0].strip().lower()
-                if raw_recall in ("false", "0", "no", "off"):
-                    cfg["auto_recall"] = False
-                raw_socket_enable = srv.get("socket_enable", "").split("#")[0].strip().lower()
-                if raw_socket_enable in ("false", "0", "no", "off"):
-                    cfg["socket_enable"] = False
-                elif raw_socket_enable in ("true", "1", "yes", "on"):
-                    cfg["socket_enable"] = True
-        except Exception as exc:
-            logger.debug("Could not parse ~/.ragger/settings.ini: %s", exc)
+
+    # Prefer the live daemon; fall back to the DB when it is down.
+    settings = _config_from_daemon(socket_path, token)
+    if settings is None:
+        settings = _config_from_db(ragger_base / "memories.db")
+
+    if settings:
+        raw_port = str(settings.get("port", "")).split("#")[0].strip()
+        if raw_port:
+            cfg["port"] = raw_port
+        raw_bind = str(settings.get("bind", "")).split("#")[0].strip()
+        if raw_bind and raw_bind != "0.0.0.0":
+            cfg["host"] = raw_bind
+        cfg["auto_recall"] = _as_bool(settings.get("auto_recall", ""), True)
+        cfg["socket_enable"] = _as_bool(settings.get("socket_enable", ""), True)
+
     return cfg
 
 
