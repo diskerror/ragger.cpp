@@ -48,7 +48,7 @@ std::string Config::resolved_db_path() const {
 }
 
 std::string Config::resolved_model_dir() const {
-    return ragger_base_dir() + "/models/" + resolve_model(embedding_model);
+    return ragger_base_dir() + "/models/" + embedding_model;
 }
 
 std::string Config::resolved_recipes_dir() const {
@@ -81,13 +81,6 @@ std::string Config::resolved_log_file_path() const {
 
 std::string Config::resolved_socket_path() const {
     return ragger_base_dir() + "/ragger.sock";
-}
-
-std::string Config::resolve_model(const std::string& name) const {
-    // [models] aliasing removed — pass-through kept so call sites (embedding
-    // dir resolution, summarizer model) don't need to change if aliasing is
-    // reintroduced later.
-    return name;
 }
 
 // -----------------------------------------------------------------------

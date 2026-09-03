@@ -137,7 +137,7 @@ class RaggerConfig:
     @property
     def llm_model(self) -> str:
         # No alias resolution: the [models] aliasing section was removed from
-        # Ragger, and Config::resolve_model() is a pass-through.
+        # Ragger, and model names are already stored canonically (provider/model).
         return self._get("summarizer_model").strip()
 
     # Retained so callers that distinguished the raw value keep working; with

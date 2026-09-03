@@ -120,7 +120,7 @@ InferenceClient InferenceClient::from_config(const Config& cfg) {
 
     InferenceClient client(endpoints, cfg.inference_model, cfg.inference_max_tokens);
     client.memory_model = cfg.summarizer_model.empty()
-                              ? client.model : cfg.resolve_model(cfg.summarizer_model);
+                              ? client.model : cfg.summarizer_model;
     return client;
 }
 

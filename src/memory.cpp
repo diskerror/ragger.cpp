@@ -73,7 +73,7 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     } catch (const std::exception& e) {
         Diskerror::Logger::critical(std::format(
             lang::ERR_EMBED_MODEL_UNUSABLE,
-            config().resolve_model(config().embedding_model),
+            config().embedding_model,
             config().resolved_model_dir(), e.what()));
         embedder_ = std::make_unique<Embedder>();   // disabled
         embeddings_degraded_ = true;
@@ -103,7 +103,7 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     //                                          re-encoding (so an aborted rebuild
     //                                          leaves settings≠config and the
     //                                          guard still catches it next time).
-    const std::string current_model = config().resolve_model(config().embedding_model);
+    const std::string current_model = config().embedding_model;
     const std::string current_vtype =
         vector_codec::canonical(config().embedding_vector_type);
     const std::string current_dims = std::to_string(config().embedding_dimensions);
@@ -352,7 +352,7 @@ RaggerMemory::EmbeddingStatus RaggerMemory::embedding_status() {
     EmbeddingStatus s;
     // Current = what the stored vectors are (drift-guard settings keys).
     s.current_model = user_store_->get_setting("embedding_model")
-                          .value_or(config().resolve_model(config().embedding_model));
+                          .value_or(config().embedding_model);
     s.current_vtype = user_store_->get_setting("vector_type")
                           .value_or(config().embedding_vector_type);
     s.current_dims  = std::stoi(user_store_->get_setting("dimensions")
@@ -361,7 +361,7 @@ RaggerMemory::EmbeddingStatus RaggerMemory::embedding_status() {
     // Desired = staged config target (seeded from current when unset).
     s.desired_model = config().desired_embedding_model.empty()
                           ? s.current_model
-                          : config().resolve_model(config().desired_embedding_model);
+                          : config().desired_embedding_model;
     s.desired_vtype = config().desired_embedding_vector_type.empty()
                           ? s.current_vtype : config().desired_embedding_vector_type;
     s.desired_dims  = config().desired_embedding_dimensions == 0
@@ -384,7 +384,7 @@ bool RaggerMemory::embeddings_unavailable() const {
 bool RaggerMemory::try_recover_embeddings() {
     if (!embeddings_degraded_) return false;  // nothing to recover
 
-    const std::string current_model = config().resolve_model(config().embedding_model);
+    const std::string current_model = config().embedding_model;
     const std::string current_vtype =
         vector_codec::canonical(config().embedding_vector_type);
     const std::string current_dims = std::to_string(config().embedding_dimensions);
@@ -502,7 +502,7 @@ int RaggerMemory::update_embeddings() {
                 ? config().embedding_model
                 : config().desired_embedding_model;
         const std::string desired_model_dir =
-            ragger_base_dir() + "/models/" + config().resolve_model(desired_model_name);
+            ragger_base_dir() + "/models/" + desired_model_name;
         const std::string desired_engine =
             config().desired_embedding_engine.empty()
                 ? config().embedding_engine
@@ -558,15 +558,16 @@ int RaggerMemory::update_embeddings() {
         // degrades search the same way but is also actionable: housekeeping
         // knows to finish the job instead of waiting for a human.
         user_store_->set_setting("reembed_repair_pending", "true");
-        user_store_->set_setting("embedding_model", config().resolve_model(desired_model_name));
+        user_store_->set_setting("embedding_model", desired_model_name);
         user_store_->set_setting("vector_type", vtype);
         user_store_->set_setting("dimensions", std::to_string(dims));
-        // resolve_model() on both sides: the settings table and the live
-        // config must record the identity in the same form, or the startup
-        // drift guard compares two spellings of the same model and degrades.
-        // (It is a pass-through today — see config.cpp — but the guard reads
-        // resolve_model(config().embedding_model), so keep them symmetric.)
-        mutable_config().embedding_model = config().resolve_model(desired_model_name);
+        // Write the same identity to both the settings table and the live
+        // config: the startup drift guard compares the stored embedding_model
+        // against the live one, and if they record the same model in different
+        // spellings it degrades. Models are stored canonically (provider/model,
+        // LM Studio-style) under base_dir/models, so desired_model_name is
+        // already the canonical form — just keep both sides symmetric.
+        mutable_config().embedding_model = desired_model_name;
         mutable_config().embedding_vector_type = vtype;
         mutable_config().embedding_dimensions = dims;
         mutable_config().embedding_engine = desired_engine;
@@ -579,7 +580,7 @@ int RaggerMemory::update_embeddings() {
         // info for anyone who turns the level up.
         Diskerror::Logger::warn(std::format(
             lang::MSG_REEMBED_STARTED,
-            config().resolve_model(desired_model_name), desired_engine));
+            desired_model_name, desired_engine));
 
         int count = backend_->rebuild_embeddings(active, /*progress=*/false);
 
@@ -601,7 +602,7 @@ int RaggerMemory::update_embeddings() {
         user_store_->set_setting("reembedding_pid", "");
         Diskerror::Logger::warn(std::format(
             lang::MSG_REEMBED_FINISHED, count,
-            config().resolve_model(desired_model_name), vtype, dims));
+            desired_model_name, vtype, dims));
         return count;
     } catch (...) {
         // Only unwind the embedder if we never promoted. Once promoted, the

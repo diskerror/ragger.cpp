@@ -241,9 +241,6 @@ struct Config {
     std::string resolved_agent_instructions_path() const;
     std::string resolved_log_file_path() const;
     std::string resolved_socket_path() const;
-
-    /// Resolve a model name: check aliases, prepend model_dir for .gguf files.
-    std::string resolve_model(const std::string& name) const;
 };
 
 /// Expand a leading ~ to the real $HOME in a path string. This is for

@@ -1362,7 +1362,7 @@ int main(int argc, char **argv) {
             // degraded-mode / recovery messages.
             Diskerror::Logger::info(std::format(
                 "rebuild-embeddings started: {} row(s), model '{}', {} {}-dim",
-                total_count, cfg.resolve_model(cfg.embedding_model),
+                total_count, cfg.embedding_model,
                 ragger::vector_codec::canonical(cfg.embedding_vector_type),
                 cfg.embedding_dimensions));
             ragger::RaggerMemory memory(db_path,
@@ -1370,7 +1370,7 @@ int main(int argc, char **argv) {
             int count = memory.rebuild_embeddings();
             ragger::UserStore settings_store(db_path);
             settings_store.set_setting(
-                "embedding_model", cfg.resolve_model(cfg.embedding_model));
+                "embedding_model", cfg.embedding_model);
             settings_store.set_setting(
                 "vector_type", ragger::vector_codec::canonical(cfg.embedding_vector_type));
             settings_store.set_setting(
