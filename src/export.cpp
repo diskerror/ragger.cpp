@@ -58,6 +58,20 @@ static bool is_internal_table(const std::string& name) {
     return name.find("_fts") != std::string::npos;
 }
 
+// Advance a read cursor one row. Returns true on SQLITE_ROW, false on
+// SQLITE_DONE, and throws on a genuine mid-scan error (SQLITE_ERROR/BUSY/
+// ABORT). The bare `sqlite3_step(...) == SQLITE_ROW` idiom collapses an error
+// into the same `false` as end-of-data, so a scan that dies partway (disk I/O
+// error, lock) exits cleanly and the dump is silently truncated on disk with
+// no error reported. This makes that failure loud.
+static bool export_step(sqlite3_stmt* stmt, const std::string& what) {
+    int rc = sqlite3_step(stmt);
+    if (rc == SQLITE_ROW)  return true;
+    if (rc == SQLITE_DONE) return false;
+    throw std::runtime_error(std::format(lang::ERR_EXPORT_SCAN_FAILED, what,
+        rc, sqlite3_errmsg(sqlite3_db_handle(stmt))));
+}
+
 // -- public API -------------------------------------------------------------
 
 std::vector<std::string> export_list_tables(const std::string& db_path) {
@@ -76,7 +90,7 @@ std::vector<std::string> export_list_tables(const std::string& db_path) {
         "SELECT name FROM sqlite_master WHERE type='table' "
         "AND name NOT LIKE 'sqlite_%' ORDER BY name",
         -1, &stmt, nullptr);
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
+    while (export_step(stmt, "sqlite_master")) {
         std::string name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
         if (!is_internal_table(name))
             tables.push_back(name);
@@ -113,7 +127,7 @@ int export_sql(std::ostream& out,
             "  WHEN 'trigger' THEN 2 "
             "  ELSE 3 END, name",
             -1, &stmt, nullptr);
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
+        while (export_step(stmt, "schema (sqlite_master)")) {
             SchemaObj obj;
             obj.type     = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
             obj.name     = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
@@ -160,7 +174,7 @@ int export_sql(std::ostream& out,
             std::string pragma = "PRAGMA table_info(" + obj.name + ")";
             sqlite3_stmt* info = nullptr;
             sqlite3_prepare_v2(db, pragma.c_str(), -1, &info, nullptr);
-            while (sqlite3_step(info) == SQLITE_ROW) {
+            while (export_step(info, "PRAGMA table_info(" + obj.name + ")")) {
                 ColInfo ci;
                 ci.name = reinterpret_cast<const char*>(sqlite3_column_text(info, 1));
                 all_cols.push_back(ci);
@@ -183,7 +197,7 @@ int export_sql(std::ostream& out,
         sqlite3_stmt* data = nullptr;
         sqlite3_prepare_v2(db, select.c_str(), -1, &data, nullptr);
 
-        while (sqlite3_step(data) == SQLITE_ROW) {
+        while (export_step(data, "table data (" + obj.name + ")")) {
             out << "INSERT INTO " << obj.name << " (";
             for (size_t j = 0; j < col_names.size(); ++j) {
                 if (j > 0) out << ", ";

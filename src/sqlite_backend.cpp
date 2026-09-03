@@ -3349,31 +3349,56 @@ struct SqliteBackend::Impl {
         }
 
         int done = 0;
+        constexpr int kBatch = 500;
+        struct Row { int id; std::string text; };
         for (auto& t : tables) {
+            // Key-paginated read-then-write, mirroring embed_tables(): walking a
+            // SELECT while UPDATE-ing the same table on the same connection is
+            // undefined in SQLite (the cursor can be invalidated mid-scan and
+            // sqlite3_step returns an error the old `while (step())` read as
+            // end-of-data — a silent partial rebuild). Read a bounded batch,
+            // finalize the SELECT, then write; step_checked() makes a genuine
+            // mid-scan failure throw instead of masquerading as "done".
+            std::string base_where = only_missing ? " WHERE phon IS NULL AND " : " WHERE ";
             std::string sel = t.extra_col
-                ? std::format("SELECT {} AS id, {}, {} FROM {}{}",
-                              t.id_col, t.text_col, t.extra_col, t.table, where)
-                : std::format("SELECT {} AS id, {} AS text FROM {}{}",
-                              t.id_col, t.text_col, t.table, where);
+                ? std::format("SELECT {} AS id, {}, {} FROM {}{}{} > ? ORDER BY {} LIMIT {}",
+                              t.id_col, t.text_col, t.extra_col, t.table,
+                              base_where, t.id_col, t.id_col, kBatch)
+                : std::format("SELECT {} AS id, {} AS text FROM {}{}{} > ? ORDER BY {} LIMIT {}",
+                              t.id_col, t.text_col, t.table,
+                              base_where, t.id_col, t.id_col, kBatch);
             std::string upd = std::format("UPDATE {} SET phon = ? WHERE {} = ?",
                                           t.table, t.id_col);
-            Stmt select_stmt(db, sel);
-            while (select_stmt.step()) {
-                int id = select_stmt.column_int(0);
-                std::string text = select_stmt.column_text(1);
-                if (t.extra_col) {
-                    std::string a = select_stmt.column_text(2);
-                    if (!a.empty()) text += " " + a;
+            int last_id = 0;
+            for (;;) {
+                std::vector<Row> batch;
+                batch.reserve(kBatch);
+                {
+                    Stmt select_stmt(db, sel);
+                    select_stmt.bind(1, last_id);
+                    while (select_stmt.step_checked()) {
+                        int id = select_stmt.column_int(0);
+                        last_id = id;
+                        std::string text = select_stmt.column_text(1);
+                        if (t.extra_col) {
+                            std::string a = select_stmt.column_text(2);
+                            if (!a.empty()) text += " " + a;
+                        }
+                        batch.push_back({id, std::move(text)});
+                    }
                 }
-                Stmt update(db, upd);
-                update.bind(1, phonize(text));
-                update.bind(2, id);
-                update.step();
-                ++done;
-                if (progress) {
-                    std::cout << std::format("\rComputing phonetic codes: {}/{}",
-                                             done, total_count);
-                    std::cout.flush();
+                if (batch.empty()) break;
+                for (auto& row : batch) {
+                    Stmt update(db, upd);
+                    update.bind(1, phonize(row.text));
+                    update.bind(2, row.id);
+                    update.exec();
+                    ++done;
+                    if (progress) {
+                        std::cout << std::format("\rComputing phonetic codes: {}/{}",
+                                                 done, total_count);
+                        std::cout.flush();
+                    }
                 }
             }
         }

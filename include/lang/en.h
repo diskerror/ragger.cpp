@@ -239,6 +239,7 @@ constexpr const char* ERR_CONFIG_NOT_INIT     = "Config not initialized — call
 constexpr const char* ERR_SQLITE_OPEN         = "SQLite open failed: {}";
 constexpr const char* ERR_SQL                 = "SQL error: {}";
 constexpr const char* ERR_EMBED_UPDATE_FAILED = "embed_tables: UPDATE {} id {} failed: {}";
+constexpr const char* ERR_EXPORT_SCAN_FAILED  = "export: scan of {} failed mid-read (rc={}): {}";
 constexpr const char* ERR_STORE_FAILED        = "Failed to store: {}";
 
 // --- Errors: embedder ---
