@@ -5,7 +5,7 @@ semantic memory with hybrid vector + BM25 search. No pip dependencies —
 uses stdlib urllib throughout.
 
 Prerequisites:
-    ragger start        # bring the daemon up (install.sh sets this up)
+    ragger start        # bring the daemon up (install-bin.sh sets this up)
 
 Configuration is resolved live from the running daemon over its
 pre-authenticated Unix socket (GET /config), falling back to the DB settings

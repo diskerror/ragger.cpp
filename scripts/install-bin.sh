@@ -1,7 +1,7 @@
 #!/bin/bash
-# install.sh — Install Ragger for the current user.
+# install-bin.sh — Install the Ragger binary + daemon for the current user.
 #
-# Usage: ./install.sh [--stats|--no-stats]
+# Usage: ./install-bin.sh [--stats|--no-stats]
 #   --stats     install the instrumented binary from build-stats/
 #   --no-stats  install the default binary from build/ (default)
 #
@@ -33,7 +33,7 @@ warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 fail() { echo -e "${RED}[!]${NC} $*" >&2; exit 1; }
 
 if [ "$(id -u)" -eq 0 ]; then
-    fail "Do NOT run install.sh as root. It installs into your own ~/.ragger/."
+    fail "Do NOT run install-bin.sh as root. It installs into your own ~/.ragger/."
 fi
 
 cd "$(dirname "$0")/.."
@@ -163,10 +163,10 @@ download_model() {
 
     for f in config.json special_tokens_map.json tokenizer_config.json tokenizer.json vocab.txt; do
         curl -sSLfo "$dest/$f" "$hf_base/$f" || \
-            warn "  failed: $f (rerun install.sh to retry)"
+            warn "  failed: $f (rerun install-bin.sh to retry)"
     done
     curl -#Lfo "$onnx_local" "$onnx_remote" || \
-        warn "  failed: model.onnx (rerun install.sh once you have a network)"
+        warn "  failed: model.onnx (rerun install-bin.sh once you have a network)"
 }
 
 download_model "sentence-transformers/all-MiniLM-L6-v2" \

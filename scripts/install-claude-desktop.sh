@@ -6,7 +6,7 @@
 #   ./scripts/install-claude-desktop.sh              # install / update
 #   ./scripts/install-claude-desktop.sh --uninstall  # remove the ragger entry
 #
-# Run this AFTER install.sh. Requires: ragger already installed
+# Run this AFTER install-bin.sh. Requires: ragger already installed
 # (~/.local/bin/ragger).
 #
 # What install does:
@@ -91,7 +91,7 @@ if [ ! -x "$RAGGER_BIN" ]; then
     RAGGER_BIN="$(command -v ragger || true)"
 fi
 [ -n "$RAGGER_BIN" ] && [ -x "$RAGGER_BIN" ] || \
-    fail "ragger binary not found — run ./scripts/install.sh first."
+    fail "ragger binary not found — run ./scripts/install-bin.sh first."
 RAGGER_BIN="$(cd "$(dirname "$RAGGER_BIN")" && pwd)/$(basename "$RAGGER_BIN")"
 
 echo ""

@@ -3,7 +3,7 @@
 #
 # Usage: ./install-openclaw.sh
 #
-# Run this AFTER install.sh if you have OpenClaw installed.
+# Run this AFTER install-bin.sh if you have OpenClaw installed.
 # Requires: ragger already installed to ~/.local/bin/ragger
 #
 # What this does:

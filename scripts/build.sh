@@ -138,4 +138,4 @@ make -j"$JOBS"
 
 echo ""
 echo "✓ Built: $(pwd)/ragger"
-echo "  Install with: ./scripts/install.sh"
+echo "  Install with: ./scripts/install-bin.sh"

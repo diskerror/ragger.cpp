@@ -5,7 +5,7 @@
 #   ./scripts/install-hermes.sh              # install / update
 #   ./scripts/install-hermes.sh --uninstall  # remove plugin and revert config
 #
-# Run this AFTER install.sh if you have Hermes Agent installed.
+# Run this AFTER install-bin.sh if you have Hermes Agent installed.
 # Requires: ragger already installed (~/.local/bin/ragger)
 #
 # What install does:
@@ -127,7 +127,7 @@ if [ ! -d "$PLUGIN_SRC" ]; then
 fi
 
 if [ ! -f "$HOME/.local/bin/ragger" ] && ! command -v ragger >/dev/null 2>&1; then
-    warn "ragger binary not found on PATH — install Ragger first (./scripts/install.sh)."
+    warn "ragger binary not found on PATH — install Ragger first (./scripts/install-bin.sh)."
     warn "Continuing anyway; plugin will be inactive until ragger is installed."
 fi
 

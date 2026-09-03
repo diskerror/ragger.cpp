@@ -27,7 +27,7 @@ namespace fs = std::filesystem;
 namespace ragger {
 
 // Wrappers around launchctl (macOS) or systemctl --user (Linux) that
-// operate on the user-level service installed by install.sh.
+// operate on the user-level service installed by install-bin.sh.
 // The daemon process itself is still `ragger serve` (what launchd/systemd run).
 //
 // Design: idempotent + friendly.

@@ -5,7 +5,7 @@
 #   ./scripts/install-claude-code.sh              # install / update
 #   ./scripts/install-claude-code.sh --uninstall  # remove the integration
 #
-# Run AFTER install.sh. Requires: ragger binary at ~/.local/bin/ragger.
+# Run AFTER install-bin.sh. Requires: ragger binary at ~/.local/bin/ragger.
 #
 # What install does:
 #   1. Installs docs/agent-memory-instructions.md → ~/.ragger/ (only if
@@ -131,7 +131,7 @@ if [ ! -x "$RAGGER_BIN" ]; then
     RAGGER_BIN="$(command -v ragger || true)"
 fi
 [ -n "$RAGGER_BIN" ] && [ -x "$RAGGER_BIN" ] || \
-    fail "ragger binary not found — run ./scripts/install.sh first."
+    fail "ragger binary not found — run ./scripts/install-bin.sh first."
 RAGGER_BIN="$(cd "$(dirname "$RAGGER_BIN")" && pwd)/$(basename "$RAGGER_BIN")"
 
 echo ""

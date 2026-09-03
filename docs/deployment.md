@@ -45,11 +45,11 @@ filesystem layer.
 ```bash
 cd /path/to/ragger.cpp
 ./build.sh           # dependency check + cmake build
-./install.sh         # copy binary, write LaunchAgent / user systemd unit, update PATH
+./install-bin.sh         # copy binary, write LaunchAgent / user systemd unit, update PATH
 ragger start         # bring the daemon up
 ```
 
-`install.sh`:
+`install-bin.sh`:
 
 - Creates `~/.local/bin` and `~/.ragger/{models,formats,recipes,www}` if missing
 - Seeds config from the compiled-in defaults; runtime overrides live in the
@@ -100,7 +100,7 @@ the daemon running across logout / reboot:
 sudo loginctl enable-linger $USER
 ```
 
-This is the only time `install.sh` asks you to touch `sudo` on Linux,
+This is the only time `install-bin.sh` asks you to touch `sudo` on Linux,
 and it's optional.
 
 ### Logs
@@ -153,21 +153,21 @@ cmake --build build --parallel
 codesigns on macOS, truncates logs, starts the daemon, and
 health-checks it over the unix socket or `127.0.0.1:8432`. It does
 **not** touch config, schema, or the install layout — it's a fast
-binary swap only. Run `install.sh` again if the service unit or PATH
+binary swap only. Run `install-bin.sh` again if the service unit or PATH
 entry needs updating.
 
 ## Switching Between C++ and Python Versions
 
 Both versions use the same database format, config file, HTTP API,
 and default port (8432). You can swap between them without data
-migration — re-run the other version's `install.sh` and it overwrites
+migration — re-run the other version's `install-bin.sh` and it overwrites
 `~/.local/bin/ragger` with the new binary.
 
 If you want both side by side:
 
 ```bash
 cp ~/.local/bin/ragger ~/.local/bin/ragger-cpp   # back up the current
-# run the other install.sh, then:
+# run the other install-bin.sh, then:
 mv ~/.local/bin/ragger ~/.local/bin/ragger-py
 mv ~/.local/bin/ragger-cpp ~/.local/bin/ragger
 ```

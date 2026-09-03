@@ -14,7 +14,7 @@ First run downloads the embedding model (~90 MB) into
 ```bash
 cd /path/to/ragger.cpp
 ./scripts/build.sh        # check deps, build
-./scripts/install.sh      # copy binary, write user service unit, install recipes
+./scripts/install-bin.sh      # copy binary, write user service unit, install recipes
 ```
 
 No `sudo`. The binary lands in `~/.local/bin` (already on `PATH` in
@@ -31,7 +31,7 @@ most modern shells); everything else under `~/.ragger/`:
 | Log                  | `~/.ragger/logs/activity.log`    |
 | Bearer token         | `~/.ragger/token`           |
 
-`install.sh` is idempotent — re-run it after any rebuild to refresh the
+`install-bin.sh` is idempotent — re-run it after any rebuild to refresh the
 binary, service unit, and shipped recipes. Your config, database, and
 custom recipe files are preserved.
 
@@ -68,7 +68,7 @@ nlohmann/json. ONNX Runtime is auto-downloaded at configure time for
 your platform; drop a `vendor/onnxruntime/` override in place for
 offline builds.
 
-`scripts/install.sh` downloads the all-MiniLM-L6-v2 embedding model on
+`scripts/install-bin.sh` downloads the all-MiniLM-L6-v2 embedding model on
 first run (~90 MB). Re-run the script to retry if the network was down.
 
 ## First run
@@ -126,9 +126,9 @@ agent.
 
 ## Embedding model
 
-The model is downloaded once by `install.sh` (~90 MB); re-run the
+The model is downloaded once by `install-bin.sh` (~90 MB); re-run the
 script if the network was down the first time. There's no separate
-CLI command to fetch it — `install.sh` is the mechanism.
+CLI command to fetch it — `install-bin.sh` is the mechanism.
 
 Files land in `~/.ragger/models/all-MiniLM-L6-v2/`.
 

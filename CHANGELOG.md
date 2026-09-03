@@ -65,7 +65,7 @@ needs one.
 - **`build.sh`** sources `~/.cargo/env` if present and checks
   `cargo`/`rustc` up front — no more silent failures mid-build at
   the Rust step.
-- **`install.sh`** downloads the all-MiniLM-L6-v2 embedding model
+- **`install-bin.sh`** downloads the all-MiniLM-L6-v2 embedding model
   (~90 MB) into `~/.ragger/models/` on first run; idempotent.
 - README + getting-started rewritten with real package-manager
   commands for MacPorts, Homebrew, apt, and dnf, plus the rustup

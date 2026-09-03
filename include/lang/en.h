@@ -152,7 +152,7 @@ constexpr const char* CLI_EMBEDDINGS          = "Include embedding column in exp
 
 // --- Daemon control ---
 constexpr const char* ERR_HOME_NOT_FOUND      = "Error: cannot resolve $HOME";
-constexpr const char* ERR_PLIST_NOT_FOUND     = "Error: {} not found. Run ./install.sh first.";
+constexpr const char* ERR_PLIST_NOT_FOUND     = "Error: {} not found. Run ./install-bin.sh first.";
 constexpr const char* ERR_LAUNCHCTL_KICKSTART = "Error: launchctl kickstart failed";
 constexpr const char* ERR_LAUNCHCTL_BOOTSTRAP = "Error: launchctl bootstrap failed";
 constexpr const char* ERR_LAUNCHCTL_BOOTOUT   = "Error: launchctl bootout failed";

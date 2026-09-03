@@ -5,7 +5,7 @@ IDEs, and custom applications.
 
 ## Starting the Server
 
-Install the user daemon once (`./install.sh` writes the LaunchAgent /
+Install the user daemon once (`./install-bin.sh` writes the LaunchAgent /
 systemd-user unit), then control it with:
 
 ```bash

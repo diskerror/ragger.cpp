@@ -70,11 +70,11 @@ Per-user, no sudo (binary → `~/.local/bin`, data → `~/.ragger/`):
 
 ```bash
 ./scripts/build.sh        # check deps, build
-./scripts/install.sh      # install binary + user service unit + recipes
+./scripts/install-bin.sh      # install binary + user service unit + recipes
 ragger start              # start the daemon
 ```
 
-`install.sh` is idempotent — re-run after a rebuild to refresh the
+`install-bin.sh` is idempotent — re-run after a rebuild to refresh the
 binary, the service unit, and the shipped recipes. Your config, database,
 and any custom recipe files are preserved.
 
@@ -128,7 +128,7 @@ Ragger supports two embedding engines, switchable from the dashboard or
 `ragger config set` (`embedding_engine` / `desired_embedding_engine`):
 
 - **internal** — ONNX models on disk under `~/.ragger/models/<provider>/<model>/`,
-  e.g. `sentence-transformers/all-MiniLM-L6-v2/`. `install.sh` downloads a
+  e.g. `sentence-transformers/all-MiniLM-L6-v2/`. `install-bin.sh` downloads a
   starter set from HuggingFace; the dashboard's Embedding tab can search
   HuggingFace and download additional ONNX models directly.
 - **external** — any OpenAI-compatible `/v1/embeddings` endpoint. The
@@ -180,7 +180,7 @@ Then:
 
 ```bash
 ./scripts/build.sh          # check deps, configure, build
-./scripts/install.sh        # places binary + downloads starter ONNX embedding models
+./scripts/install-bin.sh        # places binary + downloads starter ONNX embedding models
 ```
 
 ### Dev build (local c_lib)
