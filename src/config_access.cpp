@@ -177,6 +177,61 @@ std::optional<std::string> get_config_value(const Config& cfg, std::string_view 
     return std::nullopt;
 }
 
+nlohmann::json config_entry_json(const lang::ConfigMeta& m,
+                                 const std::string& value) {
+    const char* type = "string";
+    switch (m.type) {
+        case CfgType::Boolean: type = "boolean"; break;
+        case CfgType::Integer: type = "integer"; break;
+        case CfgType::Float:   type = "float";   break;
+        case CfgType::Enum:    type = "enum";    break;
+        case CfgType::String:  type = "string";  break;
+        case CfgType::Path:    type = "path";    break;
+        case CfgType::Text:    type = "text";    break;
+    }
+    const char* edit = "live";
+    switch (m.edit) {
+        case CfgEdit::Live:            edit = "live";    break;
+        case CfgEdit::RestartRequired: edit = "restart"; break;
+        case CfgEdit::RebuildRequired: edit = "rebuild"; break;
+        case CfgEdit::Locked:          edit = "locked";  break;
+    }
+    nlohmann::json j = {
+        {"key",     std::string(m.key)},
+        {"section", std::string(m.section)},
+        {"label",   std::string(m.pretty)},
+        {"type",    type},
+        {"edit",    edit},
+        {"default", std::string(m.default_value)},
+        {"help",    std::string(m.help)},
+        {"value",   value},
+    };
+    if (m.type == CfgType::Enum) {
+        nlohmann::json opts = nlohmann::json::array();
+        std::string_view o = m.options;
+        size_t pos = 0;
+        while (pos <= o.size()) {
+            size_t c = o.find(',', pos);
+            std::string_view tok = (c == std::string_view::npos)
+                ? o.substr(pos) : o.substr(pos, c - pos);
+            if (!tok.empty()) opts.push_back(std::string(tok));
+            if (c == std::string_view::npos) break;
+            pos = c + 1;
+        }
+        j["options"] = opts;
+    }
+    return j;
+}
+
+nlohmann::json build_config_json(const Config& cfg) {
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& m : lang::config_schema()) {
+        auto v = get_config_value(cfg, m.key);
+        arr.push_back(config_entry_json(m, v.value_or("")));
+    }
+    return nlohmann::json{{"config", arr}};
+}
+
 std::expected<void, ConfigSetError> validate_config_value(std::string_view key,
                                                           std::string_view value) {
     const ConfigMeta* meta = lang::config_meta(key);

@@ -12,6 +12,7 @@
 
 #include "mcp.h"
 #include "config.h"
+#include "config_access.h"
 #include "lang.h"
 #include "Logger.h"
 #include "memory.h"
@@ -110,6 +111,32 @@ static nlohmann::json tools_list() {
                                     {"description", "Filter by collection names."}}}
                 }},
                 {"required", nlohmann::json::array({"query"})}
+            }}
+        },
+        {
+            {"name", "get_config"},
+            {"description", "Read Ragger's live configuration. Returns every "
+                           "setting with its current value and schema metadata "
+                           "(type, default, edit policy, enum options). Pass a "
+                           "`key` to fetch just one setting. Read-only — use this "
+                           "to bootstrap host/port/token or other settings on "
+                           "agent-framework restart instead of reading a config file."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"key", {{"type", "string"},
+                             {"description", "Optional single setting key. Omit for all settings."}}}
+                }}
+            }}
+        },
+        {
+            {"name", "status"},
+            {"description", "Report Ragger's runtime status: version, total "
+                           "memories, per-table row counts, and whether "
+                           "embeddings are degraded/unavailable. Read-only."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", nlohmann::json::object()}
             }}
         }
     });
@@ -258,6 +285,32 @@ static nlohmann::json tool_call(RaggerMemory& memory,
             {"session_id", session},
             {"recipe",     ctx.recipe_name},
             {"chunks",     chunks}
+        }).dump());
+
+    } else if (tool_name == "get_config") {
+        const auto key = arguments.value("key", "");
+        if (!key.empty()) {
+            const auto* meta = lang::config_meta(key);
+            if (!meta)
+                return error_result(std::format(lang::ERR_MCP_UNKNOWN_TOOL, key));
+            auto v = get_config_value(config(), key);
+            return text_result(config_entry_json(*meta, v.value_or("")).dump());
+        }
+        return text_result(build_config_json(config()).dump());
+
+    } else if (tool_name == "status") {
+        nlohmann::json tables = nlohmann::json::object();
+        try {
+            for (auto& [name, n] : memory.backend()->table_row_counts())
+                tables[name] = n;
+        } catch (...) { /* backend unavailable — empty tables */ }
+        return text_result(nlohmann::json({
+            {"status",    "running"},
+            {"version",   RAGGER_VERSION},
+            {"memories",  memory.count()},
+            {"tables",    tables},
+            {"degraded",  memory.embeddings_degraded()},
+            {"embeddings_unavailable", memory.embeddings_unavailable()}
         }).dump());
 
     } else {

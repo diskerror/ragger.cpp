@@ -1273,59 +1273,12 @@ struct Server::Impl {
     // JSON for a single config entry: current value + schema metadata so the
     // dashboard can render the right control without a second lookup.
     json config_entry_json(const lang::ConfigMeta& m, const std::string& value) {
-        const char* type = "string";
-        switch (m.type) {
-            case lang::CfgType::Boolean: type = "boolean"; break;
-            case lang::CfgType::Integer: type = "integer"; break;
-            case lang::CfgType::Float:   type = "float";   break;
-            case lang::CfgType::Enum:    type = "enum";    break;
-            case lang::CfgType::String:  type = "string";  break;
-            case lang::CfgType::Path:    type = "path";    break;
-            case lang::CfgType::Text:    type = "text";    break;
-        }
-        const char* edit = "live";
-        switch (m.edit) {
-            case lang::CfgEdit::Live:            edit = "live";    break;
-            case lang::CfgEdit::RestartRequired: edit = "restart"; break;
-            case lang::CfgEdit::RebuildRequired: edit = "rebuild"; break;
-            case lang::CfgEdit::Locked:          edit = "locked";  break;
-        }
-        json j = {
-            {"key",     std::string(m.key)},
-            {"section", std::string(m.section)},
-            {"label",   std::string(m.pretty)},
-            {"type",    type},
-            {"edit",    edit},
-            {"default", std::string(m.default_value)},
-            {"help",    std::string(m.help)},
-            {"value",   value},
-        };
-        if (m.type == lang::CfgType::Enum) {
-            json opts = json::array();
-            std::string_view o = m.options;
-            size_t pos = 0;
-            while (pos <= o.size()) {
-                size_t c = o.find(',', pos);
-                std::string_view tok = (c == std::string_view::npos)
-                    ? o.substr(pos) : o.substr(pos, c - pos);
-                if (!tok.empty()) opts.push_back(std::string(tok));
-                if (c == std::string_view::npos) break;
-                pos = c + 1;
-            }
-            j["options"] = opts;
-        }
-        return j;
+        return ragger::config_entry_json(m, value);
     }
 
     // Full config: array of entries in schema (dashboard tab) order.
     json build_config_json() {
-        json arr = json::array();
-        const auto& cfg = config();
-        for (const auto& m : lang::config_schema()) {
-            auto v = get_config_value(cfg, m.key);
-            arr.push_back(config_entry_json(m, v.value_or("")));
-        }
-        return json{{"config", arr}};
+        return ragger::build_config_json(config());
     }
 
     // Server status + table sizes for the top status pane.

@@ -18,6 +18,7 @@
 #pragma once
 
 #include "config.h"
+#include "nlohmann_json.hpp"
 #include <string>
 #include <string_view>
 #include <vector>
@@ -25,6 +26,8 @@
 #include <expected>
 
 namespace ragger {
+
+namespace lang { struct ConfigMeta; }
 
 // Result of a validate/set attempt.
 enum class ConfigSetError {
@@ -42,6 +45,15 @@ struct ConfigSetResult {
 /// for an unknown key. An empty stored string is returned as the schema
 /// default (so "blank == default" holds at the read boundary too).
 std::optional<std::string> get_config_value(const Config& cfg, std::string_view key);
+
+/// Serialize one schema entry (metadata + current value) to JSON, matching
+/// the shape the dashboard and GET /config emit. Shared by the HTTP server
+/// and the MCP `get_config` tool so both stay in lock-step.
+nlohmann::json config_entry_json(const lang::ConfigMeta& meta,
+                                 const std::string& value);
+
+/// Full config as {"config": [entry, ...]} in schema (dashboard tab) order.
+nlohmann::json build_config_json(const Config& cfg);
 
 /// Validate `value` against the key's schema type/enum. Does NOT write.
 /// Empty `value` is always valid — it means "reset to default".
