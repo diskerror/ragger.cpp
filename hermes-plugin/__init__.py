@@ -654,13 +654,15 @@ class RaggerMemoryProvider(MemoryProvider):
         return [
             {
                 "key": "port",
-                "description": "Ragger HTTP port (set in ~/.ragger/settings.ini)",
+                "description": "Ragger HTTP port (managed by Ragger, via the dashboard or `ragger config set port`)",
                 "default": "8432",
             },
         ]
 
     def save_config(self, values: dict, hermes_home: str) -> None:
-        # Ragger configuration lives in ~/.ragger/settings.ini, not Hermes config.
+        # Ragger owns its own configuration (the settings table in
+        # ~/.ragger/memories.db, edited via the dashboard or `ragger config
+        # set`), not Hermes config — nothing to persist here.
         pass
 
 

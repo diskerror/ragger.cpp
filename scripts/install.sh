@@ -9,9 +9,9 @@
 #
 #     ~/.local/bin/ragger         executable (on PATH)
 #
-#     ~/.ragger/settings.ini      config
+#     ~/.ragger/memories.db       memories + config (settings table)
 #     ~/.ragger/logs/activity.log logs (auto-rotated: see log_max_size_mb /
-#                                 log_max_age_days in settings.ini)
+#                                 log_max_age_days config settings)
 #     ~/.ragger/models/           embedding models
 #     ~/.ragger/formats/          inference format definitions
 #     ~/.ragger/recipes/          build_context recipes (layered assembly)
@@ -255,7 +255,7 @@ if [ "$OS" = "Darwin" ]; then
     mkdir -p "$AGENT_DIR"
     info "Writing $PLIST"
     # StandardOutPath/StandardErrorPath point at the same fixed path Ragger
-    # itself rotates (see log_max_size_mb/log_max_age_days in settings.ini).
+    # itself rotates (see the log_max_size_mb/log_max_age_days config settings).
     # Ragger writes its own log lines by opening/appending/closing the file
     # on every call (not via this stdout/stderr redirect) so its content is
     # unaffected by rotation; only the launchd-level duplicate of ERROR/
