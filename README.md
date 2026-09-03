@@ -40,7 +40,7 @@ internal embeddings mean no network calls once the model is on disk.
 
 ## Swappable by design
 
-Two seams are built to be replaced without touching the rest of the code:
+Three seams are built to be replaced without touching the rest of the code:
 
 - **Storage backend.** All memory storage goes through the abstract
   `StorageBackend` interface (`include/storage_backend.h`); `SqliteBackend`
@@ -55,6 +55,14 @@ Two seams are built to be replaced without touching the rest of the code:
   instead in `lang.h`. Caveat: the browser dashboard carries its own inline
   English (`web/dashboard.html`) and isn't covered by this yet, so a full
   translation is currently two files.
+- **Context recipes (fading memory).** How a session's past is rebuilt into
+  a context payload is not hardcoded — it's a JSON recipe that layers raw
+  turns → turn summaries → session/project summaries → decisions, walking
+  the latest prompt backward so recent detail stays sharp while older
+  context fades to summary. `build_context` reads it; five recipes ship
+  (`natural_fading`, `reconnect`, `deep_recall`, `tldr`, `raw_only`) and you
+  can drop your own in `~/.ragger/recipes/` to tune the fade curve without
+  recompiling.
 
 ## Quick start
 
