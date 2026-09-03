@@ -105,8 +105,8 @@ void SummarizerService::enqueue_catch_up() {
 
     // Per-tick batch cap. Bounds memory and keeps each catch-up pass
     // short; the mop-up timer picks up the next slice once the queue
-    // drains. Configurable via [housekeeping] catch_up_batch_size in
-    // settings.ini (default 10) — small on purpose: the main use case
+    // drains. Configurable via the catch_up_batch_size setting
+    // (default 10) — small on purpose: the main use case
     // beyond normal live-turn trickle is a deliberate manual resummarize
     // (nulling model_id on a batch of `summaries` rows via direct SQL),
     // which should redo a handful of inference calls per tick, not

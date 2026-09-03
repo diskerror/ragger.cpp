@@ -256,7 +256,7 @@ std::string expand_path(const std::string& path);
 
 /// Parse config from an INI file. Ragger does not read a config file during
 /// normal startup — defaults are compiled in and the settings table is the
-/// only store. This remains for the one-time settings.ini -> DB migration.
+/// only store. This remains only for the config-parser unit tests.
 std::expected<Config, ConfigError> load_config(const std::string& path);
 
 /// Global config instance. Must call init_config() before use.

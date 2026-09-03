@@ -449,8 +449,8 @@ class RaggerMemoryProvider(MemoryProvider):
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Kick off a background search to warm the prefetch cache.
 
-        No-op when auto_recall is disabled (~/.ragger/settings.ini
-        [server] auto_recall = false) — turn capture (sync_turn /
+        No-op when auto_recall is disabled (the Ragger `auto_recall`
+        setting = false) — turn capture (sync_turn /
         post_turn_finalized) is unaffected by this flag.
         """
         if not self._auto_recall or self._breaker_open():

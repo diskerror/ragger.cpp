@@ -269,7 +269,7 @@ int main(int argc, char **argv) {
             ("command", Diskerror::po::value<std::string>()->default_value("help"), CLI_COMMAND)
             ("args", Diskerror::po::value<std::vector<std::string> >(), CLI_ARGS)
             // Undocumented, testing-only: relocate the entire ~/.ragger base
-            // directory (DB, settings.ini, logs, models, recipes, formats,
+            // directory (DB, logs, models, recipes, formats,
             // socket, token — everything). No env var equivalent — CLI-only.
             // Must be applied before any config/path resolution happens.
             ("ragger-base", Diskerror::po::value<std::string>()->default_value(""), "Override the ~/.ragger base directory (undocumented, testing only)")
@@ -340,9 +340,8 @@ int main(int argc, char **argv) {
         else if (command == "serve") {
             const auto &cfg = ragger::config();
 
-            // Create the memory store first so the DB + schema exist. This is
-            // also what the one-time settings.ini migration and the port
-            // rectify below need in place.
+            // Create the memory store first so the DB + schema exist. The
+            // port rectify below needs it in place.
             std::unique_ptr<ragger::RaggerMemory> mem_ptr;
             mem_ptr = std::make_unique<ragger::RaggerMemory>(db_path);
             auto &memory = *mem_ptr;

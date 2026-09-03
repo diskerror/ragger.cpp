@@ -28,8 +28,8 @@ namespace fs = std::filesystem;
 // Path helpers
 // -----------------------------------------------------------------------
 // expand_path() only expands a leading "~" to the real $HOME — for
-// user-supplied paths (CLI --db/--config args, settings.ini socket_path /
-// bind_address). Ragger's own on-disk footprint (DB, settings.ini, logs,
+// user-supplied paths (CLI --db/--config args, the socket_path / bind
+// address settings). Ragger's own on-disk footprint (DB, logs,
 // models, recipes, formats, socket default, token, stats.db,
 // agent-memory-instructions.md) is never built through here — each has a
 // dedicated Config::resolved_XX() below, hardcoded relative to
@@ -113,7 +113,7 @@ static Config load_default_config() {
 }
 
 // NOTE: the SERVER_LOCKED key table and clamp_to_ceiling() lived here to
-// police a two-layer config — a system settings.ini overlaid by a user one,
+// police a two-layer config — a system config file overlaid by a user one,
 // where apply_user_overrides() refused locked keys and clamped the rest to
 // system ceilings. There is only one layer now (the settings table), so there
 // is no "user config" to police and both are gone. Per-key write permission is
@@ -166,8 +166,8 @@ static bool parse_bool(const std::string& val) {
 }
 
 // Parse INI text from any stream. Split out from load_config() so the
-// compiled-in defaults can be parsed straight from memory — Ragger no longer
-// writes a settings.ini to disk, so there is no file to read on startup.
+// compiled-in defaults can be parsed straight from memory — Ragger does not
+// write or read a config file on disk; the DB settings table is the store.
 static std::expected<Config, ConfigError> parse_config(std::istream& file) {
     Config cfg;
     std::string section;
@@ -418,7 +418,7 @@ Config& mutable_config() {
 
 void init_config() {
     // Base layer: the compiled-in defaults. Ragger used to bootstrap a
-    // settings.ini into ~/.ragger and read it back as the base layer, with the
+    // config file into ~/.ragger and read it back as the base layer, with the
     // DB overlaid on top. That left the file half-live — stale for every key
     // the dashboard had written a row for, still authoritative for every key
     // it had not — and it was regenerated from defaults whenever it was
