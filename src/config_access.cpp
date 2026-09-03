@@ -40,6 +40,7 @@ const std::unordered_map<std::string_view, bool Config::*>& bool_fields() {
         {"tcp_enable",     &Config::tcp_enabled},
         {"capture_turns",  &Config::capture_turns},
         {"build_context",  &Config::build_context},
+        {"auto_recall",    &Config::auto_recall},
         {"bm25_enabled",   &Config::bm25_enabled},
         {"normalize_home", &Config::normalize_home_path},
     };

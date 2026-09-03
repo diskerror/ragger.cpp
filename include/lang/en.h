@@ -476,7 +476,7 @@ constexpr const char* ERR_PERMISSION_DENIED_SIGNAL= "Permission denied: cannot s
 // Sections drive the dashboard's left-hand tabs (server, embedding,
 // search, summarizer, logging, housekeeping, import).
 // =====================================================================
-inline constexpr std::array<ConfigMeta, 56> kConfigSchema = {{
+inline constexpr std::array<ConfigMeta, 57> kConfigSchema = {{
     // ---- server ----
     {"socket_enable", "server", "Socket Enable", CfgType::Boolean, CfgEdit::RestartRequired,
      "true", "",
@@ -508,6 +508,9 @@ inline constexpr std::array<ConfigMeta, 56> kConfigSchema = {{
     {"build_context", "server", "Build Context", CfgType::Boolean, CfgEdit::Live,
      "false", "",
      "Enable the build_context entry point (GET /session/<id>) to assemble a session's turns into a context payload. Only meaningful when capture_turns is also true."},
+    {"auto_recall", "server", "Auto Recall", CfgType::Boolean, CfgEdit::Live,
+     "true", "",
+     "Hint served to agent-framework plugins: when true, they may prefetch memories and inject a memory-context block into prompts. The daemon does no injection itself. Independent of Capture Turns."},
     {"default_recipe", "server", "Default Recipe", CfgType::String, CfgEdit::Live,
      "natural_fading", "",
      "Recipe name applied when the caller doesn't specify one. Recipes are loaded from ~/.ragger/recipes."},

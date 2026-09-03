@@ -234,6 +234,7 @@ static std::expected<Config, ConfigError> parse_config(std::istream& file) {
             else if (key == "server_name" || key == "hostname") cfg.server_name = val;
             else if (key == "capture_turns") cfg.capture_turns = parse_bool(val);
             else if (key == "build_context") cfg.build_context = parse_bool(val);
+            else if (key == "auto_recall") cfg.auto_recall = parse_bool(val);
             else if (key == "default_recipe") cfg.default_recipe = val;
             else if (key == "cert" || key == "tls_cert") cfg.tls_cert = val;
             else if (key == "key" || key == "tls_key") cfg.tls_key = val;
@@ -539,6 +540,7 @@ int reload_config() {
     RELOAD(max_turn_failures);
     RELOAD(capture_turns);
     RELOAD(build_context);
+    RELOAD(auto_recall);
     RELOAD(default_recipe);
 
     // System ceilings

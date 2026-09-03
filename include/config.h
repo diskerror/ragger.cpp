@@ -179,6 +179,11 @@ struct Config {
     // capture_turns is also true — there's nothing to build from otherwise.
     // Agent-driven search/store tools are unaffected by either flag.
     bool build_context = false;
+    // auto_recall (recall/injection side): when true, agent-framework plugins
+    // may prefetch memories and inject a <memory-context> block into prompts.
+    // Purely a hint served to plugins via GET /config — the daemon itself does
+    // no injection. Turn capture (capture_turns) is independent and unaffected.
+    bool auto_recall = true;
     // Recipe name applied when the caller doesn't specify one. Recipes are
     // loaded from ~/.ragger/recipes (JSON files); built-ins cover the case
     // where the directory is missing or empty.
