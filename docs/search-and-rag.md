@@ -218,7 +218,7 @@ embeddings loaded into an Eigen matrix and matched in one matmul).
 Simple, fast for moderate datasets, no external dependencies.
 
 For larger deployments, the pluggable `StorageBackend` interface
-(`include/ragger/storage_backend.h`) makes it straightforward to swap
+(`include/storage_backend.h`) makes it straightforward to swap
 in a vector database — `SqliteBackend` is the only concrete
 implementation today.
 

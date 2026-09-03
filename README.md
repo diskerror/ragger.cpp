@@ -38,6 +38,24 @@ diverged at v0.9.4 — now the sole focus.
 Single binary. Single-user out of the box. No external services required;
 internal embeddings mean no network calls once the model is on disk.
 
+## Swappable by design
+
+Two seams are built to be replaced without touching the rest of the code:
+
+- **Storage backend.** All memory storage goes through the abstract
+  `StorageBackend` interface (`include/storage_backend.h`); `SqliteBackend`
+  is the only implementation today. Dropping in another engine — MariaDB,
+  MongoDB, or a dedicated vector DB for large corpora — means implementing
+  that one interface. Caveat: `UserStore` (auth + settings tables) and
+  `export.cpp` still hand-roll raw SQLite and would need porting to the
+  interface first; everything else already goes through it cleanly.
+- **Interface language.** All CLI and daemon strings — help, status,
+  progress, warnings, errors — live in one file, `include/lang/en.h`. To
+  localize, copy it to `xx.h`, translate the values, and include that
+  instead in `lang.h`. Caveat: the browser dashboard carries its own inline
+  English (`web/dashboard.html`) and isn't covered by this yet, so a full
+  translation is currently two files.
+
 ## Quick start
 
 Per-user, no sudo (binary → `~/.local/bin`, data → `~/.ragger/`):
