@@ -84,7 +84,7 @@ this?" vs "who wrote this summary?".
 
 `build_context` picks a recipe by name; the resolution falls through
 from the explicit argument to the DB `settings.recipe` row (set by
-`ragger recipe`) to `[server] default_recipe` in `settings.ini`.
+`ragger recipe`) to the configured `default_recipe`.
 
 Shipped recipes:
 

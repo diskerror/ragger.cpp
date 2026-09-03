@@ -238,9 +238,10 @@ to the next on miss):
 1. The `recipe` argument on the `build_context` MCP tool or the
    `?recipe=` query param on `GET /session/<id>`.
 2. DB `settings.recipe` (set by `ragger recipe`). The sentinel value
-   `default` means "track `[server] default_recipe` in settings.ini" —
-   pick it to revert.
-3. `[server] default_recipe` in `settings.ini`.
+   `default` means "track the configured `default_recipe`" — pick it
+   to revert.
+3. The configured `default_recipe` (compiled-in default, overlaid by
+   the `settings` table).
 4. The first built-in if all of the above miss.
 
 The DB lookup happens once per `build_context` call; changing your

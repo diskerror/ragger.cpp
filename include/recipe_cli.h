@@ -3,8 +3,8 @@
  *
  * No args: interactive picker over the available recipes (↑/↓ + Enter,
  * `q` quits without choosing). The picker has a synthetic top entry
- * `default` that means "track [server] default_recipe in settings.ini" —
- * pick it to undo a previous override.
+ * `default` that means "track the configured default recipe" — pick it
+ * to undo a previous override.
  *
  * Named arg: write that recipe (or the literal `default` sentinel) as
  * the active choice and print its details. Non-interactive equivalent
@@ -13,7 +13,8 @@
  * Persistence: written to the DB `settings` table under the key `recipe`.
  * Resolution precedence at lookup time (in build_context):
  *   1. DB `settings.recipe` if present AND not the sentinel "default"
- *   2. settings.ini `[server] default_recipe`
+ *   2. The configured `default_recipe` (compiled-in default, overlaid
+ *      by the `settings` table)
  *   3. First available built-in
  *
  * The DB write takes effect immediately — no daemon restart needed.

@@ -17,9 +17,10 @@ namespace ragger {
 
 namespace {
 
-// Sentinel used in DB `settings.recipe` to mean "track settings.ini
-// [server] default_recipe". Also the name of the synthetic top entry
-// in the picker.
+// Sentinel used in DB `settings.recipe` to mean "track the configured
+// default recipe" (the compiled-in default, overlaid by the settings
+// table) rather than pinning a specific one. Also the name of the
+// synthetic top entry in the picker.
 constexpr const char* kSentinel = "default";
 
 const char* layer_kind_name(LayerKind k) {
@@ -42,32 +43,32 @@ std::vector<Recipe> load_all() {
 }
 
 // Prepend the synthetic `default` entry so the picker can express "track
-// settings.ini" as a first-class choice. Its description reports what
-// it currently resolves to.
-Recipe make_synthetic_default(const std::string& ini_default) {
+// the configured default" as a first-class choice. Its description reports
+// what it currently resolves to.
+Recipe make_synthetic_default(const std::string& configured_default) {
     Recipe r;
     r.name = kSentinel;
-    r.description = "Track [server] default_recipe in settings.ini "
-                    "(currently → " + ini_default + ")";
+    r.description = "Track the configured default recipe "
+                    "(currently → " + configured_default + ")";
     // No layers / token budget — purely a pointer.
     return r;
 }
 
 // Resolve "what's the active recipe right now?" the same way build_context
 // does, so the picker can mark it. Returns the *name* (the sentinel
-// "default" if the DB row matches the ini default or is unset).
+// "default" if the DB row is unset).
 std::string current_choice(UserStore& backend,
-                           const std::string& ini_default) {
+                           const std::string& configured_default) {
     if (auto stored = backend.get_setting("recipe");
         stored && !stored->empty()) {
         return *stored;
     }
     // Unset DB row → effectively the sentinel.
-    (void)ini_default;
+    (void)configured_default;
     return kSentinel;
 }
 
-void print_recipe(const Recipe& r, const std::string& ini_default,
+void print_recipe(const Recipe& r, const std::string& configured_default,
                   bool is_current) {
     std::println("\nRecipe: {}{}",
                  r.name, is_current ? "  (active)" : "");
@@ -77,7 +78,7 @@ void print_recipe(const Recipe& r, const std::string& ini_default,
     if (r.name == kSentinel) {
         // Synthetic entry — no layers, but show the target.
         std::println("");
-        std::println("  Resolves to: {}", ini_default);
+        std::println("  Resolves to: {}", configured_default);
         return;
     }
     std::println("");
@@ -222,13 +223,13 @@ int run_recipe_cli(const std::vector<std::string>& args,
         return 2;
     }
 
-    const std::string ini_default = config().default_recipe;
+    const std::string configured_default = config().default_recipe;
 
     // Compose the picker list: synthetic `default` first, then the on-disk
     // recipes. The named-arg path searches by exact name across both.
     std::vector<Recipe> recipes;
     recipes.reserve(on_disk.size() + 1);
-    recipes.push_back(make_synthetic_default(ini_default));
+    recipes.push_back(make_synthetic_default(configured_default));
     for (auto& r : on_disk) recipes.push_back(std::move(r));
 
     // Open DB-only backend (no embedder required for settings access).
@@ -239,7 +240,7 @@ int run_recipe_cli(const std::vector<std::string>& args,
         : db_path;
     UserStore backend(resolved_db);
 
-    const std::string current = current_choice(backend, ini_default);
+    const std::string current = current_choice(backend, configured_default);
 
     // --- Named form: `ragger recipe <name>` -----------------------------
     if (!args.empty()) {
@@ -257,7 +258,7 @@ int run_recipe_cli(const std::vector<std::string>& args,
         persist_choice(backend, name);
         std::println("✓ Active recipe set to '{}' (stored in settings.recipe).",
                      name);
-        print_recipe(*r, ini_default, /*is_current=*/true);
+        print_recipe(*r, configured_default, /*is_current=*/true);
         return 0;
     }
 
@@ -277,7 +278,7 @@ int run_recipe_cli(const std::vector<std::string>& args,
         persist_choice(backend, chosen.name);
         std::println("✓ Active recipe set to '{}' (stored in settings.recipe).",
                      chosen.name);
-        print_recipe(chosen, ini_default, /*is_current=*/true);
+        print_recipe(chosen, configured_default, /*is_current=*/true);
         return 0;
     }
     return 0;

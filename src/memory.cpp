@@ -778,9 +778,10 @@ SessionContext build_context(RaggerMemory& memory,
     const auto& recipes = cached_recipes();
     // Resolve the effective default:
     //   1. DB `settings.recipe` (set by `ragger recipe`). The sentinel
-    //      value "default" means "track settings.ini" — equivalent to
-    //      having no row.
-    //   2. settings.ini `[server] default_recipe` (system default).
+    //      value "default" means "track the configured default" —
+    //      equivalent to having no row.
+    //   2. The configured `default_recipe` (compiled-in default, overlaid
+    //      by the `settings` table).
     //   3. First built-in (last-resort fallback).
     // One keyed read per build_context call — cheap, and the user's
     // choice takes effect without a daemon restart.
