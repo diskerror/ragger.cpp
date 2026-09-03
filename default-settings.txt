@@ -1,7 +1,10 @@
-# ~/.ragger/settings.ini — Ragger configuration
+# Ragger default configuration — compiled into the binary at build time
+# (see cmake/embed_ini.cmake). NOT written to disk.
 #
-# Every Ragger install is per-user; this file is the single source of truth.
-# It is created automatically by install.sh if missing. Edit in place.
+# Every Ragger install is per-user. These compiled-in defaults are the base
+# layer; the DB `settings` table (in ~/.ragger/memories.db) overlays them.
+# To change a setting, use the dashboard or `ragger config set <key> <value>`
+# — this file is never edited by users and is not present on disk.
 #
 # Uncommented lines are the shipped defaults. Commented lines (# ...) show
 # optional settings and illustrative examples — uncomment and adjust.

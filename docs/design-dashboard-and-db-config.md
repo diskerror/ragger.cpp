@@ -24,8 +24,12 @@ path, system ceilings) stay locked — writable only where they're currently
 allowed, not freely editable at runtime. (Embedding settings have a known
 wrinkle to discuss separately.)
 
-**Migration:** one-time import of an existing `settings.ini` into the table,
-then the file is ignored. `default-settings.txt` stops being the runtime seed.
+**Migration:** originally, a one-time import of an existing `settings.ini`
+into the table, after which the file was ignored. This migration was
+implemented and has since been **removed** — `settings.ini` is fully
+retired (pre-1.0), so there is no longer anything to import; see the
+"Legacy settings.ini → DB migration" section below.
+`default-settings.txt` stops being the runtime seed.
 
 ---
 
@@ -161,28 +165,35 @@ TCP thread, never `stop()` again.
 
 
 
-## Legacy settings.ini → DB migration (implemented)
+## Legacy settings.ini → DB migration (implemented, later removed)
 
-On `serve`, after the DB exists, `migrate_ini_to_db(db_path)` runs once:
+> **Status:** This migration was built as described below, then **removed**
+> once `settings.ini` was fully retired (pre-1.0). `migrate_ini_to_db` and the
+> `bootstrap_user_config()` INI writer no longer exist — Ragger neither reads
+> nor writes `settings.ini`. The section is kept for historical design context.
 
-1. If the DB `settings` table has an `ini_migrated` marker, no-op.
-2. Otherwise, if `settings.ini` exists, parse it (`load_config`), and for every
-   schema key whose INI value differs from the compiled default, write a DB row
-   — **unless a row already exists** (existing DB values always win).
+On `serve`, after the DB existed, `migrate_ini_to_db(db_path)` ran once:
+
+1. If the DB `settings` table had an `ini_migrated` marker, no-op.
+2. Otherwise, if `settings.ini` existed, parse it (`load_config`), and for every
+   schema key whose INI value differed from the compiled default, write a DB row
+   — **unless a row already existed** (existing DB values always won).
 3. Rename `settings.ini` → `settings.ini.migrated`.
 4. Set the DB `ini_migrated=true` marker.
 
-The marker is essential because `bootstrap_user_config()` recreates a *default*
-`settings.ini` on any later launch where the file is missing — "file exists"
-can't gate the migration, but the DB marker can. `ini_migrated` lives OUTSIDE
-the config schema, so `overlay_settings_from_db` ignores it.
+The marker was essential because `bootstrap_user_config()` recreated a *default*
+`settings.ini` on any later launch where the file was missing — "file exists"
+couldn't gate the migration, but the DB marker could. `ini_migrated` lived OUTSIDE
+the config schema, so `overlay_settings_from_db` ignored it.
 
-After a migration with imports, `main` re-runs `overlay_settings_from_db` so the
-freshly-imported values take effect in the same run (no extra restart needed).
+After a migration with imports, `main` re-ran `overlay_settings_from_db` so the
+freshly-imported values took effect in the same run (no extra restart needed).
 
 Note: the shipped `DEFAULT_CONFIG` INI template carries real values that differ
-from the C++ struct defaults (summarizer model/url/prompt, etc.), so a fresh
-install still imports those into the DB on first serve — correct and intended.
+from the C++ struct defaults (summarizer model/url/prompt, etc.). Under the
+migration these were imported into the DB on first serve; after its removal
+those values simply live as compiled-in defaults (embedded from
+`default-settings.txt`) and are applied directly, with no import step.
 
 ### Pitfall fixed: DB overlay must apply Locked keys
 

@@ -42,15 +42,16 @@ commas: `IP:192.168.0.166,IP:192.168.0.220`).
 
 ### Configure ragger
 
-Add to `~/.ragger/settings.ini`:
+Set the certificate and key paths (via the dashboard, or the CLI):
 
-```ini
-[server]
-cert = ~/.ragger/tls/cert.pem
-key  = ~/.ragger/tls/key.pem
+```bash
+ragger config set cert ~/.ragger/tls/cert.pem
+ragger config set key  ~/.ragger/tls/key.pem
 ```
 
-Restart the daemon (`ragger restart`). Access via
+Both live in the `[server]` section of the config schema and are
+`restart required`, so restart the daemon (`ragger restart`) after
+setting them. Access via
 `https://192.168.0.166:8432` (HTTPS works on any port — 443 is just
 the convention). Plain HTTP on that port stops responding once TLS is
 active; check `~/.ragger/logs/activity.log` for a warning if it doesn't.

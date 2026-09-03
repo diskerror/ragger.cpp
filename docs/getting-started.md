@@ -23,7 +23,7 @@ most modern shells); everything else under `~/.ragger/`:
 | What                 | Where                       |
 |----------------------|-----------------------------|
 | Executable           | `~/.local/bin/ragger`       |
-| Config               | `~/.ragger/settings.ini`    |
+| Config               | `settings` table in `~/.ragger/memories.db` |
 | Database             | `~/.ragger/memories.db`     |
 | Embedding model      | `~/.ragger/models/`         |
 | Recipes              | `~/.ragger/recipes/`        |
@@ -97,7 +97,7 @@ of the box (`natural_fading`, `reconnect`, `deep_recall`, `tldr`,
 ```bash
 ragger recipe              # interactive picker (↑/↓, Enter to set, q to quit)
 ragger recipe reconnect    # set non-interactively
-ragger recipe default      # revert to whatever settings.ini says
+ragger recipe default      # revert to the configured default_recipe
 ```
 
 The picker stores your choice in the DB so it survives daemon
@@ -108,12 +108,11 @@ extend the menu — see [Configuration → Recipes](configuration.md#recipes).
 
 `capture_turns` ships enabled; `build_context` ships **disabled**
 (agents get `search`/`store` either way; the recipe-shaped context
-payload is opt-in). To change either, edit `~/.ragger/settings.ini`:
+payload is opt-in). To change either, use the dashboard or the CLI:
 
-```ini
-[server]
-capture_turns = true     # write: ingest agent-pushed turns
-build_context = false    # read: serve recipe-shaped context payloads
+```bash
+ragger config set capture_turns true    # write: ingest agent-pushed turns
+ragger config set build_context false   # read: serve recipe-shaped context payloads
 ```
 
 Note: `build_context` and `default_recipe` are still fully functional
@@ -135,7 +134,7 @@ Files land in `~/.ragger/models/all-MiniLM-L6-v2/`.
 
 ## Next steps
 
-- [Configuration](configuration.md) — Full `settings.ini` reference
+- [Configuration](configuration.md) — Full config key reference
 - [Search & RAG](search-and-rag.md) — How hybrid search works
 - [HTTP API](http-api.md) — Run the daemon for tool integration
 - [Agent integration](agent-integration.md) — `capture_turn`, recipes, MCP

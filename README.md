@@ -112,7 +112,7 @@ elsewhere if you need the data on a different disk.
 | What | Where |
 |---|---|
 | Binary | `~/.local/bin/ragger` |
-| Config | `~/.ragger/settings.ini` |
+| Config | `settings` table in `~/.ragger/memories.db` (edit via dashboard or `ragger config set`) |
 | Database | `~/.ragger/memories.db` |
 | Embedding models | `~/.ragger/models/<provider>/<model>/` |
 | Recipes | `~/.ragger/recipes/` |
@@ -125,7 +125,7 @@ elsewhere if you need the data on a different disk.
 ## Embedding models
 
 Ragger supports two embedding engines, switchable from the dashboard or
-`settings.ini` (`embedding_engine` / `desired_embedding_engine`):
+`ragger config set` (`embedding_engine` / `desired_embedding_engine`):
 
 - **internal** — ONNX models on disk under `~/.ragger/models/<provider>/<model>/`,
   e.g. `sentence-transformers/all-MiniLM-L6-v2/`. `install.sh` downloads a
@@ -221,7 +221,7 @@ Windows needs porting (`fork()`, the bash/launchctl/systemd install scripts).
 | Guide | |
 |-------|--|
 | [Getting started](docs/getting-started.md) | Setup and first run |
-| [Configuration](docs/configuration.md) | `settings.ini` reference |
+| [Configuration](docs/configuration.md) | Config keys reference (DB-backed) |
 | [Search & RAG](docs/search-and-rag.md) | How hybrid search works |
 | [HTTP API](docs/http-api.md) | REST endpoints, MCP, auth, `/turn` and `/session/<id>?recipe=` |
 | [Importing conversations](docs/importing-conversations.md) | Claude Code / claude.ai history |

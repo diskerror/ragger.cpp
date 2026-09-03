@@ -1,30 +1,37 @@
 # Configuration
 
-Ragger reads one INI file. There is no system-level overlay; the file
-you see is the file the daemon reads.
+Ragger's configuration is two layers: compiled-in defaults (generated at
+build time from `default-settings.txt`) form the base, overlaid by rows
+in the `settings` table inside `~/.ragger/memories.db`. The DB is the
+single source of truth — there is no `settings.ini` file on disk.
 
-## Location
+## Changing settings
 
-`~/.ragger/settings.ini`. The daemon bootstraps this file itself on first
-run, seeded from a compiled-in default (`default-settings.txt` in the
-source tree — not installed to disk, and not parsed as an INI file; it's
-only ever a build-time input to `cmake/embed_ini.cmake`, which embeds it
-directly into the binary so the template and the fallback config can
-never drift apart).
+You don't edit a file. Settings are changed two ways:
+
+- **Web dashboard** — `GET`/`PUT /config`, with a form per key.
+- **CLI** — `ragger config get <key>` / `ragger config set <key> <value>`
+  (`ragger config get -a` lists everything; `-j` for JSON).
+
+Each key carries an edit policy in the schema (`include/lang/en.h`):
+some changes apply live, some need a daemon restart, some a rebuild, and
+a few are locked. The dashboard shows "restart required" where relevant;
+the CLI validates the value before persisting it.
+
+## Where config lives
+
+The `settings` table in `~/.ragger/memories.db`. A missing/blank row for
+a key means "use the compiled-in default" (`default-settings.txt`,
+embedded into the binary at build time via `cmake/embed_ini.cmake` — it
+is never written to disk).
 
 Every other on-disk path Ragger uses (database, models, recipes, formats,
 log, token, stats, socket) is hardcoded relative to a single base
 directory, `~/.ragger` by default. None of that is independently
-configurable in `settings.ini`. The only way to relocate the whole tree
-is the hidden `--ragger-base <path>` CLI flag — undocumented in
-`--help`, meant for tests, not for normal use. If you need Ragger's data
-on a different disk, symlink `~/.ragger` there instead.
-
-To run against a different settings file (testing, side-by-side configs):
-
-```bash
-ragger serve --config /custom/path/settings.ini
-```
+configurable. The only way to relocate the whole tree is the hidden
+`--ragger-base <path>` CLI flag — undocumented in `--help`, meant for
+tests, not for normal use. If you need Ragger's data on a different disk,
+symlink `~/.ragger` there instead.
 
 ## Quick map of the sections
 
@@ -264,15 +271,16 @@ For a personal install with no sub-users, leave ceilings at `0`.
 
 ## Reloading without a restart
 
-`ragger reload` sends `SIGHUP` to the daemon, which re-reads the file
-and applies hot-reloadable keys in place. Keys that require a restart
+`ragger reload` sends `SIGHUP` to the daemon, which re-reads the config
+(compiled-in defaults re-overlaid by the `settings` table) and applies
+hot-reloadable keys in place. Keys that require a restart
 (e.g. `port`, `socket_enable`, `bind`, `tls_cert`, `tls_key`,
 `embedding_model`, `embedding_dimensions`, `embedding_vector_type`) log
 a warning instead of silently being ignored.
 
 ## Build-time instrumentation: retrieval stats (`RAGGER_STATS`)
 
-This one is **not** a settings.ini key — it's a *compile-time* flag, off by
+This one is **not** a config key — it's a *compile-time* flag, off by
 default. It exists for studying how retrieval behaves (focused vs. associative
 hits, how results shift as the corpus grows), not for normal operation.
 

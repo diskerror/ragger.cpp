@@ -11,11 +11,13 @@ systemd-user unit), then control it with:
 ```bash
 ragger start        # bring the daemon up
 ragger status       # check whether it's running
-ragger restart      # bounce it after editing settings.ini
+ragger restart      # bounce it after changing restart-required config
 ragger stop         # take it down
 ```
 
-Host, port, and bind interface come from `~/.ragger/settings.ini`.
+Host, port, and bind interface come from the config (compiled-in
+defaults overlaid by the DB `settings` table); change them with the
+dashboard or `ragger config set` — all three are restart-required.
 
 `ragger serve` is the foreground entry the daemon process itself
 invokes — you won't normally run it directly. Use it for debugging:
@@ -231,7 +233,7 @@ read-side counterpart to `/turn`, and the same payload returned by the
 
 `recipe` is optional. Resolution: explicit query arg → DB
 `settings.recipe` (set by `ragger recipe`) → `[server] default_recipe`
-in `settings.ini` → first built-in.
+from config → first built-in.
 
 Response shape:
 

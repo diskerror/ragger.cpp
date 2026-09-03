@@ -224,7 +224,7 @@ implementation today.
 
 ## Retrieval instrumentation (optional, build-time)
 
-Per-query logging is not a runtime `settings.ini` option — there is no
+Per-query logging is not a runtime setting — there is no
 `query.log` and no `[logging] query_log` key. Instead, a compile-time
 flag (`RAGGER_STATS`, off by default) logs every search's per-signal
 score breakdown to a separate, discardable `~/.ragger/stats.db`. See

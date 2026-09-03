@@ -6,8 +6,7 @@ Ragger installs per-user. The executable lives on `PATH` under
 ```
 ~/.local/bin/ragger         # executable (on PATH)
 
-~/.ragger/settings.ini      # config
-~/.ragger/memories.db       # SQLite database
+~/.ragger/memories.db       # SQLite database (also holds the `settings` config table)
 ~/.ragger/ragger.sock       # unix socket (daemon)
 ~/.ragger/logs/activity.log # daemon log (unified — no separate per-stream logs)
 ~/.ragger/models/           # embedding models
@@ -53,7 +52,8 @@ ragger start         # bring the daemon up
 `install.sh`:
 
 - Creates `~/.local/bin` and `~/.ragger/{models,formats,recipes,www}` if missing
-- Bootstraps `~/.ragger/settings.ini` from the compiled-in default on first run
+- Seeds config from the compiled-in defaults; runtime overrides live in the
+  DB `settings` table (there is no `settings.ini` on disk)
 - Refreshes `~/.ragger/formats/` and `~/.ragger/recipes/` from the source
   tree (user-added files are preserved; user edits to shipped files are
   overwritten — copy a renamed variant to keep customizations)
@@ -71,10 +71,10 @@ database, and custom formats are preserved.
 
 ### Installation locations
 
-| Platform | Executable              | Config                    | Database                |
-|----------|-------------------------|---------------------------|-------------------------|
-| macOS    | `~/.local/bin/ragger`   | `~/.ragger/settings.ini`  | `~/.ragger/memories.db` |
-| Linux    | `~/.local/bin/ragger`   | `~/.ragger/settings.ini`  | `~/.ragger/memories.db` |
+| Platform | Executable              | Config                              | Database                |
+|----------|-------------------------|-------------------------------------|-------------------------|
+| macOS    | `~/.local/bin/ragger`   | `settings` table in `memories.db`   | `~/.ragger/memories.db` |
+| Linux    | `~/.local/bin/ragger`   | `settings` table in `memories.db`   | `~/.ragger/memories.db` |
 | Windows  | not yet supported       | —                         | —                       |
 
 ## Daemon Lifecycle
@@ -82,7 +82,7 @@ database, and custom formats are preserved.
 ```bash
 ragger start        # bring the daemon up (via launchctl / systemctl --user)
 ragger stop         # take it down
-ragger restart      # bounce after editing settings.ini
+ragger restart      # bounce after changing restart-required config
 ragger status       # is it running?
 ```
 
@@ -176,9 +176,9 @@ mv ~/.local/bin/ragger-cpp ~/.local/bin/ragger
 
 **Daemon won't start:**
 Check `~/.ragger/logs/activity.log`. Common causes: port 8432 already
-in use, missing embedding model in `~/.ragger/models/`, invalid
-`settings.ini` (run `ragger serve` in the foreground to see the
-parse error).
+in use, missing embedding model in `~/.ragger/models/`, an invalid
+config value (run `ragger serve` in the foreground to see the
+error).
 
 **`ragger start` says "service loaded" but nothing's listening:**
 On macOS, `launchctl print gui/$UID/com.diskerror.ragger` shows the
@@ -200,6 +200,6 @@ Run `sudo loginctl enable-linger $USER`. See "Linger" above.
 
 ## Related
 
-- [Configuration](configuration.md) — Single `settings.ini` reference
+- [Configuration](configuration.md) — Config key reference (DB-backed)
 - [HTTP API](http-api.md) — Endpoints and auth
 - [Getting Started](getting-started.md) — First run
