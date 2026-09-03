@@ -85,15 +85,4 @@ std::vector<std::string_view> all_config_keys();
 std::expected<ConfigSetResult, ConfigSetError> set_config_persisted(
     std::string_view key, std::string_view value, bool allow_locked = false);
 
-/// One-time migration: seed the DB `settings` table from a legacy
-/// settings.ini, then retire the file. Idempotent via a DB marker
-/// (`ini_migrated`) so it never runs twice, even though the bootstrap may
-/// recreate a default settings.ini. For every schema key whose INI-parsed
-/// value differs from the schema default, a row is written to the DB (unless
-/// a row already exists — existing DB values always win). On success the INI
-/// is renamed to `<path>.migrated`. `db_path` must point at an existing,
-/// schema-initialized DB. Returns the number of keys imported (0 if the
-/// migration was already done or there was no INI). Best-effort: never throws.
-int migrate_ini_to_db(const std::string& db_path);
-
 } // namespace ragger

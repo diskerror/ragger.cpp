@@ -348,19 +348,6 @@ int main(int argc, char **argv) {
             auto &memory = *mem_ptr;
             Diskerror::Logger::info(std::format(MSG_LOADED_MEMORIES, memory.count()));
 
-            // One-time legacy config migration: seed the DB `settings` table
-            // from settings.ini (if present and not already migrated), retire
-            // the file, then re-overlay so the imported values take effect this
-            // run. Idempotent via the DB `ini_migrated` marker.
-            int imported = ragger::migrate_ini_to_db(db_path);
-            if (imported > 0) {
-                Diskerror::Logger::info(std::format(
-                    "Migrated {} setting(s) from settings.ini into the DB; "
-                    "renamed settings.ini -> settings.ini.migrated", imported));
-                ragger::overlay_settings_from_db(ragger::mutable_config(),
-                                                 cfg.resolved_db_path());
-            }
-
             // Startup port rectify: unless --port was given on the CLI, adopt
             // the dashboard's desired_port into the committed port before
             // binding. This makes ANY restart path (service manager, crash

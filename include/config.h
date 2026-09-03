@@ -240,7 +240,6 @@ struct Config {
     std::string resolved_model_dir() const;
     std::string resolved_recipes_dir() const;
     std::string resolved_formats_dir() const;
-    std::string resolved_settings_path() const;
     std::string resolved_token_path() const;
     std::string resolved_stats_db_path() const;
     std::string resolved_agent_instructions_path() const;

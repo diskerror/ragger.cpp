@@ -59,10 +59,6 @@ std::string Config::resolved_formats_dir() const {
     return ragger_base_dir() + "/formats";
 }
 
-std::string Config::resolved_settings_path() const {
-    return ragger_base_dir() + "/settings.ini";
-}
-
 std::string Config::resolved_token_path() const {
     return ragger_base_dir() + "/token";
 }
@@ -92,8 +88,9 @@ std::string Config::resolved_socket_path() const {
 // Defined below, after the Config struct's field table.
 static std::expected<Config, ConfigError> parse_config(std::istream& file);
 
-// Parse an INI file from disk. Only the one-time settings.ini -> DB migration
-// uses this now; nothing reads a config file during normal startup.
+// Parse an INI file from disk. No production path reads a config file at
+// runtime — Ragger's settings live in the DB `settings` table. This remains
+// only for the config-parser unit tests, which feed it temp INI files.
 std::expected<Config, ConfigError> load_config(const std::string& path) {
     std::ifstream file(path);
     if (!file.is_open()) {
