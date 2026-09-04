@@ -1334,8 +1334,12 @@ struct SqliteBackend::Impl {
         doc_timestamps.clear();
 
         Stmt s(db,
-            "SELECT document_id, text, embedding, title, tags, imported_at "
-            "FROM documents");
+            "SELECT d.document_id, d.text, d.embedding, "
+            "       ifnull(ds.title,''), d.tags, "
+            "       datetime(ds.imported_at, 'unixepoch', 'localtime') "
+            "FROM documents d "
+            "LEFT JOIN document_sources ds "
+            "  ON ds.document_source_id = d.document_source_id");
 
         std::vector<std::vector<float>> emb_rows;
         const int expected_dims = config().embedding_dimensions;
