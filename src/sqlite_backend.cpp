@@ -678,6 +678,20 @@ struct SqliteBackend::Impl {
             exec("DROP TRIGGER IF EXISTS documents_au");
             exec("DROP TABLE IF EXISTS documents_fts");
 
+            // Same for the phon sidecar FTS + its triggers. Critically, the
+            // external-content documents_phon_fts must be dropped too: after we
+            // rebuild `documents` below, its shadow tables would still hold the
+            // OLD rows. The row COUNT happens to match (same 8627), so
+            // create_phon_fts_schema()'s docsize-vs-base desync probe would NOT
+            // fire a rebuild -- leaving stale rowid->content pointers that make
+            // every later phon UPDATE fail "database disk image is malformed".
+            // Dropping it here forces a fresh, empty index (docsize 0 != base)
+            // so the probe rebuilds and resyncs it.
+            exec("DROP TRIGGER IF EXISTS documents_pai");
+            exec("DROP TRIGGER IF EXISTS documents_pad");
+            exec("DROP TRIGGER IF EXISTS documents_pau");
+            exec("DROP TABLE IF EXISTS documents_phon_fts");
+
             // The old documents_view SELECTs path/title/year/imported_at, so
             // SQLite won't let us DROP those columns while it exists. Drop it
             // here; create_views() rebuilds the new (joined) view afterward.
@@ -954,6 +968,34 @@ struct SqliteBackend::Impl {
             INSERT INTO documents_fts(rowid, text, tags)
             VALUES (new.document_id, new.text, new.tags);
         END)");
+
+        // Resync any text FTS whose shadow index is out of step with its base
+        // (mirrors the phon-FTS probe below). Normally a no-op, but when an
+        // external-content FTS is recreated empty over a base that still holds
+        // rows -- e.g. the documents-normalization migration drops and rebuilds
+        // documents_fts -- the per-row delete-triggers would try to remove
+        // postings that were never inserted and fail "database disk image is
+        // malformed" on the next UPDATE. The <fts>_docsize shadow holds one row
+        // per indexed document, so docsize != base row count is a reliable
+        // desync probe; 'rebuild' is a no-op-safe resync.
+        {
+            struct T { const char* fts; const char* base; };
+            const T text_fts[] = {
+                {"turns_fts",     "turns"},
+                {"summaries_fts", "summaries"},
+                {"decisions_fts", "decisions"},
+                {"documents_fts", "documents"},
+            };
+            for (const auto& t : text_fts) {
+                long long indexed_rows = 0, base_rows = 0;
+                { Stmt is(db, std::format("SELECT count(*) FROM {}_docsize", t.fts));
+                  if (is.step()) indexed_rows = is.column_int(0); }
+                { Stmt bs(db, std::format("SELECT count(*) FROM {}", t.base));
+                  if (bs.step()) base_rows = bs.column_int(0); }
+                if (indexed_rows != base_rows)
+                    exec(std::format("INSERT INTO {0}({0}) VALUES('rebuild')", t.fts));
+            }
+        }
 
         create_phon_fts_schema();
     }
@@ -1664,50 +1706,93 @@ struct SqliteBackend::Impl {
     }
 
     // ---- store_document: write Level 5 RAG chunk ----------------------
+
+    // Resolve a (path, title) document to its document_sources row, inserting
+    // one on first sighting. Returns {document_source_id, imported_at_epoch}.
+    // imported_at_text is the caller's timestamp (TEXT 'YYYY-MM-DD HH:MM:SS'
+    // or 'YYYYMMDD', interpreted LOCAL); empty -> now. On an existing source
+    // the stored epoch is returned (the first import's time wins), so every
+    // chunk of a document shares one imported_at.
+    std::pair<long long, long long> get_or_create_document_source(
+            const std::string& path, const std::string& title,
+            int year, const std::string& tags,
+            const std::string& imported_at_text) {
+        {
+            Stmt s(db,
+                "SELECT document_source_id, imported_at FROM document_sources "
+                "WHERE ifnull(path,'') = ifnull(?,'') "
+                "  AND ifnull(title,'') = ifnull(?,'')");
+            if (path.empty()) s.bind_null(1); else s.bind(1, path);
+            if (title.empty()) s.bind_null(2); else s.bind(2, title);
+            if (s.step())
+                return { s.column_int64(0), s.column_int64(1) };
+        }
+        // Convert the caller's local-wall-clock text to a unix epoch via SQLite
+        // (matches the migration's TEXT->epoch reading); fall back to now.
+        long long epoch = static_cast<long long>(std::time(nullptr));
+        if (!imported_at_text.empty()) {
+            Stmt c(db, "SELECT CAST(strftime('%s', ?, 'utc') AS INTEGER)");
+            c.bind(1, imported_at_text);
+            if (c.step() && !c.is_null(0)) epoch = c.column_int64(0);
+        }
+        Stmt ins(db,
+            "INSERT INTO document_sources(title, path, year, tags, imported_at) "
+            "VALUES (?,?,?,?,?)");
+        if (title.empty()) ins.bind_null(1); else ins.bind(1, title);
+        if (path.empty())  ins.bind_null(2); else ins.bind(2, path);
+        if (year <= 0) ins.bind_null(3); else ins.bind(3, year);
+        ins.bind(4, tags);
+        ins.bind(5, epoch);
+        if (!ins.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+        return { static_cast<long long>(sqlite3_last_insert_rowid(db)), epoch };
+    }
+
     int store_document(const DocumentChunk& chunk, bool defer_embedding) {
         // Path-normalise the body text for consistency with store().
         std::string text = normalize_path(chunk.text);
 
+        // Title rides the vector + phon signals (not just FTS): the embedder
+        // and phonizer see `text + '\n' + title`. Title goes LAST so the chunk
+        // body leads each signal (chunks of one doc don't share a phon prefix)
+        // and the primary content dominates the embedding.
+        std::string signal_text = chunk.title.empty()
+            ? text
+            : text + "\n" + chunk.title;
+
         std::vector<float> emb;
         if (!defer_embedding) {
-            emb = embedder->encode(text);
+            emb = embedder->encode(signal_text);
         }
 
-        // (imported_at is INTENTIONALLY still a TEXT 'YYYYMMDD' date-grouping
-        // key, not a real timestamp -- do not convert to epoch. See
-        // scripts/schema_db0.12.sql comment on documents.imported_at.)
-        std::string imported_at = chunk.imported_at.empty() ? local_timestamp() : chunk.imported_at;
+        // Resolve/insert the source; every chunk of a (path,title) doc shares
+        // one document_sources row and its imported_at epoch. modified_on
+        // starts equal to that epoch (until the chunk text is later edited).
+        auto [source_id, epoch] = get_or_create_document_source(
+            chunk.path, chunk.title, chunk.year, chunk.tags, chunk.imported_at);
 
-        // Lean documents schema (reference DDL): path/title/tags/year/
-        // chunk_index. Only `text` is embedded; documents_fts sync triggers
-        // index title/text/tags — no manual keyword step.
+        // Slim chunk row: no path/title/year/imported_at (they live on the
+        // source). documents_fts sync triggers index text/tags only.
         Stmt s(db,
             "INSERT INTO documents "
-            "(text, embedding_version, embedding, phon, path, title, tags, year, chunk_index, imported_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)");
-
-        auto bind_opt = [&](int idx, const std::string& v) {
-            if (v.empty()) s.bind_null(idx);
-            else s.bind(idx, v);
-        };
+            "(text, tags, chunk_index, document_source_id, modified_on, "
+            " embedding_version, embedding, phon) "
+            "VALUES (?,?,?,?,?,?,?,?)");
 
         s.bind(1, text);
+        s.bind(2, chunk.tags);
+        if (chunk.chunk_index <= 0) s.bind_null(3);
+        else s.bind(3, chunk.chunk_index);
+        s.bind(4, source_id);
+        s.bind(5, epoch);
         if (defer_embedding) {
-            s.bind_null(2);
-            s.bind_null(3);
+            s.bind_null(6);
+            s.bind_null(7);
         } else {
-            bind_embedding_version(s.raw(), 2, emb);
-            bind_embedding(s.raw(), 3, emb);
+            bind_embedding_version(s.raw(), 6, emb);
+            bind_embedding(s.raw(), 7, emb);
         }
-        s.bind(4, phonize(text));
-        bind_opt(5, chunk.path);
-        bind_opt(6, chunk.title);
-        s.bind(7, chunk.tags);
-        if (chunk.year <= 0) s.bind_null(8);
-        else s.bind(8, chunk.year);
-        if (chunk.chunk_index <= 0) s.bind_null(9);
-        else s.bind(9, chunk.chunk_index);
-        s.bind(10, imported_at);
+        s.bind(8, phonize(signal_text));
 
         if (!s.exec()) {
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
@@ -3368,6 +3453,17 @@ struct SqliteBackend::Impl {
     //             not a per-row blob decode.
     // When `progress` is set, prints a running "n/total" line to stdout
     // (interactive CLI). Returns the number of rows (re-)embedded.
+    // documents' embed/phon input is `text + '\n' + title` (title from the
+    // joined document_sources row), matching store_document so housekeeping
+    // rebuilds carry the same title signal the write path bakes in. Used as a
+    // SELECT column expression in embed_tables()/rebuild_phon(); empty/absent
+    // title -> body only. char(10) == '\n'.
+    static constexpr const char* kDocEmbedTextSQL =
+        "text || CASE WHEN (SELECT ifnull(title,'') FROM document_sources ds "
+        "WHERE ds.document_source_id = documents.document_source_id) = '' "
+        "THEN '' ELSE char(10) || (SELECT title FROM document_sources ds "
+        "WHERE ds.document_source_id = documents.document_source_id) END";
+
     int embed_tables(Embedder& emb_ref, bool only_missing, bool progress) {
         struct TableSpec {
             const char* table;
@@ -3379,7 +3475,7 @@ struct SqliteBackend::Impl {
             { "turns",           "turn_id",         "user_text", "assistant_text" },
             { "summaries",       "summary_id",      "text",      nullptr          },
             { "decisions",       "decision_id",     "text",      nullptr          },
-            { "documents",       "document_id",     "text",      nullptr          },
+            { "documents",       "document_id",     kDocEmbedTextSQL, nullptr       },
             { "turn_summaries",  "turn_summary_id", "text",      nullptr          },
         };
 
@@ -3587,7 +3683,7 @@ struct SqliteBackend::Impl {
             { "turns",     "turn_id",     "user_text", "assistant_text" },
             { "summaries", "summary_id",  "text",      nullptr          },
             { "decisions", "decision_id", "text",      nullptr          },
-            { "documents", "document_id", "text",      nullptr          },
+            { "documents", "document_id", kDocEmbedTextSQL, nullptr       },
         };
         const char* where = only_missing ? " WHERE phon IS NULL" : "";
 
