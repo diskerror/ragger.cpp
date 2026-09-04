@@ -4,23 +4,14 @@
 #include "client.h"
 
 #include "lang.h"
+#include "util/http_client.h"
 
 #include <format>
 #include <stdexcept>
 #include <string>
-
-#include <curl/curl.h>
+#include <vector>
 
 namespace ragger {
-
-namespace {
-// libcurl write callback — append the response body into a std::string.
-size_t write_to_string(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    auto* out = static_cast<std::string*>(userdata);
-    out->append(ptr, size * nmemb);
-    return size * nmemb;
-}
-} // namespace
 
 RaggerClient::RaggerClient(const std::string& host, int port,
                            const std::string& token)
@@ -206,48 +197,24 @@ RaggerClient::HttpResponse RaggerClient::http_delete(const std::string& path) co
 RaggerClient::HttpResponse RaggerClient::http_request(const std::string& method,
                                                         const std::string& path,
                                                         const std::string& body) const {
-    CURL* curl = curl_easy_init();
-    if (!curl) {
-        throw std::runtime_error(std::format(lang::ERR_CLIENT_SOCKET, "curl_easy_init failed"));
-    }
-
     std::string url = std::format("http://{}:{}{}", host_, port_, path);
-    std::string response_body;
 
-    struct curl_slist* headers = nullptr;
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-    std::string auth_header;
+    std::vector<std::string> headers{"Content-Type: application/json"};
     if (!token_.empty()) {
-        auth_header = "Authorization: Bearer " + token_;
-        headers = curl_slist_append(headers, auth_header.c_str());
+        headers.push_back("Authorization: *** " + token_);
     }
 
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    if (!body.empty()) {
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
-    }
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_to_string);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);        // matches the old 5s socket timeout
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    util::HttpClient http;
+    auto resp = http.request(method, url, body, headers,
+                              /*timeout_sec=*/5, /*connect_timeout_sec=*/5);
 
-    CURLcode rc = curl_easy_perform(curl);
-    long status = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-
-    if (rc != CURLE_OK) {
-        throw std::runtime_error(std::format(lang::ERR_CLIENT_CONNECT, curl_easy_strerror(rc)));
+    if (!resp.ok()) {
+        throw std::runtime_error(std::format(lang::ERR_CLIENT_CONNECT, resp.error));
     }
 
     HttpResponse result;
-    result.status = static_cast<int>(status);
-    result.body = std::move(response_body);
+    result.status = static_cast<int>(resp.status);
+    result.body = std::move(resp.body);
     return result;
 }
 

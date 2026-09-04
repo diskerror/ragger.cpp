@@ -8,7 +8,7 @@
 #include "util/time.h"
 #include "nlohmann_json.hpp"
 
-#include <curl/curl.h>
+#include "util/http_client.h"
 #include <fnmatch.h>
 #include <sstream>
 #include <stdexcept>
@@ -128,13 +128,6 @@ InferenceClient InferenceClient::from_config(const Config& cfg) {
 // Model auto-load (LM Studio v1 API)
 // -----------------------------------------------------------------------
 
-/// CURL write callback for simple string collection
-static size_t _simple_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    auto* buf = static_cast<std::string*>(userdata);
-    buf->append(ptr, size * nmemb);
-    return size * nmemb;
-}
-
 std::string InferenceClient::ensure_model_loaded(const std::string& model_override) {
     std::string use_model = model_override.empty() ? model : model_override;
     if (use_model.empty()) return "";
@@ -155,29 +148,21 @@ std::string InferenceClient::ensure_model_loaded(const std::string& model_overri
     if (pos == std::string::npos) return "";  // not a recognized local engine
     std::string mgmt_base = base.substr(0, pos) + "/api/v1";
 
-    CURL* curl = curl_easy_init();
-    if (!curl) return "";
-
-    std::string response_buf;
+    util::HttpClient http;
 
     // Check if model is loaded
     std::string list_url = mgmt_base + "/models";
-    curl_easy_setopt(curl, CURLOPT_URL, list_url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, _simple_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_buf);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+    auto list_resp = http.get(list_url, {}, /*timeout_sec=*/5);
 
-    CURLcode res = curl_easy_perform(curl);
-    if (res != CURLE_OK) {
-        curl_easy_cleanup(curl);
-        if (res == CURLE_COULDNT_CONNECT || res == CURLE_OPERATION_TIMEDOUT) {
+    if (!list_resp.ok()) {
+        if (list_resp.result == CURLE_COULDNT_CONNECT || list_resp.result == CURLE_OPERATION_TIMEDOUT) {
             return std::format(lang::ERR_ENGINE_UNREACHABLE, mgmt_base);
         }
         return "";  // fail open
     }
 
     try {
-        auto data = nlohmann::json::parse(response_buf);
+        auto data = nlohmann::json::parse(list_resp.body);
         auto models = data.contains("models") ? data["models"] : data.value("data", nlohmann::json::array());
 
         for (const auto& m : models) {
@@ -187,12 +172,10 @@ std::string InferenceClient::ensure_model_loaded(const std::string& model_overri
                 loaded = !m["loaded_instances"].empty();
             }
             if (key == use_model && loaded) {
-                curl_easy_cleanup(curl);
                 return "";  // already loaded
             }
         }
     } catch (...) {
-        curl_easy_cleanup(curl);
         return "";  // can't parse, fail open
     }
 
@@ -200,25 +183,15 @@ std::string InferenceClient::ensure_model_loaded(const std::string& model_overri
     std::string load_url = mgmt_base + "/models/load";
     nlohmann::json load_body = {{"model", use_model}};
     std::string body_str = load_body.dump();
-    response_buf.clear();
 
-    curl_easy_setopt(curl, CURLOPT_URL, load_url.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_str.c_str());
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+    auto load_resp = http.post(load_url, body_str,
+                                {"Content-Type: application/json"}, /*timeout_sec=*/120);
 
-    struct curl_slist* headers = nullptr;
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-
-    res = curl_easy_perform(curl);
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-
-    if (res == CURLE_OPERATION_TIMEDOUT) {
+    if (load_resp.result == CURLE_OPERATION_TIMEDOUT) {
         return std::format(lang::ERR_MODEL_LOAD_TIMEOUT, use_model, load_url);
     }
-    if (res != CURLE_OK) {
-        return std::format(lang::ERR_MODEL_LOAD_FAILED, use_model, load_url, curl_easy_strerror(res));
+    if (!load_resp.ok()) {
+        return std::format(lang::ERR_MODEL_LOAD_FAILED, use_model, load_url, load_resp.error);
     }
 
     return "";  // loaded successfully
@@ -269,37 +242,14 @@ bool Endpoint::is_reachable() const {
     else
         url += "/models";
 
-    CURL* curl = curl_easy_init();
-    if (!curl) return false;
-
-    std::string buf;
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
-        +[](char* p, size_t s, size_t n, void* ud) -> size_t {
-            static_cast<std::string*>(ud)->append(p, s * n);
-            return s * n;
-        });
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
-
+    std::vector<std::string> headers;
     if (!api_key.empty()) {
-        struct curl_slist* hdrs = nullptr;
-        std::string auth = "Authorization: Bearer " + api_key;
-        hdrs = curl_slist_append(hdrs, auth.c_str());
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
-        CURLcode res = curl_easy_perform(curl);
-        long code = 0;
-        if (res == CURLE_OK) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-        curl_slist_free_all(hdrs);
-        curl_easy_cleanup(curl);
-        return res == CURLE_OK && code < 400;
+        headers.push_back("Authorization: *** " + api_key);
     }
 
-    CURLcode res = curl_easy_perform(curl);
-    long code = 0;
-    if (res == CURLE_OK) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-    curl_easy_cleanup(curl);
-    return res == CURLE_OK && code < 400;
+    util::HttpClient http;
+    auto resp = http.get(url, headers, /*timeout_sec=*/3);
+    return resp.ok() && resp.status < 400;
 }
 
 bool Endpoint::is_local() const {
@@ -321,36 +271,18 @@ std::vector<std::string> Endpoint::list_models() const {
     else
         url += "/models";
 
-    CURL* curl = curl_easy_init();
-    if (!curl) return result;
-
-    std::string buf;
-    struct curl_slist* hdrs = nullptr;
+    std::vector<std::string> headers;
     if (!api_key.empty()) {
-        std::string auth = "Authorization: Bearer " + api_key;
-        hdrs = curl_slist_append(hdrs, auth.c_str());
+        headers.push_back("Authorization: *** " + api_key);
     }
 
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
-        +[](char* p, size_t s, size_t n, void* ud) -> size_t {
-            static_cast<std::string*>(ud)->append(p, s * n);
-            return s * n;
-        });
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
+    util::HttpClient http;
+    auto resp = http.get(url, headers, /*timeout_sec=*/5);
 
-    CURLcode res = curl_easy_perform(curl);
-    long code = 0;
-    if (res == CURLE_OK) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-    if (hdrs) curl_slist_free_all(hdrs);
-    curl_easy_cleanup(curl);
-
-    if (res != CURLE_OK || code >= 400) return result;
+    if (!resp.ok() || resp.status >= 400) return result;
 
     try {
-        auto json = nlohmann::json::parse(buf);
+        auto json = nlohmann::json::parse(resp.body);
         if (json.contains("data") && json["data"].is_array()) {
             for (const auto& m : json["data"]) {
                 if (m.contains("id") && m["id"].is_string()) {
@@ -365,19 +297,8 @@ std::vector<std::string> Endpoint::list_models() const {
 }
 
 // -----------------------------------------------------------------------
-// HTTP helpers with libcurl
+// SSE streaming parse helper (used by chat_stream, defined below)
 // -----------------------------------------------------------------------
-struct WriteCallbackData {
-    std::string* buffer;
-};
-
-static size_t write_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    size_t total = size * nmemb;
-    auto* data = static_cast<WriteCallbackData*>(userdata);
-    data->buffer->append(ptr, total);
-    return total;
-}
-
 struct StreamCallbackData {
     std::function<void(const std::string&)>* on_token;
     std::string buffer;
@@ -452,47 +373,26 @@ std::string InferenceClient::chat(const std::vector<Message>& messages,
     nlohmann::json payload = build_request_body(fmt, api_messages, use_model, use_max_tokens, false);
     std::string body = payload.dump();
 
-    // Setup libcurl
-    CURL* curl = curl_easy_init();
-    if (!curl) {
-        throw std::runtime_error(lang::ERR_CURL_INIT);
-    }
-
-    std::string response_buffer;
-    WriteCallbackData write_data{&response_buffer};
-
     // Build headers using format
-    struct curl_slist* headers = nullptr;
+    std::vector<std::string> headers;
     for (const auto& [key, value] : build_headers(fmt, endpoint.api_key)) {
-        std::string header = key + ": " + value;
-        headers = curl_slist_append(headers, header.c_str());
+        headers.push_back(key + ": " + value);
     }
 
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, body.size());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &write_data);
+    util::HttpClient http;
+    auto resp = http.post(url, body, headers, /*timeout_sec=*/0);
 
-    CURLcode res = curl_easy_perform(curl);
-    long http_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-
-    if (res != CURLE_OK) {
-        throw std::runtime_error(std::format(lang::ERR_HTTP_REQUEST, curl_easy_strerror(res)));
+    if (!resp.ok()) {
+        throw std::runtime_error(std::format(lang::ERR_HTTP_REQUEST, resp.error));
     }
 
-    if (http_code != 200) {
-        throw std::runtime_error(std::format(lang::ERR_INFERENCE_API, http_code, response_buffer));
+    if (resp.status != 200) {
+        throw std::runtime_error(std::format(lang::ERR_INFERENCE_API, resp.status, resp.body));
     }
 
     // Parse response using format
     try {
-        auto response = nlohmann::json::parse(response_buffer);
+        auto response = nlohmann::json::parse(resp.body);
         return extract_content(fmt, response);
     } catch (const std::exception& e) {
         throw std::runtime_error(std::format(lang::ERR_PARSE_RESPONSE, e.what()));
