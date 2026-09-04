@@ -246,35 +246,72 @@ SELECT decision_id, text, status, tags,
 FROM decisions;
 
 -- ---------------------------------------------------------------------------
--- documents (L5)  -- user-curated RAG; the only sharable table.
--- imported_at STAYS TEXT 'YYYYMMDD' — a date-only batch-grouping key, not a
--- real timestamp; documents rows exist to capture maximal legible metadata
--- up front, which an opaque epoch int works against. Confirmed decision,
--- 2026-07-25 — do not convert this column in a future pass without
--- re-confirming.
+-- document_sources  -- one row per curated document (db_version 0.15). Holds
+-- the per-document metadata that used to be repeated on every chunk of
+-- `documents`. Gives a document a stable identity (document_source_id) so it
+-- can be addressed / re-curated / replaced as a unit. NO FTS: this table is
+-- tiny (one row per document) and its title now rides the chunk embed/phon
+-- signals (see store_document), so keyword search needs nothing here.
+-- imported_at is an INTEGER unix-epoch (user's local import time). This
+-- reverses the old documents.imported_at 'YYYYMMDD' TEXT design (re-confirmed
+-- 2026-09-03): it is a real per-document timestamp now, not a date-only batch
+-- key -- grouping moved to document_source_id.
+-- ---------------------------------------------------------------------------
+CREATE TABLE document_sources (
+    document_source_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title       TEXT,                     -- identifies the publication
+    path        TEXT,                     -- origin file
+    year        INTEGER,                  -- publish year
+    tags        TEXT NOT NULL DEFAULT '', -- general tags for the whole document
+    imported_at INTEGER NOT NULL          -- unix epoch, user's local import time
+);
+CREATE INDEX idx_document_sources_imported_at ON document_sources(imported_at);
+
+CREATE VIEW IF NOT EXISTS document_sources_view AS
+SELECT document_source_id, title, path, year, tags,
+       datetime(imported_at, 'unixepoch', 'localtime') AS imported_at
+FROM document_sources;
+
+-- ---------------------------------------------------------------------------
+-- documents (L5)  -- user-curated RAG chunks; the only sharable table.
+-- Per-document metadata (title/path/year/imported_at) lives in
+-- document_sources, referenced by document_source_id. Each chunk keeps only
+-- its distinctive `tags` (the document's general tags float up to the source;
+-- effective tags at query time = source.tags UNION chunk.tags). chunk_index is
+-- retained as a positional handle ("where does this doc start / where am I").
+-- modified_on: unix epoch, set = the source's imported_at at import; diverges
+-- only when the chunk text is later edited (edit path TBD).
+-- NOTE: title is appended to `text` before encode()/phonize() at write time
+-- (see store_document), so it participates in vector + phon search, not just
+-- bm25 -- which is why documents_fts below indexes only text + tags.
 -- ---------------------------------------------------------------------------
 CREATE TABLE documents (
-    document_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    text        TEXT NOT NULL,            -- body; chapter/section headings inline
-    path        TEXT,
-    title       TEXT,                     -- identifies the publication
-    tags        TEXT NOT NULL DEFAULT '', -- groups + describes
-    year        INTEGER,                  -- publish year
-    chunk_index INTEGER,
-    imported_at TEXT NOT NULL,            -- 'YYYYMMDD', shared per import batch — TEXT by design, see above
-    embedding_version INTEGER, -- NULL iff embedding IS NULL
-    embedding   BLOB,                     -- payload only, no version byte (see embedding_version)
-    phon        TEXT                      -- phonize(text): Double Metaphone "sounds-like"
+    document_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    text               TEXT NOT NULL,            -- body; chapter/section headings inline
+    tags               TEXT NOT NULL DEFAULT '', -- chunk-specific tags only (see above)
+    document_source_id INTEGER REFERENCES document_sources(document_source_id),
+    chunk_index        INTEGER,
+    modified_on        INTEGER,                  -- unix epoch; = source.imported_at until edited
+    embedding_version  INTEGER, -- NULL iff embedding IS NULL
+    embedding          BLOB,                     -- payload only, no version byte (see embedding_version)
+    phon               TEXT                      -- phonize(text + '\n' + title): Double Metaphone "sounds-like"
 );
-CREATE INDEX idx_documents_imported_at ON documents(imported_at);
+CREATE INDEX idx_documents_document_source_id ON documents(document_source_id);
 CREATE INDEX idx_documents_embedding_version ON documents(embedding_version);
 
+-- LEFT JOIN keeps title/path/year visible for humans inspecting the view,
+-- even though they physically live in document_sources now.
 CREATE VIEW IF NOT EXISTS documents_view AS
-SELECT document_id, text, path, title, tags, year, chunk_index, imported_at,
-       embedding_version,
-       CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding,
-       CASE WHEN phon      IS NULL THEN 0 ELSE 1 END AS has_phon
-FROM documents;
+SELECT d.document_id, d.text, d.tags, d.document_source_id,
+       s.title, s.path, s.year,
+       d.chunk_index,
+       datetime(d.modified_on, 'unixepoch', 'localtime') AS modified_on,
+       datetime(s.imported_at, 'unixepoch', 'localtime') AS imported_at,
+       d.embedding_version,
+       CASE WHEN d.embedding IS NULL THEN 0 ELSE 1 END AS has_embedding,
+       CASE WHEN d.phon      IS NULL THEN 0 ELSE 1 END AS has_phon
+FROM documents d
+LEFT JOIN document_sources s ON s.document_source_id = d.document_source_id;
 
 -- ---------------------------------------------------------------------------
 -- settings  -- key/value store (embedding_model, dimensions, recipe,
@@ -416,7 +453,6 @@ BEGIN
 END;
 
 CREATE VIRTUAL TABLE documents_fts USING fts5 (
-    title,
     text,
     tags,
     content='documents',
@@ -426,24 +462,24 @@ CREATE TRIGGER documents_ai
     AFTER INSERT
     ON documents
 BEGIN
-    INSERT INTO documents_fts(rowid, title, text, tags)
-    VALUES (new.document_id, new.title, new.text, new.tags);
+    INSERT INTO documents_fts(rowid, text, tags)
+    VALUES (new.document_id, new.text, new.tags);
 END;
 CREATE TRIGGER documents_ad
     AFTER DELETE
     ON documents
 BEGIN
-    INSERT INTO documents_fts(documents_fts, rowid, title, text, tags)
-    VALUES ('delete', old.document_id, old.title, old.text, old.tags);
+    INSERT INTO documents_fts(documents_fts, rowid, text, tags)
+    VALUES ('delete', old.document_id, old.text, old.tags);
 END;
 CREATE TRIGGER documents_au
     AFTER UPDATE
     ON documents
 BEGIN
-    INSERT INTO documents_fts(documents_fts, rowid, title, text, tags)
-    VALUES ('delete', old.document_id, old.title, old.text, old.tags);
-    INSERT INTO documents_fts(rowid, title, text, tags)
-    VALUES (new.document_id, new.title, new.text, new.tags);
+    INSERT INTO documents_fts(documents_fts, rowid, text, tags)
+    VALUES ('delete', old.document_id, old.text, old.tags);
+    INSERT INTO documents_fts(rowid, text, tags)
+    VALUES (new.document_id, new.text, new.tags);
 END;
 
 -- ---------------------------------------------------------------------------
