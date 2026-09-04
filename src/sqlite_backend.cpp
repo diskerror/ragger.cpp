@@ -28,6 +28,7 @@
 #include <iomanip>
 #include <filesystem>
 #include <numeric>
+#include <optional>
 #include <regex>
 #include <set>
 #include <mutex>
@@ -481,27 +482,41 @@ struct SqliteBackend::Impl {
         )");
         exec("CREATE INDEX IF NOT EXISTS idx_decisions_status ON decisions(status)");
 
-        // documents (L5) — user-curated RAG; the only sharable table.
-        // Lean per the reference DDL: title identifies the publication, tags
-        // group/describe (subject), year is the publish year, path is the
-        // origin. Only `text` is embedded. Keyword search via documents_fts.
-        // v4 column order: keys/data, imported_at, embedding, phon.
+        // document_sources (L5 metadata) — one row per curated document.
+        // Holds title/path/year/tags/imported_at once, instead of repeating
+        // them on every chunk. document_source_id gives a document a stable
+        // identity. imported_at is a unix epoch (user's local import time).
+        // No FTS: tiny table; its title rides the chunk embed/phon signals.
         exec(R"(
-            CREATE TABLE IF NOT EXISTS documents (
-                document_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                text        TEXT NOT NULL,
-                path        TEXT,
+            CREATE TABLE IF NOT EXISTS document_sources (
+                document_source_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title       TEXT,
-                tags        TEXT NOT NULL DEFAULT '',
+                path        TEXT,
                 year        INTEGER,
-                chunk_index INTEGER,
-                imported_at TEXT NOT NULL,
-                embedding_version INTEGER,
-                embedding   BLOB,
-                phon        TEXT
+                tags        TEXT NOT NULL DEFAULT '',
+                imported_at INTEGER NOT NULL
             )
         )");
-        exec("CREATE INDEX IF NOT EXISTS idx_documents_imported_at ON documents(imported_at)");
+
+        // documents (L5) — user-curated RAG chunks; the only sharable table.
+        // Per-document metadata lives in document_sources (document_source_id
+        // FK). Each chunk keeps only its distinctive tags; chunk_index is a
+        // positional handle; modified_on (epoch) = source.imported_at until the
+        // chunk text is edited. `text + '\n' + title` is embedded/phonized (see
+        // store_document), so title participates in vector + phon search.
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS documents (
+                document_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                text               TEXT NOT NULL,
+                tags               TEXT NOT NULL DEFAULT '',
+                chunk_index        INTEGER,
+                document_source_id INTEGER REFERENCES document_sources(document_source_id),
+                modified_on        INTEGER,
+                embedding_version  INTEGER,
+                embedding          BLOB,
+                phon               TEXT
+            )
+        )");
 
         // In-place migration for pre-phon databases (dolphining sounds-like):
         // add the `phon` column to each context table if an existing DB predates
@@ -533,6 +548,16 @@ struct SqliteBackend::Impl {
             exec("ALTER TABLE decisions ADD COLUMN embedding_version INTEGER");
         if (!column_exists("documents", "embedding_version"))
             exec("ALTER TABLE documents ADD COLUMN embedding_version INTEGER");
+
+        // In-place migration to the normalized documents schema (0.15):
+        // extract per-document metadata (path/title/year/imported_at) into
+        // document_sources and slim `documents` to chunks + a document_source_id
+        // FK. Gated on the OLD shape (documents.path exists), NOT the db_version
+        // string -- Reid's live DB is already stamped 0.15 with the OLD shape,
+        // so a version check would wrongly skip it. Idempotent: once path is
+        // gone, this never runs again.
+        if (column_exists("documents", "path"))
+            migrate_documents_normalize();
 
         // v0.12 schema-version hard gate: no auto-migration in the binary.
         // First, stamp db_version for a genuinely fresh install ONLY --
@@ -569,7 +594,8 @@ struct SqliteBackend::Impl {
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_created_at  ON summaries(created_at)");
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_session     ON summaries(session_id)");
         exec("CREATE INDEX IF NOT EXISTS idx_decisions_status      ON decisions(status)");
-        exec("CREATE INDEX IF NOT EXISTS idx_documents_imported_at ON documents(imported_at)");
+        exec("CREATE INDEX IF NOT EXISTS idx_document_sources_imported_at ON document_sources(imported_at)");
+        exec("CREATE INDEX IF NOT EXISTS idx_documents_document_source_id ON documents(document_source_id)");
         exec("CREATE INDEX IF NOT EXISTS idx_turn_summaries_turn_id    ON turn_summaries(turn_id)");
         exec("CREATE INDEX IF NOT EXISTS idx_turn_summaries_session_id ON turn_summaries(session_id)");
         exec("CREATE INDEX IF NOT EXISTS idx_turn_summaries_datetime   ON turn_summaries(turn_datetime)");
@@ -615,6 +641,224 @@ struct SqliteBackend::Impl {
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value");
         s.bind(1, v);
         s.exec();
+    }
+
+    /// One-time in-place migration to the normalized documents schema (0.15).
+    /// Extracts per-document metadata (path/title/year/imported_at) from the
+    /// old flat `documents` rows into `document_sources`, converts imported_at
+    /// text -> unix epoch (stored text is a LOCAL wall-clock timestamp), points
+    /// each chunk at its source via document_source_id, redistributes tags
+    /// (source = intersection of a (path,title) group's chunk tags; chunk keeps
+    /// its own set minus that intersection), clears embedding/embedding_version/
+    /// phon on every doc row (so housekeeping re-embeds with title appended),
+    /// then drops the four extracted columns. Whole thing runs in one
+    /// transaction. Caller gates on column_exists("documents","path").
+    void migrate_documents_normalize() {
+        Diskerror::Logger::info("Migrating documents to normalized schema (document_sources)...");
+        Stmt(db, "BEGIN").exec();
+        try {
+            // document_sources may not exist yet on an old DB (the CREATE TABLE
+            // IF NOT EXISTS above makes it, but be defensive/idempotent).
+            exec(R"(
+                CREATE TABLE IF NOT EXISTS document_sources (
+                    document_source_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title       TEXT,
+                    path        TEXT,
+                    year        INTEGER,
+                    tags        TEXT NOT NULL DEFAULT '',
+                    imported_at INTEGER NOT NULL
+                )
+            )");
+
+            // The old documents_fts / triggers reference new.title/old.title.
+            // They MUST go before we UPDATE documents or DROP COLUMN title,
+            // else the AFTER UPDATE trigger fires against a missing column.
+            exec("DROP TRIGGER IF EXISTS documents_ai");
+            exec("DROP TRIGGER IF EXISTS documents_ad");
+            exec("DROP TRIGGER IF EXISTS documents_au");
+            exec("DROP TABLE IF EXISTS documents_fts");
+
+            // The old documents_view SELECTs path/title/year/imported_at, so
+            // SQLite won't let us DROP those columns while it exists. Drop it
+            // here; create_views() rebuilds the new (joined) view afterward.
+            exec("DROP VIEW IF EXISTS documents_view");
+
+            // The old idx_documents_imported_at indexes a column we're about to
+            // drop -- SQLite refuses DROP COLUMN while an index references it.
+            exec("DROP INDEX IF EXISTS idx_documents_imported_at");
+
+            // Helper: split a comma-separated tag string into a token set
+            // (trimmed, empties dropped).
+            auto split_tags = [](const std::string& s) {
+                std::set<std::string> out;
+                std::string tok;
+                std::stringstream ss(s);
+                while (std::getline(ss, tok, ',')) {
+                    size_t a = tok.find_first_not_of(" \t");
+                    size_t b = tok.find_last_not_of(" \t");
+                    if (a != std::string::npos)
+                        out.insert(tok.substr(a, b - a + 1));
+                }
+                return out;
+            };
+            auto join_tags = [](const std::set<std::string>& s) {
+                std::string out;
+                for (const auto& t : s) { if (!out.empty()) out += ','; out += t; }
+                return out;
+            };
+
+            // Group existing chunks by (path, title). Collect each group's
+            // year, earliest imported_at (as epoch), the intersection of its
+            // chunks' tag sets, and the lowest document_id it appears in (so
+            // sources can be inserted in document_id order -- tidy + stable).
+            struct Group {
+                std::string path, title;
+                std::optional<long long> year;
+                long long imported_epoch = 0;
+                bool have_epoch = false;
+                std::set<std::string> tag_intersection;
+                bool first_tag = true;
+                long long first_doc_id = 0;
+            };
+            // key = path + '\x1f' + title  (unit separator can't appear in text)
+            std::unordered_map<std::string, Group> groups;
+
+            {
+                // strftime('%s', ts, 'utc') interprets the stored text as LOCAL
+                // wall-clock and returns the corresponding unix epoch. (SQLite's
+                // bare strftime treats input as UTC; the 'utc' modifier flips a
+                // localtime reading back to UTC epoch.) Handles both the live
+                // 'YYYY-MM-DD HH:MM:SS' form and 'YYYYMMDD' stragglers (the
+                // latter parses as midnight local).
+                Stmt s(db,
+                    "SELECT document_id, path, title, year, tags, "
+                    "  CAST(strftime('%s', imported_at, 'utc') AS INTEGER) AS ep "
+                    "FROM documents ORDER BY document_id");
+                while (s.step()) {
+                    long long doc_id = s.column_int64(0);
+                    std::string path  = s.is_null(1) ? "" : s.column_text(1);
+                    std::string title = s.is_null(2) ? "" : s.column_text(2);
+                    std::string key = path + "\x1f" + title;
+                    auto it = groups.find(key);
+                    bool is_new = (it == groups.end());
+                    Group& g = groups[key];
+                    if (is_new) { g.first_doc_id = doc_id; g.path = path; g.title = title; }
+                    if (!s.is_null(3)) g.year = s.column_int64(3);
+                    if (!s.is_null(5)) {
+                        long long ep = s.column_int64(5);
+                        if (!g.have_epoch || ep < g.imported_epoch) {
+                            g.imported_epoch = ep; g.have_epoch = true;
+                        }
+                    }
+                    std::set<std::string> ts = split_tags(s.is_null(4) ? "" : s.column_text(4));
+                    if (g.first_tag) { g.tag_intersection = ts; g.first_tag = false; }
+                    else {
+                        std::set<std::string> inter;
+                        std::set_intersection(g.tag_intersection.begin(), g.tag_intersection.end(),
+                                              ts.begin(), ts.end(),
+                                              std::inserter(inter, inter.begin()));
+                        g.tag_intersection = std::move(inter);
+                    }
+                }
+            }
+
+            // Insert sources in document_id order (tidy IDs), remember each id.
+            std::vector<std::pair<std::string, Group*>> ordered;
+            ordered.reserve(groups.size());
+            for (auto& [key, g] : groups) ordered.emplace_back(key, &g);
+            std::sort(ordered.begin(), ordered.end(),
+                      [](const auto& a, const auto& b) {
+                          return a.second->first_doc_id < b.second->first_doc_id;
+                      });
+
+            std::unordered_map<std::string, long long> group_source_id;
+            for (auto& [key, gp] : ordered) {
+                Group& g = *gp;
+                Stmt ins(db,
+                    "INSERT INTO document_sources(title, path, year, tags, imported_at) "
+                    "VALUES (?,?,?,?,?)");
+                if (g.title.empty()) ins.bind_null(1); else ins.bind(1, g.title);
+                if (g.path.empty())  ins.bind_null(2); else ins.bind(2, g.path);
+                if (g.year) ins.bind(3, static_cast<int>(*g.year)); else ins.bind_null(3);
+                ins.bind(4, join_tags(g.tag_intersection));
+                // No usable timestamp anywhere in the group -> use "now".
+                ins.bind(5, g.have_epoch ? g.imported_epoch
+                                         : static_cast<long long>(std::time(nullptr)));
+                ins.step();
+                group_source_id[key] = sqlite3_last_insert_rowid(db);
+            }
+
+            // Rebuild `documents` with the FINAL column order (ALTER ADD COLUMN
+            // would append, diverging from a fresh install's layout). Populate
+            // it from the old table, computing per-chunk tags (own set MINUS the
+            // source intersection) in C++, pointing at the source, stamping
+            // modified_on = source epoch, and CLEARING embedding/phon (they get
+            // rebuilt with the title appended -- see store_document). The four
+            // extracted columns are simply not carried over.
+            exec(R"(
+                CREATE TABLE documents_new (
+                    document_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text               TEXT NOT NULL,
+                    tags               TEXT NOT NULL DEFAULT '',
+                    chunk_index        INTEGER,
+                    document_source_id INTEGER REFERENCES document_sources(document_source_id),
+                    modified_on        INTEGER,
+                    embedding_version  INTEGER,
+                    embedding          BLOB,
+                    phon               TEXT
+                )
+            )");
+            {
+                Stmt s(db, "SELECT document_id, text, tags, path, title, chunk_index "
+                           "FROM documents ORDER BY document_id");
+                struct Row { long long id; std::string text, tags; bool tags_null;
+                             long long src_id, modified; std::optional<long long> chunk_index; };
+                std::vector<Row> rows;
+                while (s.step()) {
+                    long long id = s.column_int64(0);
+                    std::string text = s.column_text(1);
+                    std::string path  = s.is_null(3) ? "" : s.column_text(3);
+                    std::string title = s.is_null(4) ? "" : s.column_text(4);
+                    std::string key = path + "\x1f" + title;
+                    const Group& g = groups[key];
+                    std::set<std::string> own = split_tags(s.is_null(2) ? "" : s.column_text(2));
+                    std::set<std::string> remainder;
+                    std::set_difference(own.begin(), own.end(),
+                                        g.tag_intersection.begin(), g.tag_intersection.end(),
+                                        std::inserter(remainder, remainder.begin()));
+                    Row r;
+                    r.id = id; r.text = std::move(text);
+                    r.tags = join_tags(remainder); r.tags_null = false;
+                    r.src_id = group_source_id[key];
+                    r.modified = g.have_epoch ? g.imported_epoch
+                                              : static_cast<long long>(std::time(nullptr));
+                    if (!s.is_null(5)) r.chunk_index = s.column_int64(5);
+                    rows.push_back(std::move(r));
+                }
+                for (const auto& r : rows) {
+                    Stmt ins(db,
+                        "INSERT INTO documents_new "
+                        "(document_id, text, tags, chunk_index, document_source_id, "
+                        " modified_on, embedding_version, embedding, phon) "
+                        "VALUES (?,?,?,?,?,?,NULL,NULL,NULL)");
+                    ins.bind(1, r.id).bind(2, r.text).bind(3, r.tags);
+                    if (r.chunk_index) ins.bind(4, static_cast<int>(*r.chunk_index));
+                    else ins.bind_null(4);
+                    ins.bind(5, r.src_id).bind(6, r.modified);
+                    ins.step();
+                }
+            }
+            exec("DROP TABLE documents");
+            exec("ALTER TABLE documents_new RENAME TO documents");
+
+            Stmt(db, "COMMIT").exec();
+            Diskerror::Logger::info(std::format(
+                "documents normalized: {} source(s) extracted", groups.size()));
+        } catch (...) {
+            Stmt(db, "ROLLBACK").exec();
+            throw;
+        }
+        // documents_fts is rebuilt (new shape) by create_fts_schema() below.
     }
 
     /// FTS5 external-content virtual tables + sync triggers for the four
@@ -694,21 +938,21 @@ struct SqliteBackend::Impl {
         END)");
 
         exec(R"(CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-            title, text, tags,
+            text, tags,
             content='documents', content_rowid='document_id'))");
         exec(R"(CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
-            INSERT INTO documents_fts(rowid, title, text, tags)
-            VALUES (new.document_id, new.title, new.text, new.tags);
+            INSERT INTO documents_fts(rowid, text, tags)
+            VALUES (new.document_id, new.text, new.tags);
         END)");
         exec(R"(CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
-            INSERT INTO documents_fts(documents_fts, rowid, title, text, tags)
-            VALUES ('delete', old.document_id, old.title, old.text, old.tags);
+            INSERT INTO documents_fts(documents_fts, rowid, text, tags)
+            VALUES ('delete', old.document_id, old.text, old.tags);
         END)");
         exec(R"(CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
-            INSERT INTO documents_fts(documents_fts, rowid, title, text, tags)
-            VALUES ('delete', old.document_id, old.title, old.text, old.tags);
-            INSERT INTO documents_fts(rowid, title, text, tags)
-            VALUES (new.document_id, new.title, new.text, new.tags);
+            INSERT INTO documents_fts(documents_fts, rowid, text, tags)
+            VALUES ('delete', old.document_id, old.text, old.tags);
+            INSERT INTO documents_fts(rowid, text, tags)
+            VALUES (new.document_id, new.text, new.tags);
         END)");
 
         create_phon_fts_schema();
@@ -877,8 +1121,15 @@ struct SqliteBackend::Impl {
             FROM decisions
         )");
         exec(R"(
+            CREATE VIEW IF NOT EXISTS document_sources_view AS
+            SELECT document_source_id, title, path, year, tags,
+                   datetime(imported_at, 'unixepoch', 'localtime') AS imported_at
+            FROM document_sources
+        )");
+        exec(R"(
             CREATE VIEW IF NOT EXISTS documents_view AS
-            SELECT document_id, text, path, title, tags, year, chunk_index, imported_at,
+            SELECT document_id, text, tags, chunk_index, document_source_id,
+                   datetime(modified_on, 'unixepoch', 'localtime') AS modified_on,
                    embedding_version,
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding,
                    CASE WHEN phon      IS NULL THEN 0 ELSE 1 END AS has_phon

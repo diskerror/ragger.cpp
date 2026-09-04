@@ -289,8 +289,8 @@ CREATE TABLE documents (
     document_id        INTEGER PRIMARY KEY AUTOINCREMENT,
     text               TEXT NOT NULL,            -- body; chapter/section headings inline
     tags               TEXT NOT NULL DEFAULT '', -- chunk-specific tags only (see above)
-    document_source_id INTEGER REFERENCES document_sources(document_source_id),
     chunk_index        INTEGER,
+    document_source_id INTEGER REFERENCES document_sources(document_source_id),
     modified_on        INTEGER,                  -- unix epoch; = source.imported_at until edited
     embedding_version  INTEGER, -- NULL iff embedding IS NULL
     embedding          BLOB,                     -- payload only, no version byte (see embedding_version)
@@ -299,19 +299,16 @@ CREATE TABLE documents (
 CREATE INDEX idx_documents_document_source_id ON documents(document_source_id);
 CREATE INDEX idx_documents_embedding_version ON documents(embedding_version);
 
--- LEFT JOIN keeps title/path/year visible for humans inspecting the view,
--- even though they physically live in document_sources now.
+-- documents_view mirrors the documents table's own columns (blobs -> has_*
+-- booleans, epochs -> datetime), matching every other *_view. Per-document
+-- metadata (title/path/year/imported_at) lives in document_sources_view.
 CREATE VIEW IF NOT EXISTS documents_view AS
-SELECT d.document_id, d.text, d.tags, d.document_source_id,
-       s.title, s.path, s.year,
-       d.chunk_index,
-       datetime(d.modified_on, 'unixepoch', 'localtime') AS modified_on,
-       datetime(s.imported_at, 'unixepoch', 'localtime') AS imported_at,
-       d.embedding_version,
-       CASE WHEN d.embedding IS NULL THEN 0 ELSE 1 END AS has_embedding,
-       CASE WHEN d.phon      IS NULL THEN 0 ELSE 1 END AS has_phon
-FROM documents d
-LEFT JOIN document_sources s ON s.document_source_id = d.document_source_id;
+SELECT document_id, text, tags, chunk_index, document_source_id,
+       datetime(modified_on, 'unixepoch', 'localtime') AS modified_on,
+       embedding_version,
+       CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding,
+       CASE WHEN phon      IS NULL THEN 0 ELSE 1 END AS has_phon
+FROM documents;
 
 -- ---------------------------------------------------------------------------
 -- settings  -- key/value store (embedding_model, dimensions, recipe,
