@@ -10,12 +10,15 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "embed_provider.h"
+
 namespace ragger {
 
-class Embedder {
+class Embedder : public IEmbedProvider {
 public:
     /// Disabled mode. Constructs successfully but cannot embed: ready() is
     /// false, dimensions() is 0, and encode() returns an empty vector.
@@ -40,18 +43,32 @@ public:
              const std::string& api_key = "",
              int dimensions = 0);
 
-    ~Embedder();
+    ~Embedder() override;
 
-    /// Encode text to a normalized embedding vector.
+    /// Encode text to a normalized embedding vector. Returns an empty
+    /// vector on failure (disabled instance, or — external mode — a
+    /// request error).
     std::vector<float> encode(const std::string& text) const;
 
     /// Embedding dimensions. For internal mode, read from config/model.
     /// For external mode, determined by probing or from constructor arg.
-    int dimensions() const;
+    int dimensions() const override;
 
     /// True if this embedder can actually produce embeddings. False only for
     /// the disabled instance built by the default constructor.
-    bool ready() const;
+    bool ready() const override;
+
+    // --- IEmbedProvider adapter ---------------------------------------
+    // Thin wrappers over encode(): translate its empty-vector-on-failure
+    // convention into IEmbedProvider's std::optional-on-failure contract.
+
+    /// Embed one text; std::nullopt if !ready() or encode() fails.
+    std::optional<std::vector<float>> embed(const std::string& text) const override;
+
+    /// Embed many texts sequentially (Embedder has no subprocess pool to
+    /// bound, unlike EmbedExecutor — batching here is just a loop).
+    std::vector<std::optional<std::vector<float>>>
+    embed_batch(const std::vector<std::string>& texts) const override;
 
     /// True if this embedder uses an external endpoint.
     bool is_external() const;
