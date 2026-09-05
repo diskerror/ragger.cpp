@@ -72,6 +72,15 @@ static void sigterm_handler(int) {
     g_shutdown_requested.store(true, std::memory_order_relaxed);
 }
 
+// Serializes a json body with the "application/json" content-type and an
+// optional non-200 status, replacing the repeated
+// res.set_content(json{...}.dump(), "application/json") pattern used
+// throughout this file's handlers.
+static void respond_json(httplib::Response& res, const json& body, int status = 200) {
+    res.status = status;
+    res.set_content(body.dump(), "application/json");
+}
+
 // Serialise a vector of SearchResults to a JSON array.
 // score is always included (0.0 for metadata-only searches).
 static json search_results_to_json(const std::vector<SearchResult>& results) {
@@ -503,15 +512,15 @@ struct Server::Impl {
             std::string status = metadata.value("status", "current");
             int did = mem.store_decision(text, status, tags);
             Diskerror::Logger::debug("POST /store 200 (decision)");
-            res.set_content(json{{"id", std::to_string(did)},
+            respond_json(res, json{{"id", std::to_string(did)},
                                  {"status", "stored"},
-                                 {"table", "decisions"}}.dump(), "application/json");
+                                 {"table", "decisions"}});
             return;
         }
 
         std::string id = mem.store(text, metadata);
         Diskerror::Logger::debug("POST /store 200");
-        res.set_content(json{{"id", id}, {"status", "stored"}}.dump(), "application/json");
+        respond_json(res, json{{"id", id}, {"status", "stored"}});
     }
 
     void handle_search(const UserInfo& user, const httplib::Request& req,
@@ -534,8 +543,8 @@ struct Server::Impl {
         timing["total_ms"] = ms;
         Diskerror::Logger::trace(std::format(lang::DBG_QUERY_LOG, query, sr.results.size(), ms));
         Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "POST", "/search", "200"));
-        res.set_content(json{{"results", search_results_to_json(sr.results)},
-                             {"timing",  timing}}.dump(), "application/json");
+        respond_json(res, json{{"results", search_results_to_json(sr.results)},
+                             {"timing",  timing}});
     }
 
     // POST /turn: ingest one agent-pushed conversation turn for background
@@ -551,9 +560,7 @@ struct Server::Impl {
         std::string name_source  = body.value("name_source", "");
         if (user_text.empty()) {
             Diskerror::Logger::debug("POST /turn 400");
-            res.status = 400;
-            res.set_content(json{{"error", "missing required field: user"}}.dump(),
-                            "application/json");
+                        respond_json(res, json{{"error", "missing required field: user"}}, 400);
             return;
         }
         auto& mem = _get_memory(user.username);
@@ -564,8 +571,8 @@ struct Server::Impl {
         // housekeeping tick (every 60s) via enqueue_catch_up — no immediate
         // LLM call here.
         Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "POST", "/turn", "200"));
-        res.set_content(json{{"status",  result.captured ? "captured" : "disabled"},
-                             {"turn_id", result.turn_id}}.dump(), "application/json");
+        respond_json(res, json{{"status",  result.captured ? "captured" : "disabled"},
+                             {"turn_id", result.turn_id}});
     }
 
     // GET /session/<guid>[?recipe=name]: assemble a recipe-shaped context payload.
@@ -576,17 +583,17 @@ struct Server::Impl {
         auto& mem = _get_memory(user.username);
         auto ctx = build_context(mem, sid, recipe_name);
         if (!ctx.enabled) {
-            res.set_content(json{{"status", "disabled"}}.dump(), "application/json");
+            respond_json(res, json{{"status", "disabled"}});
             return;
         }
         json chunks = json::array();
         for (const auto& c : ctx.chunks)
             chunks.push_back({{"kind", c.kind}, {"text", c.text}, {"timestamp", c.timestamp}});
         Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "GET", "/session", "200"));
-        res.set_content(json{{"status",     "ok"},
+        respond_json(res, json{{"status",     "ok"},
                              {"session_id", sid},
                              {"recipe",     ctx.recipe_name},
-                             {"chunks",     chunks}}.dump(), "application/json");
+                             {"chunks",     chunks}});
     }
 
     void handle_delete_memory(const UserInfo& user, const httplib::Request& req,
@@ -595,7 +602,7 @@ struct Server::Impl {
         auto& mem = _get_memory(user.username);
         if (mem.delete_memory(id)) {
             Diskerror::Logger::debug("DELETE /memory 200");
-            res.set_content(json{{"id", id}, {"status", "deleted"}}.dump(), "application/json");
+            respond_json(res, json{{"id", id}, {"status", "deleted"}});
         } else {
             Diskerror::Logger::debug("DELETE /memory 404");
             res.status = 404; res.set_content(lang::HTTP_MEMORY_NOT_FOUND, "text/plain");
@@ -613,7 +620,7 @@ struct Server::Impl {
         auto& mem = _get_memory(user.username);
         int deleted = mem.delete_batch(ids);
         Diskerror::Logger::debug("POST /delete_batch 200");
-        res.set_content(json{{"deleted", deleted}}.dump(), "application/json");
+        respond_json(res, json{{"deleted", deleted}});
     }
 
     void handle_search_by_metadata(const UserInfo& user, const httplib::Request& req,
@@ -627,8 +634,8 @@ struct Server::Impl {
             body["metadata"], body.value("limit", 0),
             body.value("after", ""), body.value("before", ""));
         Diskerror::Logger::debug("POST /search_by_metadata 200");
-        res.set_content(json{{"results", search_results_to_json(results)},
-                             {"count",   results.size()}}.dump(), "application/json");
+        respond_json(res, json{{"results", search_results_to_json(results)},
+                             {"count",   results.size()}});
     }
 
     // ---- Route registration -----------------------------------------------
@@ -636,13 +643,13 @@ struct Server::Impl {
     void setup_routes(httplib::Server& svr) {
         // GET /health — no auth required
         svr.Get("/health", [this](const httplib::Request&, httplib::Response& res) {
-            res.set_content(json{{"status",   "ok"},
+            respond_json(res, json{{"status",   "ok"},
                                  {"version",  RAGGER_VERSION},
                                  {"commit",   RAGGER_COMMIT},
                                  {"built",    RAGGER_BUILD_DATE},
                                  {"memories", memory.count()},
                                  {"embeddable_rows", memory.count_embeddable_rows()},
-                                 {"degraded", memory.embeddings_degraded()}}.dump(), "application/json");
+                                 {"degraded", memory.embeddings_degraded()}});
             Diskerror::Logger::debug("GET /health 200");
         });
 
@@ -672,8 +679,7 @@ struct Server::Impl {
 
         svr.Get("/count", guarded([this](const UserInfo& user, const httplib::Request&,
                                          httplib::Response& res) {
-            res.set_content(json{{"count", _get_memory(user.username).count()}}.dump(),
-                            "application/json");
+            respond_json(res, json{{"count", _get_memory(user.username).count()}});
             Diskerror::Logger::debug("GET /count 200");
         }));
 
@@ -698,8 +704,7 @@ struct Server::Impl {
             size_t e = token.find_last_not_of(" \t\r\n");
             if (s != std::string::npos) token = token.substr(s, e - s + 1);
             Diskerror::Logger::debug("GET /user/token 200");
-            res.set_content(json{{"token", token}, {"username", user.username}}.dump(),
-                            "application/json");
+            respond_json(res, json{{"token", token}, {"username", user.username}});
         }));
 
         // ---- Dashboard (embedded HTML/JS) --------------------------------
@@ -821,7 +826,7 @@ struct Server::Impl {
             // Sort by display name for stable UI ordering.
             std::sort(arr.begin(), arr.end(),
                 [](const json& a, const json& b) { return a["name"] < b["name"]; });
-            res.set_content(json{{"models", arr}}.dump(), "application/json");
+            respond_json(res, json{{"models", arr}});
         }));
 
         // GET /models/info?path=<provider/model> -> read config.json from a
@@ -851,11 +856,11 @@ struct Server::Impl {
             }
             int hidden_size = cfg_json.value("hidden_size", 0);
             std::string model_type = cfg_json.value("model_type", "");
-            res.set_content(json{
+            respond_json(res, json{
                 {"dimensions", hidden_size},
                 {"model_type", model_type},
                 {"hidden_size", hidden_size}
-            }.dump(), "application/json");
+            });
         }));
 
         // GET /models/external?host=X&port=Y&key=Z -> query a remote
@@ -875,7 +880,7 @@ struct Server::Impl {
             auto models = probe_emb.list_remote_models();
             json arr = json::array();
             for (const auto& m : models) arr.push_back(m);
-            res.set_content(json{{"models", arr}}.dump(), "application/json");
+            respond_json(res, json{{"models", arr}});
         }));
 
         // POST /models/external/probe -> send a test embedding request to a
@@ -908,11 +913,11 @@ struct Server::Impl {
             }
             std::string served = probe_emb.last_served_model();
             bool mismatch = !served.empty() && served != model;
-            res.set_content(json{
+            respond_json(res, json{
                 {"dimensions", dims},
                 {"served_model", served},
                 {"model_mismatch", mismatch}
-            }.dump(), "application/json");
+            });
         }));
 
         // GET /models/huggingface?q=<search> -> search HuggingFace for ONNX
@@ -959,7 +964,7 @@ struct Server::Impl {
                     });
                 }
             }
-            res.set_content(json{{"models", results}}.dump(), "application/json");
+            respond_json(res, json{{"models", results}});
         }));
 
         // POST /models/download -> download an ONNX model from HuggingFace
@@ -988,8 +993,7 @@ struct Server::Impl {
             // Check if already present (model.onnx or onnx/model.onnx)
             if (std::filesystem::exists(dest + "/model.onnx") ||
                 std::filesystem::exists(dest + "/onnx/model.onnx")) {
-                res.set_content(json{{"status", "already_present"}, {"path", repo}}.dump(),
-                                "application/json");
+                respond_json(res, json{{"status", "already_present"}, {"path", repo}});
                 return;
             }
 
@@ -1035,14 +1039,11 @@ struct Server::Impl {
             }
 
             if (!got_onnx) {
-                res.status = 502;
-                res.set_content(json{{"error", "Failed to download model.onnx from " + repo}}.dump(),
-                                "application/json");
+                                respond_json(res, json{{"error", "Failed to download model.onnx from " + repo}}, 502);
                 return;
             }
 
-            res.set_content(json{{"status", "downloaded"}, {"path", repo}}.dump(),
-                            "application/json");
+            respond_json(res, json{{"status", "downloaded"}, {"path", repo}});
         }));
 
         // GET /models/summarizer -> query the summarizer endpoint's /v1/models
@@ -1071,7 +1072,7 @@ struct Server::Impl {
                 if (lower.find("minilm") != std::string::npos) continue;
                 arr.push_back(id);
             }
-            res.set_content(json{{"models", arr}}.dump(), "application/json");
+            respond_json(res, json{{"models", arr}});
         }));
 
         // GET /models/embedding-external -> query the local inference endpoint
@@ -1095,7 +1096,7 @@ struct Server::Impl {
                     arr.push_back(id);
                 }
             }
-            res.set_content(json{{"models", arr}}.dump(), "application/json");
+            respond_json(res, json{{"models", arr}});
         }));
 
         // POST /models/embedding-external/probe -> send a test embedding to
@@ -1143,18 +1144,18 @@ struct Server::Impl {
             // LM Studio may serve a different loaded model than requested.
             std::string served = probe_emb.last_served_model();
             bool mismatch = !served.empty() && served != model;
-            res.set_content(json{
+            respond_json(res, json{
                 {"dimensions", dims},
                 {"served_model", served},
                 {"model_mismatch", mismatch}
-            }.dump(), "application/json");
+            });
         }));
 
         // GET /embedding/status -> current vs desired identity + flags.
         svr.Get("/embedding/status", guarded([this](const UserInfo&, const httplib::Request&,
                                                     httplib::Response& res) {
             auto s = memory.embedding_status();
-            res.set_content(json{
+            respond_json(res, json{
                 {"current", {{"model", s.current_model}, {"vector_type", s.current_vtype},
                              {"dimensions", s.current_dims}, {"engine", s.current_engine}}},
                 {"desired", {{"model", s.desired_model}, {"vector_type", s.desired_vtype},
@@ -1163,7 +1164,7 @@ struct Server::Impl {
                 {"reembedding",  s.reembedding},
                 {"repair_pending", s.repair_pending},
                 {"degraded",     memory.embeddings_degraded()},
-            }.dump(), "application/json");
+            });
         }));
 
         // POST /embedding/update -> run the staged re-embed now. Runs in a
@@ -1203,7 +1204,7 @@ struct Server::Impl {
             // startup rectify will adopt desired_port on the next restart.
             int desired = config().desired_port != 0 ? config().desired_port
                                                      : config().port;
-            res.set_content(json{
+            respond_json(res, json{
                 {"bound_port",      port},
                 {"configured_port", desired},
                 {"bound_bind",      host},
@@ -1212,7 +1213,7 @@ struct Server::Impl {
                                     (host != config().bind_address &&
                                      !(host == "127.0.0.1" && config().bind_address.empty()))},
                 {"scheme",          tls ? "https" : "http"},
-            }.dump(), "application/json");
+            });
         }));
 
         // POST /restart -> re-exec the daemon in place. Returns immediately
@@ -1230,9 +1231,9 @@ struct Server::Impl {
                                                        : config().port;
             std::string url = std::format("{}://{}:{}/dashboard",
                                           tls ? "https" : "http", h, new_port);
-            res.set_content(json{{"status", "restarting"},
+            respond_json(res, json{{"status", "restarting"},
                                  {"reconnect_url", url},
-                                 {"port", new_port}}.dump(), "application/json");
+                                 {"port", new_port}});
             Diskerror::Logger::info("POST /restart -> re-exec requested");
             // Trigger after the response flushes; the timer loop stops the
             // listeners and run() returns true so main() re-execs.
