@@ -1101,7 +1101,7 @@ struct Server::Impl {
             Endpoint ep("embedding-external", url);
             auto ids = ep.list_models();
             static const std::vector<std::string> kEmbeddingHints = {
-                "embed", "minilm", "bge", "gte", "e5", "nomic", "gist",
+                "embed", "minilm", "bge", "gte", "e5-", "nomic", "gist",
                 "sentence-t5", "sentence-transformer", "arctic-embed", "uae-"
             };
             json arr = json::array();
