@@ -346,4 +346,19 @@ std::string Embedder::last_served_model() const {
     return pImpl->last_served_model;
 }
 
+std::optional<std::vector<float>> Embedder::embed(const std::string& text) const {
+    if (!ready()) return std::nullopt;
+    auto vec = encode(text);
+    if (vec.empty()) return std::nullopt;
+    return vec;
+}
+
+std::vector<std::optional<std::vector<float>>>
+Embedder::embed_batch(const std::vector<std::string>& texts) const {
+    std::vector<std::optional<std::vector<float>>> out;
+    out.reserve(texts.size());
+    for (const auto& t : texts) out.push_back(embed(t));
+    return out;
+}
+
 } // namespace ragger

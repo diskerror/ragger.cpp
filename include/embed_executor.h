@@ -15,9 +15,11 @@
 #include <string>
 #include <vector>
 
+#include "embed_provider.h"
+
 namespace ragger {
 
-class EmbedExecutor {
+class EmbedExecutor : public IEmbedProvider {
 public:
     /// timeout_ms / retries / max_workers default to the [embed] config.
     EmbedExecutor();
@@ -33,7 +35,26 @@ public:
     std::vector<std::optional<std::vector<float>>>
     batch(const std::vector<std::string>& texts) const;
 
+    // --- IEmbedProvider ---------------------------------------------
+    // one()/batch() predate the interface and are kept as the primary,
+    // more discoverable API; embed()/embed_batch() just forward to them.
+    std::optional<std::vector<float>> embed(const std::string& text) const override {
+        return one(text);
+    }
+    std::vector<std::optional<std::vector<float>>>
+    embed_batch(const std::vector<std::string>& texts) const override {
+        return batch(texts);
+    }
+    /// Subprocess executor has no persistent model state to be "not ready";
+    /// individual calls fail (nullopt) instead. Always true.
+    bool ready() const override { return true; }
+    /// Not known ahead of a call (the subprocess reports it); no cheap way
+    /// to determine without spawning. 0 = unknown, consistent with
+    /// IEmbedProvider's documented contract.
+    int dimensions() const override { return 0; }
+
     int max_workers() const { return max_workers_; }
+
 
 private:
     int         timeout_ms_;
