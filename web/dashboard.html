@@ -626,17 +626,25 @@ async function populateExternalModelChoices() {
 async function probeExternalModelDimensions(model) {
   const dimsEntry = CONFIG.find(e => e.key === "desired_embedding_dimensions");
   if (!dimsEntry || !dimsEntry.__field) return;
+  const st = document.getElementById("ext-connect-status");
   try {
     const r = await fetch(api("/models/embedding-external/probe"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model }),
     });
-    if (!r.ok) return;
-    const data = await r.json();
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      // Most likely cause: the name-based prefilter picked a non-embedding
+      // model (e.g. a chat LLM) and the probe caught the bad response.
+      if (st) {
+        st.textContent = "⚠ " + (data.error || ("Probe failed (HTTP " + r.status + ")"));
+        st.className = "embed-status pending";
+      }
+      return;
+    }
     // Warn when the endpoint served a different model than requested —
     // the dimensions then belong to the served model, not the chosen one.
-    const st = document.getElementById("ext-connect-status");
     if (data.model_mismatch) {
       if (st) {
         st.textContent = "⚠ Endpoint served '" + data.served_model +
@@ -651,7 +659,9 @@ async function probeExternalModelDimensions(model) {
       dimsEntry.__field.disabled = true;
       commit(dimsEntry, String(data.dimensions), dimsEntry.__field);
     }
-  } catch (e) { /* probe failed */ }
+  } catch (e) {
+    if (st) { st.textContent = "⚠ Probe failed: " + e.message; st.className = "embed-status pending"; }
+  }
 }
 
 // Connect to external endpoint: fetch model list, populate external model dropdown

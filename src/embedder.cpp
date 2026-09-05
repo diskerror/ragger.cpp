@@ -19,6 +19,31 @@ namespace ragger {
 
 using json = nlohmann::json;
 
+// A response is "implausible" as an embedding if the model mistakenly
+// serving /v1/embeddings isn't actually an embedder — e.g. a chat LLM
+// bolted onto an OpenAI-compatible endpoint can return a fixed-size but
+// meaningless vector (all zeros, all one repeated value, or NaN/Inf)
+// instead of a real HTTP error. Catches the common failure shapes without
+// being a strict statistical test — a legitimate embedding can still fail
+// this in pathological cases, but a genuinely-wrong model reliably does.
+static bool is_plausible_embedding(const std::vector<float>& v) {
+    if (v.empty()) return false;
+    bool all_zero = true;
+    bool all_same = true;
+    double sumsq = 0.0;
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (!std::isfinite(v[i])) return false;  // NaN/Inf
+        if (v[i] != 0.0f) all_zero = false;
+        if (v[i] != v[0]) all_same = false;
+        sumsq += static_cast<double>(v[i]) * v[i];
+    }
+    if (all_zero || all_same) return false;
+    // A real embedding has non-trivial magnitude; L2 norm collapsing to
+    // ~0 (denormals/underflow) is another sign of garbage output.
+    if (sumsq < 1e-12) return false;
+    return true;
+}
+
 // ====================================================================
 // PIMPL — holds either an ONNX session or HTTP endpoint details.
 // ====================================================================
@@ -40,6 +65,7 @@ struct Embedder::Impl {
     std::string ext_api_key;
     int         ext_dims = 0;       // 0 = not yet known
     mutable std::string last_served_model;  // model reported by the last response
+    mutable bool last_probe_sane = false;   // plausibility check on the last probe vector
 
     // ---- Disabled constructor ----
     Impl() : disabled(true) {}
@@ -259,8 +285,10 @@ struct Embedder::Impl {
 
     int probe_dimensions() const {
         if (!external) return 0;
+        last_probe_sane = false;
         try {
             auto vec = encode_external("dimension probe");
+            last_probe_sane = is_plausible_embedding(vec);
             return static_cast<int>(vec.size());
         } catch (...) {
             return 0;
@@ -311,6 +339,10 @@ int Embedder::probe_dimensions() const {
 
 std::string Embedder::last_served_model() const {
     return pImpl->last_served_model;
+}
+
+bool Embedder::last_probe_sane() const {
+    return pImpl->last_probe_sane;
 }
 
 std::optional<std::vector<float>> Embedder::embed(const std::string& text) const {

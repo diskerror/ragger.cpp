@@ -911,6 +911,14 @@ struct Server::Impl {
                                 "application/json");
                 return;
             }
+            if (!probe_emb.last_probe_sane()) {
+                respond_json(res, json{
+                    {"error", "probe returned an implausible embedding — "
+                              "this model likely isn't an embedding model"},
+                    {"dimensions", dims}
+                }, 502);
+                return;
+            }
             std::string served = probe_emb.last_served_model();
             bool mismatch = !served.empty() && served != model;
             respond_json(res, json{
@@ -1077,6 +1085,11 @@ struct Server::Impl {
 
         // GET /models/embedding-external -> query the local inference endpoint
         // for embedding models only (the inverse of /models/summarizer).
+        // Filters by model-id substring since LM Studio/llama-swap don't
+        // reliably tag embedding models as such in /v1/models — matches
+        // known embedding-model family names, not just the literal word
+        // "embed" (see /models/embedding-external/probe for a runtime
+        // plausibility check on top of this name-based prefilter).
         svr.Get("/models/embedding-external", guarded([this](const UserInfo&, const httplib::Request&,
                                                               httplib::Response& res) {
             std::string url = config().summarizer_api_url;
@@ -1087,14 +1100,19 @@ struct Server::Impl {
             }
             Endpoint ep("embedding-external", url);
             auto ids = ep.list_models();
+            static const std::vector<std::string> kEmbeddingHints = {
+                "embed", "minilm", "bge", "gte", "e5", "nomic", "gist",
+                "sentence-t5", "sentence-transformer", "arctic-embed", "uae-"
+            };
             json arr = json::array();
             for (const auto& id : ids) {
                 std::string lower = id;
                 std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-                if (lower.find("embed") != std::string::npos ||
-                    lower.find("minilm") != std::string::npos) {
-                    arr.push_back(id);
+                bool hit = false;
+                for (const auto& hint : kEmbeddingHints) {
+                    if (lower.find(hint) != std::string::npos) { hit = true; break; }
                 }
+                if (hit) arr.push_back(id);
             }
             respond_json(res, json{{"models", arr}});
         }));
@@ -1138,6 +1156,18 @@ struct Server::Impl {
             if (dims <= 0) {
                 res.status = 502;
                 res.set_content(R"({"error":"probe failed"})", "application/json");
+                return;
+            }
+            if (!probe_emb.last_probe_sane()) {
+                // Model returned a fixed-size vector but it doesn't look like
+                // a real embedding (all-zero/constant/NaN) — most likely a
+                // non-embedding model (chat LLM) misidentified by the
+                // name-based prefilter and picked from the dropdown.
+                respond_json(res, json{
+                    {"error", "probe returned an implausible embedding — "
+                              "this model likely isn't an embedding model"},
+                    {"dimensions", dims}
+                }, 502);
                 return;
             }
             // Surface which model the server actually used — llama-swap /

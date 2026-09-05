@@ -86,6 +86,14 @@ public:
     /// endpoint (llama-swap, LM Studio) serves whatever is loaded.
     std::string last_served_model() const;
 
+    /// (External only) Whether the last probe_dimensions() call returned a
+    /// plausible embedding vector (finite values, non-constant/non-zero).
+    /// A wrong model — e.g. a chat LLM misidentified as an embedder and
+    /// asked to serve /v1/embeddings — can return a fixed-size but
+    /// meaningless vector (all zeros, or NaN/Inf) instead of erroring, so
+    /// dimension count alone isn't sufficient to trust the response.
+    bool last_probe_sane() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> pImpl;
