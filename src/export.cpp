@@ -1,15 +1,16 @@
 /**
  * Export — mysqldump-style SQL dump implementation.
  *
- * Opens the database READONLY so it's safe to run against a live server.
+ * The StorageBackend-based overloads are the canonical implementation.
+ * The db_path convenience overloads open a read-only SqliteBackend and
+ * delegate — no CREATE TABLE side-effects on arbitrary dump targets.
  * Dumps CREATE TABLE / CREATE INDEX / CREATE TRIGGER + INSERT statements.
- * The `embedding` BLOB column in `memories` is skipped unless requested.
+ * The `embedding` BLOB column in content tables is skipped unless requested.
  */
 #include "export.h"
+#include "storage_backend.h"
+#include "sqlite_backend.h"
 #include "config.h"
-#include "lang.h"
-
-#include <sqlite3.h>
 
 #include <format>
 #include <stdexcept>
@@ -29,116 +30,45 @@ static std::string sql_quote(const std::string& s) {
     return out;
 }
 
-static std::string blob_hex(const void* data, int len) {
+static std::string blob_hex(const std::vector<uint8_t>& data) {
     static const char hex[] = "0123456789ABCDEF";
     std::string out = "X'";
-    auto* p = static_cast<const unsigned char*>(data);
-    for (int i = 0; i < len; ++i) {
-        out += hex[p[i] >> 4];
-        out += hex[p[i] & 0x0F];
+    for (uint8_t b : data) {
+        out += hex[b >> 4];
+        out += hex[b & 0x0F];
     }
     out += '\'';
     return out;
 }
 
 // Columns to skip in a given table unless embeddings are requested.
-// The v2 content tables (turns/summaries/decisions/documents) each carry an
-// `embedding` BLOB; skip it by default to keep dumps small and diffable.
 static bool skip_column(const std::string& /*table*/,
                         const std::string& column,
                         bool include_embeddings) {
     return !include_embeddings && column == "embedding";
 }
 
-// Tables that are purely internal / rebuilt on startup. FTS5 maintains its
-// own shadow tables (<name>_data/_idx/_docsize/_config) under each *_fts
-// virtual table; those are derived content and are rebuilt from the base
-// tables, so they're excluded from dumps.
+// Tables that are purely internal / rebuilt on startup. FTS5 shadow tables
+// are derived content excluded from dumps. (list_schema_objects already
+// filters _fts shadow tables; is_internal_table guards tbl_name matching.)
 static bool is_internal_table(const std::string& name) {
     return name.find("_fts") != std::string::npos;
 }
 
-// Advance a read cursor one row. Returns true on SQLITE_ROW, false on
-// SQLITE_DONE, and throws on a genuine mid-scan error (SQLITE_ERROR/BUSY/
-// ABORT). The bare `sqlite3_step(...) == SQLITE_ROW` idiom collapses an error
-// into the same `false` as end-of-data, so a scan that dies partway (disk I/O
-// error, lock) exits cleanly and the dump is silently truncated on disk with
-// no error reported. This makes that failure loud.
-static bool export_step(sqlite3_stmt* stmt, const std::string& what) {
-    int rc = sqlite3_step(stmt);
-    if (rc == SQLITE_ROW)  return true;
-    if (rc == SQLITE_DONE) return false;
-    throw std::runtime_error(std::format(lang::ERR_EXPORT_SCAN_FAILED, what,
-        rc, sqlite3_errmsg(sqlite3_db_handle(stmt))));
-}
+// -- StorageBackend-based implementations -----------------------------------
 
-// -- public API -------------------------------------------------------------
-
-std::vector<std::string> export_list_tables(const std::string& db_path) {
-    std::string resolved = expand_path(db_path);
-    sqlite3* db = nullptr;
-    int rc = sqlite3_open_v2(resolved.c_str(), &db, SQLITE_OPEN_READONLY, nullptr);
-    if (rc != SQLITE_OK) {
-        std::string err = sqlite3_errmsg(db);
-        sqlite3_close(db);
-        throw std::runtime_error(std::format(lang::ERR_SQLITE_OPEN, err));
-    }
-
+std::vector<std::string> export_list_tables(StorageBackend& backend) {
     std::vector<std::string> tables;
-    sqlite3_stmt* stmt = nullptr;
-    sqlite3_prepare_v2(db,
-        "SELECT name FROM sqlite_master WHERE type='table' "
-        "AND name NOT LIKE 'sqlite_%' ORDER BY name",
-        -1, &stmt, nullptr);
-    while (export_step(stmt, "sqlite_master")) {
-        std::string name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-        if (!is_internal_table(name))
-            tables.push_back(name);
+    for (auto& obj : backend.list_schema_objects()) {
+        if (obj.type == "table" && !is_internal_table(obj.name))
+            tables.push_back(obj.name);
     }
-    sqlite3_finalize(stmt);
-    sqlite3_close(db);
     return tables;
 }
 
-int export_sql(std::ostream& out,
-               const std::string& db_path,
-               const ExportOptions& opts) {
+int export_sql(std::ostream& out, StorageBackend& backend, const ExportOptions& opts) {
+    auto schema = backend.list_schema_objects();
 
-    std::string resolved = expand_path(db_path);
-    sqlite3* db = nullptr;
-    int rc = sqlite3_open_v2(resolved.c_str(), &db, SQLITE_OPEN_READONLY, nullptr);
-    if (rc != SQLITE_OK) {
-        std::string err = sqlite3_errmsg(db);
-        sqlite3_close(db);
-        throw std::runtime_error(std::format(lang::ERR_SQLITE_OPEN, err));
-    }
-
-    // Collect schema objects (tables, indexes, triggers) from sqlite_master.
-    struct SchemaObj { std::string type; std::string name; std::string tbl_name; std::string sql; };
-    std::vector<SchemaObj> schema;
-    {
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db,
-            "SELECT type, name, tbl_name, sql FROM sqlite_master "
-            "WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' "
-            "ORDER BY CASE type "
-            "  WHEN 'table'   THEN 0 "
-            "  WHEN 'index'   THEN 1 "
-            "  WHEN 'trigger' THEN 2 "
-            "  ELSE 3 END, name",
-            -1, &stmt, nullptr);
-        while (export_step(stmt, "schema (sqlite_master)")) {
-            SchemaObj obj;
-            obj.type     = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
-            obj.name     = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-            obj.tbl_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-            obj.sql      = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
-            schema.push_back(std::move(obj));
-        }
-        sqlite3_finalize(stmt);
-    }
-
-    // Filter to requested table (if any).
     auto table_match = [&](const std::string& tbl) {
         if (opts.table.empty()) return !is_internal_table(tbl);
         return tbl == opts.table;
@@ -150,15 +80,10 @@ int export_sql(std::ostream& out,
 
     int total_rows = 0;
 
+    // Schema DDL
     for (auto& obj : schema) {
         if (!table_match(obj.tbl_name)) continue;
-
-        // Schema DDL
-        if (obj.type == "table") {
-            out << obj.sql << ";\n";
-        } else {
-            out << obj.sql << ";\n";
-        }
+        out << obj.sql << ";\n";
     }
     out << "\n";
 
@@ -167,37 +92,19 @@ int export_sql(std::ostream& out,
         if (obj.type != "table") continue;
         if (!table_match(obj.name)) continue;
 
-        // Get column info via PRAGMA.
-        struct ColInfo { std::string name; };
-        std::vector<ColInfo> all_cols;
-        {
-            std::string pragma = "PRAGMA table_info(" + obj.name + ")";
-            sqlite3_stmt* info = nullptr;
-            sqlite3_prepare_v2(db, pragma.c_str(), -1, &info, nullptr);
-            while (export_step(info, "PRAGMA table_info(" + obj.name + ")")) {
-                ColInfo ci;
-                ci.name = reinterpret_cast<const char*>(sqlite3_column_text(info, 1));
-                all_cols.push_back(ci);
-            }
-            sqlite3_finalize(info);
-        }
+        auto all_cols = backend.table_column_names(obj.name);
 
         // Decide which columns to emit.
-        std::vector<int> col_indices;
+        std::vector<int>         col_indices;
         std::vector<std::string> col_names;
         for (int i = 0; i < (int)all_cols.size(); ++i) {
-            if (skip_column(obj.name, all_cols[i].name, opts.include_embeddings))
+            if (skip_column(obj.name, all_cols[i], opts.include_embeddings))
                 continue;
             col_indices.push_back(i);
-            col_names.push_back(all_cols[i].name);
+            col_names.push_back(all_cols[i]);
         }
 
-        // SELECT all rows.
-        std::string select = "SELECT * FROM " + obj.name;
-        sqlite3_stmt* data = nullptr;
-        sqlite3_prepare_v2(db, select.c_str(), -1, &data, nullptr);
-
-        while (export_step(data, "table data (" + obj.name + ")")) {
+        backend.iterate_table_rows(obj.name, [&](const ExportRow& row) {
             out << "INSERT INTO " << obj.name << " (";
             for (size_t j = 0; j < col_names.size(); ++j) {
                 if (j > 0) out << ", ";
@@ -208,38 +115,47 @@ int export_sql(std::ostream& out,
             for (size_t j = 0; j < col_indices.size(); ++j) {
                 if (j > 0) out << ", ";
                 int ci = col_indices[j];
-                int coltype = sqlite3_column_type(data, ci);
-                switch (coltype) {
-                    case SQLITE_NULL:
+                const auto& cell = row[ci];
+                switch (cell.type) {
+                    case ExportCell::Type::Null:
                         out << "NULL";
                         break;
-                    case SQLITE_INTEGER:
-                        out << sqlite3_column_int64(data, ci);
+                    case ExportCell::Type::Integer:
+                        out << cell.int_val;
                         break;
-                    case SQLITE_FLOAT:
-                        out << sqlite3_column_double(data, ci);
+                    case ExportCell::Type::Float:
+                        out << cell.float_val;
                         break;
-                    case SQLITE_BLOB:
-                        out << blob_hex(sqlite3_column_blob(data, ci),
-                                        sqlite3_column_bytes(data, ci));
+                    case ExportCell::Type::Blob:
+                        out << blob_hex(cell.blob_val);
                         break;
-                    case SQLITE_TEXT:
+                    case ExportCell::Type::Text:
                     default:
-                        out << sql_quote(reinterpret_cast<const char*>(
-                                sqlite3_column_text(data, ci)));
+                        out << sql_quote(cell.text_val);
                         break;
                 }
             }
             out << ");\n";
             ++total_rows;
-        }
-        sqlite3_finalize(data);
+        });
     }
 
     out << "\nCOMMIT;\n";
-
-    sqlite3_close(db);
     return total_rows;
+}
+
+// -- db_path convenience overloads (thin wrappers) --------------------------
+
+std::vector<std::string> export_list_tables(const std::string& db_path) {
+    SqliteBackend backend(expand_path(db_path), /*readonly=*/true);
+    return export_list_tables(backend);
+}
+
+int export_sql(std::ostream& out,
+               const std::string& db_path,
+               const ExportOptions& opts) {
+    SqliteBackend backend(expand_path(db_path), /*readonly=*/true);
+    return export_sql(out, backend, opts);
 }
 
 } // namespace ragger

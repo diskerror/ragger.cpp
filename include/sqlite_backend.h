@@ -5,6 +5,7 @@
  */
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -25,8 +26,9 @@ public:
     SqliteBackend(Embedder& embedder, const std::string& db_path = "");
 
     /// DB-only constructor — no embedder required.
-    /// Only schema/migration operations work; store/search will throw.
-    explicit SqliteBackend(const std::string& db_path);
+    /// readonly=true: opens with SQLITE_OPEN_READONLY, skips schema creation (for export).
+    /// readonly=false (default): opens read-write and creates users/settings tables.
+    explicit SqliteBackend(const std::string& db_path, bool readonly = false);
     ~SqliteBackend() override;
 
     /// Path to the database file.
@@ -201,6 +203,22 @@ public:
     /// Delete old conversation entries older than specified hours. Returns count deleted.
     int cleanup_old_conversations(float max_age_hours) override;
 
+    // --- Users / settings ---
+    std::optional<UserInfo> get_user_by_username(const std::string& username) override;
+    std::optional<std::string> get_user_password(const std::string& username) override;
+    void update_user_token(const std::string& username, const std::string& new_hash) override;
+    int  create_user(const std::string& username, const std::string& token_hash) override;
+    bool delete_user(const std::string& username) override;
+    void set_user_password(const std::string& username, const std::string& password_hash) override;
+    std::optional<UserInfo> get_user_by_token_hash(const std::string& token_hash) override;
+    std::optional<std::string> get_setting(const std::string& key) override;
+    void set_setting(const std::string& key, const std::string& value) override;
+
+    // --- Schema introspection ---
+    std::vector<SchemaObject> list_schema_objects() override;
+    std::vector<std::string>  table_column_names(const std::string& table) override;
+    void iterate_table_rows(const std::string& table,
+                            const std::function<void(const ExportRow&)>& cb) override;
 
 private:
     struct Impl;

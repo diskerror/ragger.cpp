@@ -105,6 +105,8 @@ public:
 
     const void* column_blob(int c) const { return sqlite3_column_blob(stmt_, c); }
     int         column_bytes(int c) const { return sqlite3_column_bytes(stmt_, c); }
+    int column_count() const { return sqlite3_column_count(stmt_); }
+    int column_type(int c) const { return sqlite3_column_type(stmt_, c); }
 
     /// Escape hatch for the rare call that needs the raw handle.
     sqlite3_stmt* raw() { return stmt_; }
