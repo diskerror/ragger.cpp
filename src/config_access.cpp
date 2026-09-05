@@ -327,6 +327,34 @@ std::expected<ConfigSetResult, ConfigSetError> apply_config_value(
     return r;
 }
 
+bool set_config_field_raw(Config& cfg, std::string_view key, const std::string& value) {
+    if (auto it = bool_fields().find(key); it != bool_fields().end()) {
+        // Permissive: unrecognized strings parse as false, same as the
+        // INI loader's historical parse_bool().
+        std::string lower = value;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        cfg.*(it->second) = (lower == "true" || lower == "yes" || lower == "1");
+        return true;
+    }
+    if (auto it = int_fields().find(key); it != int_fields().end()) {
+        cfg.*(it->second) = std::stoi(value);
+        return true;
+    }
+    if (auto it = float_fields().find(key); it != float_fields().end()) {
+        cfg.*(it->second) = std::stof(value);
+        return true;
+    }
+    if (auto it = string_fields().find(key); it != string_fields().end()) {
+        cfg.*(it->second) = value;
+        return true;
+    }
+    if (key == "log_max_size_mb") {
+        cfg.log_max_size_mb = std::stol(value);
+        return true;
+    }
+    return false;
+}
+
 void overlay_settings_from_db(Config& cfg, const std::string& db_path) {
     namespace fs = std::filesystem;
     if (db_path.empty() || !fs::exists(db_path)) return;
