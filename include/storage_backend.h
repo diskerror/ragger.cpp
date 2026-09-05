@@ -4,16 +4,17 @@
  * Defines the contract for storage implementations (e.g., SQLite).
  * Allows swapping implementations without changing client code.
  *
- * KNOWN GAP (partial — engine-swap TODO, not urgent):
- * export.cpp (`ragger export`) still opens its own read-only sqlite3*
- * connection directly (intentionally — to avoid CREATE TABLE side-effects on
- * arbitrary dump targets) and retains raw sqlite3_open_v2/sqlite3_close plus
- * sqlite3_column_* for type-tagged value reading. The schema-introspection
- * half (sqlite_master / PRAGMA table_info) and user/settings CRUD are now
- * abstracted behind this interface (list_schema_objects, table_column_names,
- * iterate_table_rows, get_user_by_username …). UserStore is fully closed —
- * it now delegates through StorageBackend. StatsLogger is intentionally
- * exempt — separate SQLite-specific instrumentation DB by design.
+ * GAP CLOSED (fix/storage-gap):
+ * UserStore (user_store.cpp) and export.cpp both previously bypassed this
+ * interface with raw sqlite3_* calls. Both are now fully abstracted:
+ *   - UserStore delegates all CRUD through SqliteBackend (DB-only mode).
+ *   - export.cpp uses list_schema_objects(), table_column_names(), and
+ *     iterate_table_rows() from this interface. The db_path convenience
+ *     overloads open a SqliteBackend with readonly=true, which uses
+ *     SQLITE_OPEN_READONLY and skips schema creation — a legitimate
+ *     SQLite-level detail at the right abstraction level (interface specifies
+ *     behavior; implementation optimizes with a readonly connection).
+ * StatsLogger is intentionally exempt — separate SQLite instrumentation DB.
  */
 #pragma once
 
