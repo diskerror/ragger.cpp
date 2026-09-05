@@ -232,6 +232,7 @@ add_library(ragger_core STATIC
     src/config_access.cpp
     src/util/time.cpp
     src/util/fs.cpp
+    src/util/http_client.cpp
     src/summarizer.cpp
     src/summarizer_service.cpp
     src/recipe.cpp

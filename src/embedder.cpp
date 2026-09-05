@@ -11,8 +11,8 @@
 #include <format>
 #include <stdexcept>
 
-// --- External mode: libcurl + JSON -----------------------------------------
-#include <curl/curl.h>
+// --- External mode: HTTP client + JSON -----------------------------------------
+#include "util/http_client.h"
 #include "nlohmann_json.hpp"
 
 namespace ragger {
@@ -147,12 +147,6 @@ struct Embedder::Impl {
         return pooled;
     }
 
-    // ---- curl write callback ----
-    static size_t write_cb(char* ptr, size_t sz, size_t n, std::string* out) {
-        out->append(ptr, sz * n);
-        return sz * n;
-    }
-
     // ---- build base URL ----
     std::string base_url() const {
         return "http://" + ext_host + ":" + std::to_string(ext_port);
@@ -160,9 +154,6 @@ struct Embedder::Impl {
 
     // ---- External encode via /v1/embeddings ----
     std::vector<float> encode_external(const std::string& text) const {
-        CURL* curl = curl_easy_init();
-        if (!curl) throw std::runtime_error("Failed to init curl");
-
         json body = {
             {"input", text},
             {"model", ext_model}
@@ -174,32 +165,20 @@ struct Embedder::Impl {
         std::string payload = body.dump();
 
         std::string url = base_url() + "/v1/embeddings";
-        std::string response;
 
-        struct curl_slist* headers = nullptr;
-        headers = curl_slist_append(headers, "Content-Type: application/json");
+        std::vector<std::string> headers{"Content-Type: application/json"};
         if (!ext_api_key.empty()) {
-            headers = curl_slist_append(headers,
-                ("Authorization: Bearer " + ext_api_key).c_str());
+            headers.push_back("Authorization: *** " + ext_api_key);
         }
 
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+        util::HttpClient http;
+        auto resp = http.post(url, payload, headers, /*timeout_sec=*/30);
 
-        CURLcode rc = curl_easy_perform(curl);
-        curl_slist_free_all(headers);
-        curl_easy_cleanup(curl);
-
-        if (rc != CURLE_OK) {
-            throw std::runtime_error(std::format("Embedding request failed: {}",
-                                                 curl_easy_strerror(rc)));
+        if (!resp.ok()) {
+            throw std::runtime_error(std::format("Embedding request failed: {}", resp.error));
         }
 
-        auto j = json::parse(response, nullptr, false);
+        auto j = json::parse(resp.body, nullptr, false);
         if (j.is_discarded()) {
             throw std::runtime_error("Failed to parse embedding response");
         }
@@ -253,31 +232,19 @@ struct Embedder::Impl {
     std::vector<std::string> list_remote_models() const {
         if (!external) return {};
 
-        CURL* curl = curl_easy_init();
-        if (!curl) return {};
-
         std::string url = base_url() + "/v1/models";
-        std::string response;
 
-        struct curl_slist* headers = nullptr;
+        std::vector<std::string> headers;
         if (!ext_api_key.empty()) {
-            headers = curl_slist_append(headers,
-                ("Authorization: Bearer " + ext_api_key).c_str());
+            headers.push_back("Authorization: *** " + ext_api_key);
         }
 
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+        util::HttpClient http;
+        auto resp = http.get(url, headers, /*timeout_sec=*/10);
 
-        CURLcode rc = curl_easy_perform(curl);
-        if (headers) curl_slist_free_all(headers);
-        curl_easy_cleanup(curl);
+        if (!resp.ok()) return {};
 
-        if (rc != CURLE_OK) return {};
-
-        auto j = json::parse(response, nullptr, false);
+        auto j = json::parse(resp.body, nullptr, false);
         if (j.is_discarded() || !j.contains("data") || !j["data"].is_array())
             return {};
 
