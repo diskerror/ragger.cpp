@@ -33,7 +33,7 @@ warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 fail() { echo -e "${RED}[!]${NC} $*" >&2; exit 1; }
 
 if [ "$(id -u)" -eq 0 ]; then
-    fail "Do NOT run install-bin.sh as root. It installs into your own ~/.ragger/."
+    fail "Do NOT run install-bin.sh as root. It installs into your own ~/.ragger/ and ~/.local/bin"
 fi
 
 cd "$(dirname "$0")/.."
@@ -128,10 +128,6 @@ fi
 # Embedding models — fetch from HuggingFace if not already present.
 # Provider/model layout mirrors LM Studio and HuggingFace conventions:
 #   ~/.ragger/models/<provider>/<model>/
-#
-# Legacy flat dirs (e.g. all-MiniLM-L6-v2/ at the top level) still work
-# for backward compat but aren't offered as new choices in the dashboard.
-# New installs use the provider layout exclusively.
 
 # Helper: download one ONNX embedding model from HuggingFace.
 # Usage: download_model <hf_repo> <model_dir> [onnx_subdir]
@@ -321,7 +317,7 @@ fi
 echo ""
 info "Installed to $RAGGER_BASE"
 echo ""
-echo "  To start the daemon:              ragger start"
+echo "  To start the daemon:  ragger start"
 echo "  To open the configuration dashboard:  ragger dashboard --browser"
 echo ""
 echo "  (\`ragger dashboard\` prints the URL instead of opening a browser.)"
@@ -329,4 +325,9 @@ echo "  (\`ragger dashboard\` prints the URL instead of opening a browser.)"
 if [ -d "$HOME/.openclaw" ]; then
     echo ""
     info "OpenClaw detected — run ./install-openclaw.sh to wire the memory plugin."
+fi
+
+if [ -d "$HOME/.hermes" ]; then
+    echo ""
+    info "Hermes Agent detected — run ./install-hermes.sh to wire the memory plugin."
 fi

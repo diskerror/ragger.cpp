@@ -53,7 +53,7 @@ struct Config {
     // --ragger-base CLI flag (testing only; no env var equivalent).
 
     // --- Embedding ---
-    std::string embedding_model = "sentence-transformers/all-MiniLM-L6-v2";
+    std::string embedding_model = "sentence-transformers/all-MiniLM-L12-v2";
     int         embedding_dimensions = 384;
     // On-disk vector storage precision: "f16" (half, default — half the size)
     // or "f32" (full). In-memory math is always f32; this only affects the
@@ -85,13 +85,13 @@ struct Config {
 
     // --- Search ---
     int   default_search_limit = 5;
-    float default_min_score    = 0.4f;
+    float default_min_score    = 0.6f;
     bool  bm25_enabled         = true;
     float bm25_weight          = 4.0f;
     float vector_weight        = 8.0f;
     // Phonetic ("dolphining" sounds-like) blend weight. Default 1 (low) so the
     // signal nudges rather than dominates; 0 disables it. See phon_scores().
-    float phon_weight          = 1.0f;
+    float phon_weight          = 4.0f;
     // Reserved: not yet wired to search behavior.
     bool  inject_data          = false;
 
@@ -166,7 +166,7 @@ struct Config {
     std::string tls_key;       // path to private key (PEM)
 
     // --- Import ---
-    int  minimum_chunk_size    = 300;
+    int  minimum_chunk_size    = 800;  // 500–1000 byte target; respects paragraph boundaries
 
     // --- Turn handling ---
     // capture_turns (write side): when true, the capture_turn entry point
