@@ -221,41 +221,40 @@ static std::expected<Config, ConfigError> parse_config(std::istream& file) {
             return s;
         };
 
-        // Map to config fields
+        // Map to config fields. Most keys are plain schema fields (bool/int/
+        // float/string) applied via set_config_field_raw(), which shares the
+        // key -> Config-member-pointer tables in config_access.cpp with the
+        // CLI/dashboard config path (see config_schema.h). Keys with
+        // aliases, legacy back-compat quirks, or bespoke validation
+        // (clamping, "ignore non-positive", cross-key fallback) are not
+        // representable as a plain field assignment and are handled
+        // explicitly below, same as before.
         if (section == "server") {
-            if      (key == "socket_enable") cfg.socket_enabled = parse_bool(val);
-            else if (key == "socket") cfg.socket_enabled = !strip_quotes(val).empty();  // legacy key, back-compat
-            else if (key == "tcp_enable") cfg.tcp_enabled = parse_bool(val);
-            else if (key == "bind") cfg.bind_address = strip_quotes(val);
-            else if (key == "port") cfg.port = std::stoi(val);
-            else if (key == "server_name" || key == "hostname") cfg.server_name = val;
-            else if (key == "capture_turns") cfg.capture_turns = parse_bool(val);
-            else if (key == "build_context") cfg.build_context = parse_bool(val);
-            else if (key == "auto_recall") cfg.auto_recall = parse_bool(val);
-            else if (key == "default_recipe") cfg.default_recipe = val;
-            else if (key == "cert" || key == "tls_cert") cfg.tls_cert = val;
-            else if (key == "key" || key == "tls_key") cfg.tls_key = val;
+            if (key == "socket") {
+                // Legacy key, back-compat: presence of a non-empty value
+                // enables the socket listener (not itself a schema field).
+                cfg.socket_enabled = !strip_quotes(val).empty();
+            } else if (key == "bind") {
+                cfg.bind_address = strip_quotes(val);
+            } else if (key == "hostname") {
+                cfg.server_name = val;  // alias for server_name
+            } else if (key == "tls_cert") {
+                cfg.tls_cert = val;     // alias for cert
+            } else if (key == "tls_key") {
+                cfg.tls_key = val;      // alias for key
+            } else {
+                set_config_field_raw(cfg, key, val);
+            }
         }
         else if (section == "embedding") {
-            if      (key == "model")      cfg.embedding_model = val;
-            else if (key == "dimensions") cfg.embedding_dimensions = std::stoi(val);
-            else if (key == "vector_type") cfg.embedding_vector_type = val;
-            else if (key == "engine")     cfg.embedding_engine = val;
-            else if (key == "external_host") cfg.embedding_external_host = val;
-            else if (key == "external_port") cfg.embedding_external_port = std::stoi(val);
-            else if (key == "external_api_key") cfg.embedding_external_api_key = val;
-            else if (key == "external_model") cfg.embedding_external_model = val;
+            set_config_field_raw(cfg, key, val);
         }
         else if (section == "search") {
-            if      (key == "default_limit")    cfg.default_search_limit = std::stoi(val);
-            else if (key == "default_min_score") cfg.default_min_score = std::stof(val);
-            else if (key == "bm25_enabled")     cfg.bm25_enabled = parse_bool(val);
-            else if (key == "bm25_weight")      cfg.bm25_weight = std::stof(val);
-            else if (key == "vector_weight")    cfg.vector_weight = std::stof(val);
-            else if (key == "phon_weight")      cfg.phon_weight = std::stof(val);
-            else if (key == "inject_data")      cfg.inject_data = parse_bool(val);
+            if (key == "inject_data") cfg.inject_data = parse_bool(val);  // not a schema key
+            else set_config_field_raw(cfg, key, val);
         }
         else if (section == "inference") {
+            // Not schema keys (no CLI/dashboard-editable equivalent yet).
             if      (key == "model")      cfg.inference_model = val;
             else if (key == "api_url")    cfg.inference_api_url = val;
             else if (key == "api_key")    cfg.inference_api_key = val;
@@ -263,16 +262,11 @@ static std::expected<Config, ConfigError> parse_config(std::istream& file) {
             else if (key == "default")    cfg.inference_default = val;
         }
         else if (section == "summarizer") {
-            if      (key == "model")        cfg.summarizer_model        = val;
-            else if (key == "api_url")      cfg.summarizer_api_url      = val;
-            else if (key == "api_key")      cfg.summarizer_api_key      = val;
-            else if (key == "max_tokens")   cfg.summarizer_max_tokens   = std::stoi(val);
-            else if (key == "target_pct")   cfg.summarizer_target_pct  = std::stoi(val);
-            else if (key == "max_pct")      cfg.summarizer_max_pct     = std::stoi(val);
-            else if (key == "prompt")       cfg.summarizer_prompt       = val;
-            else if (key == "episode_idle_minutes") {
+            if (key == "episode_idle_minutes") {
                 int v = std::stoi(val);
                 if (v > 0) { cfg.episode_idle_minutes = v; episode_idle_set = true; }
+            } else {
+                set_config_field_raw(cfg, key, val);
             }
         }
         else if (section.substr(0, 10) == "inference.") {
@@ -289,8 +283,7 @@ static std::expected<Config, ConfigError> parse_config(std::istream& file) {
             else if (key == "max_tokens") ep.max_tokens = std::stoi(val);
         }
         else if (section == "logging") {
-            if (key == "log_level") cfg.log_level = val;
-            else if (key == "log_max_size_mb") {
+            if (key == "log_max_size_mb") {
                 long v = std::stol(val);
                 if (v >= 0) cfg.log_max_size_mb = v;
             }
@@ -298,27 +291,32 @@ static std::expected<Config, ConfigError> parse_config(std::istream& file) {
                 int v = std::stoi(val);
                 if (v >= 0) cfg.log_max_age_days = v;
             }
+            else set_config_field_raw(cfg, key, val);  // log_level
         }
         else if (section == "paths") {
-            if (key == "normalize_home") cfg.normalize_home_path = parse_bool(val);
+            set_config_field_raw(cfg, key, val);  // normalize_home
         }
         else if (section == "tls" || section == "ssl") {
             // Legacy standalone section — kept silently for back-compat.
             // TLS now lives under [server] (cert=/key=); see above.
-            if (key == "cert" || key == "tls_cert") cfg.tls_cert = val;
-            else if (key == "key" || key == "tls_key") cfg.tls_key = val;
+            if (key == "tls_cert") cfg.tls_cert = val;
+            else if (key == "tls_key") cfg.tls_key = val;
+            else set_config_field_raw(cfg, key, val);  // cert / key
         }
         else if (section == "import") {
-            if (key == "minimum_chunk_size") cfg.minimum_chunk_size = std::stoi(val);
+            set_config_field_raw(cfg, key, val);  // minimum_chunk_size
         }
         else if (section == "embed") {
-            if (key == "timeout_ms") cfg.embed_timeout_ms = std::stoi(val);
-            else if (key == "retries") cfg.embed_retries = std::stoi(val);
-            else if (key == "max_workers") cfg.embed_max_workers = std::stoi(val);
+            // Section-local key names (timeout_ms, retries, max_workers)
+            // differ from their schema keys (embed_timeout_ms, ...), so
+            // route through the schema key explicitly rather than passing
+            // the raw INI key.
+            if (key == "timeout_ms") set_config_field_raw(cfg, "embed_timeout_ms", val);
+            else if (key == "retries") set_config_field_raw(cfg, "embed_retries", val);
+            else if (key == "max_workers") set_config_field_raw(cfg, "embed_max_workers", val);
         }
         else if (section == "housekeeping") {
-            if (key == "cleanup_max_age_hours") cfg.cleanup_max_age_hours = std::stof(val);
-            else if (key == "housekeeping_interval") {
+            if (key == "housekeeping_interval") {
                 int v = std::stoi(val);
                 cfg.housekeeping_interval = (v == 0) ? 0 : std::max(v, 10);
             }
@@ -329,18 +327,6 @@ static std::expected<Config, ConfigError> parse_config(std::istream& file) {
             else if (key == "episode_idle_minutes") {
                 int v = std::stoi(val);
                 if (v > 0) { cfg.episode_idle_minutes = v; episode_idle_set = true; }
-            }
-            else if (key == "episode_threshold_base") {
-                cfg.episode_threshold_base = std::stof(val);
-            }
-            else if (key == "episode_threshold_cap") {
-                cfg.episode_threshold_cap = std::stof(val);
-            }
-            else if (key == "episode_threshold_step") {
-                cfg.episode_threshold_step = std::stof(val);
-            }
-            else if (key == "episode_step_minutes") {
-                cfg.episode_step_minutes = std::stof(val);
             }
             else if (key == "catch_up_batch_size") {
                 int v = std::stoi(val);
@@ -354,6 +340,7 @@ static std::expected<Config, ConfigError> parse_config(std::istream& file) {
                 int v = std::stoi(val);
                 if (v >= 0) cfg.max_turn_failures = v;
             }
+            else set_config_field_raw(cfg, key, val);  // cleanup_max_age_hours, episode_threshold_*, episode_step_minutes
         }
         else if (section == "llama") {
             // [llama] section removed — use external inference providers

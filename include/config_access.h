@@ -67,6 +67,18 @@ std::expected<ConfigSetResult, ConfigSetError> apply_config_value(
     Config& cfg, std::string_view key, std::string_view value,
     bool allow_locked = false);
 
+/// Set a Config field directly from a schema key using the same
+/// key -> member-pointer tables as get/apply_config_value, but with the
+/// permissive (non-strict) parsing historically used by the INI loader
+/// (e.g. an unrecognized boolean string parses as `false` rather than
+/// failing). Returns false if `key` is not a known direct-field key (schema
+/// keys with bespoke semantics — endpoints, alias/legacy fallback logic,
+/// clamped or "ignore non-positive" fields — are not in these tables and
+/// must still be handled by the caller). Throws std::invalid_argument for
+/// an int/float key whose value doesn't parse as a number, matching the
+/// prior std::stoi/std::stof behavior.
+bool set_config_field_raw(Config& cfg, std::string_view key, const std::string& value);
+
 /// Overlay every row present in the DB `settings` table onto `cfg`, for keys
 /// that appear in the schema. Unknown/reserved keys (db_version, boundary
 /// watermarks) are ignored. Called once after INI load in init_config().
