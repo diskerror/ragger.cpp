@@ -6,6 +6,7 @@
  */
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -95,5 +96,24 @@ struct EpisodeCandidateTurn {
     std::vector<float> summary_embedding;// from turn_summaries.embedding
 };
 
+
+/// A schema object from sqlite_master (table, index, trigger, view).
+struct SchemaObject {
+    std::string type;
+    std::string name;
+    std::string tbl_name;
+    std::string sql;
+};
+
+/// A single cell in a generic table row (for export/introspection).
+struct ExportCell {
+    enum class Type { Null, Integer, Float, Text, Blob };
+    Type        type      = Type::Null;
+    int64_t     int_val   = 0;
+    double      float_val = 0.0;
+    std::string text_val;
+    std::vector<uint8_t> blob_val;
+};
+using ExportRow = std::vector<ExportCell>;
 
 } // namespace ragger

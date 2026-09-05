@@ -4,21 +4,21 @@
  * Defines the contract for storage implementations (e.g., SQLite).
  * Allows swapping implementations without changing client code.
  *
- * KNOWN GAP (engine-swap TODO, not urgent — functionality first):
- * UserStore (user_store.cpp — auth `users` table AND the `settings`
- * table backing the dashboard/config-DB work) and export.cpp (`ragger
- * export`, which reads `sqlite_master`/`PRAGMA table_info` directly)
- * both bypass this interface and hand-roll raw sqlite3_* calls of their
- * own instead of going through StorageBackend. They're the two pieces
- * that would need a real abstraction (or a rewrite) before a different
- * DB engine could be dropped in — everything else (main.cpp, server.cpp,
- * mcp.cpp, RaggerMemory) already goes through this interface cleanly.
- * StatsLogger is intentionally exempt from this — separate
- * SQLite-specific instrumentation DB by design, not part of the
- * swappable storage layer.
+ * GAP CLOSED (fix/storage-gap):
+ * UserStore (user_store.cpp) and export.cpp both previously bypassed this
+ * interface with raw sqlite3_* calls. Both are now fully abstracted:
+ *   - UserStore delegates all CRUD through SqliteBackend (DB-only mode).
+ *   - export.cpp uses list_schema_objects(), table_column_names(), and
+ *     iterate_table_rows() from this interface. The db_path convenience
+ *     overloads open a SqliteBackend with readonly=true, which uses
+ *     SQLITE_OPEN_READONLY and skips schema creation — a legitimate
+ *     SQLite-level detail at the right abstraction level (interface specifies
+ *     behavior; implementation optimizes with a readonly connection).
+ * StatsLogger is intentionally exempt — separate SQLite instrumentation DB.
  */
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -489,6 +489,51 @@ public:
 
     /// Delete old conversation entries older than specified hours. Returns count deleted.
     virtual int cleanup_old_conversations(float max_age_hours) = 0;
+
+    // --- Users / settings table CRUD (gap closure: replaces UserStore's own sqlite3* connection) ---
+
+    /// Look up a user by username. Returns nullopt if not found.
+    virtual std::optional<UserInfo> get_user_by_username(const std::string& username) = 0;
+
+    /// Get hashed password for a user. Returns nullopt if not set.
+    virtual std::optional<std::string> get_user_password(const std::string& username) = 0;
+
+    /// Replace the user's token hash.
+    virtual void update_user_token(const std::string& username, const std::string& new_hash) = 0;
+
+    /// Create a new user. Returns the new user_id, or -1 on failure (e.g. duplicate username).
+    virtual int create_user(const std::string& username, const std::string& token_hash) = 0;
+
+    /// Delete a user by username. Returns true if a row was deleted.
+    virtual bool delete_user(const std::string& username) = 0;
+
+    /// Set or clear the password hash for a user.
+    virtual void set_user_password(const std::string& username, const std::string& password_hash) = 0;
+
+    /// Look up a user by token hash. Returns nullopt if not found.
+    virtual std::optional<UserInfo> get_user_by_token_hash(const std::string& token_hash) = 0;
+
+    /// Get a settings value by key. Returns nullopt if not present.
+    virtual std::optional<std::string> get_setting(const std::string& key) = 0;
+
+    /// Set or replace a settings value.
+    virtual void set_setting(const std::string& key, const std::string& value) = 0;
+
+    // --- Schema introspection (gap closure: replaces export.cpp's raw sqlite_master / PRAGMA calls) ---
+
+    /// All schema objects (tables, indexes, triggers) from sqlite_master, ordered
+    /// tables-first. FTS5 shadow tables are NOT filtered — callers filter via
+    /// is_internal_table() if needed.
+    virtual std::vector<SchemaObject> list_schema_objects() = 0;
+
+    /// Column names for a table, in schema order (PRAGMA table_info).
+    virtual std::vector<std::string> table_column_names(const std::string& table) = 0;
+
+    /// Iterate every row of `table`, calling `cb` once per row. Each ExportCell
+    /// carries the runtime type tag (Null/Integer/Float/Text/Blob) and value.
+    /// Used by export_sql to dump arbitrary tables without knowing their schema.
+    virtual void iterate_table_rows(const std::string& table,
+                                    const std::function<void(const ExportRow&)>& cb) = 0;
 };
 
 } // namespace ragger

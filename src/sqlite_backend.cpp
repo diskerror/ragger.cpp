@@ -115,6 +115,7 @@ static std::string tags_from_metadata(const json& metadata) {
 struct SqliteBackend::Impl {
     sqlite3*    db       = nullptr;
     Embedder*   embedder = nullptr;    // nullable — null for DB-only (user mgmt) mode
+    bool        readonly_ = false;     // true for export-path readonly connections
     std::string db_path;
     // On-disk vector dtype (from config vector_type). All in-memory math is
     // f32; this only governs how embeddings are packed into the stored BLOB.
@@ -284,14 +285,22 @@ struct SqliteBackend::Impl {
         }
     }
 
-    /// DB-only constructor — no embedder, only user management ops work.
-    explicit Impl(const std::string& path)
-        : embedder(nullptr)
+    /// DB-only constructor — no embedder.
+    /// readonly=true: opens SQLITE_OPEN_READONLY, skips schema creation (for export).
+    /// readonly=false: opens read-write and creates users/settings tables.
+    explicit Impl(const std::string& path, bool readonly)
+        : embedder(nullptr), readonly_(readonly)
     {
         db_path = expand_path(path);
-        fs::create_directories(fs::path(db_path).parent_path());
+        if (!readonly)
+            fs::create_directories(fs::path(db_path).parent_path());
 
-        int rc = sqlite3_open(db_path.c_str(), &db);
+        int rc;
+        if (readonly) {
+            rc = sqlite3_open_v2(db_path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr);
+        } else {
+            rc = sqlite3_open(db_path.c_str(), &db);
+        }
         if (rc != SQLITE_OK) {
             std::string err = sqlite3_errmsg(db);
             sqlite3_close(db);
@@ -299,11 +308,16 @@ struct SqliteBackend::Impl {
             throw std::runtime_error(std::format(lang::ERR_SQLITE_OPEN, err));
         }
 
-        exec("PRAGMA journal_mode=WAL");
-        exec("PRAGMA foreign_keys = ON");
-        sqlite3_busy_timeout(db, 10000);  // see main constructor
-        // Only ensure users + session tables exist (skip memory tables/FTS).
-        create_user_schema();
+        if (!readonly) {
+            exec("PRAGMA journal_mode=WAL");
+            exec("PRAGMA foreign_keys = ON");
+        }
+        sqlite3_busy_timeout(db, 10000);
+        // Only ensure users + settings tables exist (skip memory tables/FTS).
+        // Skip entirely for readonly connections (export path — no side-effects).
+        if (!readonly) {
+            create_user_schema();
+        }
     }
 
     ~Impl() { close(); }
@@ -1094,6 +1108,145 @@ struct SqliteBackend::Impl {
                 value TEXT NOT NULL
             )
         )");
+    }
+
+    // ---- User / settings CRUD (gap closure) --------------------------------
+
+    std::optional<UserInfo> get_user_by_username(const std::string& username) {
+        Stmt s(db, "SELECT id, username, token_hash FROM users WHERE username = ?");
+        s.bind(1, username);
+        if (s.step()) return UserInfo{s.column_int(0), s.column_text(1), s.column_text(2)};
+        return std::nullopt;
+    }
+
+    std::optional<UserInfo> get_user_by_token_hash(const std::string& token_hash) {
+        Stmt s(db, "SELECT id, username, token_hash FROM users WHERE token_hash = ?");
+        s.bind(1, token_hash);
+        if (s.step()) return UserInfo{s.column_int(0), s.column_text(1), s.column_text(2)};
+        return std::nullopt;
+    }
+
+    std::optional<std::string> get_user_password(const std::string& username) {
+        Stmt s(db, "SELECT password_hash FROM users WHERE username = ?");
+        s.bind(1, username);
+        if (s.step()) return s.column_text_opt(0);
+        return std::nullopt;
+    }
+
+    void set_user_password(const std::string& username, const std::string& pw_hash) {
+        Stmt s(db, "UPDATE users SET password_hash = ? WHERE username = ?");
+        s.bind(1, pw_hash).bind(2, username).step();
+    }
+
+    int create_user(const std::string& username, const std::string& token_hash) {
+        int64_t ts = db_epoch();
+        Stmt s(db,
+            "INSERT INTO users (username, token_hash, created_at, updated_at) VALUES (?,?,?,?)");
+        s.bind(1, username).bind(2, token_hash).bind(3, ts).bind(4, ts).step();
+        return sqlite3_changes(db) > 0
+            ? static_cast<int>(sqlite3_last_insert_rowid(db))
+            : -1;
+    }
+
+    bool delete_user(const std::string& username) {
+        Stmt s(db, "DELETE FROM users WHERE username = ?");
+        s.bind(1, username).step();
+        return sqlite3_changes(db) > 0;
+    }
+
+    void update_user_token(const std::string& username, const std::string& new_hash) {
+        Stmt s(db, "UPDATE users SET token_hash = ? WHERE username = ?");
+        s.bind(1, new_hash).bind(2, username).step();
+    }
+
+    std::optional<std::string> get_setting(const std::string& key) {
+        Stmt s(db, "SELECT value FROM settings WHERE key = ?");
+        s.bind(1, key);
+        if (s.step()) return s.column_text_opt(0);
+        return std::nullopt;
+    }
+
+    void set_setting(const std::string& key, const std::string& value) {
+        Stmt s(db, "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
+        s.bind(1, key).bind(2, value).step();
+    }
+
+    // ---- Schema introspection (gap closure) --------------------------------
+
+    std::vector<SchemaObject> list_schema_objects() {
+        std::vector<SchemaObject> result;
+        Stmt s(db,
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            "WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' "
+            "ORDER BY CASE type "
+            "  WHEN 'table'   THEN 0 "
+            "  WHEN 'index'   THEN 1 "
+            "  WHEN 'trigger' THEN 2 "
+            "  ELSE 3 END, name");
+        while (s.step_checked()) {
+            SchemaObject obj;
+            obj.type     = s.column_text(0);
+            obj.name     = s.column_text(1);
+            obj.tbl_name = s.column_text(2);
+            obj.sql      = s.column_text(3);
+            // Filter FTS5 shadow tables and other internal tables
+            if (obj.name.find("_fts") != std::string::npos) continue;
+            result.push_back(std::move(obj));
+        }
+        return result;
+    }
+
+    std::vector<std::string> table_column_names(const std::string& table) {
+        std::vector<std::string> names;
+        Stmt s(db, "PRAGMA table_info(" + table + ")");
+        while (s.step_checked()) {
+            names.push_back(s.column_text(1));  // col 1 = column name
+        }
+        return names;
+    }
+
+    int iterate_table_rows(const std::string& table,
+                           const std::function<void(const ExportRow&)>& cb) {
+        Stmt s(db, "SELECT * FROM " + table);
+        int count = 0;
+        while (s.step_checked()) {
+            int ncols = sqlite3_column_count(s.raw());
+            ExportRow row(ncols);
+            for (int i = 0; i < ncols; ++i) {
+                int coltype = sqlite3_column_type(s.raw(), i);
+                switch (coltype) {
+                    case SQLITE_NULL:
+                        row[i].type = ExportCell::Type::Null;
+                        break;
+                    case SQLITE_INTEGER:
+                        row[i].type    = ExportCell::Type::Integer;
+                        row[i].int_val = sqlite3_column_int64(s.raw(), i);
+                        break;
+                    case SQLITE_FLOAT:
+                        row[i].type      = ExportCell::Type::Float;
+                        row[i].float_val = sqlite3_column_double(s.raw(), i);
+                        break;
+                    case SQLITE_BLOB: {
+                        row[i].type = ExportCell::Type::Blob;
+                        const auto* p = static_cast<const uint8_t*>(sqlite3_column_blob(s.raw(), i));
+                        int nb = sqlite3_column_bytes(s.raw(), i);
+                        row[i].blob_val.assign(p, p + nb);
+                        break;
+                    }
+                    case SQLITE_TEXT:
+                    default: {
+                        row[i].type     = ExportCell::Type::Text;
+                        const char* txt = reinterpret_cast<const char*>(
+                            sqlite3_column_text(s.raw(), i));
+                        row[i].text_val = txt ? txt : "";
+                        break;
+                    }
+                }
+            }
+            cb(row);
+            ++count;
+        }
+        return count;
     }
 
     /// Human-readable views mirroring scripts/schema_db0.12.sql exactly:
@@ -3933,8 +4086,8 @@ struct SqliteBackend::Impl {
 SqliteBackend::SqliteBackend(Embedder& embedder, const std::string& db_path)
     : pImpl(std::make_unique<Impl>(embedder, db_path)) {}
 
-SqliteBackend::SqliteBackend(const std::string& db_path)
-    : pImpl(std::make_unique<Impl>(db_path)) {}
+SqliteBackend::SqliteBackend(const std::string& db_path, bool readonly)
+    : pImpl(std::make_unique<Impl>(db_path, readonly)) {}
 
 SqliteBackend::~SqliteBackend() = default;
 
@@ -4317,6 +4470,72 @@ int SqliteBackend::cleanup_old_conversations(float max_age_hours) {
         deleted = static_cast<int>(sqlite3_changes(pImpl->db));
     }
     return deleted;
+}
+
+// ---- users / settings CRUD (delegate through mutex) -----------------------
+
+std::optional<UserInfo> SqliteBackend::get_user_by_username(const std::string& username) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->get_user_by_username(username);
+}
+
+std::optional<std::string> SqliteBackend::get_user_password(const std::string& username) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->get_user_password(username);
+}
+
+void SqliteBackend::update_user_token(const std::string& username, const std::string& new_hash) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    pImpl->update_user_token(username, new_hash);
+}
+
+int SqliteBackend::create_user(const std::string& username, const std::string& token_hash) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->create_user(username, token_hash);
+}
+
+bool SqliteBackend::delete_user(const std::string& username) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->delete_user(username);
+}
+
+void SqliteBackend::set_user_password(const std::string& username,
+                                      const std::string& password_hash) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    pImpl->set_user_password(username, password_hash);
+}
+
+std::optional<UserInfo> SqliteBackend::get_user_by_token_hash(const std::string& token_hash) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->get_user_by_token_hash(token_hash);
+}
+
+std::optional<std::string> SqliteBackend::get_setting(const std::string& key) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->get_setting(key);
+}
+
+void SqliteBackend::set_setting(const std::string& key, const std::string& value) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    pImpl->set_setting(key, value);
+}
+
+// ---- schema introspection (delegate through mutex) ------------------------
+
+std::vector<SchemaObject> SqliteBackend::list_schema_objects() {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->list_schema_objects();
+}
+
+std::vector<std::string> SqliteBackend::table_column_names(const std::string& table) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->table_column_names(table);
+}
+
+void SqliteBackend::iterate_table_rows(const std::string& table,
+                                       const std::function<void(const ExportRow&)>& cb) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    pImpl->iterate_table_rows(table, cb);
 }
 
 } // namespace ragger
