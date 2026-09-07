@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.16.0 *In Progress*
+The SQLite FTS5 module isn't working as desired or expected. Going to use my own full-text-search 
+algorithm.
+This is similar to the original BM25 used in the project but (hopefully) better.
+
 ## v0.15.1
 - Embedding model filter: tightened e5 hint to `e5-`, widened external-model name filter with plausibility check
 - StorageBackend gap closed for user/settings + schema introspection
