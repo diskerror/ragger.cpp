@@ -364,6 +364,17 @@ struct SqliteBackend::Impl {
         // as current.
         bool db_preexisted = table_exists("turns");
 
+        // Capture the on-disk schema version BEFORE any CREATE/ALTER below
+        // mutates the file, then snapshot the DB if an in-binary migration is
+        // pending -- so the backup reflects the pristine pre-migration state.
+        // db_version() is only meaningful for an existing DB (settings table
+        // already present); a fresh install has no version yet and needs no
+        // backup. One snapshot covers a whole migration chain (0.12 -> 0.15 ->
+        // ...): it is taken here, once, before the first structural change.
+        const std::string pre_migration_version =
+            db_preexisted ? db_version() : std::string();
+        maybe_backup_before_migration(pre_migration_version);
+
         // Users, settings, and session tables — credentials (for read-only
         // document access) plus web/chat session persistence. These are a
         // separate concern from the v2 memory tables; one declarative
@@ -573,7 +584,17 @@ struct SqliteBackend::Impl {
         if (column_exists("documents", "path"))
             migrate_documents_normalize();
 
-        // v0.12 schema-version hard gate: no auto-migration in the binary.
+        // Run any pending in-binary version migration for an existing DB
+        // (e.g. the 0.12 -> 0.15 embedding version-byte split). Advances
+        // db_version toward kExpectedDbVersion so the hard gate below passes.
+        // No-op on a fresh install or an already-current DB; an unknown/too-old
+        // version is left untouched and rejected by the gate.
+        if (db_preexisted)
+            run_pending_migrations(pre_migration_version);
+
+        // Schema-version hard gate. In-binary migration for known upgrade
+        // origins (0.12, 0.15) ran just above; anything still not matching
+        // kExpectedDbVersion here is an unknown/too-old version and is rejected.
         // First, stamp db_version for a genuinely fresh install ONLY --
         // db_preexisted (captured before any CREATE TABLE ran, at the top
         // of this function) distinguishes "no memory tables existed yet"
@@ -662,6 +683,212 @@ struct SqliteBackend::Impl {
         s.bind(1, v);
         s.exec();
     }
+
+    // ---- in-binary version migrations ------------------------------------
+    // Historically, DB schema upgrades were external shell scripts
+    // (scripts/migrate_to_db*.sh) and the binary merely hard-gated on the
+    // version. To make GitHub-cloned upgrades painless, the known upgrade
+    // legs now run in-process on open, chained until the DB reaches
+    // kExpectedDbVersion. Each leg mirrors migrate_documents_normalize()'s
+    // shape: one BEGIN/try/COMMIT/ROLLBACK transaction, Logger progress,
+    // and post-migration verification that aborts (rolls back) on any
+    // inconsistency rather than silently shipping a corrupt index.
+
+    /// Snapshot the DB to "<db>_BACKUP_<timestamp>.db" before the first
+    /// structural change of a migration run. Only fires when an in-binary
+    /// migration is actually pending (current on-disk version differs from
+    /// kExpectedDbVersion AND is a version we know how to migrate from). One
+    /// snapshot covers a whole chain (0.12 -> 0.15 -> ...). Uses VACUUM INTO,
+    /// which writes a single consistent snapshot file straight from the open
+    /// (WAL) database -- no daemon stop, no lsof dance, no half-copied WAL.
+    void maybe_backup_before_migration(const std::string& current_version) {
+        if (current_version.empty()) return;                    // fresh/pre-version DB
+        if (current_version == kExpectedDbVersion) return;      // already current
+        // Only back up for versions we actually migrate FROM in-binary. An
+        // unknown version will be rejected by the gate without mutation, so a
+        // backup would be noise.
+        if (current_version != "0.12" && current_version != "0.15") return;
+
+        // Timestamped sibling of the DB file: <name>_BACKUP_<YYYYMMDD-HHMMSS>.db
+        fs::path src(db_path);
+        std::string stem = src.stem().string();               // e.g. "memories"
+        std::string ts;
+        {
+            std::time_t now = std::time(nullptr);
+            std::tm tmv{};
+#if defined(_WIN32)
+            localtime_s(&tmv, &now);
+#else
+            localtime_r(&now, &tmv);
+#endif
+            char buf[32];
+            std::strftime(buf, sizeof(buf), "%Y%m%d-%H%M%S", &tmv);
+            ts = buf;
+        }
+        fs::path backup = src.parent_path() /
+            (stem + "_BACKUP_" + ts + ".db");
+
+        Diskerror::Logger::info(std::format(
+            "DB schema {} predates {} -- taking pre-migration backup: {}",
+            current_version, std::string(kExpectedDbVersion), backup.string()));
+
+        // VACUUM INTO requires the target not already exist.
+        if (fs::exists(backup))
+            throw std::runtime_error(
+                "pre-migration backup target already exists: " + backup.string());
+
+        Stmt s(db, "VACUUM INTO ?");
+        s.bind(1, backup.string());
+        if (!s.exec())
+            throw std::runtime_error(
+                std::string("pre-migration VACUUM INTO failed: ") + sqlite3_errmsg(db));
+
+        Diskerror::Logger::info("Pre-migration backup complete.");
+    }
+
+    /// Chain the in-binary migration legs until the DB reaches
+    /// kExpectedDbVersion (or a leg we don't know about is hit -> leave it for
+    /// the hard gate to reject). `from_version` is the on-disk version captured
+    /// before create_schema() mutated anything. Each leg advances db_version;
+    /// the loop re-reads it so 0.12 flows 0.12 -> 0.15 -> (0.16 once its leg
+    /// lands) under the single backup taken above.
+    void run_pending_migrations(const std::string& from_version) {
+        std::string v = from_version;
+        // Guard against an unbounded loop if a leg ever fails to advance the
+        // version. Legs are few; a handful of iterations is plenty.
+        for (int guard = 0; guard < 8; ++guard) {
+            if (v.empty() || v == kExpectedDbVersion) return;
+            if (v == "0.12") {
+                migrate_0_12_to_0_15();
+                v = db_version();
+                continue;
+            }
+            // No known leg from this version -> stop; the hard gate reports it.
+            return;
+        }
+    }
+
+    /// 0.12 -> 0.15 migration (in-binary port of scripts/migrate_to_db0.15.sh).
+    ///
+    /// By the time this runs, create_schema() has ALREADY performed the
+    /// structural half of the 0.15 upgrade on this existing DB:
+    ///   - added embedding_version INTEGER to all five embedded tables
+    ///     (ALTER ADD COLUMN guards, above), and
+    ///   - normalized documents into document_sources via
+    ///     migrate_documents_normalize(), which also CLEARS documents'
+    ///     embedding/embedding_version/phon (they get re-embedded with the
+    ///     title appended).
+    ///
+    /// The remaining data step is the embedding version-byte SPLIT for the
+    /// four tables migrate_documents_normalize did NOT wipe: turns,
+    /// turn_summaries, summaries, decisions. Pre-0.15 blobs stored a 1-byte
+    /// version tag at byte 0 (EmbeddingCodec offset=1); 0.15 blobs are payload
+    /// only (offset=0) with the tag living in the embedding_version column. So
+    /// for every row with a non-NULL embedding: embedding_version = blob[0],
+    /// embedding = blob[1:]. NULL embeddings stay NULL in both columns.
+    ///
+    /// Whole thing runs in one transaction. On any verification failure the
+    /// transaction is rolled back (original rows untouched) and the throw
+    /// propagates -- the pre-migration backup made above is the safety net.
+    void migrate_0_12_to_0_15() {
+        Diskerror::Logger::info(
+            "Migrating DB 0.12 -> 0.15 (embedding version-byte split)...");
+
+        // (table, primary-key column) for the four tables whose embeddings
+        // survive into 0.15 and therefore need the byte split. documents is
+        // intentionally excluded: migrate_documents_normalize() already
+        // cleared its embeddings.
+        struct T { const char* table; const char* pk; };
+        const T tables[] = {
+            {"turns",          "turn_id"},
+            {"turn_summaries", "turn_summary_id"},
+            {"summaries",      "summary_id"},
+            {"decisions",      "decision_id"},
+        };
+
+        Stmt(db, "BEGIN").exec();
+        try {
+            for (const auto& t : tables) {
+                // Read each row's blob, split off byte 0, write both columns
+                // back. Collect first, then write, so we never mutate a table
+                // mid-scan.
+                struct Row { int64_t id; int version; std::vector<uint8_t> payload; };
+                std::vector<Row> rows;
+                {
+                    Stmt s(db, std::format(
+                        "SELECT {}, embedding FROM {} WHERE embedding IS NOT NULL",
+                        t.pk, t.table));
+                    while (s.step_checked()) {
+                        const auto* blob =
+                            static_cast<const uint8_t*>(s.column_blob(1));
+                        int n = s.column_bytes(1);
+                        if (blob == nullptr || n < 1)
+                            throw std::runtime_error(std::format(
+                                "{}: non-NULL embedding with <1 byte (id={})",
+                                t.table, s.column_int64(0)));
+                        Row r;
+                        r.id = s.column_int64(0);
+                        r.version = blob[0];
+                        r.payload.assign(blob + 1, blob + n);   // bytes [1, n)
+                        rows.push_back(std::move(r));
+                    }
+                }
+                for (const auto& r : rows) {
+                    Stmt u(db, std::format(
+                        "UPDATE {} SET embedding_version = ?, embedding = ? "
+                        "WHERE {} = ?", t.table, t.pk));
+                    u.bind(1, r.version);
+                    u.bind_blob(2, r.payload.data(),
+                                static_cast<int>(r.payload.size()));
+                    u.bind(3, r.id);
+                    if (!u.exec())
+                        throw std::runtime_error(std::format(
+                            "{}: embedding split UPDATE failed (id={}): {}",
+                            t.table, r.id, sqlite3_errmsg(db)));
+                }
+                Diskerror::Logger::info(std::format(
+                    "  {}: split {} embedding(s)", t.table, rows.size()));
+            }
+
+            // ---- verification (abort/rollback on any mismatch) ------------
+            // For each migrated table: embedding NULL-ness and
+            // embedding_version NULL-ness must move together. (The blob is now
+            // the pure payload; we already stripped exactly one byte in C++,
+            // so a per-row "1 byte shorter" DB check isn't reconstructable
+            // post-split -- the correctness guarantee is the byte-exact
+            // std::vector assign above plus this NULL-parity check.)
+            for (const auto& t : tables) {
+                Stmt s(db, std::format(
+                    "SELECT COUNT(*) FROM {} "
+                    "WHERE (embedding IS NULL) != (embedding_version IS NULL)",
+                    t.table));
+                s.step_checked();
+                int64_t bad = s.column_int64(0);
+                if (bad != 0)
+                    throw std::runtime_error(std::format(
+                        "{}: {} row(s) with embedding/embedding_version NULL "
+                        "mismatch after split", t.table, bad));
+            }
+
+            // Structural integrity of the whole file.
+            {
+                Stmt s(db, "PRAGMA integrity_check");
+                s.step_checked();
+                std::string res = s.column_text(0);
+                if (res != "ok")
+                    throw std::runtime_error(
+                        "PRAGMA integrity_check failed after 0.12->0.15: " + res);
+            }
+
+            set_db_version("0.15");
+            Stmt(db, "COMMIT").exec();
+            Diskerror::Logger::info("DB migration 0.12 -> 0.15 complete.");
+        } catch (...) {
+            Stmt(db, "ROLLBACK").exec();
+            throw;
+        }
+    }
+
 
     /// One-time in-place migration to the normalized documents schema (0.15).
     /// Extracts per-document metadata (path/title/year/imported_at) from the
