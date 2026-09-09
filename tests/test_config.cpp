@@ -302,11 +302,11 @@ void test_default_values() {
     assert(true == true);
     assert(cfg.embedding_dimensions == 384);
     assert(cfg.default_search_limit == 5);
-    assert(cfg.default_min_score == 0.4f);
+    assert(cfg.default_min_score == 0.6f);
     assert(cfg.bm25_enabled == true);
     assert(cfg.bm25_weight == 4.0f);
     assert(cfg.vector_weight == 8.0f);
-    assert(cfg.phon_weight == 1.0f);
+    assert(cfg.phon_weight == 4.0f);
     assert(cfg.normalize_home_path == true);
     assert(cfg.cleanup_max_age_hours == 0.0f);  // 0 = keep forever (never delete raw conversations)
     assert(cfg.housekeeping_interval == 60);
@@ -314,7 +314,7 @@ void test_default_values() {
     assert(cfg.build_context == false);
     assert(cfg.embedding_vector_type == "f16");
     assert(cfg.inference_max_tokens == 4096);
-    assert(cfg.minimum_chunk_size == 300);
+    assert(cfg.minimum_chunk_size == 800);
 
     fs::remove(path);
     std::println(" OK");

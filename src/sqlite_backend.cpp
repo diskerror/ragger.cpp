@@ -616,6 +616,12 @@ struct SqliteBackend::Impl {
         exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_turn_summaries_turn_id_uniq "
              "ON turn_summaries(turn_id) WHERE turn_id IS NOT NULL");
 
+        // Custom terms index (v0.16) — replaces both FTS5 layers with a single
+        // flat term table + per-content-type junction tables. See
+        // ownCloud/Ragger/custom-search-schema.md for the design rationale and
+        // docs/plans/migration-plan-fts-index.md for the step-by-step build plan.
+        create_terms_schema();
+
         // FTS5 — external-content virtual tables + sync triggers replace
         // the old hand-rolled bm25_* sidecars (issue #49).
         create_fts_schema();
@@ -1076,6 +1082,49 @@ struct SqliteBackend::Impl {
             if (indexed_rows != base_rows) {
                 exec(std::format("INSERT INTO {0}({0}) VALUES('rebuild')", t.fts));
             }
+        }
+    }
+
+    /// Custom terms index (v0.16) — replaces both FTS5 layers with a single
+    /// flat term table + per-content-type junction tables. See
+    /// ownCloud/Ragger/custom-search-schema.md for the design rationale and
+    /// docs/plans/migration-plan-fts-index.md for the step-by-step build plan.
+    ///
+    /// The `terms` table holds literal (stemmed) AND metaphone tokens in ONE
+    /// flat list with no type/flag column — they self-filter at query time
+    /// because a stemmed word and its DMP code are different strings that both
+    /// resolve to the same term_id. No doc_frequency column: df is computed
+    /// live via COUNT(*) on the per-table *_terms join (Decision C).
+    void create_terms_schema() {
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS terms (
+                term_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                term    TEXT NOT NULL UNIQUE
+            )
+        )");
+
+        // One junction table per text table. The FK ON DELETE CASCADE means a
+        /// deleted record's index rows go away automatically — nothing to
+        // maintain in the write path beyond delete-then-insert for updates.
+        struct T { const char* junc; const char* base; const char* pk; };
+        const T tables[] = {
+            {"turns_terms",           "turns",           "turn_id"},
+            {"turn_summaries_terms",  "turn_summaries",  "turn_summary_id"},
+            {"summaries_terms",       "summaries",       "summary_id"},
+            {"documents_terms",       "documents",       "document_id"},
+            {"decisions_terms",       "decisions",       "decision_id"},
+        };
+        for (const auto& t : tables) {
+            exec(std::format(
+                "CREATE TABLE IF NOT EXISTS {} (\n"
+                "    {} INTEGER NOT NULL REFERENCES {}({}) ON DELETE CASCADE,\n"
+                "    term_id INTEGER NOT NULL REFERENCES terms(term_id) ON DELETE CASCADE,\n"
+                "    count   INTEGER NOT NULL DEFAULT 1,\n"
+                "    PRIMARY KEY ({}, term_id)\n)",
+                t.junc, t.pk, t.base, t.pk, t.pk));
+            exec(std::format(
+                "CREATE INDEX IF NOT EXISTS idx_{}_term ON {}(term_id)",
+                t.junc, t.junc));
         }
     }
 
