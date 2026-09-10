@@ -700,7 +700,7 @@ struct SqliteBackend::Impl {
     // (e.g. "0.12"). Absent means pre-versioning (legacy v3/v4 DB from
     // before this key existed) -- returns "" in that case. Startup hard-gates
     // on this via kExpectedDbVersion below; there is no in-binary migration.
-    static constexpr std::string_view kExpectedDbVersion = "0.15";
+    static constexpr std::string_view kExpectedDbVersion = "0.16";
 
     // Watermark keys for the boundary-detection housekeeping scans (see
     // sessions_needing_close_boundary()/projects_needing_close_boundary()
@@ -801,6 +801,11 @@ struct SqliteBackend::Impl {
             if (v.empty() || v == kExpectedDbVersion) return;
             if (v == "0.12") {
                 migrate_0_12_to_0_15();
+                v = db_version();
+                continue;
+            }
+            if (v == "0.15") {
+                migrate_0_15_to_0_16();
                 v = db_version();
                 continue;
             }
@@ -1161,6 +1166,83 @@ struct SqliteBackend::Impl {
             throw;
         }
         // documents_fts is rebuilt (new shape) by create_fts_schema() below.
+    }
+
+    /// 0.15 -> 0.16 migration (FTS5 teardown + custom index backfill).
+    ///
+    /// This is the big cutover:
+    /// 1. Drop all FTS5 triggers (both text and phonetic)
+    /// 2. Drop both FTS5 virtual tables
+    /// 3. Drop the `phon` column from all 5 text tables
+    /// 4. Call reindex_table() for each of the 5 tables to populate the custom index
+    /// 5. Update db_version to 0.16
+    ///
+    /// The schema (terms, *_terms, count columns) is created by create_schema()
+    /// BEFORE this runs, and reindex_table() (Step 6) populates them.
+    void migrate_0_15_to_0_16() {
+        Diskerror::Logger::info("Migrating DB 0.15 -> 0.16 (custom FTS index)...");
+
+        try {
+            Stmt(db, "BEGIN").exec();
+
+            // Drop all FTS5 triggers for the 5 text tables
+            // Triggers: <table>_ai/_ad/_au (text) and <table>_pai/_pad/_pau (phon)
+            const char* tables[] = {"turns", "turn_summaries", "summaries", "decisions", "documents"};
+            const char* triggers_per_table[] = {"ai", "ad", "au", "pai", "pad", "pau"};
+
+            for (const auto* table : tables) {
+                for (const auto* tri : triggers_per_table) {
+                    std::string trigger_name = std::string(table) + "_" + tri;
+                    try {
+                        exec(std::format("DROP TRIGGER IF EXISTS {}", trigger_name));
+                    } catch (...) {
+                        // Trigger may not exist; ignore
+                    }
+                }
+            }
+
+            // Drop FTS5 virtual tables (auto-drops shadow tables)
+            for (const auto* table : tables) {
+                try {
+                    exec(std::format("DROP TABLE IF EXISTS {}_fts", table));
+                } catch (...) {}
+                try {
+                    exec(std::format("DROP TABLE IF EXISTS {}_phon_fts", table));
+                } catch (...) {}
+            }
+
+            // Drop the `phon` column from all 5 tables (SQLite >= 3.35 required)
+            // Safe to check and skip if not supported
+            for (const auto* table : tables) {
+                if (column_exists(table, "phon")) {
+                    try {
+                        exec(std::format("ALTER TABLE {} DROP COLUMN phon", table));
+                    } catch (const std::exception& e) {
+                        // If DROP COLUMN not supported, log but continue
+                        Diskerror::Logger::warn(
+                            std::format("Could not drop phon from {}: {}", table, e.what()));
+                    }
+                }
+            }
+
+            // Now backfill the custom FTS index for each table
+            Diskerror::Logger::info("Populating custom FTS index...");
+            for (const auto* table : tables) {
+                Diskerror::Logger::info(std::format("  Indexing {}...", table));
+                // Call reindex_table directly (we're in the Impl class)
+                reindex_table(table);
+            }
+
+            // Update db_version to 0.16
+            set_db_version("0.16");
+            Stmt(db, "COMMIT").exec();
+            Diskerror::Logger::info("DB migration 0.15 -> 0.16 complete.");
+        } catch (...) {
+            try {
+                Stmt(db, "ROLLBACK").exec();
+            } catch (...) {}
+            throw;
+        }
     }
 
     /// FTS5 external-content virtual tables + sync triggers for the four
