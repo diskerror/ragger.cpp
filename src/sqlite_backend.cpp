@@ -9,6 +9,7 @@
 #include "util/time.h"
 #include "util/sqlite.h"
 #include "double_metaphone.h"
+#include "fts_tokenize.h"
 #include "vector_codec.h"
 #include "Logger.h"
 #include <format>
@@ -4226,6 +4227,179 @@ struct SqliteBackend::Impl {
         return done;
     }
 
+    // (Re)build the custom FTS index for a single text table.
+    // Tokenizes every record, populates terms/junction table, updates counts.
+    int reindex_table(const std::string& table_name) {
+        // Validate table name
+        static const std::unordered_set<std::string> valid_tables = {
+            "turns", "turn_summaries", "summaries", "documents", "decisions"
+        };
+        if (valid_tables.find(table_name) == valid_tables.end()) {
+            throw std::runtime_error("Invalid table name: " + table_name);
+        }
+
+        // Build the query based on table type
+        std::string select_sql;
+        std::string id_col, text_sql;
+        std::string junction_table = table_name + "_terms";
+        
+        if (table_name == "turns") {
+            id_col = "turn_id";
+            text_sql = "SELECT turn_id, user_text, assistant_text FROM turns ORDER BY turn_id";
+        } else if (table_name == "turn_summaries") {
+            id_col = "turn_summary_id";
+            text_sql = "SELECT turn_summary_id, text FROM turn_summaries ORDER BY turn_summary_id";
+        } else if (table_name == "summaries") {
+            id_col = "summary_id";
+            text_sql = "SELECT summary_id, text FROM summaries ORDER BY summary_id";
+        } else if (table_name == "documents") {
+            id_col = "document_id";
+            // Use the same doc embedding text formula as rebuild_phon
+            text_sql = std::format(
+                "SELECT document_id, {} AS text FROM documents ORDER BY document_id",
+                kDocEmbedTextSQL);
+        } else if (table_name == "decisions") {
+            id_col = "decision_id";
+            text_sql = "SELECT decision_id, text FROM decisions ORDER BY decision_id";
+        }
+
+        // Build stopword sets
+        using ragger::fts::stopword_set;
+        auto uni_stops = stopword_set(ragger::lang::STOPWORDS_UNIGRAM);
+        auto bi_stops = stopword_set(ragger::lang::STOPWORDS_BIGRAM);
+
+        // Batch processing
+        constexpr int kBatch = 200;
+        int total_reindexed = 0;
+
+        struct Row {
+            int id;
+            std::string text;  // for single-column tables
+            std::string extra; // for turns (assistant_text)
+        };
+
+        // Two-pass: read batch, finalize, then write (to avoid cursor invalidation)
+        int last_id = 0;
+        for (;;) {
+            std::vector<Row> batch;
+            batch.reserve(kBatch);
+
+            // Read batch
+            {
+                Stmt stmt(db, text_sql);
+                while (stmt.step()) {
+                    int id = stmt.column_int(0);
+                    std::string text = stmt.column_text(1);
+                    std::string extra;
+                    
+                    // For turns, combine user_text + assistant_text
+                    if (table_name == "turns") {
+                        extra = stmt.column_text(2);
+                        if (!extra.empty()) {
+                            text += "\n" + extra;
+                        }
+                    }
+                    
+                    batch.push_back({id, std::move(text), ""});
+                    if (static_cast<int>(batch.size()) >= kBatch) break;
+                }
+            }
+
+            if (batch.empty()) break;
+
+            // Process batch: tokenize and insert
+            for (const auto& row : batch) {
+                // Tokenize the text
+                auto sentences = ragger::fts::split_sentences(row.text);
+                std::unordered_map<std::string, int> term_counts;
+                int unigram_count = 0;
+                int bigram_count = 0;
+
+                for (const auto& sentence : sentences) {
+                    auto normalized = ragger::fts::normalize_words(sentence);
+                    
+                    // Process unigrams
+                    auto uni_tokens = ragger::fts::unigrams(normalized, uni_stops);
+                    for (const auto& token : uni_tokens) {
+                        if (!token.literal.empty()) {
+                            term_counts[token.literal]++;
+                            unigram_count++;
+                        }
+                        if (!token.metaphone.empty()) {
+                            term_counts[token.metaphone]++;
+                        }
+                    }
+                    
+                    // Process bigrams
+                    auto bi_tokens = ragger::fts::bigrams(normalized, bi_stops);
+                    for (const auto& token : bi_tokens) {
+                        if (!token.literal.empty()) {
+                            term_counts[token.literal]++;
+                            bigram_count++;
+                        }
+                        if (!token.metaphone.empty() && token.metaphone.find('_') != std::string::npos) {
+                            term_counts[token.metaphone]++;
+                        }
+                    }
+                }
+
+                // Insert/get term_ids and populate junction table
+                // First, delete existing entries for this record
+                {
+                    Stmt del(db, std::format("DELETE FROM {} WHERE {} = ?", junction_table, id_col));
+                    del.bind(1, row.id);
+                    del.exec();
+                }
+
+                // Insert new entries
+                for (const auto& [term, count] : term_counts) {
+                    // INSERT OR IGNORE term (in case of race)
+                    {
+                        Stmt ins(db, "INSERT OR IGNORE INTO terms(term) VALUES (?)");
+                        ins.bind(1, term);
+                        ins.exec();
+                    }
+
+                    // Get term_id
+                    int term_id = 0;
+                    {
+                        Stmt sel(db, "SELECT term_id FROM terms WHERE term = ?");
+                        sel.bind(1, term);
+                        if (sel.step()) {
+                            term_id = sel.column_int(0);
+                        }
+                    }
+
+                    if (term_id > 0) {
+                        // Insert into junction table
+                        Stmt junc(db, 
+                            std::format("INSERT OR REPLACE INTO {} ({}, term_id, count) VALUES (?, ?, ?)",
+                                       junction_table, id_col));
+                        junc.bind(1, row.id);
+                        junc.bind(2, term_id);
+                        junc.bind(3, count);
+                        junc.exec();
+                    }
+                }
+
+                // Update count columns
+                {
+                    Stmt upd(db, std::format(
+                        "UPDATE {} SET unigram_count = ?, bigram_count = ? WHERE {} = ?",
+                        table_name, id_col));
+                    upd.bind(1, unigram_count);
+                    upd.bind(2, bigram_count);
+                    upd.bind(3, row.id);
+                    upd.exec();
+                }
+
+                total_reindexed++;
+            }
+        }
+
+        return total_reindexed;
+    }
+
     // Set a document's embedding (used by the import path after embedding
     // chunks via the subprocess executor). Returns true on a row update.
     bool update_document_embedding(int document_id, const std::vector<float>& emb) {
@@ -4707,6 +4881,11 @@ uint8_t SqliteBackend::increment_embedding_version() {
 int SqliteBackend::rebuild_phon(bool only_missing, bool progress) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->rebuild_phon(only_missing, progress);
+}
+
+int SqliteBackend::reindex_table(const std::string& table, bool progress) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->reindex_table(table);
 }
 
 bool SqliteBackend::update_document_embedding(int document_id,
