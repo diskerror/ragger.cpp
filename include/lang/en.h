@@ -755,16 +755,17 @@ inline constexpr std::array<std::pair<std::string_view, std::string_view>, 10> S
 
 /**
  * MATH_SYMBOLS: Convert mathematical/comparison operators to words.
- * Maps: + → plus, ± → plus minus, - → minus, = → equals, ≠ → not equals, ≈ → approximately equals
+ * Maps as people write them out: + → plus, ± → plus or minus, - → minus, = → equals,
+ * ≠ → not equal to, ≈ → approximately equal to
  * Enables: "x+5=10" → "x plus five equals ten" (searchable)
  * Note: Multi-word replacements are space-separated and will be split into individual tokens.
  */
 inline constexpr std::array<std::pair<std::string_view, std::string_view>, 6> MATH_SYMBOLS = {{
     {"+", "plus"},
-    {"\xC2\xB1", "plus minus"},  // UTF-8 plus-minus (±, U+00B1: C2 B1) → two tokens
+    {"\xC2\xB1", "plus or minus"},  // UTF-8 plus-minus (±, U+00B1: C2 B1)
     {"=", "equals"},
-    {"\xE2\x89\xA0", "not equals"},  // UTF-8 not-equals (≠, U+2260: E2 89 A0) → two tokens
-    {"\xE2\x89\x88", "approximately equals"},  // UTF-8 approx-equals (≈, U+2248: E2 89 88) → two tokens
+    {"\xE2\x89\xA0", "not equal to"},  // UTF-8 not-equals (≠, U+2260: E2 89 A0)
+    {"\xE2\x89\x88", "approximately equal to"},  // UTF-8 approx-equals (≈, U+2248: E2 89 88)
 }};
 
 /**
