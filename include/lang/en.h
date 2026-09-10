@@ -71,12 +71,13 @@ inline constexpr std::array<std::string_view, 132> STOPWORDS_UNIGRAM = {{
  * don't clutter bigrams after ~n't expansion (e.g., "isn't" → "is not"
  * becomes just "not_good", not "is_not" + "not_good").
  */
-inline constexpr std::array<std::string_view, 47> STOPWORDS_BIGRAM = {{
+inline constexpr std::array<std::string_view, 46> STOPWORDS_BIGRAM = {{
     // Auxiliaries: drop these from bigrams (they only serve contractions)
+    // Exception: "must" is EXCLUDED — it carries deontic strength and should form bigrams
     "am", "is", "are", "was", "were", "be", "been", "being",
     "have", "has", "had",
     "do", "does", "did",
-    "will", "would", "shall", "should", "may", "might", "must", "can", "could",
+    "will", "would", "shall", "should", "may", "might", "can", "could",
     // Generic/low-info words
     "the", "a", "an",
     "and", "or", "but",
