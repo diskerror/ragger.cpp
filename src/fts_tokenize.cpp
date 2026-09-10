@@ -74,16 +74,14 @@ std::vector<std::string> normalize_words(std::string_view sentence) {
         result.push_back(current_word);
     }
 
-    // Second pass: expand contractions (n't family)
+    // Second pass: replace contractions with "not" directly
     std::vector<std::string> expanded;
     for (const auto& word : result) {
-        // Search the contraction map
+        // Search the contraction map for this word
         bool found = false;
-        for (const auto& [contraction, pair] : ragger::lang::CONTRACTIONS_N_T) {
+        for (const auto& [contraction, replacement] : ragger::lang::CONTRACTIONS_N_T) {
             if (word == contraction) {
-                // pair is {word1, word2}
-                expanded.push_back(std::string(pair.first));
-                expanded.push_back(std::string(pair.second));
+                expanded.push_back(std::string(replacement));
                 found = true;
                 break;
             }

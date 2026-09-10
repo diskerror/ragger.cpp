@@ -734,35 +734,36 @@ inline const ConfigMeta* config_meta(std::string_view key) {
 }
 
 // =====================================================================
-// v0.16 FTS Contraction Expansion Map (for step 4 tokenizer)
+// v0.16 FTS Contraction Replacement Map (for step 4 tokenizer)
 // =====================================================================
 
 /**
- * CONTRACTIONS_N_T: expand n't contractions so negation is preserved.
- * Maps from contraction → expansion as two separate words.
+ * CONTRACTIONS_N_T: map n't contractions directly to "not".
  * 
- * Example: "isn't" → {"is", "not"}
- * After normalization and this expansion, "is" drops as a unigram stopword,
- * but "not" survives and pairs with following words.
+ * Rationale: The auxiliary verb (is, are, do, etc.) would drop as a unigram
+ * stopword anyway (they're all in STOPWORDS_UNIGRAM). So we skip the 
+ * intermediate step and replace the contraction directly with "not".
+ * Result is identical: the negation signal survives for bigram formation.
+ * 
+ * Example: "isn't" → "not" (simpler than "isn't" → {"is", "not"} → "not" survives)
+ * Final bigram: "not_good" (same as the multi-step expansion approach).
  */
-inline constexpr std::array<std::pair<std::string_view, std::pair<std::string_view, std::string_view>>, 14> CONTRACTIONS_N_T = {{
-    {"isn't", {"is", "not"}},
-    {"aren't", {"are", "not"}},
-    {"wasn't", {"was", "not"}},
-    {"weren't", {"were", "not"}},
-    {"don't", {"do", "not"}},
-    {"doesn't", {"does", "not"}},
-    {"didn't", {"did", "not"}},
-    {"can't", {"can", "not"}},
-    {"couldn't", {"could", "not"}},
-    {"won't", {"will", "not"}},
-    {"wouldn't", {"would", "not"}},
-    {"shouldn't", {"should", "not"}},
-    {"hasn't", {"has", "not"}},
-    {"haven't", {"have", "not"}},
-    // Note: "hadn't" and "mustn't" are not included because they're uncommon
-    // and would need a separate list for multi-word expansions.
-    // Keep the critical negations; Reid can expand later if needed.
+inline constexpr std::array<std::pair<std::string_view, std::string_view>, 15> CONTRACTIONS_N_T = {{
+    {"isn't", "not"},
+    {"aren't", "not"},
+    {"wasn't", "not"},
+    {"weren't", "not"},
+    {"don't", "not"},
+    {"doesn't", "not"},
+    {"didn't", "not"},
+    {"can't", "not"},
+    {"couldn't", "not"},
+    {"won't", "not"},
+    {"wouldn't", "not"},
+    {"shouldn't", "not"},
+    {"hasn't", "not"},
+    {"haven't", "not"},
+    {"mustn't", "not"},
 }};
 
 /**

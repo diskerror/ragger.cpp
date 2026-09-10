@@ -148,7 +148,7 @@ int main() {
         std::cout << "  ✓ Metaphone correctly returns empty for all-digits\n";
     }
 
-    // ===== Test 5: Contraction expansion with metaphone =====
+    // ===== Test 5: Contraction - \"Isn't good\" with metaphone =====
     {
         std::cout << "Test 5: Contraction - \"Isn't good\" with metaphone\n";
         auto sentences = split_sentences("Isn't good");
@@ -156,6 +156,10 @@ int main() {
         std::cout << "  Normalized words: [";
         for (const auto& w : words) std::cout << w << " ";
         std::cout << "]\n";
+        // "Isn't" should be replaced with "not" directly, resulting in ["not", "good"]
+        assert(words.size() == 2);
+        assert(words[0] == "not");
+        assert(words[1] == "good");
 
         StopSet uni_stops = stopword_set(STOPWORDS_UNIGRAM);
         StopSet bi_stops = stopword_set(STOPWORDS_BIGRAM);
@@ -164,11 +168,11 @@ int main() {
 
         auto uni_lits = unigram_literals(uni);
         auto bi_lits = bigram_literals(bi);
-        // Same result as "not good": "is" drops (stopword), "good" survives
+        // "not" is a unigram stopword (drops), "good" survives
+        // Bigram: "not_good" (not is NOT a bigram stopword)
         assert(uni_lits.find("good") != uni_lits.end());
-        // "not_good" should be in bigrams (not is a bigram-survivor)
         assert(bi_lits.find("not_good") != bi_lits.end());
-        std::cout << "  ✓ Contraction expands correctly (good and not_good with metaphone)\n";
+        std::cout << "  ✓ Contraction replaced directly with 'not' (good and not_good with metaphone)\n";
     }
 
     // ===== Test 6: Metaphone weight calculation consistency =====
