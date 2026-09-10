@@ -64,20 +64,18 @@ inline constexpr std::array<std::string_view, 132> STOPWORDS_UNIGRAM = {{
 
 /**
  * STOPWORDS_BIGRAM: much looser list. Allows polar/directional words
- * to survive so they form meaningful bigrams. REMOVES words that are
- * strong signal when paired (e.g., "not", "forward", "backward").
+ * to survive so they form meaningful bigrams. Also allows auxiliary verbs
+ * (will, must, should, can, etc.) to form bigrams because they add semantic
+ * weight when paired (e.g., "must_go", "will_happen", "should_consider").
  * 
- * Keeps the auxiliaries that contraction expansion produces, so they
- * don't clutter bigrams after ~n't expansion (e.g., "isn't" → "is not"
- * becomes just "not_good", not "is_not" + "not_good").
+ * Keeps ONLY auxiliaries that exist purely to carry contractions (is, are, be, 
+ * have, do) — these are genuinely low-signal in bigrams.
  */
-inline constexpr std::array<std::string_view, 46> STOPWORDS_BIGRAM = {{
-    // Auxiliaries: drop these from bigrams (they only serve contractions)
-    // Exception: "must" is EXCLUDED — it carries deontic strength and should form bigrams
+inline constexpr std::array<std::string_view, 38> STOPWORDS_BIGRAM = {{
+    // Auxiliaries: drop ONLY these (they exist purely to carry n't contractions)
     "am", "is", "are", "was", "were", "be", "been", "being",
     "have", "has", "had",
     "do", "does", "did",
-    "will", "would", "shall", "should", "may", "might", "can", "could",
     // Generic/low-info words
     "the", "a", "an",
     "and", "or", "but",
