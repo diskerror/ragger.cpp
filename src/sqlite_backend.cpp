@@ -625,6 +625,14 @@ struct SqliteBackend::Impl {
         if (column_exists("documents", "path"))
             migrate_documents_normalize();
 
+        // Custom terms index (v0.16) — replaces both FTS5 layers with a single
+        // flat term table + per-content-type junction tables. Created BEFORE
+        // migrations run, so migrate_0_15_to_0_16() can populate them via
+        // reindex_table(). See ownCloud/Ragger/custom-search-schema.md for
+        // the design rationale and docs/plans/migration-plan-fts-index.md for
+        // the step-by-step build plan.
+        create_terms_schema();
+
         // Run any pending in-binary version migration for an existing DB
         // (e.g. the 0.12 -> 0.15 embedding version-byte split). Advances
         // db_version toward kExpectedDbVersion so the hard gate below passes.
@@ -677,12 +685,6 @@ struct SqliteBackend::Impl {
         exec("CREATE INDEX IF NOT EXISTS idx_turn_summaries_datetime   ON turn_summaries(turn_datetime)");
         exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_turn_summaries_turn_id_uniq "
              "ON turn_summaries(turn_id) WHERE turn_id IS NOT NULL");
-
-        // Custom terms index (v0.16) — replaces both FTS5 layers with a single
-        // flat term table + per-content-type junction tables. See
-        // ownCloud/Ragger/custom-search-schema.md for the design rationale and
-        // docs/plans/migration-plan-fts-index.md for the step-by-step build plan.
-        create_terms_schema();
 
         // FTS5 — external-content virtual tables + sync triggers replace
         // the old hand-rolled bm25_* sidecars (issue #49).
