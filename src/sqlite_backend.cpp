@@ -413,6 +413,9 @@ struct SqliteBackend::Impl {
         // deferred-embedding path (partial row written, backfilled later).
         // created_at has NO DEFAULT (matches scripts/schema_db0.12.sql
         // exactly) -- the app always supplies it explicitly on INSERT.
+        // unigram_count/bigram_count are TF denominators for the custom terms
+        // index (v0.16); placed before embedding_version to keep text-index
+        // columns grouped together (cosmetic — SQLite appends physically).
         exec(R"(
             CREATE TABLE IF NOT EXISTS turns (
                 turn_id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -421,6 +424,8 @@ struct SqliteBackend::Impl {
                 model_id       INTEGER REFERENCES models(model_id) ON DELETE SET NULL,
                 session_id     INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                 created_at     INTEGER NOT NULL,
+                unigram_count  INTEGER NOT NULL DEFAULT 0,
+                bigram_count   INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER,
                 embedding      BLOB,
                 phon           TEXT
@@ -443,6 +448,8 @@ struct SqliteBackend::Impl {
                 model_id   INTEGER REFERENCES models(model_id),
                 created_at INTEGER NOT NULL DEFAULT (unixepoch()),
                 updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                unigram_count  INTEGER NOT NULL DEFAULT 0,
+                bigram_count   INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER,
                 embedding  BLOB,
                 phon       TEXT
@@ -466,6 +473,8 @@ struct SqliteBackend::Impl {
                 summary_model_id INTEGER REFERENCES models(model_id),
                 turn_datetime    INTEGER NOT NULL,
                 summarized_on    INTEGER NOT NULL DEFAULT (unixepoch()),
+                unigram_count  INTEGER NOT NULL DEFAULT 0,
+                bigram_count   INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER,
                 embedding        BLOB,
                 phon             TEXT
@@ -500,6 +509,8 @@ struct SqliteBackend::Impl {
                 status      TEXT NOT NULL,
                 tags        TEXT NOT NULL DEFAULT '',
                 created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                unigram_count  INTEGER NOT NULL DEFAULT 0,
+                bigram_count   INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER,
                 embedding   BLOB,
                 phon        TEXT
@@ -537,6 +548,8 @@ struct SqliteBackend::Impl {
                 chunk_index        INTEGER,
                 document_source_id INTEGER REFERENCES document_sources(document_source_id),
                 modified_on        INTEGER,
+                unigram_count      INTEGER NOT NULL DEFAULT 0,
+                bigram_count       INTEGER NOT NULL DEFAULT 0,
                 embedding_version  INTEGER,
                 embedding          BLOB,
                 phon               TEXT
@@ -573,6 +586,33 @@ struct SqliteBackend::Impl {
             exec("ALTER TABLE decisions ADD COLUMN embedding_version INTEGER");
         if (!column_exists("documents", "embedding_version"))
             exec("ALTER TABLE documents ADD COLUMN embedding_version INTEGER");
+
+        // In-place migration for pre-0.16 databases: add unigram_count and
+        // bigram_count to each text table (TF denominators for the custom
+        // terms index). Fresh DBs already have them from the CREATE above;
+        // existing rows get 0 until reindexed by the v0.16 migration leg
+        // (Step 7 of docs/plans/migration-plan-fts-index.md). Idempotent: once
+        // present, these ALTERs never fire again.
+        if (!column_exists("turns", "unigram_count"))
+            exec("ALTER TABLE turns ADD COLUMN unigram_count INTEGER NOT NULL DEFAULT 0");
+        if (!column_exists("turns", "bigram_count"))
+            exec("ALTER TABLE turns ADD COLUMN bigram_count INTEGER NOT NULL DEFAULT 0");
+        if (!column_exists("summaries", "unigram_count"))
+            exec("ALTER TABLE summaries ADD COLUMN unigram_count INTEGER NOT NULL DEFAULT 0");
+        if (!column_exists("summaries", "bigram_count"))
+            exec("ALTER TABLE summaries ADD COLUMN bigram_count INTEGER NOT NULL DEFAULT 0");
+        if (!column_exists("turn_summaries", "unigram_count"))
+            exec("ALTER TABLE turn_summaries ADD COLUMN unigram_count INTEGER NOT NULL DEFAULT 0");
+        if (!column_exists("turn_summaries", "bigram_count"))
+            exec("ALTER TABLE turn_summaries ADD COLUMN bigram_count INTEGER NOT NULL DEFAULT 0");
+        if (!column_exists("decisions", "unigram_count"))
+            exec("ALTER TABLE decisions ADD COLUMN unigram_count INTEGER NOT NULL DEFAULT 0");
+        if (!column_exists("decisions", "bigram_count"))
+            exec("ALTER TABLE decisions ADD COLUMN bigram_count INTEGER NOT NULL DEFAULT 0");
+        if (!column_exists("documents", "unigram_count"))
+            exec("ALTER TABLE documents ADD COLUMN unigram_count INTEGER NOT NULL DEFAULT 0");
+        if (!column_exists("documents", "bigram_count"))
+            exec("ALTER TABLE documents ADD COLUMN bigram_count INTEGER NOT NULL DEFAULT 0");
 
         // In-place migration to the normalized documents schema (0.15):
         // extract per-document metadata (path/title/year/imported_at) into

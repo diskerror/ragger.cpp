@@ -73,3 +73,8 @@ ragger count
 For developers, see `tests/test_retrieval_quality.py` — a pytest suite
 that runs parameterized queries against the real database. The user test
 described above is the accessible version of the same idea.
+
+For developers testing schema migrations, reindexing, or other destructive
+changes against a copy of real data (not synthetic fixtures), see
+`docs/dev-testing-ragger-base.md` — covers the `--ragger-base` flag and the
+required port-bump step to avoid silently cross-talking with a live daemon.
