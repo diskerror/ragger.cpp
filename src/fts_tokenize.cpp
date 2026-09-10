@@ -23,7 +23,9 @@ std::vector<std::string> split_sentences(std::string_view text) {
         char c = text[i];
         current += c;
 
-        if (c == '.' || c == '!' || c == '?') {
+        // Sentence terminators: . ! ? : ;
+        // Bigrams do not cross these boundaries.
+        if (c == '.' || c == '!' || c == '?' || c == ':' || c == ';') {
             // Trim and add if non-empty
             std::string trimmed = current;
             trimmed.erase(0, trimmed.find_first_not_of(" \t\r\n"));
