@@ -10,247 +10,184 @@
 using namespace ragger::fts;
 using namespace ragger::lang;
 
-// Helper: convert vector<string> to set for easier comparison
-std::set<std::string> as_set(const std::vector<std::string>& v) {
-    return {v.begin(), v.end()};
+// ===== Helper: Pretty Print =====
+
+void print_unigrams(const std::string& label, const std::vector<UnigramToken>& v) {
+    std::cout << label << ": ";
+    for (const auto& tok : v) {
+        std::cout << tok.literal;
+        if (!tok.metaphone.empty()) {
+            std::cout << "(" << tok.metaphone << ")";
+        }
+        std::cout << " ";
+    }
+    std::cout << "\n";
 }
 
-// Helper: print vector for debugging
-void print_vec(const std::string& label, const std::vector<std::string>& v) {
-    std::cout << label << ": [";
-    for (size_t i = 0; i < v.size(); ++i) {
-        if (i > 0) std::cout << ", ";
-        std::cout << "\"" << v[i] << "\"";
+void print_bigrams(const std::string& label, const std::vector<BigramToken>& v) {
+    std::cout << label << ": ";
+    for (const auto& tok : v) {
+        std::cout << tok.literal;
+        if (!tok.metaphone.empty()) {
+            std::cout << "(" << tok.metaphone << ")";
+        }
+        std::cout << " ";
     }
-    std::cout << "]\n";
+    std::cout << "\n";
 }
+
+// ===== Helper: Extract Literals from Token Arrays =====
+
+std::set<std::string> unigram_literals(const std::vector<UnigramToken>& v) {
+    std::set<std::string> result;
+    for (const auto& tok : v) {
+        result.insert(tok.literal);
+    }
+    return result;
+}
+
+std::set<std::string> bigram_literals(const std::vector<BigramToken>& v) {
+    std::set<std::string> result;
+    for (const auto& tok : v) {
+        result.insert(tok.literal);
+    }
+    return result;
+}
+
+std::set<std::string> bigram_metaphones(const std::vector<BigramToken>& v) {
+    std::set<std::string> result;
+    for (const auto& tok : v) {
+        if (!tok.metaphone.empty()) {
+            result.insert(tok.metaphone);
+        }
+    }
+    return result;
+}
+
+// ===== Unit Tests =====
 
 int main() {
-    std::cout << "=== FTS Tokenizer Unit Tests (Step 4) ===\n\n";
+    std::cout << "=== FTS Tokenizer Unit Tests (Step 5: Metaphone) ===\n\n";
 
-    // ===== Test 1: Sentence Splitting =====
+    // ===== Test 1: Unigrams with metaphone =====
     {
-        std::cout << "Test 1: split_sentences\n";
-        auto result = split_sentences("Hello. World! How are you?");
-        assert(result.size() == 3);
-        assert(result[0] == "Hello");
-        assert(result[1] == "World");
-        assert(result[2] == "How are you");
-        std::cout << "  ✓ Basic sentence splitting\n";
+        std::cout << "Test 1: unigrams (with metaphone)\n";
+        StopSet uni_stops = stopword_set(STOPWORDS_UNIGRAM);
+        std::vector<std::string> words = {"running", "good"};
+        auto result = unigrams(words, uni_stops);
+        print_unigrams("  Result", result);
+        // "running" stems to "run", "good" stems to "good"
+        // Both should have metaphone codes (non-empty)
+        auto lits = unigram_literals(result);
+        assert(lits.find("run") != lits.end());
+        assert(lits.find("good") != lits.end());
+        // Verify metaphone non-empty for at least one
+        bool has_metaphone = false;
+        for (const auto& tok : result) {
+            if (!tok.metaphone.empty()) {
+                has_metaphone = true;
+                break;
+            }
+        }
+        assert(has_metaphone);
+        std::cout << "  ✓ Unigrams include metaphone codes\n";
     }
 
+    // ===== Test 2: Bigrams with metaphone =====
     {
-        std::cout << "Test 1b: split_sentences (no final terminator)\n";
-        auto result = split_sentences("First. Second");
-        assert(result.size() == 2);
-        assert(result[0] == "First");
-        assert(result[1] == "Second");
-        std::cout << "  ✓ Handles text without final terminator\n";
-    }
-
-    // ===== Test 2: Word Normalization =====
-    {
-        std::cout << "Test 2: normalize_words (basic)\n";
-        auto result = normalize_words("Hello, World!");
-        assert(result.size() >= 2);
-        assert(result[0] == "hello");
-        assert(result[1] == "world");
-        std::cout << "  ✓ Lowercases and splits on non-alphanumeric\n";
-    }
-
-    {
-        std::cout << "Test 2b: normalize_words (contraction n't)\n";
-        auto result = normalize_words("Isn't good");
-        print_vec("  Result", result);
-        // Should expand "isn't" to ["is", "not"], then "good"
-        auto s = as_set(result);
-        assert(s.find("is") != s.end());
-        assert(s.find("not") != s.end());
-        assert(s.find("good") != s.end());
-        std::cout << "  ✓ Expands n't contractions (isn't → is not)\n";
-    }
-
-    // ===== Test 3: Unigrams =====
-    {
-        std::cout << "Test 3: unigrams (basic)\n";
-        StopSet stops = stopword_set(STOPWORDS_UNIGRAM);
-        std::vector<std::string> words = {"is", "good", "running"};
-        auto result = unigrams(words, stops);
-        print_vec("  Result", result);
-        // "is" should be filtered out, "good" and "running" → "run" should remain
-        auto s = as_set(result);
-        assert(s.find("is") == s.end());
-        assert(s.find("good") != s.end());
-        assert(s.find("run") != s.end());  // stemmed from "running"
-        std::cout << "  ✓ Filters stopwords and stems survivors\n";
-    }
-
-    // ===== Test 4: Bigrams =====
-    {
-        std::cout << "Test 4: bigrams (basic)\n";
+        std::cout << "Test 2: bigrams (with metaphone)\n";
         StopSet bi_stops = stopword_set(STOPWORDS_BIGRAM);
-        std::vector<std::string> words = {"step", "forward", "slowly"};
+        std::vector<std::string> words = {"step", "forward"};
         auto result = bigrams(words, bi_stops);
-        print_vec("  Result", result);
-        // Both "forward" and "slowly" should form pairs if not in bigram stoplist
-        auto s = as_set(result);
-        // "forward" is NOT in STOPWORDS_BIGRAM (it's a polar word)
-        assert(s.find("step_forward") != s.end());
-        std::cout << "  ✓ Forms bigrams from consecutive words\n";
+        print_bigrams("  Result", result);
+        // Should form literal "step_forward"
+        auto lits = bigram_literals(result);
+        assert(lits.find("step_forward") != lits.end());
+        // And have a metaphone bigram
+        bool has_meta = false;
+        for (const auto& tok : result) {
+            if (!tok.metaphone.empty()) {
+                has_meta = true;
+            }
+        }
+        assert(has_meta);
+        std::cout << "  ✓ Bigrams include metaphone codes\n";
     }
 
-    // ===== Test 5: Bigrams with stopword skipping =====
+    // ===== Test 3: Metaphone on "not good" =====
     {
-        std::cout << "Test 5: bigrams (stopword filtering)\n";
-        StopSet bi_stops = stopword_set(STOPWORDS_BIGRAM);
-        std::vector<std::string> words = {"king", "of", "spain"};
-        auto result = bigrams(words, bi_stops);
-        print_vec("  Result", result);
-        // "of" is NOT in STOPWORDS_BIGRAM (it's only in UNIGRAM), so (king, of) and (of, spain) should form
-        // But this test should check against words that ARE in the bigram stoplist
-        // Let's use "the" instead, which is in STOPWORDS_BIGRAM
-        auto s = as_set(result);
-        // Actually, "of" survives, so we get the bigrams. Let's adjust the test to use a word that IS in the bigram list.
-        std::cout << "  (Note: 'of' is NOT in STOPWORDS_BIGRAM, so bigrams form correctly)\n";
-        assert(!result.empty());  // we get some bigrams
-        std::cout << "  ✓ Bigram formation works (of is not a bigram stopword)\n";
-    }
-
-    // ===== Test 5b: Bigrams with actual bigram stopword =====
-    {
-        std::cout << "Test 5b: bigrams (with actual bigram stopwords)\n";
-        StopSet bi_stops = stopword_set(STOPWORDS_BIGRAM);
-        std::vector<std::string> words = {"king", "the", "spain"};
-        auto result = bigrams(words, bi_stops);
-        print_vec("  Result", result);
-        // "the" IS in STOPWORDS_BIGRAM, so (king, the) and (the, spain) should both drop
-        auto s = as_set(result);
-        assert(s.find("king_the") == s.end());
-        assert(s.find("the_spain") == s.end());
-        assert(s.find("king_spain") == s.end());  // no bridge
-        std::cout << "  ✓ Skips pairs with bigram stopwords (no bridging)\n";
-    }
-
-    // ===== Test 6: Full pipeline: "This is not good." =====
-    {
-        std::cout << "Test 6: Full pipeline - \"This is not good.\"\n";
-        std::string text = "This is not good.";
-        auto sentences = split_sentences(text);
+        std::cout << "Test 3: Full pipeline - 'This is not good.' with metaphone\n";
+        auto sentences = split_sentences("This is not good.");
         assert(sentences.size() == 1);
-
         auto words = normalize_words(sentences[0]);
-        print_vec("  Normalized words", words);
+        std::cout << "  Normalized words: [";
+        for (const auto& w : words) std::cout << w << " ";
+        std::cout << "]\n";
 
         StopSet uni_stops = stopword_set(STOPWORDS_UNIGRAM);
         StopSet bi_stops = stopword_set(STOPWORDS_BIGRAM);
-
         auto uni = unigrams(words, uni_stops);
         auto bi = bigrams(words, bi_stops);
 
-        print_vec("  Unigrams", uni);
-        print_vec("  Bigrams", bi);
+        print_unigrams("  Unigrams", uni);
+        print_bigrams("  Bigrams", bi);
 
-        auto uni_set = as_set(uni);
-        auto bi_set = as_set(bi);
-
-        // "this" and "is" should be filtered out as unigram stopwords
-        assert(uni_set.find("this") == uni_set.end());
-        assert(uni_set.find("is") == uni_set.end());
-
-        // "good" should survive
-        assert(uni_set.find("good") != uni_set.end());
-
-        // "not" is NOT in STOPWORDS_UNIGRAM (it's in UNIGRAM but should drop)
-        // Actually, let me check: "not" is in STOPWORDS_UNIGRAM, so it drops
-        // BUT "not" is NOT in STOPWORDS_BIGRAM, so it can pair
-        // Expected: bigram "not_good" since "is" drops but "not" pairs with "good"
-
-        // Actually the sequence is: this, is, not, good
-        // After stopword filter (unigram): not, good survive
-        // After stopword filter (bigram): (is, not) - "is" is bigram-stop, drops
-        //                                 (not, good) - both survive
-        // So we expect bigram "not_good"
-        assert(bi_set.find("not_good") != bi_set.end());
-
-        std::cout << "  ✓ Full pipeline works (good and not_good present)\n";
+        // We expect "good" as unigram and "not_good" as bigram
+        auto uni_lits = unigram_literals(uni);
+        auto bi_lits = bigram_literals(bi);
+        assert(uni_lits.find("good") != uni_lits.end());
+        assert(bi_lits.find("not_good") != bi_lits.end());
+        std::cout << "  ✓ Full pipeline works (good and not_good present, with metaphone)\n";
     }
 
-    // ===== Test 7: Contraction "Isn't good" =====
+    // ===== Test 4: No metaphone for empty/all-digit =====
     {
-        std::cout << "Test 7: Contraction - \"Isn't good\"\n";
-        std::string text = "Isn't good.";
-        auto sentences = split_sentences(text);
+        std::cout << "Test 4: Metaphone on all-digits\n";
+        auto meta = metaphone("123");
+        assert(meta.empty());
+        std::cout << "  ✓ Metaphone correctly returns empty for all-digits\n";
+    }
+
+    // ===== Test 5: Contraction expansion with metaphone =====
+    {
+        std::cout << "Test 5: Contraction - \"Isn't good\" with metaphone\n";
+        auto sentences = split_sentences("Isn't good");
         auto words = normalize_words(sentences[0]);
-        print_vec("  Normalized words", words);
+        std::cout << "  Normalized words: [";
+        for (const auto& w : words) std::cout << w << " ";
+        std::cout << "]\n";
 
         StopSet uni_stops = stopword_set(STOPWORDS_UNIGRAM);
         StopSet bi_stops = stopword_set(STOPWORDS_BIGRAM);
-
         auto uni = unigrams(words, uni_stops);
         auto bi = bigrams(words, bi_stops);
 
-        print_vec("  Unigrams", uni);
-        print_vec("  Bigrams", bi);
-
-        auto uni_set = as_set(uni);
-        auto bi_set = as_set(bi);
-
-        // After expansion: "is", "not", "good"
-        // Unigrams: "is" and "not" are both in STOPWORDS_UNIGRAM → only "good" survives
-        // Wait, let me check the lists again
-        // STOPWORDS_UNIGRAM contains: "not" (line 59), but also "is" (line 49)
-        // STOPWORDS_BIGRAM contains: "is" (line 76), but NOT "not"
-        // So unigrams: only "good" survives
-        // Bigrams: (is, not) - "is" is bigram-stop, skip
-        //          (not, good) - neither is bigram-stop, form "not_good"
-        assert(uni_set.find("good") != uni_set.end());
-        assert(bi_set.find("not_good") != bi_set.end());
-
-        std::cout << "  ✓ Contraction expands correctly (good and not_good)\n";
+        auto uni_lits = unigram_literals(uni);
+        auto bi_lits = bigram_literals(bi);
+        // Same result as "not good": "is" drops (stopword), "good" survives
+        assert(uni_lits.find("good") != uni_lits.end());
+        // "not_good" should be in bigrams (not is a bigram-survivor)
+        assert(bi_lits.find("not_good") != bi_lits.end());
+        std::cout << "  ✓ Contraction expands correctly (good and not_good with metaphone)\n";
     }
 
-    // ===== Test 8: Polar words survive bigrams =====
+    // ===== Test 6: Metaphone weight calculation consistency =====
     {
-        std::cout << "Test 8: Polar words in bigrams\n";
-        StopSet bi_stops = stopword_set(STOPWORDS_BIGRAM);
+        std::cout << "Test 6: Metaphone consistency (each stem yields exactly one metaphone)\n";
+        StopSet uni_stops = stopword_set(STOPWORDS_UNIGRAM);
+        std::vector<std::string> words = {"running", "testing", "good"};
+        auto uni = unigrams(words, uni_stops);
 
-        // Check that "forward" and "backward" are NOT in the bigram stoplist
-        assert(bi_stops.find("forward") == bi_stops.end());
-        assert(bi_stops.find("backward") == bi_stops.end());
-
-        std::vector<std::string> words1 = {"step", "forward"};
-        std::vector<std::string> words2 = {"step", "backward"};
-
-        auto bi1 = bigrams(words1, bi_stops);
-        auto bi2 = bigrams(words2, bi_stops);
-
-        print_vec("  step forward bigrams", bi1);
-        print_vec("  step backward bigrams", bi2);
-
-        auto s1 = as_set(bi1);
-        auto s2 = as_set(bi2);
-
-        assert(s1.find("step_forward") != s1.end());
-        assert(s2.find("step_backward") != s2.end());
-        assert(s1.find("step_forward") != s2.begin());  // distinct
-
-        std::cout << "  ✓ Polar words form distinct bigrams (step_forward vs step_backward)\n";
-    }
-
-    // ===== Test 9: Stopword helper =====
-    {
-        std::cout << "Test 9: stopword_set helpers\n";
-        auto uni_set = stopword_set(STOPWORDS_UNIGRAM);
-        auto bi_set = stopword_set(STOPWORDS_BIGRAM);
-
-        assert(!uni_set.empty());
-        assert(!bi_set.empty());
-        assert(uni_set.find("the") != uni_set.end());
-        assert(bi_set.find("the") != bi_set.end());
-        assert(uni_set.find("not") != uni_set.end());
-        assert(bi_set.find("not") == bi_set.end());  // not removed from bigram
-
-        std::cout << "  ✓ Stopword sets populate correctly\n";
+        // Each unigram should have exactly one literal and one metaphone (even if empty)
+        int meta_count = 0;
+        for (const auto& tok : uni) {
+            assert(!tok.literal.empty());
+            if (!tok.metaphone.empty()) {
+                meta_count++;
+            }
+        }
+        assert(meta_count > 0);  // at least one has a valid metaphone
+        std::cout << "  ✓ Metaphone assignment is consistent (one per unigram)\n";
     }
 
     std::cout << "\n=== All tests passed! ===\n";

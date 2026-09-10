@@ -5,97 +5,85 @@
 #include <algorithm>
 #include <cctype>
 #include <map>
-#include <sstream>
 
-// Directly include c_lib headers since they're in the public include path
+// Include c_lib headers directly (no extern C needed for C++ functions)
 #include "Stemmer.h"
+#include "DoubleMetaphone.h"
 
 namespace ragger::fts {
 
-// ===== Sentence Splitting =====
+// ===== Text Segmentation =====
 
 std::vector<std::string> split_sentences(std::string_view text) {
-    std::vector<std::string> sentences;
+    std::vector<std::string> result;
     std::string current;
 
     for (size_t i = 0; i < text.size(); ++i) {
         char c = text[i];
         current += c;
 
-        // Check for sentence terminators
         if (c == '.' || c == '!' || c == '?') {
-            // Trim and store if non-empty
-            std::string trimmed;
-            for (char ch : current) {
-                if (std::isspace(ch) && trimmed.empty()) continue;
-                trimmed += ch;
-            }
-            // Remove trailing terminator
-            if (!trimmed.empty() && (trimmed.back() == '.' || trimmed.back() == '!' || trimmed.back() == '?')) {
-                trimmed.pop_back();
-            }
-            // Trim trailing whitespace
-            while (!trimmed.empty() && std::isspace(trimmed.back())) {
-                trimmed.pop_back();
-            }
+            // Trim and add if non-empty
+            std::string trimmed = current;
+            trimmed.erase(0, trimmed.find_first_not_of(" \t\r\n"));
+            trimmed.erase(trimmed.find_last_not_of(" \t\r\n") + 1);
             if (!trimmed.empty()) {
-                sentences.push_back(trimmed);
+                result.push_back(trimmed);
             }
             current.clear();
         }
     }
 
-    // Handle any remaining text (no final terminator)
-    if (!current.empty()) {
-        std::string trimmed;
-        for (char c : current) {
-            if (std::isspace(c) && trimmed.empty()) continue;
-            trimmed += c;
-        }
-        while (!trimmed.empty() && std::isspace(trimmed.back())) {
-            trimmed.pop_back();
-        }
-        if (!trimmed.empty()) {
-            sentences.push_back(trimmed);
-        }
+    // Handle remaining text (no final terminator)
+    std::string trimmed = current;
+    trimmed.erase(0, trimmed.find_first_not_of(" \t\r\n"));
+    trimmed.erase(trimmed.find_last_not_of(" \t\r\n") + 1);
+    if (!trimmed.empty()) {
+        result.push_back(trimmed);
     }
 
-    return sentences;
+    return result;
 }
 
-// ===== Word Normalization =====
+// ===== Word Normalization & Contraction Expansion =====
 
 std::vector<std::string> normalize_words(std::string_view sentence) {
-    std::vector<std::string> words;
-    std::string current;
+    std::vector<std::string> result;
 
-    // Lowercase and process character by character
-    for (size_t i = 0; i < sentence.size(); ++i) {
-        char c = std::tolower(static_cast<unsigned char>(sentence[i]));
+    // First pass: lowercase and split on non-alphanumeric (but preserve apostrophes for contractions)
+    std::string lower_sent(sentence);
+    std::transform(lower_sent.begin(), lower_sent.end(), lower_sent.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
 
-        if (std::isalnum(c) || c == '\'') {
-            current += c;
+    std::string current_word;
+    for (size_t i = 0; i < lower_sent.size(); ++i) {
+        char c = lower_sent[i];
+        if (std::isalnum(c)) {
+            current_word += c;
+        } else if (c == '\'' && i > 0 && i < lower_sent.size() - 1 && std::isalpha(lower_sent[i + 1])) {
+            // Preserve apostrophe in contractions (e.g., "isn't", "don't")
+            current_word += c;
         } else {
-            // Non-alphanumeric delimiter
-            if (!current.empty()) {
-                words.push_back(current);
-                current.clear();
+            if (!current_word.empty()) {
+                result.push_back(current_word);
+                current_word.clear();
             }
         }
     }
-    if (!current.empty()) {
-        words.push_back(current);
+    if (!current_word.empty()) {
+        result.push_back(current_word);
     }
 
-    // Expand contractions (n't family critical)
+    // Second pass: expand contractions (n't family)
     std::vector<std::string> expanded;
-    for (const auto& word : words) {
+    for (const auto& word : result) {
+        // Search the contraction map
         bool found = false;
-        // Check n't contractions
-        for (const auto& [contraction, expansion] : lang::CONTRACTIONS_N_T) {
+        for (const auto& [contraction, pair] : ragger::lang::CONTRACTIONS_N_T) {
             if (word == contraction) {
-                expanded.push_back(std::string(expansion.first));
-                expanded.push_back(std::string(expansion.second));
+                // pair is {word1, word2}
+                expanded.push_back(std::string(pair.first));
+                expanded.push_back(std::string(pair.second));
                 found = true;
                 break;
             }
@@ -114,69 +102,88 @@ std::string stem(std::string_view word) {
     return Diskerror::stem_en(word);
 }
 
-// ===== Unigrams =====
+// ===== Metaphone =====
 
-std::vector<std::string> unigrams(const std::vector<std::string>& words,
+std::string metaphone(std::string_view stem) {
+    if (stem.empty()) return "";
+
+    // Call ragger::double_metaphone which returns vector<string> with primary and secondary
+    auto codes = ragger::double_metaphone(stem);
+    // Return ONLY the primary code (first element)
+    if (!codes.empty() && !codes[0].empty()) {
+        return codes[0];
+    }
+    return "";
+}
+
+// ===== Unigrams (literals + metaphone) =====
+
+std::vector<UnigramToken> unigrams(const std::vector<std::string>& words,
                                    const StopSet& uni_stops) {
-    std::vector<std::string> result;
+    std::vector<UnigramToken> result;
 
     for (const auto& word : words) {
-        // Check stopword on raw word
-        if (uni_stops.find(word) == uni_stops.end()) {
-            // Not a stopword — stem it
-            std::string stemmed = stem(word);
-            if (!stemmed.empty()) {
-                result.push_back(stemmed);
-            }
+        // Filter on RAW word
+        if (uni_stops.find(word) != uni_stops.end()) {
+            continue;  // stopword, skip
         }
-    }
 
-    return result;
-}
-
-// ===== Bigrams =====
-
-std::vector<std::string> bigrams(const std::vector<std::string>& words,
-                                  const StopSet& bi_stops) {
-    std::vector<std::string> result;
-
-    // Form consecutive pairs from the raw word list
-    for (size_t i = 0; i + 1 < words.size(); ++i) {
-        const auto& word_a = words[i];
-        const auto& word_b = words[i + 1];
-
-        // Skip pair if EITHER raw word is a bigram stopword
-        bool a_is_stop = (bi_stops.find(word_a) != bi_stops.end());
-        bool b_is_stop = (bi_stops.find(word_b) != bi_stops.end());
-
-        if (!a_is_stop && !b_is_stop) {
-            // Both survive — stem and join
-            std::string stem_a = stem(word_a);
-            std::string stem_b = stem(word_b);
-            if (!stem_a.empty() && !stem_b.empty()) {
-                result.push_back(stem_a + "_" + stem_b);
-            }
+        // Stem the survivor
+        std::string stemmed = stem(word);
+        if (stemmed.empty()) {
+            continue;  // all-digit or malformed, skip
         }
+
+        // Compute metaphone on the stem
+        std::string meta = metaphone(stemmed);
+
+        result.push_back({stemmed, meta});
     }
 
     return result;
 }
 
-// ===== Helper: Load Stopword Lists =====
+// ===== Bigrams (literals + metaphone) =====
 
-StopSet stopword_set(const std::array<std::string_view, 132>& list) {
-    StopSet result;
-    for (auto word : list) {
-        result.insert(word);
-    }
-    return result;
-}
+std::vector<BigramToken> bigrams(const std::vector<std::string>& words,
+                                 const StopSet& bi_stops) {
+    std::vector<BigramToken> result;
 
-StopSet stopword_set(const std::array<std::string_view, 47>& list) {
-    StopSet result;
-    for (auto word : list) {
-        result.insert(word);
+    if (words.size() < 2) {
+        return result;  // need at least 2 words
     }
+
+    for (size_t i = 0; i < words.size() - 1; ++i) {
+        // Check if either raw word is a bigram stopword
+        if (bi_stops.find(words[i]) != bi_stops.end() ||
+            bi_stops.find(words[i + 1]) != bi_stops.end()) {
+            continue;  // skip this pair (no bridging)
+        }
+
+        // Stem both
+        std::string stem_a = stem(words[i]);
+        std::string stem_b = stem(words[i + 1]);
+
+        // Skip if either stem is empty
+        if (stem_a.empty() || stem_b.empty()) {
+            continue;
+        }
+
+        // Form literal bigram
+        std::string literal = stem_a + "_" + stem_b;
+
+        // Form metaphone bigram
+        std::string meta_a = metaphone(stem_a);
+        std::string meta_b = metaphone(stem_b);
+        std::string meta_bigram;
+        if (!meta_a.empty() && !meta_b.empty()) {
+            meta_bigram = meta_a + "_" + meta_b;
+        }
+        // If either metaphone is empty, we still add the bigram (may have one part)
+
+        result.push_back({literal, meta_bigram});
+    }
+
     return result;
 }
 
