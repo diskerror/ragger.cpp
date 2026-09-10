@@ -230,12 +230,17 @@ int main() {
             std::cout << "  Normalized words: [";
             for (const auto& w : words) std::cout << w << " ";
             std::cout << "]\n";
-            // Should convert: + → plus, = → equals, ≈ → approximately_equals, 5 → five
+            // Should convert: + → plus, = → equals, ≈ → approximately equals (two words), 5 → five
             assert(std::find(words.begin(), words.end(), "plus") != words.end());
             assert(std::find(words.begin(), words.end(), "equals") != words.end());
-            assert(std::find(words.begin(), words.end(), "approximately_equals") != words.end());
+            assert(std::find(words.begin(), words.end(), "approximately") != words.end());
+            // Check that "approximately" and "equals" are consecutive
+            auto approx_it = std::find(words.begin(), words.end(), "approximately");
+            assert(approx_it != words.end());
+            auto next_it = std::next(approx_it);
+            assert(next_it != words.end() && *next_it == "equals");
             assert(std::find(words.begin(), words.end(), "five") != words.end());
-            std::cout << "  ✓ Math operators converted to words\n";
+            std::cout << "  ✓ Math operators converted to words (± → 'plus minus', ≠ → 'not equals', ≈ → 'approximately equals')\n";
         }
         StopSet uni_stops = stopword_set(STOPWORDS_UNIGRAM);
         std::vector<std::string> words = {"running", "testing", "good"};

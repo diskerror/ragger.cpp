@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 #include <map>
+#include <sstream>
 
 // Include c_lib headers directly (no extern C needed for C++ functions)
 #include "Stemmer.h"
@@ -182,7 +183,13 @@ std::vector<std::string> normalize_words(std::string_view sentence) {
         bool op_found = false;
         for (const auto& [op, op_word] : ragger::lang::MATH_SYMBOLS) {
             if (word == op) {
-                expanded.push_back(std::string(op_word));
+                // op_word may contain spaces (e.g., "plus minus", "not equals")
+                // Split and add each word individually
+                std::istringstream iss{std::string(op_word)};
+                std::string part;
+                while (iss >> part) {
+                    expanded.push_back(part);
+                }
                 op_found = true;
                 break;
             }
