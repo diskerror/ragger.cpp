@@ -226,8 +226,8 @@ int main() {
         {
             std::cout << "Test 9: Math operators\n";
             auto sentences = split_sentences("Formula: x+5=10 and y≈3.14.");
-            // `:` is NOT a terminator, so full formula is in sentences[0]
-            auto words = normalize_words(sentences[0]);
+            // `:` is a sentence terminator, so math formula is in sentences[1]
+            auto words = normalize_words(sentences[1]);
             std::cout << "  Normalized words: [";
             for (const auto& w : words) std::cout << w << " ";
             std::cout << "]\n";

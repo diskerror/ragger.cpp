@@ -22,7 +22,7 @@ using StopSet = std::unordered_set<std::string_view>;
 // ===== Text Segmentation =====
 
 /**
- * split_sentences: Break text on sentence terminators . ! ? ;
+ * split_sentences: Break text on sentence terminators . ! ? : ;
  * Returns: vector of trimmed sentence strings (no empty sentences).
  */
 std::vector<std::string> split_sentences(std::string_view text);
