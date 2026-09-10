@@ -245,6 +245,7 @@ add_library(ragger_core STATIC
     src/embedder.cpp
     src/embed_executor.cpp
     src/tokenizer_wrapper.cpp
+    src/fts_tokenize.cpp
     src/sqlite_backend.cpp
     src/user_store.cpp
     src/import.cpp

@@ -64,6 +64,10 @@ add_executable(test_vector_codec test_vector_codec.cpp)
 target_link_libraries(test_vector_codec PRIVATE ragger_core)
 add_test(NAME test_vector_codec COMMAND test_vector_codec)
 
+add_executable(test_fts_tokenize test_fts_tokenize.cpp)
+target_link_libraries(test_fts_tokenize PRIVATE ragger_core)
+add_test(NAME test_fts_tokenize COMMAND test_fts_tokenize)
+
 # Stats logger tests — only built/registered when RAGGER_STATS is ON.
 # (ragger_core carries the RAGGER_STATS compile definition transitively, so
 # the test body's #ifdef sees it; we still gate the target so a default build

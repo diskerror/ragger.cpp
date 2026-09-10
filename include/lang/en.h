@@ -733,4 +733,45 @@ inline const ConfigMeta* config_meta(std::string_view key) {
     return nullptr;
 }
 
+// =====================================================================
+// v0.16 FTS Contraction Expansion Map (for step 4 tokenizer)
+// =====================================================================
+
+/**
+ * CONTRACTIONS_N_T: expand n't contractions so negation is preserved.
+ * Maps from contraction → expansion as two separate words.
+ * 
+ * Example: "isn't" → {"is", "not"}
+ * After normalization and this expansion, "is" drops as a unigram stopword,
+ * but "not" survives and pairs with following words.
+ */
+inline constexpr std::array<std::pair<std::string_view, std::pair<std::string_view, std::string_view>>, 14> CONTRACTIONS_N_T = {{
+    {"isn't", {"is", "not"}},
+    {"aren't", {"are", "not"}},
+    {"wasn't", {"was", "not"}},
+    {"weren't", {"were", "not"}},
+    {"don't", {"do", "not"}},
+    {"doesn't", {"does", "not"}},
+    {"didn't", {"did", "not"}},
+    {"can't", {"can", "not"}},
+    {"couldn't", {"could", "not"}},
+    {"won't", {"will", "not"}},
+    {"wouldn't", {"would", "not"}},
+    {"shouldn't", {"should", "not"}},
+    {"hasn't", {"has", "not"}},
+    {"haven't", {"have", "not"}},
+    // Note: "hadn't" and "mustn't" are not included because they're uncommon
+    // and would need a separate list for multi-word expansions.
+    // Keep the critical negations; Reid can expand later if needed.
+}};
+
+/**
+ * CONTRACTIONS_OTHER: expand common non-negating contractions.
+ * Optional; focus on n't first, then add these if needed.
+ * Examples: "it's" → {"it", "is"}, "I'm" → {"i", "am"}
+ * 
+ * NOT YET IMPLEMENTED: can be added per Reid's preference.
+ */
+// Future: {"it's", {"it", "is"}}, {"we'll", {"we", "will"}}, etc.
+
 } // namespace ragger::lang
