@@ -29,6 +29,65 @@
 
 namespace ragger::lang {
 
+// =====================================================================
+// v0.16 FTS Stopword Lists — two distinct lists per Step 3
+// =====================================================================
+
+/**
+ * STOPWORDS_UNIGRAM: aggressive filtering for standalone words.
+ * Seeded from the Porter stopword list. Filters out function words
+ * that carry minimal meaning on their own.
+ */
+inline constexpr std::array<std::string_view, 132> STOPWORDS_UNIGRAM = {{
+    // Articles
+    "a", "an", "the",
+    // Pronouns
+    "i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you", "your", "yours", "yourself", "yourselves",
+    "he", "him", "his", "himself", "she", "her", "hers", "herself", "it", "its", "itself", "they", "them", "their", "theirs", "themselves",
+    "what", "which", "who", "whom", "this", "that", "these", "those",
+    // Auxiliary verbs
+    "am", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "having",
+    "do", "does", "did", "doing",
+    "will", "would", "shall", "should", "may", "might", "must", "can", "could",
+    // Prepositions
+    "of", "in", "to", "for", "from", "with", "by", "at", "as", "on", "into", "through", "during", "before", "after",
+    "above", "below", "between", "under", "over", "out", "off", "up", "down", "along", "around", "about",
+    // Conjunctions
+    "and", "or", "but", "nor", "yet", "so", "because", "while", "when", "where", "how", "why", "if", "unless",
+    // Negations
+    "not", "no", "never", "neither", "nobody", "nothing", "nowhere", "ain't",
+    // Common filler
+    "all", "each", "every", "both", "few", "more", "most", "other", "same", "such", "only", "own", "just",
+    "also", "than", "too", "very", "much",
+}};
+
+/**
+ * STOPWORDS_BIGRAM: much looser list. Allows polar/directional words
+ * to survive so they form meaningful bigrams. REMOVES words that are
+ * strong signal when paired (e.g., "not", "forward", "backward").
+ * 
+ * Keeps the auxiliaries that contraction expansion produces, so they
+ * don't clutter bigrams after ~n't expansion (e.g., "isn't" → "is not"
+ * becomes just "not_good", not "is_not" + "not_good").
+ */
+inline constexpr std::array<std::string_view, 47> STOPWORDS_BIGRAM = {{
+    // Auxiliaries: drop these from bigrams (they only serve contractions)
+    "am", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had",
+    "do", "does", "did",
+    "will", "would", "shall", "should", "may", "might", "must", "can", "could",
+    // Generic/low-info words
+    "the", "a", "an",
+    "and", "or", "but",
+    "all", "each", "every", "both",
+    "same", "such", "other",
+    "also", "only", "just",
+    // Common articles/pronouns
+    "this", "that", "these", "those",
+    "it", "its", "they", "them",
+}};
+
 // --- CLI options ---
 constexpr const char* CLI_DESCRIPTION         = "ragger — Ragger Memory";
 constexpr const char* CLI_HELP                = "Show help";

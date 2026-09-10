@@ -162,15 +162,20 @@ target_include_directories(vendor_headers INTERFACE
 target_compile_definitions(vendor_headers INTERFACE CPPHTTPLIB_OPENSSL_SUPPORT)
 
 # ---------------------------------------------------------------------------
-# c_lib (FetchContent — uses local copy if FETCHCONTENT_SOURCE_DIR_C_LIB is
-# set, otherwise clones from GitHub)
+# c_lib (local if ../c_lib exists, else FetchContent from GitHub)
 # ---------------------------------------------------------------------------
-include(FetchContent)
-FetchContent_Declare(c_lib
-    GIT_REPOSITORY https://github.com/diskerror/c_lib.git
-    GIT_TAG        master
-)
-FetchContent_MakeAvailable(c_lib)
+if(EXISTS "${CMAKE_SOURCE_DIR}/../c_lib/CMakeLists.txt")
+    message(STATUS "c_lib: using local ../c_lib")
+    add_subdirectory("${CMAKE_SOURCE_DIR}/../c_lib" "${CMAKE_BINARY_DIR}/_c_lib")
+else()
+    message(STATUS "c_lib: fetching from GitHub (set FETCHCONTENT_SOURCE_DIR_C_LIB to use local)")
+    include(FetchContent)
+    FetchContent_Declare(c_lib
+        GIT_REPOSITORY https://github.com/diskerror/c_lib.git
+        GIT_TAG        master
+    )
+    FetchContent_MakeAvailable(c_lib)
+endif()
 
 # c_lib targets provide their own include directories via
 # target_include_directories(... PUBLIC), so consumers just link the targets.
@@ -273,6 +278,7 @@ target_link_libraries(ragger_core PUBLIC
     c_lib_utils
     diskerror_embedding_codec
     diskerror_double_metaphone
+    diskerror_stemmer
     SQLite::SQLite3
     onnxruntime
     tokenizers_cpp
