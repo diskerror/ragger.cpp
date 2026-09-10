@@ -645,7 +645,7 @@ struct SqliteBackend::Impl {
         // scripts/migrate_to_db0.12.sh instead of silently being treated
         // as current.
         if (!db_preexisted)
-            exec("INSERT OR IGNORE INTO settings (key, value) VALUES ('db_version', '0.15')");
+            exec(std::format("INSERT OR IGNORE INTO settings (key, value) VALUES ('db_version', '{}')", kExpectedDbVersion));
         {
             std::string actual = db_version();
             if (actual != kExpectedDbVersion) {
