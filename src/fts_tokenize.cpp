@@ -23,9 +23,11 @@ std::vector<std::string> split_sentences(std::string_view text) {
         char c = text[i];
         current += c;
 
-        // Sentence terminators: . ! ? : ;
+        // Sentence terminators: . ! ? ;
         // Bigrams do not cross these boundaries.
-        if (c == '.' || c == '!' || c == '?' || c == ':' || c == ';') {
+        // Note: ':' is NOT included; it's often used mid-clause (e.g., "Formula: x+y")
+        // and there's no meaning to pairing before/after it anyway.
+        if (c == '.' || c == '!' || c == '?' || c == ';') {
             // Trim and add if non-empty
             std::string trimmed = current;
             trimmed.erase(0, trimmed.find_first_not_of(" \t\r\n"));
