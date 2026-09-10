@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <set>
+#include <algorithm>
 
 #include "fts_tokenize.h"
 #include "lang/en.h"
@@ -175,7 +176,51 @@ int main() {
         std::cout << "  ✓ Contraction replaced directly with 'not' (good and not_good with metaphone)\n";
     }
 
-    // ===== Test 6: Metaphone weight calculation consistency =====
+    // ===== Test 6: Single digit conversion =====
+    {
+        std::cout << "Test 6: Single digit conversion\n";
+        auto sentences = split_sentences("I have 3 cats and 2 dogs.");
+        auto words = normalize_words(sentences[0]);
+        std::cout << "  Normalized words: [";
+        for (const auto& w : words) std::cout << w << " ";
+        std::cout << "]\n";
+        // Should convert digits: 3 → three, 2 → two
+        // stopwords drop "and"
+        assert(std::find(words.begin(), words.end(), "three") != words.end());
+        assert(std::find(words.begin(), words.end(), "two") != words.end());
+        assert(std::find(words.begin(), words.end(), "3") == words.end());  // digit should be gone
+        assert(std::find(words.begin(), words.end(), "2") == words.end());  // digit should be gone
+        std::cout << "  ✓ Single digits converted to words\n";
+    }
+
+    // ===== Test 7: Minus sign before single digit =====
+    {
+        std::cout << "Test 7: Minus sign handling\n";
+        auto sentences = split_sentences("Temperature is -5 degrees.");
+        auto words = normalize_words(sentences[0]);
+        std::cout << "  Normalized words: [";
+        for (const auto& w : words) std::cout << w << " ";
+        std::cout << "]\n";
+        // Should convert: - → minus, 5 → five
+        assert(std::find(words.begin(), words.end(), "minus") != words.end());
+        assert(std::find(words.begin(), words.end(), "five") != words.end());
+        assert(std::find(words.begin(), words.end(), "-") == words.end());   // minus sign should be gone
+        assert(std::find(words.begin(), words.end(), "5") == words.end());   // digit should be gone
+        std::cout << "  ✓ Minus sign and single digit handled correctly\n";
+    }
+
+    // ===== Test 8: Multi-digit numbers NOT converted =====
+    {
+        std::cout << "Test 8: Multi-digit numbers unchanged\n";
+        auto sentences = split_sentences("Year 2024 is here.");
+        auto words = normalize_words(sentences[0]);
+        std::cout << "  Normalized words: [";
+        for (const auto& w : words) std::cout << w << " ";
+        std::cout << "]\n";
+        // Multi-digit numbers should NOT be converted
+        assert(std::find(words.begin(), words.end(), "2024") != words.end());
+        std::cout << "  ✓ Multi-digit numbers preserved\n";
+    }
     {
         std::cout << "Test 6: Metaphone consistency (each stem yields exactly one metaphone)\n";
         StopSet uni_stops = stopword_set(STOPWORDS_UNIGRAM);

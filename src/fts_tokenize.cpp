@@ -50,7 +50,7 @@ std::vector<std::string> split_sentences(std::string_view text) {
 std::vector<std::string> normalize_words(std::string_view sentence) {
     std::vector<std::string> result;
 
-    // First pass: lowercase and split on non-alphanumeric (but preserve apostrophes for contractions)
+    // First pass: lowercase and split on non-alphanumeric, but preserve minus signs and apostrophes
     std::string lower_sent(sentence);
     std::transform(lower_sent.begin(), lower_sent.end(), lower_sent.begin(),
                    [](unsigned char c) { return std::tolower(c); });
@@ -58,8 +58,27 @@ std::vector<std::string> normalize_words(std::string_view sentence) {
     std::string current_word;
     for (size_t i = 0; i < lower_sent.size(); ++i) {
         char c = lower_sent[i];
+        unsigned char uc = static_cast<unsigned char>(c);
+        
         if (std::isalnum(c)) {
             current_word += c;
+        } else if (c == '-') {
+            // Preserve hyphen as a potential minus sign
+            if (!current_word.empty()) {
+                result.push_back(current_word);
+                current_word.clear();
+            }
+            result.push_back("-");
+        } else if (uc == 0xE2 && i + 2 < lower_sent.size() && 
+                   (unsigned char)lower_sent[i + 1] == 0x88 && 
+                   (unsigned char)lower_sent[i + 2] == 0x92) {
+            // UTF-8 minus sign (U+2212: E2 88 92)
+            if (!current_word.empty()) {
+                result.push_back(current_word);
+                current_word.clear();
+            }
+            result.push_back(std::string("\xE2\x88\x92"));
+            i += 2;  // Skip the next two bytes
         } else if (c == '\'' && i > 0 && i < lower_sent.size() - 1 && std::isalpha(lower_sent[i + 1])) {
             // Preserve apostrophe in contractions (e.g., "isn't", "don't")
             current_word += c;
@@ -74,10 +93,51 @@ std::vector<std::string> normalize_words(std::string_view sentence) {
         result.push_back(current_word);
     }
 
-    // Second pass: replace contractions with "not" directly
+    // Second pass: handle minus signs before single digits
+    // Detect minus (either hyphen '-' or UTF-8 minus '−') and replace with "minus" if followed by single digit
+    std::vector<std::string> with_minus_handling;
+    for (size_t i = 0; i < result.size(); ++i) {
+        const auto& word = result[i];
+        
+        // Check if this word is a minus sign (hyphen or UTF-8 minus)
+        // UTF-8 minus is encoded as 0xE2 0x88 0x92 (3 bytes)
+        bool is_minus = (word == "-");
+        bool is_utf8_minus = (word.size() == 3 && 
+                              (unsigned char)word[0] == 0xE2 && 
+                              (unsigned char)word[1] == 0x88 && 
+                              (unsigned char)word[2] == 0x92);
+        
+        if ((is_minus || is_utf8_minus) && i + 1 < result.size() && result[i + 1].size() == 1 && std::isdigit(result[i + 1][0])) {
+            // This is a minus sign followed by a single digit
+            with_minus_handling.push_back("minus");
+            // Skip adding the minus; continue to process the digit next
+        } else {
+            with_minus_handling.push_back(word);
+        }
+    }
+
+    // Third pass: replace single digits with their word forms, and replace contractions
     std::vector<std::string> expanded;
-    for (const auto& word : result) {
-        // Search the contraction map for this word
+    for (size_t i = 0; i < with_minus_handling.size(); ++i) {
+        const auto& word = with_minus_handling[i];
+        
+        // Check if it's a single digit
+        if (word.size() == 1 && std::isdigit(word[0])) {
+            // Convert single digit to word
+            bool digit_found = false;
+            for (const auto& [digit, digit_word] : ragger::lang::SINGLE_DIGIT_WORDS) {
+                if (word == digit) {
+                    expanded.push_back(std::string(digit_word));
+                    digit_found = true;
+                    break;
+                }
+            }
+            if (digit_found) {
+                continue;
+            }
+        }
+        
+        // Check for contractions
         bool found = false;
         for (const auto& [contraction, replacement] : ragger::lang::CONTRACTIONS_N_T) {
             if (word == contraction) {

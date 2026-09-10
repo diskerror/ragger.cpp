@@ -733,8 +733,25 @@ inline const ConfigMeta* config_meta(std::string_view key) {
 }
 
 // =====================================================================
-// v0.16 FTS Contraction Replacement Map (for step 4 tokenizer)
+// v0.16 FTS Number/Symbol Replacement Map (for step 4 tokenizer)
 // =====================================================================
+
+/**
+ * SINGLE_DIGIT_WORDS: Convert single digits (0-9) to their word forms.
+ * Improves search: "I have 3 cats" becomes "I have three cats" → searchable as text.
+ */
+inline constexpr std::array<std::pair<std::string_view, std::string_view>, 10> SINGLE_DIGIT_WORDS = {{
+    {"0", "zero"},
+    {"1", "one"},
+    {"2", "two"},
+    {"3", "three"},
+    {"4", "four"},
+    {"5", "five"},
+    {"6", "six"},
+    {"7", "seven"},
+    {"8", "eight"},
+    {"9", "nine"},
+}};
 
 /**
  * CONTRACTIONS_N_T: map n't contractions directly to "not".
