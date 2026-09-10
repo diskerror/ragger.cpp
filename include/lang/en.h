@@ -754,6 +754,19 @@ inline constexpr std::array<std::pair<std::string_view, std::string_view>, 10> S
 }};
 
 /**
+ * MATH_SYMBOLS: Convert mathematical/comparison operators to words.
+ * Maps: + → plus, ± → plusminus, - → minus, = → equals, ≠ → not_equals, ≈ → approximately_equals
+ * Enables: "x+5=10" → "x plus five equals ten" (searchable)
+ */
+inline constexpr std::array<std::pair<std::string_view, std::string_view>, 6> MATH_SYMBOLS = {{
+    {"+", "plus"},
+    {"\xC2\xB1", "plusminus"},  // UTF-8 plus-minus (±, U+00B1: C2 B1)
+    {"=", "equals"},
+    {"\xE2\x89\xA0", "not_equals"},  // UTF-8 not-equals (≠, U+2260: E2 89 A0)
+    {"\xE2\x89\x88", "approximately_equals"},  // UTF-8 approx-equals (≈, U+2248: E2 89 88)
+}};
+
+/**
  * CONTRACTIONS_N_T: map n't contractions directly to "not".
  * 
  * Rationale: The auxiliary verb (is, are, do, etc.) would drop as a unigram

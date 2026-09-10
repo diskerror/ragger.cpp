@@ -50,7 +50,7 @@ std::vector<std::string> split_sentences(std::string_view text) {
 std::vector<std::string> normalize_words(std::string_view sentence) {
     std::vector<std::string> result;
 
-    // First pass: lowercase and split on non-alphanumeric, but preserve minus signs and apostrophes
+    // First pass: lowercase and split on non-alphanumeric, but preserve special symbols
     std::string lower_sent(sentence);
     std::transform(lower_sent.begin(), lower_sent.end(), lower_sent.begin(),
                    [](unsigned char c) { return std::tolower(c); });
@@ -62,23 +62,56 @@ std::vector<std::string> normalize_words(std::string_view sentence) {
         
         if (std::isalnum(c)) {
             current_word += c;
-        } else if (c == '-') {
-            // Preserve hyphen as a potential minus sign
+        } else if (c == '+' || c == '=' || c == '-') {
+            // Preserve +, =, - as potential operator symbols
             if (!current_word.empty()) {
                 result.push_back(current_word);
                 current_word.clear();
             }
-            result.push_back("-");
+            result.push_back(std::string(1, c));
+        } else if (uc == 0xC2 && i + 1 < lower_sent.size() && (unsigned char)lower_sent[i + 1] == 0xB1) {
+            // UTF-8 plus-minus (±, U+00B1: C2 B1)
+            if (!current_word.empty()) {
+                result.push_back(current_word);
+                current_word.clear();
+            }
+            result.push_back(std::string("\xC2\xB1"));
+            i += 1;  // Skip next byte
         } else if (uc == 0xE2 && i + 2 < lower_sent.size() && 
-                   (unsigned char)lower_sent[i + 1] == 0x88 && 
-                   (unsigned char)lower_sent[i + 2] == 0x92) {
-            // UTF-8 minus sign (U+2212: E2 88 92)
-            if (!current_word.empty()) {
-                result.push_back(current_word);
-                current_word.clear();
+                   (unsigned char)lower_sent[i + 1] == 0x89) {
+            // UTF-8 multi-byte operators starting with E2 89:
+            unsigned char byte3 = (unsigned char)lower_sent[i + 2];
+            if (byte3 == 0xA0) {
+                // ≠ (U+2260: E2 89 A0)
+                if (!current_word.empty()) {
+                    result.push_back(current_word);
+                    current_word.clear();
+                }
+                result.push_back(std::string("\xE2\x89\xA0"));
+                i += 2;
+            } else if (byte3 == 0x88) {
+                // ≈ (U+2248: E2 89 88)
+                if (!current_word.empty()) {
+                    result.push_back(current_word);
+                    current_word.clear();
+                }
+                result.push_back(std::string("\xE2\x89\x88"));
+                i += 2;
+            } else if (byte3 == 0x92) {
+                // − (U+2212: E2 88 92) — UTF-8 minus
+                if (!current_word.empty()) {
+                    result.push_back(current_word);
+                    current_word.clear();
+                }
+                result.push_back(std::string("\xE2\x88\x92"));
+                i += 2;
+            } else {
+                // Not a recognized operator, drop it
+                if (!current_word.empty()) {
+                    result.push_back(current_word);
+                    current_word.clear();
+                }
             }
-            result.push_back(std::string("\xE2\x88\x92"));
-            i += 2;  // Skip the next two bytes
         } else if (c == '\'' && i > 0 && i < lower_sent.size() - 1 && std::isalpha(lower_sent[i + 1])) {
             // Preserve apostrophe in contractions (e.g., "isn't", "don't")
             current_word += c;
@@ -93,33 +126,41 @@ std::vector<std::string> normalize_words(std::string_view sentence) {
         result.push_back(current_word);
     }
 
-    // Second pass: handle minus signs before single digits
-    // Detect minus (either hyphen '-' or UTF-8 minus '−') and replace with "minus" if followed by single digit
-    std::vector<std::string> with_minus_handling;
+    // Second pass: handle minus signs and operators before single digits
+    // Detect operator followed by single digit and handle appropriately
+    std::vector<std::string> with_operator_handling;
     for (size_t i = 0; i < result.size(); ++i) {
         const auto& word = result[i];
+        bool is_minus_op = false;
+        bool is_plus_op = false;
         
-        // Check if this word is a minus sign (hyphen or UTF-8 minus)
-        // UTF-8 minus is encoded as 0xE2 0x88 0x92 (3 bytes)
-        bool is_minus = (word == "-");
-        bool is_utf8_minus = (word.size() == 3 && 
-                              (unsigned char)word[0] == 0xE2 && 
-                              (unsigned char)word[1] == 0x88 && 
-                              (unsigned char)word[2] == 0x92);
+        // Check for minus-type operators
+        if (word == "-" || word == "\xE2\x88\x92") {  // ASCII hyphen or UTF-8 minus
+            is_minus_op = true;
+        }
+        // Check for plus-type operators
+        if (word == "+" || word == "\xC2\xB1") {  // ASCII plus or UTF-8 plus-minus
+            is_plus_op = true;
+        }
         
-        if ((is_minus || is_utf8_minus) && i + 1 < result.size() && result[i + 1].size() == 1 && std::isdigit(result[i + 1][0])) {
-            // This is a minus sign followed by a single digit
-            with_minus_handling.push_back("minus");
-            // Skip adding the minus; continue to process the digit next
+        // If operator is followed by single digit, convert operator to word (no digit skip needed)
+        if ((is_minus_op || is_plus_op) && i + 1 < result.size() && 
+            result[i + 1].size() == 1 && std::isdigit(result[i + 1][0])) {
+            // Replace operator with its word form
+            if (is_minus_op) {
+                with_operator_handling.push_back("minus");
+            } else if (is_plus_op) {
+                with_operator_handling.push_back("plus");
+            }
         } else {
-            with_minus_handling.push_back(word);
+            with_operator_handling.push_back(word);
         }
     }
 
-    // Third pass: replace single digits with their word forms, and replace contractions
+    // Third pass: replace operators and single digits with their word forms, and replace contractions
     std::vector<std::string> expanded;
-    for (size_t i = 0; i < with_minus_handling.size(); ++i) {
-        const auto& word = with_minus_handling[i];
+    for (size_t i = 0; i < with_operator_handling.size(); ++i) {
+        const auto& word = with_operator_handling[i];
         
         // Check if it's a single digit
         if (word.size() == 1 && std::isdigit(word[0])) {
@@ -135,6 +176,19 @@ std::vector<std::string> normalize_words(std::string_view sentence) {
             if (digit_found) {
                 continue;
             }
+        }
+        
+        // Check for math operators
+        bool op_found = false;
+        for (const auto& [op, op_word] : ragger::lang::MATH_SYMBOLS) {
+            if (word == op) {
+                expanded.push_back(std::string(op_word));
+                op_found = true;
+                break;
+            }
+        }
+        if (op_found) {
+            continue;
         }
         
         // Check for contractions

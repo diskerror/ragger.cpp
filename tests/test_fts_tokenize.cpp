@@ -222,7 +222,21 @@ int main() {
         std::cout << "  ✓ Multi-digit numbers preserved\n";
     }
     {
-        std::cout << "Test 6: Metaphone consistency (each stem yields exactly one metaphone)\n";
+        // ===== Test 9: Math operators =====
+        {
+            std::cout << "Test 9: Math operators\n";
+            auto sentences = split_sentences("Formula: x+5=10 and y≈3.14.");
+            auto words = normalize_words(sentences[0]);
+            std::cout << "  Normalized words: [";
+            for (const auto& w : words) std::cout << w << " ";
+            std::cout << "]\n";
+            // Should convert: + → plus, = → equals, ≈ → approximately_equals, 5 → five
+            assert(std::find(words.begin(), words.end(), "plus") != words.end());
+            assert(std::find(words.begin(), words.end(), "equals") != words.end());
+            assert(std::find(words.begin(), words.end(), "approximately_equals") != words.end());
+            assert(std::find(words.begin(), words.end(), "five") != words.end());
+            std::cout << "  ✓ Math operators converted to words\n";
+        }
         StopSet uni_stops = stopword_set(STOPWORDS_UNIGRAM);
         std::vector<std::string> words = {"running", "testing", "good"};
         auto uni = unigrams(words, uni_stops);
