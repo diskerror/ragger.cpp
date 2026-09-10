@@ -70,8 +70,10 @@ inline constexpr std::array<std::string_view, 132> STOPWORDS_UNIGRAM = {{
  * 
  * Keeps ONLY auxiliaries that exist purely to carry contractions (is, are, be, 
  * have, do) — these are genuinely low-signal in bigrams.
+ * 
+ * Also drops "to" (preposition connector with no independent meaning in pairs).
  */
-inline constexpr std::array<std::string_view, 38> STOPWORDS_BIGRAM = {{
+inline constexpr std::array<std::string_view, 39> STOPWORDS_BIGRAM = {{
     // Auxiliaries: drop ONLY these (they exist purely to carry n't contractions)
     "am", "is", "are", "was", "were", "be", "been", "being",
     "have", "has", "had",
@@ -82,6 +84,7 @@ inline constexpr std::array<std::string_view, 38> STOPWORDS_BIGRAM = {{
     "all", "each", "every", "both",
     "same", "such", "other",
     "also", "only", "just",
+    "to",  // Preposition connector with no independent meaning
     // Common articles/pronouns
     "this", "that", "these", "those",
     "it", "its", "they", "them",
