@@ -132,10 +132,10 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
                               user_store_->get_setting("dimensions").value_or(""), current_dims));
         } catch (const std::runtime_error& e) {
             // Degrade gracefully: log the error and disable vector search.
-            // FTS5 text + phonetic search still works.
+            // The custom terms index still works.
             Diskerror::Logger::error(std::format(
                 "Embedding drift detected — vector search disabled, "
-                "falling back to text + phonetic search only. {}", e.what()));
+                "falling back to custom terms index search only. {}", e.what()));
             embeddings_degraded_ = true;
         }
     }
@@ -148,15 +148,6 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     // housekeeping tick (background, ~60s after start). CLI paths that need
     // it immediately use `ragger rebuild-embeddings`.
 
-    // Backfill any NULL phon (dolphining sounds-like) rows — self-heals rows
-    // that predate the phon column after the one-time ADD COLUMN migration.
-    // Pure string work (no embedder); NULL-only so it's a no-op once populated.
-    // Runs here (single startup connection) to avoid the double-backend write
-    // contention that silently swallows UPDATEs when the daemon holds the DB.
-    int phoned = backend_->rebuild_phon(/*only_missing=*/true, /*progress=*/false);
-    if (phoned > 0) {
-        Diskerror::Logger::info(std::format("Backfilled phonetic codes for {} row(s)", phoned));
-    }
 #ifdef RAGGER_STATS
     // Opt-in retrieval instrumentation. Construction never throws into the
     // caller; if the stats DB can't be opened the logger disables itself.
@@ -302,7 +293,7 @@ SearchResponse RaggerMemory::search(const std::string& query,
                                     std::vector<std::string> collections) {
     // While a re-embed is in progress the vectors are being rewritten, so a
     // vector query would mix old/new spaces or hit half-updated rows. Fall
-    // back to text-only search (FTS5 keyword + phonetic) exactly like the
+    // back to text-only search (custom terms index) exactly like the
     // degraded path below, rather than returning a stub record — callers
     // (MCP clients especially) get real, if unranked, results instead of a
     // single unusable row.
@@ -313,7 +304,7 @@ SearchResponse RaggerMemory::search(const std::string& query,
         return busy;
     }
     // When embeddings are degraded (drift mismatch at startup), fall back to
-    // text-only search (FTS5 keyword + phonetic). Vector similarity is
+    // text-only search (custom terms index). Vector similarity is
     // unavailable but lookups still work.
     if (embeddings_degraded_ || !embedder_->ready()) {
         return backend_->search_text_only(query, limit);
@@ -664,10 +655,6 @@ int RaggerMemory::resume_interrupted_reembed() {
 
 int RaggerMemory::backfill_embeddings() {
     return backend_->backfill_embeddings(*embedder_);
-}
-
-int RaggerMemory::rebuild_phon(bool only_missing, bool progress) {
-    return backend_->rebuild_phon(only_missing, progress);
 }
 
 std::vector<std::string> RaggerMemory::collections() const {

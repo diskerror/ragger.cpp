@@ -182,7 +182,6 @@ public:
     int backfill_embeddings(Embedder& embedder) override;
     uint8_t embedding_version() const override;
     uint8_t increment_embedding_version() override;
-    int rebuild_phon(bool only_missing, bool progress) override;
     int reindex_table(const std::string& table, bool progress = false) override;
 
     /// Get distinct collection names.

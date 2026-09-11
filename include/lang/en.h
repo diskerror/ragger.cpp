@@ -396,8 +396,9 @@ Commands:
   reload             Reload config on running daemon (SIGHUP)
                      options: --user <name>, --dry-run
   rebuild-embeddings Rebuild embeddings for all memories
-  rebuild-phon       Recompute the phonetic (sounds-like) index column
-                     options: --missing  only fill rows with a NULL phon column
+  reindex <table|all> Rebuild the custom text index (terms + TF-IDF)
+                     tables: turns, turn_summaries, summaries, decisions,
+                     documents, or "all"
   show-embedding-model  Show current embedding model info
   embed               Embed text from stdin, write JSON array to stdout
   help               Show this help

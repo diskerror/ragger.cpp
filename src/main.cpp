@@ -263,7 +263,6 @@ int main(int argc, char **argv) {
             ("json,j", "config get: format output as JSON")
             ("browser,b", "dashboard: open the URL in the default browser")
             ("embeddings,e", CLI_EMBEDDINGS)
-            ("missing", "rebuild-phon: only fill rows with a NULL phon column")
             ("output,o", Diskerror::po::value<std::string>(), "Output file");
     opts.add_hidden_options()
             ("command", Diskerror::po::value<std::string>()->default_value("help"), CLI_COMMAND)
@@ -1367,14 +1366,34 @@ int main(int argc, char **argv) {
             std::cout << std::format(ragger::lang::MSG_EMBEDDINGS_REBUILT, count) << "\n";
 
         }
-        else if (command == "rebuild-phon") {
-            // Recompute the phon (Double Metaphone "sounds-like") column from
-            // text across all four context tables. Pure string work — no
-            // embedder, no model-identity change. `--missing` only fills
-            // phon-NULL rows (cheap post-migration backfill); default recomputes
-            // all (e.g. after a phonize() change). Backs up the DB first — cheap
-            // rollback, no drift guard needed.
-            bool only_missing = opts.count("missing") > 0;
+        else if (command == "reindex") {
+            // Manually (re)build the custom terms/TF-IDF text index for one
+            // table, or all five. Idempotent (delete-then-insert per record),
+            // so safe to re-run any time — e.g. after a tokenizer/stopword
+            // change, or to recover from a suspected inconsistency. Backs up
+            // the DB first — cheap rollback, no drift guard needed.
+            static constexpr std::array<const char*, 5> kAllTables = {
+                "turns", "turn_summaries", "summaries", "decisions", "documents"
+            };
+
+            auto args = opts.getParams("args");
+            if (args.empty()) {
+                Diskerror::Logger::error(
+                    "Usage: ragger reindex <table|all>  "
+                    "(tables: turns, turn_summaries, summaries, decisions, documents)");
+                return 1;
+            }
+            std::string target = args[0];
+            if (target != "all") {
+                bool found = false;
+                for (auto* t : kAllTables) if (target == t) { found = true; break; }
+                if (!found) {
+                    Diskerror::Logger::error(std::format(
+                        "Unknown table '{}'. Expected one of: turns, turn_summaries, "
+                        "summaries, decisions, documents, or \"all\"", target));
+                    return 1;
+                }
+            }
 
             std::string actual_db_path = db_path.empty() ? cfg.resolved_db_path() : db_path;
             std::string backup_path = actual_db_path + ".bak";
@@ -1389,8 +1408,18 @@ int main(int argc, char **argv) {
 
             ragger::RaggerMemory memory(db_path,
                                         /*skip_embedding_guard=*/true);
-            int count = memory.rebuild_phon(only_missing, /*progress=*/true);
-            std::println("Rebuilt phonetic codes for {} row(s).", count);
+            int total = 0;
+            if (target == "all") {
+                for (auto* t : kAllTables) {
+                    int count = memory.backend()->reindex_table(t, /*progress=*/true);
+                    std::println("Reindexed {}: {} row(s).", t, count);
+                    total += count;
+                }
+                std::println("Reindexed all tables: {} row(s) total.", total);
+            } else {
+                total = memory.backend()->reindex_table(target, /*progress=*/true);
+                std::println("Reindexed {}: {} row(s).", target, total);
+            }
         }
         else if (command == "show-embedding-model") {
             std::println(ragger::lang::MSG_EMBEDDING_MODEL_NAME, cfg.embedding_model);

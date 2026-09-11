@@ -277,19 +277,9 @@ struct Server::Impl {
             }
         }
 
-        // 4. Backfill NULL phon (dolphining sounds-like) — self-heals rows that
-        //    predate the phon column after the one-time ADD COLUMN migration.
-        //    Pure string work (no embedder); NULL-only so it's a no-op once
-        //    every row is populated.
-        try {
-            int phoned = memory.rebuild_phon(/*only_missing=*/true, /*progress=*/false);
-            if (phoned > 0) {
-                Diskerror::Logger::info(std::format(
-                    "Backfilled phonetic codes for {} row(s)", phoned));
-            }
-        } catch (const std::exception& e) {
-            Diskerror::Logger::warn(std::format(lang::ERR_CLEANUP_DB, e.what()));
-        }
+        // 4. (Reindex housekeeping removed in Step 10 — the custom text index
+        //    is maintained incrementally by the write path; use
+        //    `ragger reindex [table|all]` for manual rebuilds.)
     }
 
     // Per-user housekeeping locks: username → fd

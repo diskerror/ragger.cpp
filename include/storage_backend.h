@@ -462,11 +462,6 @@ public:
     /// update the in-memory cached value. Returns the new version.
     virtual uint8_t increment_embedding_version() = 0;
 
-    /// (Re)compute the phon (Double Metaphone "sounds-like") column for every
-    /// context-table row. only_missing=true does only phon-NULL rows (cheap
-    /// post-migration backfill); false recomputes all. Returns rows rewritten.
-    virtual int rebuild_phon(bool only_missing, bool progress) = 0;
-
     /// (Re)build the custom FTS index for a single text table.
     /// Tokenizes every record's text, extracts/inserts terms, populates the
     /// <table>_terms junction table, and updates unigram_count/bigram_count.
