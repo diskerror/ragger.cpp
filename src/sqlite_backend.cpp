@@ -434,8 +434,7 @@ struct SqliteBackend::Impl {
                 unigram_count  INTEGER NOT NULL DEFAULT 0,
                 bigram_count   INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER,
-                embedding      BLOB,
-                phon           TEXT
+                embedding      BLOB
             )
         )");
 
@@ -458,8 +457,7 @@ struct SqliteBackend::Impl {
                 unigram_count  INTEGER NOT NULL DEFAULT 0,
                 bigram_count   INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER,
-                embedding  BLOB,
-                phon       TEXT
+                embedding  BLOB
             )
         )");
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_level      ON summaries(level)");
@@ -483,8 +481,7 @@ struct SqliteBackend::Impl {
                 unigram_count  INTEGER NOT NULL DEFAULT 0,
                 bigram_count   INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER,
-                embedding        BLOB,
-                phon             TEXT
+                embedding        BLOB
             )
         )");
         exec("CREATE INDEX IF NOT EXISTS idx_turn_summaries_turn_id    ON turn_summaries(turn_id)");
@@ -519,8 +516,7 @@ struct SqliteBackend::Impl {
                 unigram_count  INTEGER NOT NULL DEFAULT 0,
                 bigram_count   INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER,
-                embedding   BLOB,
-                phon        TEXT
+                embedding   BLOB
             )
         )");
         exec("CREATE INDEX IF NOT EXISTS idx_decisions_status ON decisions(status)");
@@ -558,26 +554,9 @@ struct SqliteBackend::Impl {
                 unigram_count      INTEGER NOT NULL DEFAULT 0,
                 bigram_count       INTEGER NOT NULL DEFAULT 0,
                 embedding_version  INTEGER,
-                embedding          BLOB,
-                phon               TEXT
+                embedding          BLOB
             )
         )");
-
-        // In-place migration for pre-phon databases (dolphining sounds-like):
-        // add the `phon` column to each context table if an existing DB predates
-        // it. Placed after ALL four CREATE TABLEs so the ALTERs can't hit a
-        // not-yet-created table. Fresh DBs already have the column; existing
-        // rows get phon = NULL, backfilled at startup or via `ragger rebuild-phon`.
-        if (!column_exists("turns", "phon"))
-            exec("ALTER TABLE turns ADD COLUMN phon TEXT");
-        if (!column_exists("summaries", "phon"))
-            exec("ALTER TABLE summaries ADD COLUMN phon TEXT");
-        if (!column_exists("decisions", "phon"))
-            exec("ALTER TABLE decisions ADD COLUMN phon TEXT");
-        if (!column_exists("documents", "phon"))
-            exec("ALTER TABLE documents ADD COLUMN phon TEXT");
-        if (!column_exists("turn_summaries", "phon"))
-            exec("ALTER TABLE turn_summaries ADD COLUMN phon TEXT");
 
         // In-place migration for pre-0.15 databases: add embedding_version
         // to each embedded table if an existing DB predates it. Fresh DBs
@@ -1108,9 +1087,11 @@ struct SqliteBackend::Impl {
             // would append, diverging from a fresh install's layout). Populate
             // it from the old table, computing per-chunk tags (own set MINUS the
             // source intersection) in C++, pointing at the source, stamping
-            // modified_on = source epoch, and CLEARING embedding/phon (they get
+            // modified_on = source epoch, and CLEARING embedding (it gets
             // rebuilt with the title appended -- see store_document). The four
-            // extracted columns are simply not carried over.
+            // extracted columns are simply not carried over. `phon` is retired
+            // (v0.16) so it is never (re)created here, even for very old
+            // pre-normalize DBs going through this one-time rebuild.
             exec(R"(
                 CREATE TABLE documents_new (
                     document_id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1120,8 +1101,7 @@ struct SqliteBackend::Impl {
                     document_source_id INTEGER REFERENCES document_sources(document_source_id),
                     modified_on        INTEGER,
                     embedding_version  INTEGER,
-                    embedding          BLOB,
-                    phon               TEXT
+                    embedding          BLOB
                 )
             )");
             {
@@ -1155,8 +1135,8 @@ struct SqliteBackend::Impl {
                     Stmt ins(db,
                         "INSERT INTO documents_new "
                         "(document_id, text, tags, chunk_index, document_source_id, "
-                        " modified_on, embedding_version, embedding, phon) "
-                        "VALUES (?,?,?,?,?,?,NULL,NULL,NULL)");
+                        " modified_on, embedding_version, embedding) "
+                        "VALUES (?,?,?,?,?,?,NULL,NULL)");
                     ins.bind(1, r.id).bind(2, r.text).bind(3, r.tags);
                     if (r.chunk_index) ins.bind(4, static_cast<int>(*r.chunk_index));
                     else ins.bind_null(4);
@@ -1221,7 +1201,15 @@ struct SqliteBackend::Impl {
             }
 
             // Drop the `phon` column from all 5 tables (SQLite >= 3.35 required)
-            // Safe to check and skip if not supported
+            // Safe to check and skip if not supported. The *_view views (created
+            // by an earlier create_views() call, possibly from a pre-fix binary)
+            // may still SELECT the `phon` column -- SQLite refuses DROP COLUMN
+            // while a view references it. Drop them first; create_views() (called
+            // after migrations complete, CREATE VIEW IF NOT EXISTS) recreates the
+            // now-phon-free versions.
+            for (const auto* table : tables) {
+                exec(std::format("DROP VIEW IF EXISTS {}_view", table));
+            }
             for (const auto* table : tables) {
                 if (column_exists(table, "phon")) {
                     try {
@@ -1469,8 +1457,7 @@ struct SqliteBackend::Impl {
             SELECT turn_id, user_text, assistant_text, model_id, session_id,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
                    embedding_version,
-                   CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding,
-                   CASE WHEN phon      IS NULL THEN 0 ELSE 1 END AS has_phon
+                   CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM turns
         )");
         exec(R"(
@@ -1480,8 +1467,7 @@ struct SqliteBackend::Impl {
                 datetime(turn_datetime, 'unixepoch', 'localtime') AS turn_datetime,
                 datetime(summarized_on, 'unixepoch', 'localtime') AS summarized_on,
                 embedding_version,
-                CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding,
-                CASE WHEN phon      IS NULL THEN 0 ELSE 1 END AS has_phon
+                CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM turn_summaries
             WHERE text != ''
         )");
@@ -1491,8 +1477,7 @@ struct SqliteBackend::Impl {
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
                    datetime(updated_at, 'unixepoch', 'localtime') AS updated_at,
                    embedding_version,
-                   CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding,
-                   CASE WHEN phon      IS NULL THEN 0 ELSE 1 END AS has_phon
+                   CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM summaries
         )");
         exec(R"(
@@ -1500,8 +1485,7 @@ struct SqliteBackend::Impl {
             SELECT decision_id, text, status, tags,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
                    embedding_version,
-                   CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding,
-                   CASE WHEN phon      IS NULL THEN 0 ELSE 1 END AS has_phon
+                   CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM decisions
         )");
         exec(R"(
@@ -1515,8 +1499,7 @@ struct SqliteBackend::Impl {
             SELECT document_id, text, tags, chunk_index, document_source_id,
                    datetime(modified_on, 'unixepoch', 'localtime') AS modified_on,
                    embedding_version,
-                   CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding,
-                   CASE WHEN phon      IS NULL THEN 0 ELSE 1 END AS has_phon
+                   CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM documents
         )");
     }
@@ -1880,12 +1863,9 @@ struct SqliteBackend::Impl {
         int model_id = get_or_create_model(model_name);
 
         // FTS5 sync triggers index the row from text/tags — no manual step.
-        // phon = Double Metaphone of the body (dolphining sounds-like); the
-        // *_phon_fts triggers index it. Always computed (cheap), even when the
-        // embedding is deferred.
         Stmt s(db,
-            "INSERT INTO summaries (text, embedding_version, embedding, phon, level, tags, created_at, model_id, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)");
+            "INSERT INTO summaries (text, embedding_version, embedding, level, tags, created_at, model_id, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)");
 
         s.bind(1, text);
         if (defer_embedding) {
@@ -1895,10 +1875,9 @@ struct SqliteBackend::Impl {
             bind_embedding_version(s.raw(), 2, emb);
             bind_embedding(s.raw(), 3, emb);
         }
-        s.bind(4, phonize(text));
-        s.bind(5, level).bind(6, tags_str).bind(7, ts);
-        if (model_id) s.bind(8, model_id); else s.bind_null(8);
-        s.bind(9, ts);  // updated_at == created_at on insert
+        s.bind(4, level).bind(5, tags_str).bind(6, ts);
+        if (model_id) s.bind(7, model_id); else s.bind_null(7);
+        s.bind(8, ts);  // updated_at == created_at on insert
 
         if (!s.exec()) {
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
@@ -1981,8 +1960,8 @@ struct SqliteBackend::Impl {
         Stmt s(db,
             "INSERT INTO documents "
             "(text, tags, chunk_index, document_source_id, modified_on, "
-            " embedding_version, embedding, phon) "
-            "VALUES (?,?,?,?,?,?,?,?)");
+            " embedding_version, embedding) "
+            "VALUES (?,?,?,?,?,?,?)");
 
         s.bind(1, text);
         s.bind(2, chunk.tags);
@@ -1997,7 +1976,6 @@ struct SqliteBackend::Impl {
             bind_embedding_version(s.raw(), 6, emb);
             bind_embedding(s.raw(), 7, emb);
         }
-        s.bind(8, phonize(signal_text));
 
         if (!s.exec()) {
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
@@ -2120,18 +2098,17 @@ struct SqliteBackend::Impl {
                     // apart and strand the old (session_id, prev_ts) slot.
                     const int64_t new_ts = db_epoch();
                     Stmt up(db,
-                        "UPDATE turns SET assistant_text = ?, embedding_version = ?, embedding = ?, phon = ?, "
+                        "UPDATE turns SET assistant_text = ?, embedding_version = ?, embedding = ?, "
                         "model_id = COALESCE(?, model_id), "
                         "session_id = COALESCE(?, session_id), created_at = ? "
                         "WHERE turn_id = ?");
                     up.bind(1, a);
                     bind_embedding_version(up.raw(), 2, emb2);
                     bind_embedding(up.raw(), 3, emb2);
-                    up.bind(4, phonize(u + " " + a));
-                    if (model_id) up.bind(5, model_id); else up.bind_null(5);
-                    if (session_id) up.bind(6, session_id); else up.bind_null(6);
-                    up.bind(7, new_ts);
-                    up.bind(8, prev_id);
+                    if (model_id) up.bind(4, model_id); else up.bind_null(4);
+                    if (session_id) up.bind(5, session_id); else up.bind_null(5);
+                    up.bind(6, new_ts);
+                    up.bind(7, prev_id);
                     if (!up.exec())
                         if (!up.exec()) throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
                         text_index_->index_record("turns", prev_id, u + "\n" + a);
@@ -2148,8 +2125,8 @@ struct SqliteBackend::Impl {
         }
 
         Stmt s(db,
-            "INSERT INTO turns (model_id, session_id, user_text, assistant_text, embedding_version, embedding, phon, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?)");
+            "INSERT INTO turns (model_id, session_id, user_text, assistant_text, embedding_version, embedding, created_at) "
+            "VALUES (?,?,?,?,?,?,?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
         if (session_id) s.bind(2, session_id); else s.bind_null(2);
         s.bind(3, u);
@@ -2162,8 +2139,7 @@ struct SqliteBackend::Impl {
             s.bind_null(5);
             s.bind_null(6);
         }
-        s.bind(7, phonize(a.empty() ? u : (u + " " + a)));
-        s.bind(8, resolve_epoch(source_timestamp));
+        s.bind(7, resolve_epoch(source_timestamp));
 
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
@@ -2229,14 +2205,13 @@ struct SqliteBackend::Impl {
         auto emb = embedder->encode(turn_embed_text(u, a));
 
         Stmt s(db,
-            "UPDATE turns SET assistant_text = ?, embedding_version = ?, embedding = ?, phon = ?, "
+            "UPDATE turns SET assistant_text = ?, embedding_version = ?, embedding = ?, "
             "model_id = COALESCE(?, model_id) WHERE turn_id = ?");
         s.bind(1, a);
         bind_embedding_version(s.raw(), 2, emb);
         bind_embedding(s.raw(), 3, emb);
-        s.bind(4, phonize(u + " " + a));
-        if (model_id) s.bind(5, model_id); else s.bind_null(5);
-        s.bind(6, turn_id);
+        if (model_id) s.bind(4, model_id); else s.bind_null(4);
+        s.bind(5, turn_id);
         if (!s.exec()) return false;
         text_index_->index_record("turns", turn_id, u + "\n" + a);
         return true;
@@ -2260,19 +2235,18 @@ struct SqliteBackend::Impl {
         auto emb = embedder->encode(t);
 
         Stmt s(db,
-            "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, phon, level, tags, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)");
+            "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, level, tags, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
         if (session_id) s.bind(2, session_id); else s.bind_null(2);
         s.bind(3, t);
         bind_embedding_version(s.raw(), 4, emb);
         bind_embedding(s.raw(), 5, emb);
-        s.bind(6, phonize(t));
-        s.bind(7, level).bind(8, tags);
+        s.bind(6, level).bind(7, tags);
         {
             const int64_t ts = resolve_epoch(source_timestamp);
-            s.bind(9, ts);
-            s.bind(10, ts);  // updated_at == created_at on insert
+            s.bind(8, ts);
+            s.bind(9, ts);  // updated_at == created_at on insert
         }
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
@@ -2293,8 +2267,8 @@ struct SqliteBackend::Impl {
         std::string t = normalize_path(strip_decision_number_prefix(text));
 
         Stmt s(db,
-            "INSERT INTO decisions (text, embedding_version, embedding, phon, status, tags, created_at) "
-            "VALUES (?,?,?,?,?,?,?)");
+            "INSERT INTO decisions (text, embedding_version, embedding, status, tags, created_at) "
+            "VALUES (?,?,?,?,?,?)");
         s.bind(1, t);
         if (defer_embedding) {
             s.bind_null(2);
@@ -2304,10 +2278,9 @@ struct SqliteBackend::Impl {
             bind_embedding_version(s.raw(), 2, emb);
             bind_embedding(s.raw(), 3, emb);
         }
-        s.bind(4, phonize(t));
-        s.bind(5, status.empty() ? "current" : status);
-        s.bind(6, tags);
-        s.bind(7, resolve_epoch(source_timestamp));
+        s.bind(4, status.empty() ? "current" : status);
+        s.bind(5, tags);
+        s.bind(6, resolve_epoch(source_timestamp));
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_dec_cache();
@@ -2429,18 +2402,17 @@ struct SqliteBackend::Impl {
         // failures via the bool return rather than throwing.
         Stmt s(db,
             "INSERT INTO turn_summaries "
-            "(turn_id, text, embedding_version, embedding, phon, session_id, turn_model_id, "
+            "(turn_id, text, embedding_version, embedding, session_id, turn_model_id, "
             " summary_model_id, turn_datetime, summarized_on) "
-            "VALUES (?,?,?,?,?,?,?,?,?,unixepoch())");
+            "VALUES (?,?,?,?,?,?,?,?,unixepoch())");
         s.bind(1, turn_id);
         s.bind(2, t);
         bind_embedding_version(s.raw(), 3, emb);
         bind_embedding(s.raw(), 4, emb);
-        s.bind(5, phonize(t));
-        if (session_null) s.bind_null(6); else s.bind(6, session_id);
-        if (turn_model_null) s.bind_null(7); else s.bind(7, turn_model_id);
-        if (model_id) s.bind(8, model_id); else s.bind_null(8);
-        s.bind(9, turn_dt);
+        if (session_null) s.bind_null(5); else s.bind(5, session_id);
+        if (turn_model_null) s.bind_null(6); else s.bind(6, turn_model_id);
+        if (model_id) s.bind(7, model_id); else s.bind_null(7);
+        s.bind(8, turn_dt);
         bool ok = s.exec();
         if (ok) {
             invalidate_turn_cache();
@@ -2650,19 +2622,18 @@ struct SqliteBackend::Impl {
         auto emb = embedder->encode(t);
 
         Stmt s(db,
-            "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, phon, "
+            "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, "
             "level, tags, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)");
+            "VALUES (?,?,?,?,?,?,?,?,?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
         if (session_id) s.bind(2, session_id); else s.bind_null(2);
         s.bind(3, t);
         bind_embedding_version(s.raw(), 4, emb);
         bind_embedding(s.raw(), 5, emb);
-        s.bind(6, phonize(t));
-        s.bind(7, std::string("episode"))
-         .bind(8, std::string(""));
-        s.bind(9, resolve_epoch(first_ts));
-        s.bind(10, resolve_epoch(last_ts.empty() ? first_ts : last_ts));
+        s.bind(6, std::string("episode"))
+         .bind(7, std::string(""));
+        s.bind(8, resolve_epoch(first_ts));
+        s.bind(9, resolve_epoch(last_ts.empty() ? first_ts : last_ts));
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_cache();
@@ -2946,19 +2917,18 @@ struct SqliteBackend::Impl {
         auto emb = embedder->encode(t);
 
         Stmt s(db,
-            "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, phon, "
+            "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, "
             "level, tags, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)");
+            "VALUES (?,?,?,?,?,?,?,?,?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
         if (session_id) s.bind(2, session_id); else s.bind_null(2);
         s.bind(3, t);
         bind_embedding_version(s.raw(), 4, emb);
         bind_embedding(s.raw(), 5, emb);
-        s.bind(6, phonize(t));
-        s.bind(7, std::string("session"))
-         .bind(8, std::string(""));
-        s.bind(9, first_ts);
-        s.bind(10, last_ts);
+        s.bind(6, std::string("session"))
+         .bind(7, std::string(""));
+        s.bind(8, first_ts);
+        s.bind(9, last_ts);
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_cache();
@@ -2976,19 +2946,18 @@ struct SqliteBackend::Impl {
         auto emb = embedder->encode(t);
 
         Stmt s(db,
-            "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, phon, "
+            "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, "
             "level, tags, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)");
+            "VALUES (?,?,?,?,?,?,?,?,?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
         s.bind_null(2);
         s.bind(3, t);
         bind_embedding_version(s.raw(), 4, emb);
         bind_embedding(s.raw(), 5, emb);
-        s.bind(6, phonize(t));
-        s.bind(7, std::string("project"))
-         .bind(8, std::string(""));
-        s.bind(9, first_ts);
-        s.bind(10, last_ts);
+        s.bind(6, std::string("project"))
+         .bind(7, std::string(""));
+        s.bind(8, first_ts);
+        s.bind(9, last_ts);
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_cache();
@@ -3227,14 +3196,13 @@ struct SqliteBackend::Impl {
         auto emb = embedder->encode(t);
 
         Stmt s(db,
-            "UPDATE summaries SET text = ?, embedding_version = ?, embedding = ?, phon = ?, "
+            "UPDATE summaries SET text = ?, embedding_version = ?, embedding = ?, "
             "model_id = COALESCE(?, model_id) WHERE summary_id = ?");
         s.bind(1, t);
         bind_embedding_version(s.raw(), 2, emb);
         bind_embedding(s.raw(), 3, emb);
-        s.bind(4, phonize(t));
-        if (model_id) s.bind(5, model_id); else s.bind_null(5);
-        s.bind(6, summary_id);
+        if (model_id) s.bind(4, model_id); else s.bind_null(4);
+        s.bind(5, summary_id);
         bool ok = s.exec() && sqlite3_changes(db) > 0;
         if (ok) {
             invalidate_cache();
@@ -3273,7 +3241,7 @@ struct SqliteBackend::Impl {
 
         // Custom index: re-tokenize the record on the new text (v0.16).
         Stmt stmt(db,
-            "UPDATE summaries SET text = ?, embedding_version = ?, embedding = ?, phon = ?, tags = ? "
+            "UPDATE summaries SET text = ?, embedding_version = ?, embedding = ?, tags = ? "
             "WHERE summary_id = ?");
 
         stmt.bind(1, text);
@@ -3284,9 +3252,8 @@ struct SqliteBackend::Impl {
             bind_embedding_version(stmt.raw(), 2, emb);
             bind_embedding(stmt.raw(), 3, emb);
         }
-        stmt.bind(4, phonize(text));
-        stmt.bind(5, tags_str);
-        stmt.bind(6, memory_id);
+        stmt.bind(4, tags_str);
+        stmt.bind(5, memory_id);
 
         if (!stmt.exec()) return false;
 
