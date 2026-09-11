@@ -95,6 +95,13 @@ struct Config {
     // Reserved: not yet wired to search behavior.
     bool  inject_data          = false;
 
+    // TF-IDF text-index blend weights (v0.16 custom terms index). Pushed into
+    // TextIndex::set_weights() once per search call. See TextIndexWeights.
+    float fts_w_unigram        = 0.3f;
+    float fts_w_bigram         = 0.7f;
+    float fts_w_metaphone      = 1.0f;
+    bool  fts_literal_enabled  = true;
+
     // --- Embed (subprocess) ---
     int embed_timeout_ms  = 10000;
     int embed_retries     = 1;

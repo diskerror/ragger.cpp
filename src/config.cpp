@@ -468,6 +468,10 @@ int reload_config() {
     RELOAD(vector_weight);
     RELOAD(phon_weight);
     RELOAD(inject_data);
+    RELOAD(fts_w_unigram);
+    RELOAD(fts_w_bigram);
+    RELOAD(fts_w_metaphone);
+    RELOAD(fts_literal_enabled);
 
     // Inference
     RELOAD(inference_model);

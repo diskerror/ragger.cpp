@@ -694,7 +694,8 @@ struct SqliteBackend::Impl {
 
         // FTS5 — external-content virtual tables + sync triggers replace
         // the old hand-rolled bm25_* sidecars (issue #49).
-        create_fts_schema();
+        // (v0.16: FTS5 schema removed; custom terms index created below via
+        // create_terms_schema().)
 
         // Human-readable views (datetime()-rendered timestamps,
         // has_embedding/has_phon booleans) mirroring scripts/schema_db0.12.sql
@@ -1250,196 +1251,6 @@ struct SqliteBackend::Impl {
                 Stmt(db, "ROLLBACK").exec();
             } catch (...) {}
             throw;
-        }
-    }
-
-    /// FTS5 external-content virtual tables + sync triggers for the four
-    /// searchable content tables (turns, summaries, decisions, documents).
-    /// Idempotent — safe to call on every open.
-    void create_fts_schema() {
-        exec(R"(CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts USING fts5(
-            user_text, assistant_text,
-            content='turns', content_rowid='turn_id'))");
-        exec(R"(CREATE TRIGGER IF NOT EXISTS turns_ai AFTER INSERT ON turns BEGIN
-            INSERT INTO turns_fts(rowid, user_text, assistant_text)
-            VALUES (new.turn_id, new.user_text, new.assistant_text);
-        END)");
-        exec(R"(CREATE TRIGGER IF NOT EXISTS turns_ad AFTER DELETE ON turns BEGIN
-            INSERT INTO turns_fts(turns_fts, rowid, user_text, assistant_text)
-            VALUES ('delete', old.turn_id, old.user_text, old.assistant_text);
-        END)");
-        exec(R"(CREATE TRIGGER IF NOT EXISTS turns_au AFTER UPDATE ON turns BEGIN
-            INSERT INTO turns_fts(turns_fts, rowid, user_text, assistant_text)
-            VALUES ('delete', old.turn_id, old.user_text, old.assistant_text);
-            INSERT INTO turns_fts(rowid, user_text, assistant_text)
-            VALUES (new.turn_id, new.user_text, new.assistant_text);
-        END)");
-
-        exec(R"(CREATE VIRTUAL TABLE IF NOT EXISTS summaries_fts USING fts5(
-            text, tags,
-            content='summaries', content_rowid='summary_id'))");
-        exec(R"(CREATE TRIGGER IF NOT EXISTS summaries_ai AFTER INSERT ON summaries BEGIN
-            INSERT INTO summaries_fts(rowid, text, tags)
-            VALUES (new.summary_id, new.text, new.tags);
-        END)");
-        exec(R"(CREATE TRIGGER IF NOT EXISTS summaries_ad AFTER DELETE ON summaries BEGIN
-            INSERT INTO summaries_fts(summaries_fts, rowid, text, tags)
-            VALUES ('delete', old.summary_id, old.text, old.tags);
-        END)");
-        exec(R"(CREATE TRIGGER IF NOT EXISTS summaries_au AFTER UPDATE ON summaries BEGIN
-            INSERT INTO summaries_fts(summaries_fts, rowid, text, tags)
-            VALUES ('delete', old.summary_id, old.text, old.tags);
-            INSERT INTO summaries_fts(rowid, text, tags)
-            VALUES (new.summary_id, new.text, new.tags);
-        END)");
-
-        exec(R"(CREATE VIRTUAL TABLE IF NOT EXISTS turn_summaries_fts USING fts5(
-            text,
-            content='turn_summaries', content_rowid='turn_summary_id'))");
-        exec(R"(CREATE TRIGGER IF NOT EXISTS turn_summaries_ai AFTER INSERT ON turn_summaries BEGIN
-            INSERT INTO turn_summaries_fts(rowid, text)
-            VALUES (new.turn_summary_id, new.text);
-        END)");
-        exec(R"(CREATE TRIGGER IF NOT EXISTS turn_summaries_ad AFTER DELETE ON turn_summaries BEGIN
-            INSERT INTO turn_summaries_fts(turn_summaries_fts, rowid, text)
-            VALUES ('delete', old.turn_summary_id, old.text);
-        END)");
-        exec(R"(CREATE TRIGGER IF NOT EXISTS turn_summaries_au AFTER UPDATE ON turn_summaries BEGIN
-            INSERT INTO turn_summaries_fts(turn_summaries_fts, rowid, text)
-            VALUES ('delete', old.turn_summary_id, old.text);
-            INSERT INTO turn_summaries_fts(rowid, text)
-            VALUES (new.turn_summary_id, new.text);
-        END)");
-
-        exec(R"(CREATE VIRTUAL TABLE IF NOT EXISTS decisions_fts USING fts5(
-            text, tags,
-            content='decisions', content_rowid='decision_id'))");
-        exec(R"(CREATE TRIGGER IF NOT EXISTS decisions_ai AFTER INSERT ON decisions BEGIN
-            INSERT INTO decisions_fts(rowid, text, tags)
-            VALUES (new.decision_id, new.text, new.tags);
-        END)");
-        exec(R"(CREATE TRIGGER IF NOT EXISTS decisions_ad AFTER DELETE ON decisions BEGIN
-            INSERT INTO decisions_fts(decisions_fts, rowid, text, tags)
-            VALUES ('delete', old.decision_id, old.text, old.tags);
-        END)");
-        exec(R"(CREATE TRIGGER IF NOT EXISTS decisions_au AFTER UPDATE ON decisions BEGIN
-            INSERT INTO decisions_fts(decisions_fts, rowid, text, tags)
-            VALUES ('delete', old.decision_id, old.text, old.tags);
-            INSERT INTO decisions_fts(rowid, text, tags)
-            VALUES (new.decision_id, new.text, new.tags);
-        END)");
-
-        exec(R"(CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-            text, tags,
-            content='documents', content_rowid='document_id'))");
-        exec(R"(CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
-            INSERT INTO documents_fts(rowid, text, tags)
-            VALUES (new.document_id, new.text, new.tags);
-        END)");
-        exec(R"(CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
-            INSERT INTO documents_fts(documents_fts, rowid, text, tags)
-            VALUES ('delete', old.document_id, old.text, old.tags);
-        END)");
-        exec(R"(CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
-            INSERT INTO documents_fts(documents_fts, rowid, text, tags)
-            VALUES ('delete', old.document_id, old.text, old.tags);
-            INSERT INTO documents_fts(rowid, text, tags)
-            VALUES (new.document_id, new.text, new.tags);
-        END)");
-
-        // Resync any text FTS whose shadow index is out of step with its base
-        // (mirrors the phon-FTS probe below). Normally a no-op, but when an
-        // external-content FTS is recreated empty over a base that still holds
-        // rows -- e.g. the documents-normalization migration drops and rebuilds
-        // documents_fts -- the per-row delete-triggers would try to remove
-        // postings that were never inserted and fail "database disk image is
-        // malformed" on the next UPDATE. The <fts>_docsize shadow holds one row
-        // per indexed document, so docsize != base row count is a reliable
-        // desync probe; 'rebuild' is a no-op-safe resync.
-        {
-            struct T { const char* fts; const char* base; };
-            const T text_fts[] = {
-                {"turns_fts",     "turns"},
-                {"summaries_fts", "summaries"},
-                {"decisions_fts", "decisions"},
-                {"documents_fts", "documents"},
-            };
-            for (const auto& t : text_fts) {
-                long long indexed_rows = 0, base_rows = 0;
-                { Stmt is(db, std::format("SELECT count(*) FROM {}_docsize", t.fts));
-                  if (is.step()) indexed_rows = is.column_int(0); }
-                { Stmt bs(db, std::format("SELECT count(*) FROM {}", t.base));
-                  if (bs.step()) base_rows = bs.column_int(0); }
-                if (indexed_rows != base_rows)
-                    exec(std::format("INSERT INTO {0}({0}) VALUES('rebuild')", t.fts));
-            }
-        }
-
-        create_phon_fts_schema();
-    }
-
-    /// Phonetic ("dolphining" sounds-like) FTS5 tables: one external-content
-    /// index over each context table's `phon` column, kept in sync by its own
-    /// triggers. Separate from the text FTS so phon produces an INDEPENDENT
-    /// bm25 score for the three-way search blend (vector + text + phon). Codes
-    /// are space-joined Double Metaphone keys (see phonize()); the default
-    /// unicode61 tokenizer splits them on spaces exactly like ordinary tokens.
-    /// Idempotent — safe on every open.
-    void create_phon_fts_schema() {
-        struct P { const char* fts; const char* base; const char* rowid; };
-        const P tables[] = {
-            {"turns_phon_fts",     "turns",     "turn_id"},
-            {"summaries_phon_fts", "summaries", "summary_id"},
-            {"turn_summaries_phon_fts", "turn_summaries", "turn_summary_id"},
-            {"decisions_phon_fts", "decisions", "decision_id"},
-            {"documents_phon_fts", "documents", "document_id"},
-        };
-        for (const auto& t : tables) {
-            exec(std::format(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS {} USING fts5("
-                "phon, content='{}', content_rowid='{}')",
-                t.fts, t.base, t.rowid));
-            exec(std::format(
-                "CREATE TRIGGER IF NOT EXISTS {0}_pai AFTER INSERT ON {1} BEGIN "
-                "INSERT INTO {2}(rowid, phon) VALUES (new.{3}, new.phon); END",
-                t.base, t.base, t.fts, t.rowid));
-            exec(std::format(
-                "CREATE TRIGGER IF NOT EXISTS {0}_pad AFTER DELETE ON {1} BEGIN "
-                "INSERT INTO {2}({2}, rowid, phon) "
-                "VALUES ('delete', old.{3}, old.phon); END",
-                t.base, t.base, t.fts, t.rowid));
-            exec(std::format(
-                "CREATE TRIGGER IF NOT EXISTS {0}_pau AFTER UPDATE ON {1} BEGIN "
-                "INSERT INTO {2}({2}, rowid, phon) "
-                "VALUES ('delete', old.{3}, old.phon); "
-                "INSERT INTO {2}(rowid, phon) VALUES (new.{3}, new.phon); END",
-                t.base, t.base, t.fts, t.rowid));
-
-            // External-content FTS built over a table that ALREADY has rows
-            // (the phon column was ADD COLUMN-migrated onto an existing DB)
-            // starts with an EMPTY index while the base holds content. The
-            // delete-triggers then try to remove postings that were never
-            // inserted → "database disk image is malformed" on the next UPDATE.
-            // 'rebuild' syncs the index to current base.phon content so the
-            // per-row delete/insert triggers stay valid.
-            //
-            // Detecting the desync: count(*) on an external-content FTS reads
-            // THROUGH to the base table, so it always "matches" even when the
-            // index is empty. The `<fts>_docsize` shadow table, however, holds
-            // exactly one row per *indexed* document — so comparing its count
-            // to the base row count is a reliable desync probe. If they differ
-            // (e.g. index empty after ADD COLUMN, or corrupted by a prior
-            // partial run), rebuild to resync. 'rebuild' is a no-op-safe resync.
-            long long indexed_rows = 0, base_rows = 0;
-            {
-                Stmt is(db, std::format("SELECT count(*) FROM {}_docsize", t.fts));
-                if (is.step()) indexed_rows = is.column_int(0);
-                Stmt bs(db, std::format("SELECT count(*) FROM {}", t.base));
-                if (bs.step()) base_rows = bs.column_int(0);
-            }
-            if (indexed_rows != base_rows) {
-                exec(std::format("INSERT INTO {0}({0}) VALUES('rebuild')", t.fts));
-            }
         }
     }
 
@@ -2025,148 +1836,6 @@ struct SqliteBackend::Impl {
         }
 
         turn_cache_valid = true;
-    }
-
-    // ---- FTS5 keyword scoring -----------------------------------------
-    // Build a safe MATCH expression from arbitrary user text: extract
-    // alphanumeric tokens and OR together quoted terms. Returns "" when the
-    // query has no usable tokens (caller then skips the keyword pass).
-    static std::string fts_match_expr(const std::string& query) {
-        std::string expr, tok;
-        auto flush = [&]() {
-            if (tok.empty()) return;
-            if (!expr.empty()) expr += " OR ";
-            expr += "\"" + tok + "\"";
-            tok.clear();
-        };
-        for (char c : query) {
-            if (std::isalnum(static_cast<unsigned char>(c))) tok += c;
-            else flush();
-        }
-        flush();
-        return expr;
-    }
-
-    // bm25(summaries_fts) over a MATCH expression → summary_id → score, where
-    // higher = more relevant (FTS5 bm25() is lower-is-better, so the sign is
-    // flipped). Non-matching rows are absent (treated as 0 by the caller).
-    std::unordered_map<int, float> keyword_scores(const std::string& match_expr) {
-        std::unordered_map<int, float> out;
-        if (match_expr.empty()) return out;
-        Stmt s(db,
-                "SELECT rowid, bm25(summaries_fts) FROM summaries_fts "
-                "WHERE summaries_fts MATCH ?");
-        s.bind(1, match_expr);
-        while (s.step()) {
-            int id   = s.column_int(0);
-            double val = s.column_double(1);
-            out[id]  = static_cast<float>(-val);
-        }
-        return out;
-    }
-
-    // bm25(documents_fts) over a MATCH expression → document_id → score.
-    // Analogous to keyword_scores() but against the documents FTS5 index.
-    std::unordered_map<int, float> doc_keyword_scores(const std::string& match_expr) {
-        std::unordered_map<int, float> out;
-        if (match_expr.empty()) return out;
-        Stmt s(db,
-                "SELECT rowid, bm25(documents_fts) FROM documents_fts "
-                "WHERE documents_fts MATCH ?");
-        s.bind(1, match_expr);
-        while (s.step()) {
-            int id   = s.column_int(0);
-            double val = s.column_double(1);
-            out[id]  = static_cast<float>(-val);
-        }
-        return out;
-    }
-
-    // bm25(decisions_fts) over a MATCH expression → decision_id → score.
-    // Analogous to keyword_scores() but against the decisions FTS5 index.
-    std::unordered_map<int, float> dec_keyword_scores(const std::string& match_expr) {
-        std::unordered_map<int, float> out;
-        if (match_expr.empty()) return out;
-        Stmt s(db,
-                "SELECT rowid, bm25(decisions_fts) FROM decisions_fts "
-                "WHERE decisions_fts MATCH ?");
-        s.bind(1, match_expr);
-        while (s.step()) {
-            int id   = s.column_int(0);
-            double val = s.column_double(1);
-            out[id]  = static_cast<float>(-val);
-        }
-        return out;
-    }
-
-    // bm25(turn_summaries_fts) over a MATCH expression → turn_summary_id →
-    // score. Analogous to keyword_scores() but against the turn_summaries
-    // FTS5 index.
-    std::unordered_map<int, float> turn_keyword_scores(const std::string& match_expr) {
-        std::unordered_map<int, float> out;
-        if (match_expr.empty()) return out;
-        Stmt s(db,
-                "SELECT rowid, bm25(turn_summaries_fts) FROM turn_summaries_fts "
-                "WHERE turn_summaries_fts MATCH ?");
-        s.bind(1, match_expr);
-        while (s.step()) {
-            int id   = s.column_int(0);
-            double val = s.column_double(1);
-            out[id]  = static_cast<float>(-val);
-        }
-        return out;
-    }
-
-    // ---- phonetic ("dolphining" sounds-like) scoring ------------------
-    // bm25 over a *_phon_fts index, keyed by the base rowid. `phon_expr` is an
-    // FTS5 MATCH expression built from the *phonized* query (Double Metaphone
-    // codes OR'd together) — see phon_match_expr(). Non-matching rows are absent
-    // (0 to the caller). Higher = better (bm25 sign flipped), mirroring
-    // keyword_scores(). One helper per corpus so the FTS table name is fixed.
-    std::unordered_map<int, float> phon_scores_for(const char* fts_table,
-                                                   const std::string& phon_expr) {
-        std::unordered_map<int, float> out;
-        if (phon_expr.empty()) return out;
-        Stmt s(db, std::format(
-            "SELECT rowid, bm25({0}) FROM {0} WHERE {0} MATCH ?", fts_table));
-        s.bind(1, phon_expr);
-        while (s.step()) {
-            int id   = s.column_int(0);
-            double val = s.column_double(1);
-            out[id]  = static_cast<float>(-val);
-        }
-        return out;
-    }
-    std::unordered_map<int, float> sum_phon_scores(const std::string& e) {
-        return phon_scores_for("summaries_phon_fts", e);
-    }
-    std::unordered_map<int, float> doc_phon_scores(const std::string& e) {
-        return phon_scores_for("documents_phon_fts", e);
-    }
-    std::unordered_map<int, float> dec_phon_scores(const std::string& e) {
-        return phon_scores_for("decisions_phon_fts", e);
-    }
-    std::unordered_map<int, float> turn_phon_scores(const std::string& e) {
-        return phon_scores_for("turn_summaries_phon_fts", e);
-    }
-
-    // Build a phon MATCH expression: phonize the query, then OR the Double
-    // Metaphone codes as quoted terms (same shape as fts_match_expr). Empty
-    // when the query yields no codes (caller skips the phon pass).
-    static std::string phon_match_expr(const std::string& query) {
-        std::string phon = phonize(query);   // space-joined DM codes
-        std::string expr, tok;
-        auto flush = [&]() {
-            if (tok.empty()) return;
-            if (!expr.empty()) expr += " OR ";
-            expr += "\"" + tok + "\"";
-            tok.clear();
-        };
-        for (char c : phon) {
-            if (c == ' ') flush(); else tok += c;
-        }
-        flush();
-        return expr;
     }
 
     // ---- public API ---------------------------------------------------
@@ -3627,17 +3296,19 @@ struct SqliteBackend::Impl {
     }
 
     // Hybrid search over summaries: vector cosine (cached embeddings) blended
-    // with FTS5 keyword relevance (bm25(summaries_fts)). Both are min-max
-    // normalized and combined with vector_weight/bm25_weight. The result
-    // score reported is the raw cosine; ranking uses the blended score.
+    // with the custom TF-IDF text index (literal + metaphone, v0.16). Both are
+    // min-max normalized and combined with vector_weight/bm25_weight (bm25_weight
+    // is now the single text-index blend weight; the old separate phon_weight
+    // signal is folded into score_query() itself via fts_w_metaphone).
     //
     // NOTE: the lean v2 summaries table has no collection column, so the
     // `collections` filter is currently a no-op (kept for API/source compat).
     // Documents (L5) and decisions (L6) ARE merged into search: parallel passes
-    // (ensure_doc_cache / ensure_dec_cache + their FTS scorers) are scored
-    // identically and merged with the summaries results into the single ranked
-    // top-k returned here. Each SearchResult's metadata["source"] is "summary",
-    // "document", or "decision" so callers can tell the corpora apart.
+    // (ensure_doc_cache / ensure_dec_cache + a text_index_->score_query() pass)
+    // are scored identically and merged with the summaries results into the
+    // single ranked top-k returned here. Each SearchResult's metadata["source"]
+    // is "summary", "document", or "decision" so callers can tell the corpora
+    // apart.
     SearchResponse search(const std::string& query, int limit,
                           float min_score,
                           std::vector<std::string> /*collections*/) {
@@ -3653,6 +3324,11 @@ struct SqliteBackend::Impl {
         int n_dec = static_cast<int>(dec_ids.size());
         int n_turn = static_cast<int>(turn_ids.size());
         if (n_sum == 0 && n_doc == 0 && n_dec == 0 && n_turn == 0) return {{}, {{"corpus_size", 0}}};
+
+        // Push the current tunable weights into the engine once per search
+        // call (config-agnostic engine; only this backend reads config()).
+        text_index_->set_weights({config().fts_w_unigram, config().fts_w_bigram,
+                                   config().fts_w_metaphone, config().fts_literal_enabled});
 
         // ---- query embedding ------------------------------------------
         auto t_embed_start = clock::now();
@@ -3672,18 +3348,18 @@ struct SqliteBackend::Impl {
         std::vector<Candidate> candidates;
         candidates.reserve(static_cast<size_t>(n_sum + n_doc + n_dec + n_turn));
 
-        // Score one corpus: vector cosine blended with FTS5 bm25 (keyword) and
-        // the phonetic "sounds-like" signal. Each signal is min-max normalized
-        // to [0,1] then weighted-summed. Shared by the summaries/documents/
-        // decisions passes so the blend logic lives in exactly one place.
+        // Score one corpus: vector cosine blended with the custom text-index
+        // TF-IDF signal (literal + metaphone folded together by score_query()).
+        // Each signal is min-max normalized to [0,1] then weighted-summed.
+        // Shared by the summaries/documents/decisions/turns passes so the
+        // blend logic lives in exactly one place.
         auto score_corpus =
             [&](const std::vector<int>& ids,
                 const std::vector<std::string>& texts,
                 const Eigen::MatrixXf& cache_emb,
                 const std::vector<json>& meta,
                 const std::vector<std::string>& ts,
-                const std::unordered_map<int, float>& kw,
-                const std::unordered_map<int, float>& ph) {
+                const std::unordered_map<int, float>& kw) {
             int n = static_cast<int>(ids.size());
             if (n == 0) return;
 
@@ -3705,28 +3381,20 @@ struct SqliteBackend::Impl {
             };
 
             bool use_kw   = config().bm25_enabled && !kw.empty();
-            bool use_phon = config().phon_weight > 0.0f && !ph.empty();
 
-            // Normalized [0,1] signal vectors. vec is always computed; kw/ph
-            // only when their signal is active. When neither keyword nor phon
-            // contributes, ranking falls back to raw cosine (combined) so the
+            // Normalized [0,1] signal vectors. vec is always computed; kw
+            // only when the text-index signal is active. When it doesn't
+            // contribute, ranking falls back to raw cosine (combined) so the
             // vec-only path behaves exactly as before.
             Eigen::VectorXf vec_norm = similarities;
-            Eigen::VectorXf kw_norm, ph_norm;
+            Eigen::VectorXf kw_norm;
             Eigen::VectorXf combined = similarities;
-            if (use_kw || use_phon) {
+            if (use_kw) {
                 norm_minmax(vec_norm);
                 combined = config().vector_weight * vec_norm;
-                if (use_kw) {
-                    kw_norm = gather(kw);
-                    norm_minmax(kw_norm);
-                    combined += config().bm25_weight * kw_norm;
-                }
-                if (use_phon) {
-                    ph_norm = gather(ph);
-                    norm_minmax(ph_norm);
-                    combined += config().phon_weight * ph_norm;
-                }
+                kw_norm = gather(kw);
+                norm_minmax(kw_norm);
+                combined += config().bm25_weight * kw_norm;
             }
 
             for (int i = 0; i < n; ++i) {
@@ -3735,35 +3403,39 @@ struct SqliteBackend::Impl {
                 // signal so the analysis can tell "0 contribution" apart from
                 // "not part of this search". vec_score is the normalized cosine
                 // that actually fed the blend (== raw cosine on the vec-only
-                // path, since no min-max is applied there).
+                // path, since no min-max is applied there). phon_score is no
+                // longer an independent signal (folded into bm25_score by
+                // score_query()); kept at -1 for API/stats-schema compat.
                 sr.vec_score  = vec_norm(i);
                 sr.bm25_score = use_kw   ? kw_norm(i) : -1.0f;
-                sr.phon_score = use_phon ? ph_norm(i) : -1.0f;
+                sr.phon_score = -1.0f;
                 sr.blended    = combined(i);
                 candidates.push_back({combined(i), std::move(sr)});
             }
         };
 
-        std::string match_expr = fts_match_expr(query);
-        std::string phon_expr  = config().phon_weight > 0.0f
-                               ? phon_match_expr(query) : std::string{};
+        // Convert a text_index_ score vector into the id->score map the
+        // blend lambda expects.
+        auto to_map = [](const std::vector<TextScore>& v) {
+            std::unordered_map<int, float> m;
+            m.reserve(v.size());
+            for (const auto& s : v) m[s.id] = s.score;
+            return m;
+        };
         auto no_scores = std::unordered_map<int, float>{};
+        bool bm25_on = config().bm25_enabled;
         score_corpus(cached_ids, cached_texts, cached_embeddings,
                      cached_metadata, cached_timestamps,
-                     config().bm25_enabled ? keyword_scores(match_expr) : no_scores,
-                     phon_expr.empty() ? no_scores : sum_phon_scores(phon_expr));
+                     bm25_on ? to_map(text_index_->score_query("summaries", query)) : no_scores);
         score_corpus(doc_ids, doc_texts, doc_embeddings,
                      doc_metadata, doc_timestamps,
-                     config().bm25_enabled ? doc_keyword_scores(match_expr) : no_scores,
-                     phon_expr.empty() ? no_scores : doc_phon_scores(phon_expr));
+                     bm25_on ? to_map(text_index_->score_query("documents", query)) : no_scores);
         score_corpus(dec_ids, dec_texts, dec_embeddings,
                      dec_metadata, dec_timestamps,
-                     config().bm25_enabled ? dec_keyword_scores(match_expr) : no_scores,
-                     phon_expr.empty() ? no_scores : dec_phon_scores(phon_expr));
+                     bm25_on ? to_map(text_index_->score_query("decisions", query)) : no_scores);
         score_corpus(turn_ids, turn_texts, turn_embeddings,
                      turn_metadata, turn_timestamps,
-                     config().bm25_enabled ? turn_keyword_scores(match_expr) : no_scores,
-                     phon_expr.empty() ? no_scores : turn_phon_scores(phon_expr));
+                     bm25_on ? to_map(text_index_->score_query("turn_summaries", query)) : no_scores);
         auto t_search_end = clock::now();
 
         // ---- merged top-k selection -----------------------------------
@@ -3810,11 +3482,8 @@ struct SqliteBackend::Impl {
         using clock = std::chrono::high_resolution_clock;
         auto t_start = clock::now();
 
-        std::string match_expr = fts_match_expr(query);
-        std::string phon_expr  = phon_match_expr(query);
-
-        if (match_expr.empty() && phon_expr.empty())
-            return {{}, {{"corpus_size", 0}, {"text_only", true}}};
+        text_index_->set_weights({config().fts_w_unigram, config().fts_w_bigram,
+                                   config().fts_w_metaphone, config().fts_literal_enabled});
 
         struct Candidate {
             float        score;
@@ -3822,87 +3491,81 @@ struct SqliteBackend::Impl {
         };
         std::vector<Candidate> candidates;
 
-        // Score one FTS5 corpus: gather BM25 hits, optionally blend phon.
-        // We need to join back to the source table for text + metadata.
-        auto score_fts_corpus = [&](
+        // Score one corpus via the custom TF-IDF text index, then join back
+        // to the source table for text + metadata.
+        auto score_text_corpus = [&](
                 const char* table, const char* id_col, const char* text_col,
-                const char* fts_table, const char* phon_fts_table,
                 const char* source_label,
                 const char* ts_expr) {
-            // BM25 hits
-            std::unordered_map<int, float> kw;
-            if (!match_expr.empty()) {
-                Stmt s(db, std::format(
-                    "SELECT rowid, bm25({0}) FROM {0} WHERE {0} MATCH ?", fts_table));
-                s.bind(1, match_expr);
-                while (s.step()) {
-                    kw[s.column_int(0)] = static_cast<float>(-s.column_double(1));
-                }
-            }
-            // Phon hits
-            std::unordered_map<int, float> ph;
-            if (!phon_expr.empty() && phon_fts_table) {
-                Stmt s(db, std::format(
-                    "SELECT rowid, bm25({0}) FROM {0} WHERE {0} MATCH ?", phon_fts_table));
-                s.bind(1, phon_expr);
-                while (s.step()) {
-                    ph[s.column_int(0)] = static_cast<float>(-s.column_double(1));
-                }
-            }
+            std::vector<TextScore> hits = text_index_->score_query(table, query);
+            if (hits.empty()) return;
 
-            // Union of all hit IDs
-            std::unordered_set<int> hit_ids;
-            for (auto& [id, _] : kw) hit_ids.insert(id);
-            for (auto& [id, _] : ph) hit_ids.insert(id);
-            if (hit_ids.empty()) return;
-
-            // Fetch text + metadata for hits
-            for (int id : hit_ids) {
+            for (const auto& hit : hits) {
                 Stmt s(db, std::format(
                     "SELECT {}, {} FROM {} WHERE {} = ?",
                     text_col, ts_expr, table, id_col));
-                s.bind(1, id);
+                s.bind(1, hit.id);
                 if (!s.step()) continue;
                 std::string text = s.column_text(0);
                 std::string ts   = s.column_text(1);
 
-                float kw_score  = kw.count(id) ? kw[id] : 0.0f;
-                float ph_score  = ph.count(id) ? ph[id] : 0.0f;
-                float combined  = kw_score + ph_score;
-
                 json meta = json::object();
                 meta["source"] = source_label;
 
-                SearchResult sr{id, text, combined, meta, ts};
+                SearchResult sr{hit.id, text, hit.score, meta, ts};
                 sr.vec_score  = -1.0f;  // no vector signal
-                sr.bm25_score = kw_score;
-                sr.phon_score = ph_score;
-                sr.blended    = combined;
-                candidates.push_back({combined, std::move(sr)});
+                sr.bm25_score = hit.score;
+                sr.phon_score = -1.0f;  // folded into bm25_score by score_query()
+                sr.blended    = hit.score;
+                candidates.push_back({hit.score, std::move(sr)});
             }
         };
 
         // Summaries
-        score_fts_corpus("summaries", "summary_id", "text",
-                         "summaries_fts", "summaries_phon_fts", "summary",
-                         "datetime(created_at,'unixepoch','localtime')");
-        // Documents
-        score_fts_corpus("documents", "document_id", "text",
-                         "documents_fts", "documents_phon_fts", "document",
-                         "imported_at");
+        score_text_corpus("summaries", "summary_id", "text", "summary",
+                          "datetime(created_at,'unixepoch','localtime')");
+        // Documents (imported_at lives on document_sources, joined via
+        // document_source_id — pre-existing bug fixed while rewiring this
+        // corpus for v0.16: the old code referenced documents.imported_at,
+        // a column that has never existed on the documents table itself).
+        {
+            std::vector<TextScore> hits = text_index_->score_query("documents", query);
+            for (const auto& hit : hits) {
+                Stmt s(db,
+                    "SELECT d.text, COALESCE(ds.imported_at, 0) "
+                    "FROM documents d LEFT JOIN document_sources ds "
+                    "ON d.document_source_id = ds.document_source_id "
+                    "WHERE d.document_id = ?");
+                s.bind(1, hit.id);
+                if (!s.step()) continue;
+                std::string text = s.column_text(0);
+                std::string ts   = s.column_text(1);
+
+                json meta = json::object();
+                meta["source"] = "document";
+
+                SearchResult sr{hit.id, text, hit.score, meta, ts};
+                sr.vec_score  = -1.0f;
+                sr.bm25_score = hit.score;
+                sr.phon_score = -1.0f;
+                sr.blended    = hit.score;
+                candidates.push_back({hit.score, std::move(sr)});
+            }
+        }
         // Decisions
-        score_fts_corpus("decisions", "decision_id", "text",
-                         "decisions_fts", "decisions_phon_fts", "decision",
-                         "datetime(created_at,'unixepoch','localtime')");
+        score_text_corpus("decisions", "decision_id", "text", "decision",
+                          "datetime(created_at,'unixepoch','localtime')");
         // Turn summaries. NOTE: this table has no created_at — an L2 summary
         // inherits its source turn's timestamp in turn_datetime (the
         // (session_id, turn_datetime) pair is the join back to the turn). The
         // wrong column name here threw "no such column: created_at" out of the
         // whole function, so text-only search never returned anything: both
         // the drift-degraded fallback and the startup warmup were dead.
-        score_fts_corpus("turn_summaries", "turn_summary_id", "text",
-                         "turn_summaries_fts", "turn_summaries_phon_fts", "turn_summary",
-                         "datetime(turn_datetime,'unixepoch','localtime')");
+        score_text_corpus("turn_summaries", "turn_summary_id", "text", "turn_summary",
+                          "datetime(turn_datetime,'unixepoch','localtime')");
+
+        if (candidates.empty())
+            return {{}, {{"corpus_size", 0}, {"text_only", true}}};
 
         // Rank by blended score, top-k
         std::sort(candidates.begin(), candidates.end(),

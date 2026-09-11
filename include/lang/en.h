@@ -537,7 +537,7 @@ constexpr const char* ERR_PERMISSION_DENIED_SIGNAL= "Permission denied: cannot s
 // Sections drive the dashboard's left-hand tabs (server, embedding,
 // search, summarizer, logging, housekeeping, import).
 // =====================================================================
-inline constexpr std::array<ConfigMeta, 57> kConfigSchema = {{
+inline constexpr std::array<ConfigMeta, 61> kConfigSchema = {{
     // ---- server ----
     {"socket_enable", "server", "Socket Enable", CfgType::Boolean, CfgEdit::RestartRequired,
      "true", "",
@@ -649,6 +649,18 @@ inline constexpr std::array<ConfigMeta, 57> kConfigSchema = {{
     {"phon_weight", "search", "Phonetic Weight", CfgType::Float, CfgEdit::Live,
      "1", "",
      "\"Sounds-like\" (dolphining) weight — matches on how a phrase sounds (Double Metaphone) alongside meaning and keywords. 0 disables."},
+    {"fts_w_unigram", "search", "FTS Unigram Weight", CfgType::Float, CfgEdit::Live,
+     "0.3", "",
+     "TF-IDF weight for single-word (unigram) term matches in the custom text index."},
+    {"fts_w_bigram", "search", "FTS Bigram Weight", CfgType::Float, CfgEdit::Live,
+     "0.7", "",
+     "TF-IDF weight for adjacent-word-pair (bigram) term matches in the custom text index."},
+    {"fts_w_metaphone", "search", "FTS Metaphone Weight", CfgType::Float, CfgEdit::Live,
+     "1", "",
+     "Weight applied to phonetic (Double Metaphone) term matches relative to exact stemmed-literal matches. 0 disables phonetic matching; 1 treats it as equal to literal."},
+    {"fts_literal_enabled", "search", "FTS Literal Enabled", CfgType::Boolean, CfgEdit::Live,
+     "true", "",
+     "Enable exact stemmed-literal term matching in the custom text index. Disable for DMP-only (phonetic-only) scoring without reindexing."},
 
     // ---- summarizer ----
     {"summarizer_model", "summarizer", "Model", CfgType::String, CfgEdit::Live,

@@ -42,6 +42,7 @@ const std::unordered_map<std::string_view, bool Config::*>& bool_fields() {
         {"build_context",  &Config::build_context},
         {"auto_recall",    &Config::auto_recall},
         {"bm25_enabled",   &Config::bm25_enabled},
+        {"fts_literal_enabled", &Config::fts_literal_enabled},
         {"normalize_home", &Config::normalize_home_path},
     };
     return m;
@@ -78,6 +79,9 @@ const std::unordered_map<std::string_view, float Config::*>& float_fields() {
         {"bm25_weight",             &Config::bm25_weight},
         {"vector_weight",           &Config::vector_weight},
         {"phon_weight",             &Config::phon_weight},
+        {"fts_w_unigram",           &Config::fts_w_unigram},
+        {"fts_w_bigram",            &Config::fts_w_bigram},
+        {"fts_w_metaphone",         &Config::fts_w_metaphone},
         {"cleanup_max_age_hours",   &Config::cleanup_max_age_hours},
         {"episode_threshold_base",  &Config::episode_threshold_base},
         {"episode_threshold_cap",   &Config::episode_threshold_cap},
