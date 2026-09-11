@@ -319,6 +319,7 @@ struct SqliteBackend::Impl {
             exec("PRAGMA foreign_keys = ON");
         }
         sqlite3_busy_timeout(db, 10000);
+        text_index_.emplace(db);
         // Only ensure users + settings tables exist (skip memory tables/FTS).
         // Skip entirely for readonly connections (export path — no side-effects).
         if (!readonly) {
@@ -2236,6 +2237,7 @@ struct SqliteBackend::Impl {
 
         int summary_id = static_cast<int>(sqlite3_last_insert_rowid(db));
         invalidate_cache();
+        text_index_->index_record("summaries", summary_id, text);
         return std::to_string(summary_id);
     }
 
@@ -2333,7 +2335,9 @@ struct SqliteBackend::Impl {
         }
 
         invalidate_doc_cache();
-        return static_cast<int>(sqlite3_last_insert_rowid(db));
+        int doc_id = static_cast<int>(sqlite3_last_insert_rowid(db));
+        text_index_->index_record("documents", doc_id, signal_text);
+        return doc_id;
     }
 
     // ---- turns (L1) raw exchange capture ------------------------------
@@ -2460,8 +2464,9 @@ struct SqliteBackend::Impl {
                     up.bind(7, new_ts);
                     up.bind(8, prev_id);
                     if (!up.exec())
-                        throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-                    return prev_id;
+                        if (!up.exec()) throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+                        text_index_->index_record("turns", prev_id, u + "\n" + a);
+                        return prev_id;
                 }
             }
         }
@@ -2494,6 +2499,7 @@ struct SqliteBackend::Impl {
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         int new_id = static_cast<int>(sqlite3_last_insert_rowid(db));
+        text_index_->index_record("turns", new_id, a.empty() ? u : (u + "\n" + a));
         return new_id;
     }
 
@@ -2562,7 +2568,9 @@ struct SqliteBackend::Impl {
         s.bind(4, phonize(u + " " + a));
         if (model_id) s.bind(5, model_id); else s.bind_null(5);
         s.bind(6, turn_id);
-        return s.exec();
+        if (!s.exec()) return false;
+        text_index_->index_record("turns", turn_id, u + "\n" + a);
+        return true;
     }
 
     // ---- summaries (L2/L3) pipeline primitives (issue #22) ------------
@@ -2600,7 +2608,9 @@ struct SqliteBackend::Impl {
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_cache();
-        return static_cast<int>(sqlite3_last_insert_rowid(db));
+        int sid = static_cast<int>(sqlite3_last_insert_rowid(db));
+        text_index_->index_record("summaries", sid, t);
+        return sid;
     }
 
     // ---- store_decision: write Level 6 curated decision/lesson ----------
@@ -2632,7 +2642,9 @@ struct SqliteBackend::Impl {
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_dec_cache();
-        return static_cast<int>(sqlite3_last_insert_rowid(db));
+        int did = static_cast<int>(sqlite3_last_insert_rowid(db));
+        text_index_->index_record("decisions", did, t);
+        return did;
     }
 
     // ---- catch-up / recipe helpers ------------------------------------
@@ -2761,7 +2773,10 @@ struct SqliteBackend::Impl {
         if (model_id) s.bind(8, model_id); else s.bind_null(8);
         s.bind(9, turn_dt);
         bool ok = s.exec();
-        if (ok) invalidate_turn_cache();
+        if (ok) {
+            invalidate_turn_cache();
+            text_index_->index_record("turn_summaries", turn_id, t);
+        }
         return ok;
     }
 
@@ -2797,7 +2812,10 @@ struct SqliteBackend::Impl {
         s.bind(4, model_id);
         s.bind(5, turn_dt);
         bool ok = s.exec();
-        if (ok) invalidate_turn_cache();
+        if (ok) {
+            invalidate_turn_cache();
+            text_index_->index_record("turn_summaries", turn_id, "");
+        }
         return ok;
     }
 
@@ -2979,7 +2997,9 @@ struct SqliteBackend::Impl {
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_cache();
-        return static_cast<int>(sqlite3_last_insert_rowid(db));
+        int eid = static_cast<int>(sqlite3_last_insert_rowid(db));
+        text_index_->index_record("summaries", eid, t);
+        return eid;
     }
 
     // Sessions whose open episode is ready to close: they have >=1 non-draft
@@ -3273,7 +3293,9 @@ struct SqliteBackend::Impl {
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_cache();
-        return static_cast<int>(sqlite3_last_insert_rowid(db));
+        int sid = static_cast<int>(sqlite3_last_insert_rowid(db));
+        text_index_->index_record("summaries", sid, t);
+        return sid;
     }
 
     // Insert one immutable level='project' row spanning a closed run.
@@ -3301,9 +3323,10 @@ struct SqliteBackend::Impl {
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         invalidate_cache();
-        return static_cast<int>(sqlite3_last_insert_rowid(db));
+        int pid = static_cast<int>(sqlite3_last_insert_rowid(db));
+        text_index_->index_record("summaries", pid, t);
+        return pid;
     }
-
     std::vector<TurnRecord> turns_by_session_desc(
             const std::string& session_guid, int limit) {
         return turns_by_session_impl(session_guid, false, limit);
@@ -3544,7 +3567,10 @@ struct SqliteBackend::Impl {
         if (model_id) s.bind(5, model_id); else s.bind_null(5);
         s.bind(6, summary_id);
         bool ok = s.exec() && sqlite3_changes(db) > 0;
-        if (ok) invalidate_cache();
+        if (ok) {
+            invalidate_cache();
+            text_index_->index_record("summaries", summary_id, t);
+        }
         return ok;
     }
 
@@ -3576,7 +3602,7 @@ struct SqliteBackend::Impl {
             emb = embedder->encode(text);
         }
 
-        // FTS5 sync triggers re-index from the new text/tags automatically.
+        // Custom index: re-tokenize the record on the new text (v0.16).
         Stmt stmt(db,
             "UPDATE summaries SET text = ?, embedding_version = ?, embedding = ?, phon = ?, tags = ? "
             "WHERE summary_id = ?");
@@ -3596,6 +3622,7 @@ struct SqliteBackend::Impl {
         if (!stmt.exec()) return false;
 
         invalidate_cache();
+        text_index_->index_record("summaries", memory_id, text);
         return true;
     }
 
