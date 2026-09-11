@@ -653,6 +653,20 @@ struct SqliteBackend::Impl {
             }
         }
 
+        // Post-migration reclaim: if a migration actually ran this session
+        // (same gating condition maybe_backup_before_migration used), the
+        // chain just dropped a lot of data (old FTS5 tables/triggers, phon
+        // columns, etc). Reclaim that space with a plain in-place VACUUM
+        // now that the DB is confirmed at kExpectedDbVersion. Skipped on a
+        // fresh install or a DB that was already current (no migration).
+        if (migration_pending(pre_migration_version)) {
+            Diskerror::Logger::info(
+                "Post-migration VACUUM starting (reclaiming space from dropped "
+                "schema) -- this may take a while on a large DB.");
+            exec("VACUUM");
+            Diskerror::Logger::info("Post-migration VACUUM complete.");
+        }
+
         // Indexes — (re)created here, after migration, so a table rebuild
         // (which drops the table and with it every index) can't leave them
         // missing. All IF NOT EXISTS, so fresh / migrated / already-current
@@ -723,22 +737,52 @@ struct SqliteBackend::Impl {
     // and post-migration verification that aborts (rolls back) on any
     // inconsistency rather than silently shipping a corrupt index.
 
-    /// Snapshot the DB to "<db>_BACKUP_<timestamp>.db" before the first
-    /// structural change of a migration run. Only fires when an in-binary
-    /// migration is actually pending (current on-disk version differs from
-    /// kExpectedDbVersion AND is a version we know how to migrate from). One
-    /// snapshot covers a whole chain (0.12 -> 0.15 -> ...). Uses VACUUM INTO,
-    /// which writes a single consistent snapshot file straight from the open
-    /// (WAL) database -- no daemon stop, no lsof dance, no half-copied WAL.
-    void maybe_backup_before_migration(const std::string& current_version) {
-        if (current_version.empty()) return;                    // fresh/pre-version DB
-        if (current_version == kExpectedDbVersion) return;      // already current
-        // Only back up for versions we actually migrate FROM in-binary. An
-        // unknown version will be rejected by the gate without mutation, so a
-        // backup would be noise.
-        if (current_version != "0.12" && current_version != "0.15") return;
+    /// True iff a pre-migration backup/reopen (and, later, a post-migration
+    /// VACUUM) should happen for `current_version`. Mirrors the guard
+    /// conditions maybe_backup_before_migration() has always used: shared
+    /// by that function and by the post-migration VACUUM decision so both
+    /// stay in lockstep.
+    static bool migration_pending(const std::string& current_version) {
+        if (current_version.empty()) return false;               // fresh/pre-version DB
+        if (current_version == kExpectedDbVersion) return false;  // already current
+        // Only for versions we actually migrate FROM in-binary. An unknown
+        // version is rejected by the gate without mutation.
+        if (current_version != "0.12" && current_version != "0.15") return false;
+        return true;
+    }
 
-        // Timestamped sibling of the DB file: <name>_BACKUP_<YYYYMMDD-HHMMSS>.db
+    /// Archive the raw DB file(s) as "<db>_BACKUP_<timestamp>.tar.gz" (or
+    /// .zip / .db, see fallback chain below) before the first structural
+    /// change of a migration run. Only fires when an in-binary migration is
+    /// actually pending (see migration_pending()). One snapshot covers a
+    /// whole chain (0.12 -> 0.15 -> ...).
+    ///
+    /// Preferred path: WAL-checkpoint in TRUNCATE mode WITHOUT closing the
+    /// connection, then archive the now-fully-checkpointed main .db file
+    /// while the connection stays open. A TRUNCATE checkpoint that reports
+    /// zero "busy" frames means every WAL frame was folded back into the
+    /// main file and the -wal file was truncated to empty -- at that point
+    /// the main .db file alone is a complete, consistent point-in-time
+    /// snapshot, and it's safe to read/archive it while `db` stays open,
+    /// PROVIDED no other writer is concurrently active (true here: this is
+    /// single-threaded startup code, before any other work on this
+    /// connection begins). This avoids ever closing/reopening `db`, so
+    /// text_index_'s non-owning pointer never goes stale.
+    ///
+    /// Falls back to a full close -> archive -> reopen (re-pointing
+    /// text_index_ at the new handle) only if the checkpoint could NOT
+    /// fully complete without closing (checkpoint reports busy frames,
+    /// meaning some other connection/transaction is holding the WAL open --
+    /// in that case the main .db file alone would not be a safe snapshot).
+    ///
+    /// Unlike the old VACUUM INTO approach (which snapshotted the live WAL
+    /// database via a separate materialized copy query), this archives the
+    /// raw file(s) directly using the existing timestamped naming
+    /// convention (tar.gz -> zip -> plain copy fallback chain).
+    void maybe_backup_before_migration(const std::string& current_version) {
+        if (!migration_pending(current_version)) return;
+
+        // Timestamped sibling of the DB file: <name>_BACKUP_<YYYYMMDD-HHMMSS>
         fs::path src(db_path);
         std::string stem = src.stem().string();               // e.g. "memories"
         std::string ts;
@@ -754,25 +798,152 @@ struct SqliteBackend::Impl {
             std::strftime(buf, sizeof(buf), "%Y%m%d-%H%M%S", &tmv);
             ts = buf;
         }
-        fs::path backup = src.parent_path() /
-            (stem + "_BACKUP_" + ts + ".db");
+        std::string prefix = stem + "_BACKUP_" + ts;
 
         Diskerror::Logger::info(std::format(
-            "DB schema {} predates {} -- taking pre-migration backup: {}",
-            current_version, std::string(kExpectedDbVersion), backup.string()));
+            "DB schema {} predates {} -- taking pre-migration backup ({})",
+            current_version, std::string(kExpectedDbVersion), prefix));
 
-        // VACUUM INTO requires the target not already exist.
-        if (fs::exists(backup))
-            throw std::runtime_error(
-                "pre-migration backup target already exists: " + backup.string());
+        // ---- 1. WAL-checkpoint (TRUNCATE) -- try without closing first ---
+        // "PRAGMA wal_checkpoint(TRUNCATE);" returns one row: (busy, log,
+        // checkpointed). busy != 0 means the checkpoint could not complete
+        // fully (some frames left un-checkpointed) -- typically because
+        // another connection is mid-transaction. busy == 0 means the main
+        // .db file now fully reflects the database and the -wal file was
+        // truncated to empty: safe to archive while staying open.
+        bool checkpoint_complete = false;
+        {
+            Stmt s(db, "PRAGMA wal_checkpoint(TRUNCATE)");
+            if (s.step()) {
+                int busy = s.column_int(0);
+                checkpoint_complete = (busy == 0);
+            }
+            // Stmt goes out of scope here -- no live prepared statement
+            // survives past this block, whichever path we take next.
+        }
 
-        Stmt s(db, "VACUUM INTO ?");
-        s.bind(1, backup.string());
-        if (!s.exec())
-            throw std::runtime_error(
-                std::string("pre-migration VACUUM INTO failed: ") + sqlite3_errmsg(db));
+        bool closed_for_backup = false;
+        if (!checkpoint_complete) {
+            // Fallback: something prevented a full checkpoint while open
+            // (e.g. another connection holding a read/write transaction).
+            // Fully close so the archived file(s) are guaranteed quiescent.
+            Diskerror::Logger::info(
+                "wal_checkpoint(TRUNCATE) could not fully complete while open "
+                "-- falling back to close+archive+reopen for the pre-migration "
+                "backup.");
+            int rc = sqlite3_close(db);
+            if (rc != SQLITE_OK) {
+                throw std::runtime_error(std::format(
+                    "pre-migration backup: sqlite3_close failed ({}); refusing to "
+                    "archive a DB with abandoned open state", sqlite3_errstr(rc)));
+            }
+            db = nullptr;
+            closed_for_backup = true;
+        }
 
-        Diskerror::Logger::info("Pre-migration backup complete.");
+        // ---- 2. Archive the raw file(s): tar.gz -> zip -> plain copy -----
+        fs::path parent = src.parent_path();
+        std::string db_filename = src.filename().string();          // "memories.db"
+        std::string wal_filename = db_filename + "-wal";
+        std::string shm_filename = db_filename + "-shm";
+        bool has_wal = fs::exists(parent / wal_filename);
+        bool has_shm = fs::exists(parent / shm_filename);
+
+        auto shell_quote = [](const std::string& s) {
+            std::string out = "'";
+            for (char c : s) {
+                if (c == '\'') out += "'\\''";
+                else out += c;
+            }
+            out += "'";
+            return out;
+        };
+
+        std::string method;
+        fs::path archive;
+
+        // -- tar.gz --
+        {
+            fs::path tar_path = parent / (prefix + ".tar.gz");
+            std::string cmd = "tar -czf " + shell_quote(tar_path.string()) +
+                " -C " + shell_quote(parent.string()) +
+                " " + shell_quote(db_filename);
+            if (has_wal) cmd += " " + shell_quote(wal_filename);
+            if (has_shm) cmd += " " + shell_quote(shm_filename);
+            if (std::system(cmd.c_str()) == 0 && fs::exists(tar_path)) {
+                method = "tar";
+                archive = tar_path;
+            }
+        }
+
+        // -- zip fallback --
+        if (method.empty()) {
+            fs::path zip_path = parent / (prefix + ".zip");
+            std::string cmd = "cd " + shell_quote(parent.string()) +
+                " && zip -q " + shell_quote(zip_path.string()) +
+                " -j " + shell_quote(db_filename);
+            if (has_wal) cmd += " " + shell_quote(wal_filename);
+            if (has_shm) cmd += " " + shell_quote(shm_filename);
+            if (std::system(cmd.c_str()) == 0 && fs::exists(zip_path)) {
+                method = "zip";
+                archive = zip_path;
+            }
+        }
+
+        // -- plain copy fallback (old naming/behavior exactly) --
+        if (method.empty()) {
+            fs::path copy_path = parent / (prefix + ".db");
+            try {
+                if (fs::exists(copy_path))
+                    throw std::runtime_error(
+                        "pre-migration backup target already exists: " + copy_path.string());
+                fs::copy_file(src, copy_path);
+                if (has_wal) fs::copy_file(parent / wal_filename, parent / (prefix + ".db-wal"));
+                if (has_shm) fs::copy_file(parent / shm_filename, parent / (prefix + ".db-shm"));
+                method = "copy";
+                archive = copy_path;
+            } catch (const std::exception& e) {
+                // All three methods failed -- if we closed for the backup,
+                // reopen before throwing so we don't leave the backend in a
+                // permanently-closed state, then surface the failure.
+                if (closed_for_backup) reopen_db();
+                throw std::runtime_error(
+                    std::string("pre-migration backup failed (tar, zip, and plain copy all "
+                                 "failed): ") + e.what());
+            }
+        }
+
+        Diskerror::Logger::info(std::format(
+            "Pre-migration backup complete via {}: {}", method, archive.string()));
+
+        // ---- 3. Reopen the connection (only if we closed it) --------------
+        if (closed_for_backup) {
+            reopen_db();
+            Diskerror::Logger::info(
+                "Reconnected to DB after close+archive pre-migration backup.");
+        }
+    }
+
+    /// Reopen `db` (after maybe_backup_before_migration's checkpoint+close)
+    /// with the exact same open flags/pragmas used in the constructor, and
+    /// re-point the non-owning text_index_ at the new handle -- sqlite3_open
+    /// is not guaranteed to reuse the same pointer value.
+    void reopen_db() {
+        int rc = sqlite3_open(db_path.c_str(), &db);
+        if (rc != SQLITE_OK) {
+            std::string err = db ? sqlite3_errmsg(db) : sqlite3_errstr(rc);
+            if (db) { sqlite3_close(db); db = nullptr; }
+            throw std::runtime_error(std::format(lang::ERR_SQLITE_OPEN, err));
+        }
+        exec("PRAGMA journal_mode=WAL");
+        exec("PRAGMA foreign_keys = ON");
+        sqlite3_busy_timeout(db, 10000);
+
+        // text_index_ holds a NON-OWNING sqlite3* captured at construction;
+        // re-emplace it against the new handle. Cheap (no allocation, just a
+        // pointer member) and safe (no other state in SqliteTextIndex).
+        text_index_.reset();
+        text_index_.emplace(db);
     }
 
     /// Chain the in-binary migration legs until the DB reaches
