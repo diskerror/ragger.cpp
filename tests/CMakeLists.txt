@@ -58,6 +58,10 @@ add_test(NAME test_summarizer COMMAND test_summarizer)
 
 add_executable(test_double_metaphone test_double_metaphone.cpp)
 target_link_libraries(test_double_metaphone PRIVATE ragger_core)
+
+add_executable(test_text_index test_text_index.cpp)
+target_link_libraries(test_text_index PRIVATE ragger_core)
+add_test(NAME test_text_index COMMAND test_text_index)
 add_test(NAME test_double_metaphone COMMAND test_double_metaphone)
 
 add_executable(test_vector_codec test_vector_codec.cpp)

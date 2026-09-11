@@ -10,6 +10,7 @@
 #include "util/sqlite.h"
 #include "double_metaphone.h"
 #include "fts_tokenize.h"
+#include "sqlite_text_index.h"
 #include "vector_codec.h"
 #include "Logger.h"
 #include <format>
@@ -115,6 +116,9 @@ static std::string tags_from_metadata(const json& metadata) {
 // -----------------------------------------------------------------------
 struct SqliteBackend::Impl {
     sqlite3*    db       = nullptr;
+    // Custom v0.16 inverted-index engine (schema + reindex + TF-IDF scoring).
+    // Holds a non-owning copy of `db`; constructed once `db` is open.
+    std::optional<SqliteTextIndex> text_index_;
     Embedder*   embedder = nullptr;    // nullable — null for DB-only (user mgmt) mode
     bool        readonly_ = false;     // true for export-path readonly connections
     std::string db_path;
@@ -267,6 +271,7 @@ struct SqliteBackend::Impl {
         // import CLI) still serialize; without this any collision is an
         // immediate "database is locked" error.
         sqlite3_busy_timeout(db, 10000);
+        text_index_.emplace(db);
         create_schema();
 
         // Load the current embedding version from the settings table.
@@ -1448,36 +1453,7 @@ struct SqliteBackend::Impl {
     /// resolve to the same term_id. No doc_frequency column: df is computed
     /// live via COUNT(*) on the per-table *_terms join (Decision C).
     void create_terms_schema() {
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS terms (
-                term_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                term    TEXT NOT NULL UNIQUE
-            )
-        )");
-
-        // One junction table per text table. The FK ON DELETE CASCADE means a
-        /// deleted record's index rows go away automatically — nothing to
-        // maintain in the write path beyond delete-then-insert for updates.
-        struct T { const char* junc; const char* base; const char* pk; };
-        const T tables[] = {
-            {"turns_terms",           "turns",           "turn_id"},
-            {"turn_summaries_terms",  "turn_summaries",  "turn_summary_id"},
-            {"summaries_terms",       "summaries",       "summary_id"},
-            {"documents_terms",       "documents",       "document_id"},
-            {"decisions_terms",       "decisions",       "decision_id"},
-        };
-        for (const auto& t : tables) {
-            exec(std::format(
-                "CREATE TABLE IF NOT EXISTS {} (\n"
-                "    {} INTEGER NOT NULL REFERENCES {}({}) ON DELETE CASCADE,\n"
-                "    term_id INTEGER NOT NULL REFERENCES terms(term_id) ON DELETE CASCADE,\n"
-                "    count   INTEGER NOT NULL DEFAULT 1,\n"
-                "    PRIMARY KEY ({}, term_id)\n)",
-                t.junc, t.pk, t.base, t.pk, t.pk));
-            exec(std::format(
-                "CREATE INDEX IF NOT EXISTS idx_{}_term ON {}(term_id)",
-                t.junc, t.junc));
-        }
+        text_index_->create_schema();
     }
 
     /// Users + settings tables — declarative, no in-place migration
@@ -4311,177 +4287,10 @@ struct SqliteBackend::Impl {
         return done;
     }
 
-    // (Re)build the custom FTS index for a single text table.
-    // Tokenizes every record, populates terms/junction table, updates counts.
+    // (Re)build the custom index for a single text table. Delegates to the
+    // SqliteTextIndex engine (schema + tokenize + TF-IDF live there now).
     int reindex_table(const std::string& table_name) {
-        // Validate table name
-        static const std::unordered_set<std::string> valid_tables = {
-            "turns", "turn_summaries", "summaries", "documents", "decisions"
-        };
-        if (valid_tables.find(table_name) == valid_tables.end()) {
-            throw std::runtime_error("Invalid table name: " + table_name);
-        }
-
-        // Build the query based on table type
-        std::string select_sql;
-        std::string id_col, text_sql;
-        std::string junction_table = table_name + "_terms";
-        
-        if (table_name == "turns") {
-            id_col = "turn_id";
-            text_sql = "SELECT turn_id, user_text, assistant_text FROM turns ORDER BY turn_id";
-        } else if (table_name == "turn_summaries") {
-            id_col = "turn_summary_id";
-            text_sql = "SELECT turn_summary_id, text FROM turn_summaries ORDER BY turn_summary_id";
-        } else if (table_name == "summaries") {
-            id_col = "summary_id";
-            text_sql = "SELECT summary_id, text FROM summaries ORDER BY summary_id";
-        } else if (table_name == "documents") {
-            id_col = "document_id";
-            // Use the same doc embedding text formula as rebuild_phon
-            text_sql = std::format(
-                "SELECT document_id, {} AS text FROM documents ORDER BY document_id",
-                kDocEmbedTextSQL);
-        } else if (table_name == "decisions") {
-            id_col = "decision_id";
-            text_sql = "SELECT decision_id, text FROM decisions ORDER BY decision_id";
-        }
-
-        // Build stopword sets
-        using ragger::fts::stopword_set;
-        auto uni_stops = stopword_set(ragger::lang::STOPWORDS_UNIGRAM);
-        auto bi_stops = stopword_set(ragger::lang::STOPWORDS_BIGRAM);
-
-        // Batch processing
-        constexpr int kBatch = 200;
-        int total_reindexed = 0;
-
-        struct Row {
-            int id;
-            std::string text;  // for single-column tables
-            std::string extra; // for turns (assistant_text)
-        };
-
-        // Two-pass: read batch, finalize, then write (to avoid cursor invalidation)
-        int last_id = 0;
-        for (;;) {
-            std::vector<Row> batch;
-            batch.reserve(kBatch);
-
-            // Read batch
-            {
-                Stmt stmt(db, text_sql);
-                while (stmt.step()) {
-                    int id = stmt.column_int(0);
-                    std::string text = stmt.column_text(1);
-                    std::string extra;
-                    
-                    // For turns, combine user_text + assistant_text
-                    if (table_name == "turns") {
-                        extra = stmt.column_text(2);
-                        if (!extra.empty()) {
-                            text += "\n" + extra;
-                        }
-                    }
-                    
-                    batch.push_back({id, std::move(text), ""});
-                    if (static_cast<int>(batch.size()) >= kBatch) break;
-                }
-            }
-
-            if (batch.empty()) break;
-
-            // Process batch: tokenize and insert
-            for (const auto& row : batch) {
-                // Tokenize the text
-                auto sentences = ragger::fts::split_sentences(row.text);
-                std::unordered_map<std::string, int> term_counts;
-                int unigram_count = 0;
-                int bigram_count = 0;
-
-                for (const auto& sentence : sentences) {
-                    auto normalized = ragger::fts::normalize_words(sentence);
-                    
-                    // Process unigrams
-                    auto uni_tokens = ragger::fts::unigrams(normalized, uni_stops);
-                    for (const auto& token : uni_tokens) {
-                        if (!token.literal.empty()) {
-                            term_counts[token.literal]++;
-                            unigram_count++;
-                        }
-                        if (!token.metaphone.empty()) {
-                            term_counts[token.metaphone]++;
-                        }
-                    }
-                    
-                    // Process bigrams
-                    auto bi_tokens = ragger::fts::bigrams(normalized, bi_stops);
-                    for (const auto& token : bi_tokens) {
-                        if (!token.literal.empty()) {
-                            term_counts[token.literal]++;
-                            bigram_count++;
-                        }
-                        if (!token.metaphone.empty() && token.metaphone.find('_') != std::string::npos) {
-                            term_counts[token.metaphone]++;
-                        }
-                    }
-                }
-
-                // Insert/get term_ids and populate junction table
-                // First, delete existing entries for this record
-                {
-                    Stmt del(db, std::format("DELETE FROM {} WHERE {} = ?", junction_table, id_col));
-                    del.bind(1, row.id);
-                    del.exec();
-                }
-
-                // Insert new entries
-                for (const auto& [term, count] : term_counts) {
-                    // INSERT OR IGNORE term (in case of race)
-                    {
-                        Stmt ins(db, "INSERT OR IGNORE INTO terms(term) VALUES (?)");
-                        ins.bind(1, term);
-                        ins.exec();
-                    }
-
-                    // Get term_id
-                    int term_id = 0;
-                    {
-                        Stmt sel(db, "SELECT term_id FROM terms WHERE term = ?");
-                        sel.bind(1, term);
-                        if (sel.step()) {
-                            term_id = sel.column_int(0);
-                        }
-                    }
-
-                    if (term_id > 0) {
-                        // Insert into junction table
-                        Stmt junc(db, 
-                            std::format("INSERT OR REPLACE INTO {} ({}, term_id, count) VALUES (?, ?, ?)",
-                                       junction_table, id_col));
-                        junc.bind(1, row.id);
-                        junc.bind(2, term_id);
-                        junc.bind(3, count);
-                        junc.exec();
-                    }
-                }
-
-                // Update count columns
-                {
-                    Stmt upd(db, std::format(
-                        "UPDATE {} SET unigram_count = ?, bigram_count = ? WHERE {} = ?",
-                        table_name, id_col));
-                    upd.bind(1, unigram_count);
-                    upd.bind(2, bigram_count);
-                    upd.bind(3, row.id);
-                    upd.exec();
-                }
-
-                total_reindexed++;
-            }
-        }
-
-        return total_reindexed;
+        return text_index_->reindex_table(table_name, /*progress=*/false);
     }
 
     // Set a document's embedding (used by the import path after embedding
