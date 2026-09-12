@@ -226,7 +226,7 @@ int main(int argc, char **argv) {
     opts.add_options()
             ("help,h", CLI_HELP)
             ("version,V", CLI_VERSION)
-            ("host", Diskerror::po::value<std::string>(), CLI_HOST)
+            ("host,H", Diskerror::po::value<std::string>(), CLI_HOST)
             ("port,p", Diskerror::po::value<int>(), CLI_PORT)
             ("min-chunk-size", Diskerror::po::value<int>(), CLI_MIN_CHUNK_SIZE)
             ("num,n", Diskerror::po::value<int>(),
@@ -441,7 +441,7 @@ int main(int argc, char **argv) {
 
             // Try daemon first (thin client — no model loading)
             auto token = ragger::load_token();
-            ragger::RaggerClient client(cfg.bind_address, cfg.port, token);
+            ragger::RaggerClient client(host, port, token);
             ragger::SearchResponse response;
 
             if (client.is_available()) {
@@ -481,7 +481,7 @@ int main(int argc, char **argv) {
 
             // Try daemon first (thin client — no model loading)
             auto token = ragger::load_token();
-            ragger::RaggerClient client(cfg.bind_address, cfg.port, token);
+            ragger::RaggerClient client(host, port, token);
             std::string id;
 
             if (client.is_available()) {
@@ -562,7 +562,7 @@ int main(int argc, char **argv) {
 
             // Try daemon first (thin client — no model loading)
             auto token = ragger::load_token();
-            ragger::RaggerClient client(cfg.bind_address, cfg.port, token);
+            ragger::RaggerClient client(host, port, token);
             int count;
 
             if (client.is_available()) {
