@@ -112,7 +112,7 @@ int main() {
     ragger::init_config();
     auto cfg = ragger::config();
     auto model_dir = cfg.resolved_model_dir();
-    if (!std::filesystem::exists(model_dir + "/model.onnx")) {
+    if (!std::filesystem::exists(model_dir + "/model.onnx") && !std::filesystem::exists(model_dir + "/onnx/model.onnx")) {
         std::cerr << "Skipping embedder tests: model not found at " << model_dir << "\n";
         return 0;
     }

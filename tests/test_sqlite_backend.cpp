@@ -620,14 +620,19 @@ void test_store_document(ragger::Embedder& emb) {
         db.close();
     }
 
-    // Verify the dedicated columns round-trip via the raw documents table.
+    // Verify the dedicated columns round-trip. Per-document metadata
+    // (title/tags/year/path) lives in document_sources since the v0.15
+    // normalization migration; documents (chunks) hold only text/chunk_index
+    // + a document_source_id FK.
     sqlite3* raw = nullptr;
     assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
 
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(raw,
-        "SELECT text, title, tags, year, path, chunk_index "
-        "FROM documents WHERE document_id = ?",
+        "SELECT d.text, ds.title, ds.tags, ds.year, ds.path, d.chunk_index "
+        "FROM documents d JOIN document_sources ds "
+        "  ON ds.document_source_id = d.document_source_id "
+        "WHERE d.document_id = ?",
         -1, &st, nullptr);
     sqlite3_bind_int(st, 1, doc_id);
     assert(sqlite3_step(st) == SQLITE_ROW);
@@ -791,9 +796,15 @@ void test_store_turn_dedup(ragger::Embedder& emb) {
     assert(sqlite3_step(st) != SQLITE_ROW);
     sqlite3_finalize(st);
 
-    // FTS index agrees: the prompt term resolves to exactly one rowid.
+    // Custom terms index agrees: the prompt's distinctive stemmed bigram term
+    // resolves to exactly one turn_id (dedup didn't leave a stale/duplicate
+    // turns_terms row behind). "general" stems to "genera" in this pipeline,
+    // so the stored literal bigram token is "genera_search", not
+    // "general_search".
     sqlite3_prepare_v2(raw,
-        "SELECT COUNT(*) FROM turns_fts WHERE turns_fts MATCH 'general_search'",
+        "SELECT COUNT(*) FROM turns_terms tt "
+        "JOIN terms t ON t.term_id = tt.term_id "
+        "WHERE t.term = 'genera_search'",
         -1, &st, nullptr);
     assert(sqlite3_step(st) == SQLITE_ROW);
     assert(sqlite3_column_int(st, 0) == 1);
@@ -1504,7 +1515,7 @@ int main() {
     ragger::init_config();
     auto model_dir = ragger::config().resolved_model_dir();
 
-    if (!fs::exists(model_dir + "/model.onnx")) {
+    if (!fs::exists(model_dir + "/model.onnx") && !fs::exists(model_dir + "/onnx/model.onnx")) {
         std::cerr << "Skipping backend tests: model not found at " << model_dir << "\n";
         std::println("test_sqlite_backend: SKIPPED (no model)");
         return 0;

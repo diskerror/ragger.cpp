@@ -466,7 +466,6 @@ int reload_config() {
     RELOAD(bm25_enabled);
     RELOAD(bm25_weight);
     RELOAD(vector_weight);
-    RELOAD(phon_weight);
     RELOAD(inject_data);
     RELOAD(fts_w_unigram);
     RELOAD(fts_w_bigram);

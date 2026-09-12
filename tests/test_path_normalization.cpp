@@ -137,7 +137,7 @@ int main() {
 
     // Embedder needed for SqliteBackend store()
     auto model_dir = cfg.resolved_model_dir();
-    if (!std::filesystem::exists(model_dir + "/model.onnx")) {
+    if (!std::filesystem::exists(model_dir + "/model.onnx") && !std::filesystem::exists(model_dir + "/onnx/model.onnx")) {
         std::cerr << "Skipping path normalization tests: model not found at " << model_dir << "\n";
         return 0;
     }

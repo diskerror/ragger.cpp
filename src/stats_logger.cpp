@@ -161,9 +161,10 @@ void StatsLogger::log_lookup(const std::string& query,
              .bind(3, r.id)
              .bind(4, static_cast<double>(r.score));
             // Per-signal breakdown. A -1 sentinel means the signal was inactive
-            // for this search (bm25 disabled / phon_weight==0) → store NULL so
-            // analysis queries can AVG()/filter without a magic number skewing
-            // results. A real 0.0 (present but no contribution) is preserved.
+            // for this search (bm25 disabled) → store NULL so analysis queries
+            // can AVG()/filter without a magic number skewing results. A real
+            // 0.0 (present but no contribution) is preserved. phon_score is
+            // always -1/NULL now (v0.16: folded into bm25_score).
             auto bind_signal = [&](int idx, float v) {
                 if (v < 0.0f) s.bind_null(idx); else s.bind(idx, static_cast<double>(v));
             };

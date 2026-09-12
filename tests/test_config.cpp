@@ -306,7 +306,6 @@ void test_default_values() {
     assert(cfg.bm25_enabled == true);
     assert(cfg.bm25_weight == 4.0f);
     assert(cfg.vector_weight == 8.0f);
-    assert(cfg.phon_weight == 4.0f);
     assert(cfg.normalize_home_path == true);
     assert(cfg.cleanup_max_age_hours == 0.0f);  // 0 = keep forever (never delete raw conversations)
     assert(cfg.housekeeping_interval == 60);

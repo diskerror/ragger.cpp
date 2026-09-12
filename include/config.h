@@ -89,9 +89,6 @@ struct Config {
     bool  bm25_enabled         = true;
     float bm25_weight          = 4.0f;
     float vector_weight        = 8.0f;
-    // Phonetic ("dolphining" sounds-like) blend weight. Default 1 (low) so the
-    // signal nudges rather than dominates; 0 disables it. See phon_scores().
-    float phon_weight          = 4.0f;
     // Reserved: not yet wired to search behavior.
     bool  inject_data          = false;
 

@@ -27,8 +27,11 @@ struct SearchResult {
     // so each search type's contribution can be judged (tune/keep/drop a weight).
     // Each *_score is the min-max-normalized [0,1] signal value that actually
     // fed the weighted blend; a value of -1 means that signal was inactive for
-    // this search (bm25 disabled, or phon_weight==0). `blended` is the final
-    // weighted ranking score (vector_weight*vec + bm25_weight*bm25 + phon_weight*phon).
+    // this search (bm25 disabled). `blended` is the final weighted ranking
+    // score (vector_weight*vec + bm25_weight*bm25). phon_score is retained at
+    // -1 for API/stats-schema compat only -- the old independent phonetic
+    // signal was folded into bm25_score by TextIndex::score_query() (v0.16;
+    // see fts_w_metaphone).
     float vec_score  = -1.0f;
     float bm25_score = -1.0f;
     float phon_score = -1.0f;

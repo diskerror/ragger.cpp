@@ -78,7 +78,6 @@ const std::unordered_map<std::string_view, float Config::*>& float_fields() {
         {"default_min_score",       &Config::default_min_score},
         {"bm25_weight",             &Config::bm25_weight},
         {"vector_weight",           &Config::vector_weight},
-        {"phon_weight",             &Config::phon_weight},
         {"fts_w_unigram",           &Config::fts_w_unigram},
         {"fts_w_bigram",            &Config::fts_w_bigram},
         {"fts_w_metaphone",         &Config::fts_w_metaphone},

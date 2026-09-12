@@ -1,7 +1,8 @@
 # Search & RAG
 
-Ragger uses **hybrid RAG with BM25 + dense retrieval** — combining keyword
-matching with semantic vector search for better recall.
+Ragger uses **hybrid RAG with a custom TF-IDF text index + dense retrieval**
+— combining keyword/phonetic matching with semantic vector search for
+better recall.
 
 ## How It Works
 
@@ -12,7 +13,10 @@ to a minimum size, never split mid-sentence). Each chunk is:
 
 1. Embedded into a 384-dimensional vector using a local sentence-transformer
    model (`all-MiniLM-L6-v2`)
-2. Indexed for BM25 keyword search via SQLite's built-in FTS5 (no external services)
+2. Tokenized into stemmed unigrams and within-sentence bigrams, each paired
+   with a Double Metaphone phonetic code, and indexed into Ragger's own
+   `terms` / `<table>_terms` tables (v0.16 — replaces the older SQLite FTS5 +
+   phonetic-sidecar design; see "Custom Text Index" below)
 3. Stored alongside the original text and metadata
 
 Imported document chunks include heading context prepended to the text
@@ -21,17 +25,19 @@ using `»` separators for deeper nesting.
 
 ### 2. Retrieval
 
-At query time, the query is embedded with the same model. Two scores are
-computed for each document:
+At query time, the query is embedded with the same model and separately
+tokenized the same way as indexing. Two scores are computed for each document:
 
 - **Vector score:** Cosine similarity computed with Eigen3 (semantic meaning)
-- **BM25 score:** Okapi BM25 keyword relevance (exact term matching)
+- **Text-index score:** TF-IDF over stemmed unigrams/bigrams (exact term
+  matching), with Double Metaphone tokens blended in so misspelled or
+  phonetically-similar queries still match (see `fts_w_metaphone`)
 
 Both scores are min-max normalized to [0,1], then blended with configurable
-weights (default: vector 8 / BM25 4 / phonetic 1 — meaning-first, with
-keyword and a gentle "sounds-like" nudge). Top-k results are returned
-ranked by the blended score; the reported score remains raw cosine
-similarity for consistency.
+weights (default: vector 8 / text-index 4 — meaning-first, with keyword and
+phonetic matching not far behind). Top-k results are returned ranked by
+the blended score; the reported score remains raw cosine similarity for
+consistency.
 
 ### 3. Generation
 
@@ -41,6 +47,37 @@ material. The LLM generates its response grounded in the retrieved text.
 This is the standard RAG pattern. Ragger handles retrieval; your LLM
 handles generation.
 
+## Custom Text Index (v0.16)
+
+Ragger dropped SQLite FTS5 (plus a separate phonetic FTS5 sidecar keyed off
+a `phon` column) in favor of a small, fully custom, hand-rolled index —
+"yours, fully understood, completely customizable" (see
+`ownCloud/Ragger/custom-search-schema.md` for the full design rationale).
+
+- **`terms`** — one flat table of every distinct token seen, unigram or
+  bigram, literal (stemmed) or metaphone, no type/flag column. They
+  self-filter: a real word and its phonetic code never collide as strings.
+- **`<table>_terms`** — one join table per text table (`turns_terms`,
+  `turn_summaries_terms`, `summaries_terms`, `decisions_terms`,
+  `documents_terms`), each `(record_id, term_id, count)`.
+- **Tokenization pipeline:** normalize → expand negated contractions
+  (`isn't` → `is not`, keeping the negation) → stopword-filter the raw word
+  → **stem** (Porter/Snowball, from the `c_lib` project) → emit the stem as
+  a literal token AND its Double Metaphone primary code as a phonetic token.
+  Bigrams pair adjacent surviving words *within one sentence only* (a
+  `.!?` always breaks pairing) and use a separate, looser bigram stopword
+  list (see `include/lang/en.h`).
+- **No stored document-frequency column.** `df` (how many records contain a
+  term) is computed live as `COUNT(*) FROM <table>_terms WHERE term_id=?` —
+  it churns constantly, so a cached counter would just fight the churn.
+  Corpus size `N` is likewise a live `COUNT(*) FROM <table>`. Both are
+  per-table (per content type), not global.
+- **`unigram_count`/`bigram_count`** columns on each text table are the TF
+  length-normalization denominators (total unigram/bigram tokens for that
+  record).
+- Manually rebuildable any time via `ragger reindex <table|all>` — useful
+  after a tokenizer/stopword-list change, with no need to touch embeddings.
+
 ## Hybrid Search Scoring
 
 Hybrid search blends two retrieval methods:
@@ -49,9 +86,11 @@ Hybrid search blends two retrieval methods:
    *meaning* to the query, even if they don't share keywords. Good for
    paraphrasing, conceptual questions, cross-domain search.
 
-2. **Sparse retrieval (BM25):** Finds documents with exact keyword matches,
-   weighted by term frequency and document length. Good for technical terms,
-   proper nouns, acronyms.
+2. **Sparse retrieval (custom TF-IDF text index):** Finds documents with
+   exact keyword or phonetically-similar matches, weighted by term
+   frequency and per-record length. Good for technical terms, proper
+   nouns, acronyms, and typos/misspellings (via the Double Metaphone
+   phonetic layer).
 
 **Why blend?**
 
@@ -61,9 +100,9 @@ Hybrid search gets the best of both.
 
 ### Score Normalization
 
-Raw vector scores (cosine similarity) are already in [0,1]. Raw BM25 scores
-are unbounded. To blend them fairly, Ragger applies min-max normalization
-to BM25 scores:
+Raw vector scores (cosine similarity) are already in [0,1]. Raw text-index
+scores are unbounded. To blend them fairly, Ragger applies min-max
+normalization to text-index scores:
 
 ```
 normalized_score = (score - min) / (max - min)
@@ -74,36 +113,49 @@ configurable weights.
 
 ### Blending Weights
 
-Default blend: **vector 8 / BM25 4 / phonetic 1** ("sounds-like" via
-Double Metaphone, off by default weight 0 in older versions — now on
-lightly by default).
+Default blend: **vector 8 / text-index 4** — the text-index score itself
+already folds in unigram/bigram TF-IDF and Double Metaphone phonetic
+matching internally (see `fts_w_unigram`/`fts_w_bigram`/`fts_w_metaphone`
+below).
 
-Configure via `vector_weight`, `bm25_weight`, and `phon_weight` in `[search]`:
+Configure the overall vector-vs-text-index blend via `vector_weight` and
+`bm25_weight` in `[search]` (the name `bm25_weight` is kept for backward
+compatibility even though the scoring is no longer literally BM25):
 
 ```ini
 [search]
 vector_weight = 8
 bm25_weight   = 4
-phon_weight   = 1
+```
+
+Then tune the text index's own internal blend via `fts_w_unigram`,
+`fts_w_bigram`, and `fts_w_metaphone`:
+
+```ini
+[search]
+fts_w_unigram       = 0.3   # single-word matches
+fts_w_bigram        = 0.7   # adjacent-word-pair matches (rarer, more specific)
+fts_w_metaphone     = 1.0   # phonetic matches, relative to exact literal matches
+fts_literal_enabled = true  # set false for DMP-only (phonetic-only) scoring
 ```
 
 Weights are ratios (not percentages). They're normalized internally.
 Using integers avoids floating-point config parsing issues.
 
-**To disable BM25 or the phonetic signal:**
+**To disable the text index entirely, or just its phonetic layer:**
 
 ```ini
 [search]
-bm25_enabled = false
-phon_weight  = 0
+bm25_enabled    = false   # turn off the text index altogether
+fts_w_metaphone = 0       # keep literal matching, drop phonetic matching
 ```
 
-## BM25 Tuning
+## Text-Index Tuning
 
-Keyword relevance is computed by SQLite's built-in FTS5 `bm25()` ranking
-function, which uses fixed internal parameters (`k1` and `b`). These are not
-exposed as config — the only keyword knob is `bm25_weight`, which sets how
-much the keyword score contributes to the hybrid blend (see above).
+Keyword relevance is computed by Ragger's own TF-IDF text index (see
+"Custom Text Index" above), not an external library — the internal knobs
+(`fts_w_unigram`, `fts_w_bigram`, `fts_w_metaphone`, `fts_literal_enabled`)
+are the tuning surface, alongside the overall `bm25_weight` blend weight.
 
 ## Chunking Strategy
 

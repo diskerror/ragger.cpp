@@ -79,9 +79,18 @@ bm25_enabled      = true
 # Weights are ratios — don't need to sum to 1.0. "3 and 7" == "0.3 and 0.7"
 bm25_weight   = 4
 vector_weight = 8
-# Phonetic "sounds-like" (dolphining) weight — matches on how a phrase SOUNDS
-# (Double Metaphone) alongside meaning (vector) and keywords (bm25). 0 disables.
-phon_weight   = 1
+
+# Custom TF-IDF text index (v0.16) — replaces the old FTS5 + Double Metaphone
+# sidecar. bm25_weight above is the overall text-index blend weight (vs.
+# vector_weight); the settings below tune the index's OWN internal blend of
+# unigram vs. bigram vs. phonetic (metaphone) term matches.
+fts_w_unigram       = 0.3   # TF-IDF weight for single-word (unigram) matches
+fts_w_bigram        = 0.7   # TF-IDF weight for adjacent-word-pair (bigram) matches
+fts_w_metaphone     = 1.0   # weight for phonetic (Double Metaphone) term matches
+                            # relative to exact stemmed-literal matches. 0 disables
+                            # phonetic matching; 1 treats it as equal to literal.
+fts_literal_enabled = true  # exact stemmed-literal term matching. Disable for
+                            # DMP-only (phonetic-only) scoring, no reindex needed.
 
 # =====================================================================
 # Summarizer (inference endpoint used for L2/L3 summarization)

@@ -93,16 +93,24 @@ independently configurable; hardcoded like every other Ragger path.
 |---------------------|---------|-----------------------------------------------------------------------------|
 | `default_limit`     | `5`     | Default result count.                                                       |
 | `default_min_score` | `0.4`   | Cosine floor for returned results.                                          |
-| `bm25_enabled`      | `true`  | Blend BM25 keyword scoring into the rank.                                   |
-| `bm25_weight`       | `4`     | Weight for the BM25 signal (ratio, not percentage; integers preferred).     |
+| `bm25_enabled`      | `true`  | Blend the custom text-index score into the rank.                           |
+| `bm25_weight`       | `4`     | Weight for the text-index signal (ratio, not percentage; integers preferred). |
 | `vector_weight`     | `8`     | Weight for the cosine signal.                                               |
-| `phon_weight`       | `1`     | Weight for the phonetic "sounds-like" (Double Metaphone) signal. `0` off.   |
+| `fts_w_unigram`     | `0.3`   | Text index's internal weight for single-word (unigram) term matches.        |
+| `fts_w_bigram`      | `0.7`   | Text index's internal weight for adjacent-word-pair (bigram) term matches.   |
+| `fts_w_metaphone`   | `1.0`   | Weight for phonetic (Double Metaphone) term matches relative to exact stemmed-literal matches. `0` disables phonetic matching; `1` treats it as equal to literal. |
+| `fts_literal_enabled` | `true` | Enable exact stemmed-literal term matching. Disable for DMP-only (phonetic-only) scoring — no reindex needed, it's a scoring-time flag. |
 | `inject_data`       | `false` | Reserved — parsed and hot-reloadable, not yet wired to any search behavior. |
 | `max_search_limit`  | `0`     | Ceiling on client-requested `limit` for sub-users. `0` disables the cap.    |
 
 Weights are ratios; they're normalized internally. The default blend is
-`8` vector / `4` bm25 / `1` phon — meaning-first, with keyword and a gentle
-phonetic nudge. `phon_weight = 0` disables the sounds-like signal entirely.
+`8` vector / `4` bm25 (text-index) — meaning-first, with keyword matching
+close behind. As of v0.16, keyword/BM25 scoring is done by Ragger's own
+custom TF-IDF text index (unigrams + bigrams + Double Metaphone phonetic
+tokens, all in one flat term table) rather than SQLite FTS5 — see
+`fts_w_unigram`/`fts_w_bigram`/`fts_w_metaphone` above to tune the index's
+own internal blend. `bm25_weight` is still the name of the *overall*
+text-index-vs-vector weight for backward compatibility.
 
 ## `[summarizer]` — the only inference endpoint
 
@@ -316,8 +324,7 @@ point:
 SELECT l.id, l.query, h.rank,
        ROUND(h.score,3)      AS cos,    -- raw cosine (the reported score)
        ROUND(h.vec_score,3)  AS vec,    -- normalized vector contribution
-       ROUND(h.bm25_score,3) AS bm25,   -- normalized keyword contribution
-       ROUND(h.phon_score,3) AS phon,   -- normalized phonetic contribution
+       ROUND(h.bm25_score,3) AS bm25,   -- normalized text-index contribution
        ROUND(h.blended,2)    AS blend,  -- final weighted ranking score
        h.collection, h.snippet
 FROM lookups l
@@ -330,37 +337,36 @@ LIMIT 30;
 
 Each `hits` row records not just the final rank but **how each search signal
 contributed**, so you can judge whether a weight (`vector_weight`,
-`bm25_weight`, `phon_weight`) needs tuning — or whether a signal earns its keep
+`bm25_weight`) needs tuning — or whether a signal earns its keep
 at all:
 
 | column | meaning |
 |--------|---------|
 | `score` | Raw vector cosine similarity — the absolute "how close in meaning" number, also what the API reports. |
 | `vec_score` | The **min-max-normalized** cosine that actually fed the blend (how it competed *within this result set*). |
-| `bm25_score` | Normalized BM25 keyword contribution, or **NULL** when `bm25_enabled = false`. |
-| `phon_score` | Normalized phonetic ("sounds-like", Double Metaphone) contribution, or **NULL** when `phon_weight = 0`. |
-| `blended` | The final weighted ranking value: `vector_weight·vec + bm25_weight·bm25 + phon_weight·phon`. This is what actually ordered the results. |
+| `bm25_score` | Normalized custom-text-index contribution (TF-IDF over stemmed unigrams/bigrams, blended with Double Metaphone phonetic matches internally — see `fts_w_metaphone`), or **NULL** when `bm25_enabled = false`. |
+| `phon_score` | **Retired as an independent signal in v0.16** — always `NULL`/`-1`, kept only for schema/API compatibility with older `stats.db` rows. The phonetic contribution now lives *inside* `bm25_score` (see `fts_w_metaphone`). |
+| `blended` | The final weighted ranking value: `vector_weight·vec + bm25_weight·bm25`. This is what actually ordered the results. |
 
-A **NULL** in `bm25_score`/`phon_score` means that signal was switched off for
+A **NULL** in `bm25_score` means that signal was switched off for
 the search (so you can `AVG()`/filter without a sentinel skewing the numbers); a
 real **0.0** means the signal was active but contributed nothing for that row.
 Because each signal is normalized to `[0,1]` before weighting, the columns are
-directly comparable — e.g. a hit with a low `vec` but a high `phon` is a
-"sounds-like pulled this in" case, and one with `bm25` near 1.0 won on exact
-keywords. Example dissections:
+directly comparable — e.g. a hit with a low `vec` but a high `bm25` won mostly
+on keyword/phonetic matching rather than semantic similarity. Example
+dissections:
 
 ```sql
--- Hits where the phonetic signal was the strongest contributor:
-SELECT l.query, h.rank, h.vec_score, h.bm25_score, h.phon_score
+-- Hits where the text-index signal was the strongest contributor:
+SELECT l.query, h.rank, h.vec_score, h.bm25_score
 FROM lookups l JOIN hits h ON h.lookup_id = l.id
-WHERE h.phon_score IS NOT NULL
-  AND h.phon_score > h.vec_score AND h.phon_score > h.bm25_score
+WHERE h.bm25_score IS NOT NULL
+  AND h.bm25_score > h.vec_score
 ORDER BY l.id DESC;
 
 -- Average contribution of each signal across all logged hits:
 SELECT ROUND(AVG(vec_score),3)  AS avg_vec,
-       ROUND(AVG(bm25_score),3) AS avg_bm25,
-       ROUND(AVG(phon_score),3) AS avg_phon
+       ROUND(AVG(bm25_score),3) AS avg_bm25
 FROM hits;
 ```
 

@@ -38,7 +38,7 @@ void test_server_instantiation() {
     auto model_dir = ragger::config().resolved_model_dir();
 
     // Skip if no model
-    if (!std::filesystem::exists(model_dir + "/model.onnx")) {
+    if (!std::filesystem::exists(model_dir + "/model.onnx") && !std::filesystem::exists(model_dir + "/onnx/model.onnx")) {
         std::println(" SKIPPED (no model)");
         return;
     }

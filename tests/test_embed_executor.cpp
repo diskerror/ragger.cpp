@@ -21,7 +21,7 @@ namespace fs = std::filesystem;
 int main() {
     ragger::init_config();
     auto model_dir = ragger::config().resolved_model_dir();
-    if (!fs::exists(model_dir + "/model.onnx")) {
+    if (!fs::exists(model_dir + "/model.onnx") && !fs::exists(model_dir + "/onnx/model.onnx")) {
         std::println("test_embed_executor: SKIPPED (no model)");
         return 0;
     }

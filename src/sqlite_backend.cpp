@@ -691,7 +691,7 @@ struct SqliteBackend::Impl {
         // create_terms_schema().)
 
         // Human-readable views (datetime()-rendered timestamps,
-        // has_embedding/has_phon booleans) mirroring scripts/schema_db0.12.sql
+        // has_embedding booleans) mirroring scripts/schema_db0.12.sql
         // exactly. Always (re)created so fresh/migrated DBs converge.
         create_views();
     }
@@ -1598,8 +1598,8 @@ struct SqliteBackend::Impl {
     }
 
     /// Human-readable views mirroring scripts/schema_db0.12.sql exactly:
-    /// datetime()-rendered epoch timestamps, and has_embedding/has_phon
-    /// (0/1) collapsing the raw embedding/phon BLOB/TEXT columns. Meant to
+    /// datetime()-rendered epoch timestamps, and has_embedding (0/1)
+    /// collapsing the raw embedding BLOB column. Meant to
     /// be opened directly in a plain SQLite browser by a human. Idempotent
     /// — safe to call on every open.
     void create_views() {
@@ -2033,7 +2033,8 @@ struct SqliteBackend::Impl {
         std::string model_name = metadata.value("model", std::string(""));
         int model_id = get_or_create_model(model_name);
 
-        // FTS5 sync triggers index the row from text/tags — no manual step.
+        // Custom text index (v0.16): index_record() below tokenizes text and
+        // maintains terms/*_terms/count columns — no FTS5 triggers involved.
         Stmt s(db,
             "INSERT INTO summaries (text, embedding_version, embedding, level, tags, created_at, model_id, updated_at) "
             "VALUES (?,?,?,?,?,?,?,?)");
