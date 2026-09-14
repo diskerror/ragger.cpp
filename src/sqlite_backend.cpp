@@ -1422,11 +1422,29 @@ struct SqliteBackend::Impl {
         try {
             Stmt(db, "BEGIN").exec();
 
+            // Repair dangling session references BEFORE baselining FK state.
+            // These columns are declared ON DELETE SET NULL, so a NULL here is
+            // precisely what the schema intends when a session goes away -- the
+            // clause simply never fired (the session was deleted while FK
+            // enforcement was off). The summary/turn is the valuable record; the
+            // session pointer is not. Null the stale pointer and KEEP the row,
+            // rather than deleting content to satisfy a constraint.
+            for (const char* t : {"summaries", "turns", "turn_summaries"}) {
+                const std::string sql = std::format(
+                    "UPDATE {} SET session_id = NULL WHERE session_id IS NOT NULL "
+                    "AND session_id NOT IN (SELECT session_id FROM sessions)", t);
+                exec(sql);
+                if (int n = sqlite3_changes(db); n > 0) {
+                    Diskerror::Logger::info(std::format(
+                        "  {}: cleared {} dangling session_id reference(s) "
+                        "(ON DELETE SET NULL never fired; rows preserved)", t, n));
+                }
+            }
+
             // Baseline the FK violations that ALREADY exist in this DB, so the
-            // post-rebuild check can flag only NEW orphans. Real 0.15 DBs can
-            // carry pre-existing violations (e.g. a summaries row whose session
-            // was deleted while enforcement was off); those are a separate data
-            // issue and must not abort an otherwise-correct schema migration.
+            // post-rebuild check can flag only NEW orphans. Anything still here
+            // after the repair above is a pre-existing data issue unrelated to
+            // this migration and must not abort an otherwise-correct upgrade.
             auto fk_violations = [this]() {
                 std::multiset<std::string> out;
                 Stmt s(db, "PRAGMA foreign_key_check");
