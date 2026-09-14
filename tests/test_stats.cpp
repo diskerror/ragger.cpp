@@ -20,7 +20,7 @@
 
 #include <sqlite3.h>
 
-#include <cassert>
+#include "check.h"
 #include <cmath>
 #include <filesystem>
 #include <limits>
@@ -43,9 +43,9 @@ static void cleanup() {
 // Tiny read-only helper: run a single-int aggregate query against the db.
 static int scalar(const std::string& sql) {
     sqlite3* db = nullptr;
-    assert(sqlite3_open(DB.c_str(), &db) == SQLITE_OK);
+    CHECK(sqlite3_open(DB.c_str(), &db) == SQLITE_OK);
     sqlite3_stmt* st = nullptr;
-    assert(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+    CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
     int out = -1;
     if (sqlite3_step(st) == SQLITE_ROW) out = sqlite3_column_int(st, 0);
     sqlite3_finalize(st);
@@ -56,9 +56,9 @@ static int scalar(const std::string& sql) {
 // Read a single text cell.
 static std::string scalar_text(const std::string& sql) {
     sqlite3* db = nullptr;
-    assert(sqlite3_open(DB.c_str(), &db) == SQLITE_OK);
+    CHECK(sqlite3_open(DB.c_str(), &db) == SQLITE_OK);
     sqlite3_stmt* st = nullptr;
-    assert(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+    CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
     std::string out;
     if (sqlite3_step(st) == SQLITE_ROW) {
         auto* p = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
@@ -72,9 +72,9 @@ static std::string scalar_text(const std::string& sql) {
 // Read a single REAL cell; returns NaN when the cell is NULL.
 static double scalar_real(const std::string& sql) {
     sqlite3* db = nullptr;
-    assert(sqlite3_open(DB.c_str(), &db) == SQLITE_OK);
+    CHECK(sqlite3_open(DB.c_str(), &db) == SQLITE_OK);
     sqlite3_stmt* st = nullptr;
-    assert(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+    CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
     double out = std::numeric_limits<double>::quiet_NaN();
     if (sqlite3_step(st) == SQLITE_ROW) {
         if (sqlite3_column_type(st, 0) != SQLITE_NULL)
@@ -104,11 +104,11 @@ int main() {
     cleanup();
     {
         StatsLogger s(DB);
-        assert(s.enabled());
+        CHECK(s.enabled());
     }
-    assert(fs::exists(DB));
+    CHECK(fs::exists(DB));
     // Both tables exist.
-    assert(scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+    CHECK(scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
                   "AND name IN ('lookups','hits')") == 2);
     std::println("    OK");
 
@@ -126,20 +126,20 @@ int main() {
         };
         s.log_lookup("the cost of obsession", 5, 0.3f, results, 12.5, /*top_n=*/3);
     }
-    assert(scalar("SELECT COUNT(*) FROM lookups") == 1);
+    CHECK(scalar("SELECT COUNT(*) FROM lookups") == 1);
     // top_n=3 → only 3 hits stored even though 5 results were returned.
-    assert(scalar("SELECT COUNT(*) FROM hits") == 3);
+    CHECK(scalar("SELECT COUNT(*) FROM hits") == 3);
     // result_count records the FULL set (5), not the capped hit count.
-    assert(scalar("SELECT result_count FROM lookups") == 5);
+    CHECK(scalar("SELECT result_count FROM lookups") == 5);
     // Query text round-trips.
-    assert(scalar_text("SELECT query FROM lookups") == "the cost of obsession");
+    CHECK(scalar_text("SELECT query FROM lookups") == "the cost of obsession");
     // Ranks are 1..3 in score order.
-    assert(scalar("SELECT memory_id FROM hits WHERE rank=1") == 101);
-    assert(scalar("SELECT memory_id FROM hits WHERE rank=3") == 103);
+    CHECK(scalar("SELECT memory_id FROM hits WHERE rank=1") == 101);
+    CHECK(scalar("SELECT memory_id FROM hits WHERE rank=3") == 103);
     // Collection label extracted from metadata (collection/kind/level fallback).
-    assert(scalar_text("SELECT collection FROM hits WHERE rank=1") == "doc");
-    assert(scalar_text("SELECT collection FROM hits WHERE rank=2") == "summary");
-    assert(scalar_text("SELECT collection FROM hits WHERE rank=3") == "decision");
+    CHECK(scalar_text("SELECT collection FROM hits WHERE rank=1") == "doc");
+    CHECK(scalar_text("SELECT collection FROM hits WHERE rank=2") == "summary");
+    CHECK(scalar_text("SELECT collection FROM hits WHERE rank=3") == "decision");
     std::println("    OK");
 
     // --- 3. top_n<=0 stores ALL results --------------------------------
@@ -152,9 +152,9 @@ int main() {
         };
         s.log_lookup("q", 10, 0.0f, results, -1.0, /*top_n=*/0);
     }
-    assert(scalar("SELECT COUNT(*) FROM hits") == 4);
+    CHECK(scalar("SELECT COUNT(*) FROM hits") == 4);
     // elapsed_ms negative → stored as NULL.
-    assert(scalar("SELECT COUNT(*) FROM lookups WHERE elapsed_ms IS NULL") == 1);
+    CHECK(scalar("SELECT COUNT(*) FROM lookups WHERE elapsed_ms IS NULL") == 1);
     std::println("    OK");
 
     // --- 4. Empty result set: lookup row, zero hits --------------------
@@ -164,9 +164,9 @@ int main() {
         StatsLogger s(DB);
         s.log_lookup("no hits", 5, 0.9f, {}, 3.0);
     }
-    assert(scalar("SELECT COUNT(*) FROM lookups") == 1);
-    assert(scalar("SELECT result_count FROM lookups") == 0);
-    assert(scalar("SELECT COUNT(*) FROM hits") == 0);
+    CHECK(scalar("SELECT COUNT(*) FROM lookups") == 1);
+    CHECK(scalar("SELECT result_count FROM lookups") == 0);
+    CHECK(scalar("SELECT COUNT(*) FROM hits") == 0);
     std::println("    OK");
 
     // --- 5. Multiple lookups accumulate & FK links hold ----------------
@@ -177,10 +177,10 @@ int main() {
         s.log_lookup("first",  3, 0.0f, {mk(1, "x", 0.5f)}, 1.0);
         s.log_lookup("second", 3, 0.0f, {mk(2, "y", 0.6f), mk(3, "z", 0.4f)}, 2.0);
     }
-    assert(scalar("SELECT COUNT(*) FROM lookups") == 2);
-    assert(scalar("SELECT COUNT(*) FROM hits") == 3);
+    CHECK(scalar("SELECT COUNT(*) FROM lookups") == 2);
+    CHECK(scalar("SELECT COUNT(*) FROM hits") == 3);
     // Every hit points at a real lookup row (no orphans).
-    assert(scalar("SELECT COUNT(*) FROM hits h "
+    CHECK(scalar("SELECT COUNT(*) FROM hits h "
                   "LEFT JOIN lookups l ON h.lookup_id = l.id "
                   "WHERE l.id IS NULL") == 0);
     std::println("    OK");
@@ -199,14 +199,14 @@ int main() {
         s.log_lookup("signal probe", 5, 0.0f, {a, b}, 5.0, /*top_n=*/3);
     }
     // Active signals round-trip as their stored values.
-    assert(std::abs(scalar_real("SELECT vec_score  FROM hits WHERE memory_id=201") - 0.9) < 1e-6);
-    assert(std::abs(scalar_real("SELECT bm25_score FROM hits WHERE memory_id=201") - 0.5) < 1e-6);
-    assert(std::abs(scalar_real("SELECT phon_score FROM hits WHERE memory_id=201") - 0.2) < 1e-6);
-    assert(std::abs(scalar_real("SELECT blended    FROM hits WHERE memory_id=201") - 8.9) < 1e-6);
+    CHECK(std::abs(scalar_real("SELECT vec_score  FROM hits WHERE memory_id=201") - 0.9) < 1e-6);
+    CHECK(std::abs(scalar_real("SELECT bm25_score FROM hits WHERE memory_id=201") - 0.5) < 1e-6);
+    CHECK(std::abs(scalar_real("SELECT phon_score FROM hits WHERE memory_id=201") - 0.2) < 1e-6);
+    CHECK(std::abs(scalar_real("SELECT blended    FROM hits WHERE memory_id=201") - 8.9) < 1e-6);
     // Inactive phon (-1) is stored as NULL, not -1.
-    assert(scalar("SELECT phon_score IS NULL FROM hits WHERE memory_id=202") == 1);
+    CHECK(scalar("SELECT phon_score IS NULL FROM hits WHERE memory_id=202") == 1);
     // ...while its active vec/bm25 still land.
-    assert(std::abs(scalar_real("SELECT vec_score FROM hits WHERE memory_id=202") - 0.4) < 1e-6);
+    CHECK(std::abs(scalar_real("SELECT vec_score FROM hits WHERE memory_id=202") - 0.4) < 1e-6);
     std::println("    OK");
 
     cleanup();

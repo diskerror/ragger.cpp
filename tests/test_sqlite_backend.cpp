@@ -11,7 +11,7 @@
 #include "auth.h"
 #include "util/time.h"
 #include <sqlite3.h>
-#include <cassert>
+#include "check.h"
 #include <filesystem>
 #include <iostream>
 #include <print>
@@ -39,13 +39,13 @@ void test_store_and_count(ragger::Embedder& emb) {
     cleanup();
     ragger::SqliteBackend db(emb, TEMP_DB);
 
-    assert(db.count() == 0);
+    CHECK(db.count() == 0);
 
     db.store("Hello world, this is a test memory.");
-    assert(db.count() == 1);
+    CHECK(db.count() == 1);
 
     db.store("Another memory about something else.");
-    assert(db.count() == 2);
+    CHECK(db.count() == 2);
 
     db.close();
     cleanup();
@@ -63,13 +63,13 @@ void test_store_with_metadata(ragger::Embedder& emb) {
         {"tags", {"test", "unit"}}
     };
     std::string id = db.store("Metadata round-trip test.", meta);
-    assert(!id.empty());
+    CHECK(!id.empty());
 
     auto all = db.load_all();
-    assert(all.size() == 1);
-    assert(all[0].metadata["level"] == "session");
+    CHECK(all.size() == 1);
+    CHECK(all[0].metadata["level"] == "session");
     // Tags stored as comma-separated string in the tags column.
-    assert(all[0].metadata["tags"] == "test,unit");
+    CHECK(all[0].metadata["tags"] == "test,unit");
 
     db.close();
     cleanup();
@@ -84,9 +84,9 @@ void test_search_basic(ragger::Embedder& emb) {
     db.store("Machine learning uses neural networks for prediction.");
 
     auto resp = db.search("What is the capital of France?", 3, 0.0f);
-    assert(!resp.results.empty());
+    CHECK(!resp.results.empty());
     // The France/Paris doc should be the top result
-    assert(resp.results[0].text.find("Paris") != std::string::npos);
+    CHECK(resp.results[0].text.find("Paris") != std::string::npos);
 
     db.close();
     cleanup();
@@ -116,8 +116,8 @@ void test_search_fts_special_chars(ragger::Embedder& emb) {
 
     // A normal keyword still resolves through the hybrid path.
     auto resp = db.search("lightweight database", 5, 0.0f);
-    assert(!resp.results.empty());
-    assert(resp.results[0].text.find("SQLite") != std::string::npos);
+    CHECK(!resp.results.empty());
+    CHECK(resp.results[0].text.find("SQLite") != std::string::npos);
 
     db.close();
     cleanup();
@@ -132,7 +132,7 @@ void test_search_min_score(ragger::Embedder& emb) {
 
     // Very high min_score should return no results for a vague query
     auto resp = db.search("random unrelated gibberish xyzzy", 5, 0.99f);
-    assert(resp.results.empty());
+    CHECK(resp.results.empty());
 
     db.close();
     cleanup();
@@ -165,7 +165,7 @@ void test_search_min_score_before_topk(ragger::Embedder& emb) {
 
     // (1) Invariant: nothing below threshold is ever returned.
     for (const auto& r : resp.results)
-        assert(r.score >= thr);
+        CHECK(r.score >= thr);
 
     // (2) Count how many candidates actually clear the threshold by asking for
     // a huge limit; with the fix, a smaller limit returns exactly
@@ -173,7 +173,7 @@ void test_search_min_score_before_topk(ragger::Embedder& emb) {
     auto all = db.search("What is the capital of France?", 100, thr);
     size_t qualifying = all.results.size();
     size_t expected = std::min<size_t>(5, qualifying);
-    assert(resp.results.size() == expected);
+    CHECK(resp.results.size() == expected);
 
     db.close();
     cleanup();
@@ -188,7 +188,7 @@ void test_search_limit(ragger::Embedder& emb) {
     }
 
     auto resp = db.search("test document", 3, 0.0f);
-    assert((int)resp.results.size() <= 3);
+    CHECK((int)resp.results.size() <= 3);
 
     db.close();
     cleanup();
@@ -203,7 +203,7 @@ void test_load_all(ragger::Embedder& emb) {
     db.store("Third memory.");
 
     auto all = db.load_all();
-    assert(all.size() == 3);
+    CHECK(all.size() == 3);
 
     db.close();
     cleanup();
@@ -220,11 +220,11 @@ void test_rebuild_embeddings(ragger::Embedder& emb) {
 
     // Rebuild all embeddings
     int count = db.rebuild_embeddings(emb);
-    assert(count == 3);
+    CHECK(count == 3);
 
     // Search should still work after rebuild
     auto resp = db.search("embedding test", 5, 0.0f);
-    assert(!resp.results.empty());
+    CHECK(!resp.results.empty());
 
     db.close();
     cleanup();
@@ -236,7 +236,7 @@ void test_rebuild_embeddings_empty_db(ragger::Embedder& emb) {
 
     // Rebuild on empty DB should return 0
     int count = db.rebuild_embeddings(emb);
-    assert(count == 0);
+    CHECK(count == 0);
 
     db.close();
     cleanup();
@@ -255,8 +255,8 @@ void test_rebuild_embeddings_count_matches(ragger::Embedder& emb) {
     int rebuild_count = db.rebuild_embeddings(emb);
     
     // Rebuild count should match total count
-    assert(rebuild_count == total_count);
-    assert(rebuild_count == 7);
+    CHECK(rebuild_count == total_count);
+    CHECK(rebuild_count == 7);
 
     db.close();
     cleanup();
@@ -287,28 +287,28 @@ void test_search_text_only(ragger::Embedder& emb) {
     // turn_summaries table would let the bug through.
     db.finalize_turn_summary(turn_id, "User asked about the harpsichord.",
                              "test-model");
-    assert(db.turn_summary_exists(turn_id));
+    CHECK(db.turn_summary_exists(turn_id));
 
     // Must not throw, and must actually find the keyword across corpora.
     auto resp = db.search_text_only("harpsichord", 10);
-    assert(resp.timing.contains("text_only"));
-    assert(!resp.results.empty());
+    CHECK(resp.timing.contains("text_only"));
+    CHECK(!resp.results.empty());
 
     // Every hit carries a source label and no vector signal.
     bool saw_turn_summary = false;
     for (const auto& r : resp.results) {
-        assert(r.metadata.contains("source"));
-        assert(r.vec_score < 0.0f);
+        CHECK(r.metadata.contains("source"));
+        CHECK(r.vec_score < 0.0f);
         if (r.metadata["source"] == "turn_summary") {
             saw_turn_summary = true;
-            assert(!r.timestamp.empty());   // resolved from turn_datetime
+            CHECK(!r.timestamp.empty());   // resolved from turn_datetime
         }
     }
-    assert(saw_turn_summary);
+    CHECK(saw_turn_summary);
 
     // A query that matches nothing returns cleanly rather than throwing.
     auto none = db.search_text_only("zzzzznotawordzzzzz", 5);
-    assert(none.results.empty());
+    CHECK(none.results.empty());
 
     db.close();
     cleanup();
@@ -321,7 +321,7 @@ void test_search_timing(ragger::Embedder& emb) {
     db.store("Timing test document.");
     auto resp = db.search("timing", 5, 0.0f);
     // Timing JSON should have keys
-    assert(resp.timing.contains("embedding_ms") || resp.timing.contains("total_ms") ||
+    CHECK(resp.timing.contains("embedding_ms") || resp.timing.contains("total_ms") ||
            !resp.timing.empty());
 
     db.close();
@@ -335,22 +335,22 @@ void test_delete_memory(ragger::Embedder& emb) {
     // Store a memory
     std::string id1 = db.store("Memory to delete.");
     std::string id2 = db.store("Memory to keep.");
-    assert(db.count() == 2);
+    CHECK(db.count() == 2);
 
     // Delete the first memory
     bool deleted = db.delete_memory(std::stoi(id1));
-    assert(deleted);
-    assert(db.count() == 1);
+    CHECK(deleted);
+    CHECK(db.count() == 1);
 
     // Verify the correct one was deleted
     auto all = db.load_all();
-    assert(all.size() == 1);
-    assert(all[0].text == "Memory to keep.");
+    CHECK(all.size() == 1);
+    CHECK(all[0].text == "Memory to keep.");
 
     // Try deleting non-existent ID
     deleted = db.delete_memory(99999);
-    assert(!deleted);
-    assert(db.count() == 1);
+    CHECK(!deleted);
+    CHECK(db.count() == 1);
 
     db.close();
     cleanup();
@@ -364,26 +364,26 @@ void test_delete_batch(ragger::Embedder& emb) {
     std::string id1 = db.store("First memory.");
     std::string id2 = db.store("Second memory.");
     std::string id3 = db.store("Third memory.");
-    assert(db.count() == 3);
+    CHECK(db.count() == 3);
 
     // Delete 2 by ID
     std::vector<int> to_delete = {std::stoi(id1), std::stoi(id3)};
     int deleted_count = db.delete_batch(to_delete);
-    assert(deleted_count == 2);
-    assert(db.count() == 1);
+    CHECK(deleted_count == 2);
+    CHECK(db.count() == 1);
 
     // Verify the correct one remains
     auto all = db.load_all();
-    assert(all.size() == 1);
-    assert(all[0].text == "Second memory.");
+    CHECK(all.size() == 1);
+    CHECK(all[0].text == "Second memory.");
 
     // Empty vector → returns 0
     deleted_count = db.delete_batch({});
-    assert(deleted_count == 0);
+    CHECK(deleted_count == 0);
 
     // Delete with non-existent IDs
     deleted_count = db.delete_batch({99999, 88888});
-    assert(deleted_count == 0);
+    CHECK(deleted_count == 0);
 
     db.close();
     cleanup();
@@ -400,30 +400,30 @@ void test_search_by_metadata(ragger::Embedder& emb) {
 
     // Filter by level
     auto results = db.search_by_metadata({{"level", "turn"}});
-    assert(results.size() == 2);
-    for (auto& r : results) assert(r.metadata["level"] == "turn");
+    CHECK(results.size() == 2);
+    for (auto& r : results) CHECK(r.metadata["level"] == "turn");
 
     // Filter by tag (LIKE on the tags column)
     results = db.search_by_metadata({{"tags", "vehicle"}});
-    assert(results.size() == 1);
-    assert(results[0].text == "Car note.");
+    CHECK(results.size() == 1);
+    CHECK(results[0].text == "Car note.");
 
     // AND across columns
     results = db.search_by_metadata({{"level", "turn"}, {"tags", "tropical"}});
-    assert(results.size() == 1);
-    assert(results[0].text == "Banana note.");
+    CHECK(results.size() == 1);
+    CHECK(results[0].text == "Banana note.");
 
     // Limit respected
     results = db.search_by_metadata({{"level", "turn"}}, 1);
-    assert(results.size() == 1);
+    CHECK(results.size() == 1);
 
     // No matches → empty
     results = db.search_by_metadata({{"level", "project"}});
-    assert(results.empty());
+    CHECK(results.empty());
 
     // Unsupported key under lean schema → empty
     results = db.search_by_metadata({{"color", "red"}});
-    assert(results.empty());
+    CHECK(results.empty());
 
     db.close();
     cleanup();
@@ -436,31 +436,31 @@ void test_user_management(ragger::Embedder& emb) {
 
     // create_user → returns valid ID
     int user_id = umgr.create_user("testuser", "abc123hash");
-    assert(user_id > 0);
+    CHECK(user_id > 0);
 
     int admin_id = umgr.create_user("adminuser", "def456hash");
-    assert(admin_id > 0);
-    assert(admin_id != user_id);
+    CHECK(admin_id > 0);
+    CHECK(admin_id != user_id);
 
     // get_user_by_token_hash → finds created user
     auto user_opt = umgr.get_user_by_token_hash("abc123hash");
-    assert(user_opt.has_value());
-    assert(user_opt->username == "testuser");
-    assert(user_opt->token_hash == "abc123hash");
+    CHECK(user_opt.has_value());
+    CHECK(user_opt->username == "testuser");
+    CHECK(user_opt->token_hash == "abc123hash");
 
     // get_user_by_username → finds created user
     user_opt = umgr.get_user_by_username("adminuser");
-    assert(user_opt.has_value());
-    assert(user_opt->username == "adminuser");
-    assert(user_opt->token_hash == "def456hash");
+    CHECK(user_opt.has_value());
+    CHECK(user_opt->username == "adminuser");
+    CHECK(user_opt->token_hash == "def456hash");
 
     // get_user_by_token_hash with wrong hash → nullopt
     user_opt = umgr.get_user_by_token_hash("wronghash");
-    assert(!user_opt.has_value());
+    CHECK(!user_opt.has_value());
 
     // get_user_by_username with wrong name → nullopt
     user_opt = umgr.get_user_by_username("nonexistent");
-    assert(!user_opt.has_value());
+    CHECK(!user_opt.has_value());
 
     cleanup();
 }
@@ -476,19 +476,19 @@ void test_delete_respects_keep(ragger::Embedder& emb) {
     auto id = db.store("protected memory", meta);
     
     // Try to delete — should return false
-    assert(!db.delete_memory(std::stoi(id)));
+    CHECK(!db.delete_memory(std::stoi(id)));
     
     // Memory should still exist
-    assert(db.count() == initial_count + 1);
+    CHECK(db.count() == initial_count + 1);
     
     // Store without keep
     auto id2 = db.store("deletable memory", {{"collection", "memory"}});
     
     // Delete should work
-    assert(db.delete_memory(std::stoi(id2)));
+    CHECK(db.delete_memory(std::stoi(id2)));
     
     // Only the protected one should remain
-    assert(db.count() == initial_count + 1);
+    CHECK(db.count() == initial_count + 1);
     
     db.close();
     cleanup();
@@ -512,8 +512,8 @@ void test_delete_batch_respects_keep(ragger::Embedder& emb) {
     int deleted = db.delete_batch({std::stoi(id1), std::stoi(id2), std::stoi(id3)});
     
     // Only 2 should be deleted (not the keep one)
-    assert(deleted == 2);
-    assert(db.count() == initial_count - 2);
+    CHECK(deleted == 2);
+    CHECK(db.count() == initial_count - 2);
     
     // Verify the protected one remains
     auto all = db.load_all();
@@ -524,7 +524,7 @@ void test_delete_batch_respects_keep(ragger::Embedder& emb) {
             break;
         }
     }
-    assert(found_protected);
+    CHECK(found_protected);
     
     db.close();
     cleanup();
@@ -536,7 +536,7 @@ void test_timestamp_format(ragger::Embedder& emb) {
 
     db.store("Timestamp format test.");
     auto all = db.load_all();
-    assert(all.size() == 1);
+    CHECK(all.size() == 1);
 
     // `summaries.created_at` is now an INTEGER epoch (v0.12.0 migration),
     // not the old "YYYY-MM-DD HH:MM:SS" TEXT format. load_all() reads the
@@ -545,13 +545,13 @@ void test_timestamp_format(ragger::Embedder& emb) {
     // that it's a plausible "recent" epoch value, rather than asserting the
     // old fixed-19-char formatted-string length.
     auto& ts = all[0].timestamp;
-    assert(!ts.empty());
-    assert(ts.find_first_not_of("0123456789") == std::string::npos);
+    CHECK(!ts.empty());
+    CHECK(ts.find_first_not_of("0123456789") == std::string::npos);
     int64_t epoch_val = std::stoll(ts);
     int64_t now_epoch = static_cast<int64_t>(std::time(nullptr));
-    assert(epoch_val > 0);
-    assert(epoch_val <= now_epoch + 5);       // not in the future
-    assert(now_epoch - epoch_val < 300);      // stored "just now"
+    CHECK(epoch_val > 0);
+    CHECK(epoch_val <= now_epoch + 5);       // not in the future
+    CHECK(now_epoch - epoch_val < 300);      // stored "just now"
 
     db.close();
     cleanup();
@@ -569,29 +569,29 @@ void test_v2_summaries_backing(ragger::Embedder& emb) {
                  {{"level", "session"}, {"tags", {"note"}}});
 
         auto all = db.load_all();
-        assert(all.size() == 1);
-        assert(all[0].metadata["level"] == "session");
-        assert(all[0].metadata["tags"] == "note");
+        CHECK(all.size() == 1);
+        CHECK(all[0].metadata["level"] == "session");
+        CHECK(all[0].metadata["tags"] == "note");
         db.close();
     }
 
     // Inspect the raw DB: the row must be in `summaries`, and the legacy
     // `memories` table must not exist in a fresh v2 database.
     sqlite3* raw = nullptr;
-    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
 
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM summaries", -1, &st, nullptr);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_int(st, 0) == 1);
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_column_int(st, 0) == 1);
     sqlite3_finalize(st);
 
     sqlite3_prepare_v2(raw,
         "SELECT COUNT(*) FROM sqlite_master "
         "WHERE type='table' AND name='memories'",
         -1, &st, nullptr);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_int(st, 0) == 0);   // no legacy table in fresh DB
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_column_int(st, 0) == 0);   // no legacy table in fresh DB
     sqlite3_finalize(st);
 
     sqlite3_close(raw);
@@ -616,7 +616,7 @@ void test_store_document(ragger::Embedder& emb) {
         doc.chunk_index = 1;
 
         doc_id = db.store_document(doc);
-        assert(doc_id > 0);
+        CHECK(doc_id > 0);
         db.close();
     }
 
@@ -625,7 +625,7 @@ void test_store_document(ragger::Embedder& emb) {
     // normalization migration; documents (chunks) hold only text/chunk_index
     // + a document_source_id FK.
     sqlite3* raw = nullptr;
-    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
 
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(raw,
@@ -635,22 +635,22 @@ void test_store_document(ragger::Embedder& emb) {
         "WHERE d.document_id = ?",
         -1, &st, nullptr);
     sqlite3_bind_int(st, 1, doc_id);
-    assert(sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
 
     auto col = [&](int i) {
         const char* s = reinterpret_cast<const char*>(sqlite3_column_text(st, i));
         return std::string(s ? s : "");
     };
     std::string text = col(0);
-    assert(col(1) == "Cell Biology Primer");
-    assert(col(2) == "biology,cells");
-    assert(sqlite3_column_int(st, 3) == 2021);
-    assert(col(4) == "/tmp/primer.md");
-    assert(sqlite3_column_int(st, 5) == 1);
+    CHECK(col(1) == "Cell Biology Primer");
+    CHECK(col(2) == "biology,cells");
+    CHECK(sqlite3_column_int(st, 3) == 2021);
+    CHECK(col(4) == "/tmp/primer.md");
+    CHECK(sqlite3_column_int(st, 5) == 1);
 
     // Grouping metadata must NOT be embedded into the body text.
-    assert(text == "The mitochondria is the powerhouse of the cell.");
-    assert(text.find("Cell Biology Primer") == std::string::npos);
+    CHECK(text == "The mitochondria is the powerhouse of the cell.");
+    CHECK(text.find("Cell Biology Primer") == std::string::npos);
 
     sqlite3_finalize(st);
     sqlite3_close(raw);
@@ -668,19 +668,19 @@ void test_store_turn(ragger::Embedder& emb) {
         // Complete turn in one call — embedded immediately.
         int t1 = db.store_turn("What is the capital of France?",
                                "The capital of France is Paris.", "test-model");
-        assert(t1 > 0);
+        CHECK(t1 > 0);
 
         // Partial turn (no assistant yet) → embedding NULL → finalize fills it.
         int t2 = db.store_turn("Tell me about photosynthesis.", "", "test-model",
                                /*defer_embedding=*/true);
-        assert(t2 > 0 && t2 != t1);
-        assert(db.finalize_turn(t2, "Plants convert sunlight into energy.",
+        CHECK(t2 > 0 && t2 != t1);
+        CHECK(db.finalize_turn(t2, "Plants convert sunlight into energy.",
                                 "test-model"));
         db.close();
     }
 
     sqlite3* raw = nullptr;
-    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
 
     // Both rows present, both have assistant_text and a non-NULL embedding,
     // and a model_id resolved to the 'test-model' models row.
@@ -696,28 +696,28 @@ void test_store_turn(ragger::Embedder& emb) {
         const char* a = reinterpret_cast<const char*>(sqlite3_column_text(st, 1));
         int emb_bytes = sqlite3_column_int(st, 2);
         const char* model = reinterpret_cast<const char*>(sqlite3_column_text(st, 3));
-        assert(u && a && a[0] != '\0');          // assistant filled in
+        CHECK(u && a && a[0] != '\0');          // assistant filled in
         // Embedded as f16, payload-only (db_version 0.15+; no version byte —
         // that tag lives in the sibling embedding_version column now):
         // 384 dims * 2 bytes/dim.
-        assert(emb_bytes == 384 * 2);
-        assert(model && std::string(model) == "test-model");
+        CHECK(emb_bytes == 384 * 2);
+        CHECK(model && std::string(model) == "test-model");
         ++rows;
     }
     sqlite3_finalize(st);
-    assert(rows == 2);
+    CHECK(rows == 2);
 
     // The model row was created exactly once, not duplicated.
     sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM models WHERE name='test-model'",
                        -1, &st, nullptr);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_int(st, 0) == 1);
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_column_int(st, 0) == 1);
     sqlite3_finalize(st);
 
     // finalize_turn on a non-existent id returns false.
     {
         ragger::SqliteBackend db2(emb, TEMP_DB);
-        assert(!db2.finalize_turn(99999, "x", "test-model"));
+        CHECK(!db2.finalize_turn(99999, "x", "test-model"));
         db2.close();
     }
 
@@ -740,7 +740,7 @@ void test_store_turn_dedup(ragger::Embedder& emb) {
         t1 = db.store_turn("Explain the general_search recipe.",
                                "It searches summaries.", "model-a",
                                /*defer_embedding=*/false, "sessionA");
-        assert(t1 > 0);
+        CHECK(t1 > 0);
 
         // Sleep across a second boundary: local_timestamp() has second-level
         // resolution, so without a real gap here old_ts would trivially equal
@@ -753,7 +753,7 @@ void test_store_turn_dedup(ragger::Embedder& emb) {
         int t2 = db.store_turn("Explain the general_search recipe.",
                                "It searches summaries, documents, and decisions.",
                                "model-b", /*defer_embedding=*/false, "sessionB");
-        assert(t2 == t1);  // same row id returned — keep-latest
+        CHECK(t2 == t1);  // same row id returned — keep-latest
 
         // Cross a second boundary before the next insert: local_timestamp()
         // has second-level resolution, and turn3 landing in the same second
@@ -765,20 +765,20 @@ void test_store_turn_dedup(ragger::Embedder& emb) {
         // A genuinely different prompt still inserts a fresh row.
         int t3 = db.store_turn("What about decisions?", "They are first-class.",
                                "model-b", /*defer_embedding=*/false, "sessionB");
-        assert(t3 != t1);
+        CHECK(t3 != t1);
 
         db.close();
     }
 
     sqlite3* raw = nullptr;
-    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
 
     // Exactly two turn rows: the deduped pair collapsed to one, plus the
     // distinct third prompt.
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM turns", -1, &st, nullptr);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_int(st, 0) == 2);
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_column_int(st, 0) == 2);
     sqlite3_finalize(st);
 
     // The surviving deduped row carries the LATEST assistant_text and is not
@@ -787,13 +787,13 @@ void test_store_turn_dedup(ragger::Embedder& emb) {
         "SELECT assistant_text FROM turns "
         "WHERE user_text = 'Explain the general_search recipe.'",
         -1, &st, nullptr);
-    assert(sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
     {
         const char* a = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
-        assert(a && std::string(a).find("decisions") != std::string::npos);
+        CHECK(a && std::string(a).find("decisions") != std::string::npos);
     }
     // Only one such row (no duplicate).
-    assert(sqlite3_step(st) != SQLITE_ROW);
+    CHECK(sqlite3_step(st) != SQLITE_ROW);
     sqlite3_finalize(st);
 
     // Custom terms index agrees: the prompt's distinctive stemmed bigram term
@@ -806,8 +806,8 @@ void test_store_turn_dedup(ragger::Embedder& emb) {
         "JOIN terms t ON t.term_id = tt.term_id "
         "WHERE t.term = 'genera_search'",
         -1, &st, nullptr);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_int(st, 0) == 1);
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_column_int(st, 0) == 1);
     sqlite3_finalize(st);
 
     // Regression: a dedup that moves the turn's created_at must not leave a
@@ -819,8 +819,8 @@ void test_store_turn_dedup(ragger::Embedder& emb) {
         "SELECT COUNT(*) FROM turn_summaries ts WHERE ts.turn_id = ?",
         -1, &st, nullptr);
     sqlite3_bind_int(st, 1, t1);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_int(st, 0) == 0);
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_column_int(st, 0) == 0);
     sqlite3_finalize(st);
 
     sqlite3_close(raw);
@@ -846,17 +846,17 @@ void test_store_turn_creates_no_turn_summaries_row(ragger::Embedder& emb) {
 
     int t1 = db.store_turn("What is the capital of Spain?",
                            "The capital of Spain is Madrid.", "test-model");
-    assert(t1 > 0);
-    assert(!db.turn_summary_exists(t1));
+    CHECK(t1 > 0);
+    CHECK(!db.turn_summary_exists(t1));
 
     sqlite3* raw = nullptr;
-    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM turn_summaries WHERE turn_id = ?",
                        -1, &st, nullptr);
     sqlite3_bind_int(st, 1, t1);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_int(st, 0) == 0);
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_column_int(st, 0) == 0);
     sqlite3_finalize(st);
     sqlite3_close(raw);
 
@@ -872,8 +872,8 @@ void test_store_turn_partial_turn_creates_no_turn_summaries_row(ragger::Embedder
 
     int t1 = db.store_turn("Tell me about volcanoes.", "", "test-model",
                           /*defer_embedding=*/true);
-    assert(t1 > 0);
-    assert(!db.turn_summary_exists(t1));
+    CHECK(t1 > 0);
+    CHECK(!db.turn_summary_exists(t1));
 
     db.close();
     cleanup();
@@ -889,28 +889,28 @@ void test_finalize_turn_summary_rejects_duplicate(ragger::Embedder& emb) {
 
     int t1 = db.store_turn("Summarize this exchange.",
                            "First finalize target.", "test-model");
-    assert(t1 > 0);
+    CHECK(t1 > 0);
 
-    assert(db.finalize_turn_summary(t1, "First summary text.", "summarizer-model"));
-    assert(!db.finalize_turn_summary(t1, "Second summary text.", "summarizer-model"));
+    CHECK(db.finalize_turn_summary(t1, "First summary text.", "summarizer-model"));
+    CHECK(!db.finalize_turn_summary(t1, "Second summary text.", "summarizer-model"));
 
     sqlite3* raw = nullptr;
-    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM turn_summaries WHERE turn_id = ?",
                        -1, &st, nullptr);
     sqlite3_bind_int(st, 1, t1);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_int(st, 0) == 1);   // no duplicate row
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_column_int(st, 0) == 1);   // no duplicate row
     sqlite3_finalize(st);
 
     sqlite3_prepare_v2(raw, "SELECT text FROM turn_summaries WHERE turn_id = ?",
                        -1, &st, nullptr);
     sqlite3_bind_int(st, 1, t1);
-    assert(sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
     {
         const char* txt = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
-        assert(txt && std::string(txt) == "First summary text.");
+        CHECK(txt && std::string(txt) == "First summary text.");
     }
     sqlite3_finalize(st);
     sqlite3_close(raw);
@@ -926,16 +926,16 @@ void test_finalize_turn_summary_missing_turn_returns_false(ragger::Embedder& emb
     ragger::SqliteBackend db(emb, TEMP_DB);
 
     const int missing_turn_id = 999999;
-    assert(!db.finalize_turn_summary(missing_turn_id, "orphan text", "test-model"));
+    CHECK(!db.finalize_turn_summary(missing_turn_id, "orphan text", "test-model"));
 
     sqlite3* raw = nullptr;
-    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM turn_summaries WHERE turn_id = ?",
                        -1, &st, nullptr);
     sqlite3_bind_int(st, 1, missing_turn_id);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_int(st, 0) == 0);
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_column_int(st, 0) == 0);
     sqlite3_finalize(st);
     sqlite3_close(raw);
 
@@ -952,18 +952,18 @@ void test_turn_summary_survives_turn_deletion(ragger::Embedder& emb) {
 
     int t1 = db.store_turn("A turn destined for deletion.",
                            "Its summary should survive.", "test-model");
-    assert(t1 > 0);
-    assert(db.finalize_turn_summary(t1, "Survivor summary text.", "summarizer-model"));
+    CHECK(t1 > 0);
+    CHECK(db.finalize_turn_summary(t1, "Survivor summary text.", "summarizer-model"));
 
     sqlite3* raw = nullptr;
-    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
 
     int64_t turn_datetime_before = 0;
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(raw, "SELECT turn_datetime FROM turn_summaries WHERE turn_id = ?",
                        -1, &st, nullptr);
     sqlite3_bind_int(st, 1, t1);
-    assert(sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
     turn_datetime_before = sqlite3_column_int64(st, 0);
     sqlite3_finalize(st);
 
@@ -974,7 +974,7 @@ void test_turn_summary_survives_turn_deletion(ragger::Embedder& emb) {
     sqlite3_finalize(st);
     sqlite3_prepare_v2(raw, "DELETE FROM turns WHERE turn_id = ?", -1, &st, nullptr);
     sqlite3_bind_int(st, 1, t1);
-    assert(sqlite3_step(st) == SQLITE_DONE);
+    CHECK(sqlite3_step(st) == SQLITE_DONE);
     sqlite3_finalize(st);
 
     // The turn_summaries row still exists, turn_id is now NULL, and the
@@ -983,13 +983,13 @@ void test_turn_summary_survives_turn_deletion(ragger::Embedder& emb) {
         "SELECT text, turn_id, turn_datetime FROM turn_summaries "
         "WHERE turn_datetime = ?", -1, &st, nullptr);
     sqlite3_bind_int64(st, 1, turn_datetime_before);
-    assert(sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
     {
         const char* txt = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
-        assert(txt && std::string(txt) == "Survivor summary text.");
+        CHECK(txt && std::string(txt) == "Survivor summary text.");
     }
-    assert(sqlite3_column_type(st, 1) == SQLITE_NULL);   // turn_id now NULL
-    assert(sqlite3_column_int64(st, 2) == turn_datetime_before);
+    CHECK(sqlite3_column_type(st, 1) == SQLITE_NULL);   // turn_id now NULL
+    CHECK(sqlite3_column_int64(st, 2) == turn_datetime_before);
     sqlite3_finalize(st);
     sqlite3_close(raw);
 
@@ -1005,12 +1005,12 @@ void test_unsummarized_turns_excludes_summarized(ragger::Embedder& emb) {
 
     int t_summarized = db.store_turn("This turn will be summarized.",
                                      "Summarized turn's reply.", "test-model");
-    assert(t_summarized > 0);
+    CHECK(t_summarized > 0);
     int t_pending = db.store_turn("This turn stays unsummarized.",
                                   "Pending turn's reply.", "test-model");
-    assert(t_pending > 0);
+    CHECK(t_pending > 0);
 
-    assert(db.finalize_turn_summary(t_summarized, "Already done.", "summarizer-model"));
+    CHECK(db.finalize_turn_summary(t_summarized, "Already done.", "summarizer-model"));
 
     auto pending = db.unsummarized_turns(0);
     bool found_pending = false, found_summarized = false;
@@ -1018,8 +1018,8 @@ void test_unsummarized_turns_excludes_summarized(ragger::Embedder& emb) {
         if (t.turn_id == t_pending) found_pending = true;
         if (t.turn_id == t_summarized) found_summarized = true;
     }
-    assert(found_pending);
-    assert(!found_summarized);
+    CHECK(found_pending);
+    CHECK(!found_summarized);
 
     db.close();
     cleanup();
@@ -1035,28 +1035,28 @@ void test_mark_turn_summarized_trivial_turn(ragger::Embedder& emb) {
 
     // store_turn() no longer creates any turn_summaries row automatically.
     int t1 = db.store_turn("ok", "ok", "test-model");
-    assert(t1 > 0);
-    assert(!db.turn_summary_exists(t1));
+    CHECK(t1 > 0);
+    CHECK(!db.turn_summary_exists(t1));
 
-    assert(db.mark_turn_summarized(t1, "trivial-skip-model"));
+    CHECK(db.mark_turn_summarized(t1, "trivial-skip-model"));
 
     sqlite3* raw = nullptr;
-    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(raw,
         "SELECT ts.text, m.name FROM turn_summaries ts "
         "JOIN models m ON m.model_id = ts.summary_model_id "
         "WHERE ts.turn_id = ?", -1, &st, nullptr);
     sqlite3_bind_int(st, 1, t1);
-    assert(sqlite3_step(st) == SQLITE_ROW);
-    assert(sqlite3_column_type(st, 0) == SQLITE_TEXT);   // text is '' (not NULL)
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_column_type(st, 0) == SQLITE_TEXT);   // text is '' (not NULL)
     {
         const char* txt = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
-        assert(txt && std::string(txt).empty());
+        CHECK(txt && std::string(txt).empty());
     }
     {
         const char* model = reinterpret_cast<const char*>(sqlite3_column_text(st, 1));
-        assert(model && std::string(model) == "trivial-skip-model");
+        CHECK(model && std::string(model) == "trivial-skip-model");
     }
     sqlite3_finalize(st);
     sqlite3_close(raw);
@@ -1076,7 +1076,7 @@ void test_reset_abandoned_turn_summaries(ragger::Embedder& emb) {
 
     // A genuine trivial-turn skip: must survive the reset untouched.
     int t_trivial = db.store_turn("hi", "hi", "test-model");
-    assert(db.mark_turn_summarized(t_trivial, "trivial-skip-model"));
+    CHECK(db.mark_turn_summarized(t_trivial, "trivial-skip-model"));
 
     // A poison-abandoned turn: tagged with the "bad" sentinel model, text
     // NULL. This is what summarizer_service.cpp writes when a turn hits
@@ -1085,23 +1085,23 @@ void test_reset_abandoned_turn_summaries(ragger::Embedder& emb) {
         "this turn kept failing to summarize before the fix landed",
         "and this is a long enough assistant reply to not be trivial-skipped",
         "test-model");
-    assert(db.mark_turn_summarized(t_bad, "bad"));
-    assert(db.turn_summary_exists(t_bad));
+    CHECK(db.mark_turn_summarized(t_bad, "bad"));
+    CHECK(db.turn_summary_exists(t_bad));
 
     // Both turns currently have a turn_summaries row, so neither shows up
     // as unsummarized yet.
     {
         auto pending = db.unsummarized_turns(0);
-        for (auto& p : pending) assert(p.turn_id != t_trivial && p.turn_id != t_bad);
+        for (auto& p : pending) CHECK(p.turn_id != t_trivial && p.turn_id != t_bad);
     }
 
     int reset_count = db.reset_abandoned_turn_summaries(0);
-    assert(reset_count == 1);  // only the "bad" row, not the trivial-skip row
+    CHECK(reset_count == 1);  // only the "bad" row, not the trivial-skip row
 
     // The trivial-skip row must still exist, untouched.
-    assert(db.turn_summary_exists(t_trivial));
+    CHECK(db.turn_summary_exists(t_trivial));
     // The poison-abandoned row must be gone.
-    assert(!db.turn_summary_exists(t_bad));
+    CHECK(!db.turn_summary_exists(t_bad));
 
     // t_bad must now be back in the unsummarized-turns candidate set;
     // t_trivial must NOT (it's legitimately done).
@@ -1112,12 +1112,12 @@ void test_reset_abandoned_turn_summaries(ragger::Embedder& emb) {
             if (p.turn_id == t_bad) found_bad = true;
             if (p.turn_id == t_trivial) found_trivial = true;
         }
-        assert(found_bad);
-        assert(!found_trivial);
+        CHECK(found_bad);
+        CHECK(!found_trivial);
     }
 
     // Re-running with nothing left to reset is a clean no-op.
-    assert(db.reset_abandoned_turn_summaries(0) == 0);
+    CHECK(db.reset_abandoned_turn_summaries(0) == 0);
 
     db.close();
     cleanup();
@@ -1134,48 +1134,48 @@ void test_summary_primitives(ragger::Embedder& emb) {
 
     int l2 = db.store_summary("User asked about France; capital is Paris.",
                               "turn", "memo-model");
-    assert(l2 > 0);
+    CHECK(l2 > 0);
 
     int l3 = db.store_summary("Discussed European capitals.",
                               "session", "memo-model");
-    assert(l3 > 0);
+    CHECK(l3 > 0);
 
-    assert(db.update_summary_text(l3, "Discussed European capitals, focus France.",
+    CHECK(db.update_summary_text(l3, "Discussed European capitals, focus France.",
                                   "memo-model"));
 
     int l3b = db.store_summary("Switched to cooking techniques.",
                                "session", "memo-model");
-    assert(l3b > 0);
+    CHECK(l3b > 0);
 
     sqlite3* raw = nullptr;
-    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM summaries WHERE level='turn'",
                        -1, &st, nullptr);
-    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1);
+    CHECK(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1);
     sqlite3_finalize(st);
     sqlite3_prepare_v2(raw,
         "SELECT COUNT(*) FROM summaries WHERE level='session'",
         -1, &st, nullptr);
-    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 2);
+    CHECK(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 2);
     sqlite3_finalize(st);
     sqlite3_prepare_v2(raw,
         "SELECT COUNT(*) FROM summaries s JOIN models m ON m.model_id=s.model_id "
         "WHERE m.name='memo-model'", -1, &st, nullptr);
-    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 3);
+    CHECK(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 3);
     sqlite3_finalize(st);
     sqlite3_close(raw);
 
-    assert(!db.update_summary_text(99999, "x", "memo-model"));
+    CHECK(!db.update_summary_text(99999, "x", "memo-model"));
 
     // Recipe ingredients (issue #23): recency-based fetch.
     auto turns = db.recent_summaries("turn", 5);
-    assert(turns.size() == 1);
+    CHECK(turns.size() == 1);
     auto sessions = db.recent_summaries("session", 5);
-    assert(sessions.size() == 2);
-    assert(db.recent_summaries("project", 5).empty());
-    assert(db.recent_summaries("turn", 0).empty());
-    assert(db.current_decisions(5).empty());      // none created
+    CHECK(sessions.size() == 2);
+    CHECK(db.recent_summaries("project", 5).empty());
+    CHECK(db.recent_summaries("turn", 0).empty());
+    CHECK(db.current_decisions(5).empty());      // none created
 
     db.close();
     cleanup();
@@ -1192,8 +1192,8 @@ void test_episode_rollup_no_dup(ragger::Embedder& emb) {
     const std::string G = "phase2-session";
 
     // No episodes yet.
-    assert(db.last_episode_end(G).empty());
-    assert(db.episode_texts(G).empty());
+    CHECK(db.last_episode_end(G).empty());
+    CHECK(db.episode_texts(G).empty());
 
     // Two L2 turn summaries land (distinct timestamps → distinct rows).
     // Turn-level summaries now live in turn_summaries, keyed by a real
@@ -1203,38 +1203,38 @@ void test_episode_rollup_no_dup(ragger::Embedder& emb) {
     // 0.12; see l2_summaries_since's redirect to turn_summaries).
     int t1 = db.store_turn("Q1", "A1", "memo", false, G, "2026-01-01 10:00:00");
     int t2 = db.store_turn("Q2", "A2", "memo", false, G, "2026-01-01 10:00:02");
-    assert(db.finalize_turn_summary(t1, "Turn one: discussed knowledge graphs.", "memo"));
-    assert(db.finalize_turn_summary(t2, "Turn two: phonetic pun edges.", "memo"));
+    CHECK(db.finalize_turn_summary(t1, "Turn one: discussed knowledge graphs.", "memo"));
+    CHECK(db.finalize_turn_summary(t2, "Turn two: phonetic pun edges.", "memo"));
 
     // Before any episode, l2_summaries_since(all) returns both.
-    assert(db.l2_summaries_since(G, "").size() == 2);
+    CHECK(db.l2_summaries_since(G, "").size() == 2);
 
     // Close episode 1 spanning both turns.
     int ep1 = db.store_episode("Episode 1: KG design + phonetic edges.",
                                "memo", G, "2026-01-01 10:00:00",
                                "2026-01-01 10:00:02");
-    assert(ep1 > 0);
-    assert(db.last_episode_end(G) == "2026-01-01 10:00:02");
-    assert(db.episode_texts(G).size() == 1);
+    CHECK(ep1 > 0);
+    CHECK(db.last_episode_end(G) == "2026-01-01 10:00:02");
+    CHECK(db.episode_texts(G).size() == 1);
     // No L2 past the episode end now.
-    assert(db.l2_summaries_since(G, db.last_episode_end(G)).empty());
+    CHECK(db.l2_summaries_since(G, db.last_episode_end(G)).empty());
 
     // Second episode.
     int t3 = db.store_turn("Q3", "A3", "memo", false, G, "2026-01-01 11:00:00");
-    assert(db.finalize_turn_summary(t3, "Turn three: curated fiction corpus.", "memo"));
+    CHECK(db.finalize_turn_summary(t3, "Turn three: curated fiction corpus.", "memo"));
     db.store_episode("Episode 2: curated corpus bet.", "memo", G,
                      "2026-01-01 11:00:00", "2026-01-01 11:00:00");
-    assert(db.episode_texts(G).size() == 2);
+    CHECK(db.episode_texts(G).size() == 2);
 
     // Episode rows are immutable: timestamp=first, updated_at=last (span).
     sqlite3* raw = nullptr;
-    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(raw,
         "SELECT COUNT(*) FROM summaries WHERE level='episode' "
         "AND session_id=(SELECT session_id FROM sessions WHERE guid='phase2-session')",
         -1, &st, nullptr);
-    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 2);
+    CHECK(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 2);
     sqlite3_finalize(st);
     sqlite3_close(raw);
 
@@ -1252,23 +1252,23 @@ void test_episode_rollup_no_dup(ragger::Embedder& emb) {
     // the whole session.
     auto first_ep = ragger::parse_db_timestamp("2026-01-01 10:00:00");
     auto last_ep  = ragger::parse_db_timestamp("2026-01-01 11:00:00");
-    assert(first_ep.has_value() && last_ep.has_value());
+    CHECK(first_ep.has_value() && last_ep.has_value());
     auto sess_texts = db.bounded_session_rollup_texts(
         G, static_cast<int64_t>(*first_ep), static_cast<int64_t>(*last_ep));
-    assert(sess_texts.size() == 2);  // both episode texts, oldest-first
-    assert(sess_texts[0] == "Episode 1: KG design + phonetic edges.");
-    assert(sess_texts[1] == "Episode 2: curated corpus bet.");
+    CHECK(sess_texts.size() == 2);  // both episode texts, oldest-first
+    CHECK(sess_texts[0] == "Episode 1: KG design + phonetic edges.");
+    CHECK(sess_texts[1] == "Episode 2: curated corpus bet.");
 
     // A LATER run of the SAME session_guid must not leak into an EARLIER
     // run's bounded query -- add a third episode outside [first_ep,last_ep]
     // and confirm it's excluded.
     int t4 = db.store_turn("Q4", "A4", "memo", false, G, "2026-01-02 09:00:00");
-    assert(db.finalize_turn_summary(t4, "Turn four: unrelated later topic.", "memo"));
+    CHECK(db.finalize_turn_summary(t4, "Turn four: unrelated later topic.", "memo"));
     db.store_episode("Episode 3: later unrelated run.", "memo", G,
                      "2026-01-02 09:00:00", "2026-01-02 09:00:00");
     auto sess_texts2 = db.bounded_session_rollup_texts(
         G, static_cast<int64_t>(*first_ep), static_cast<int64_t>(*last_ep));
-    assert(sess_texts2.size() == 2);  // unchanged -- later episode excluded
+    CHECK(sess_texts2.size() == 2);  // unchanged -- later episode excluded
 
     // store_session_summary: one immutable insert per closed run. Two
     // separate closes of the SAME session_guid produce TWO rows (unlike
@@ -1276,22 +1276,22 @@ void test_episode_rollup_no_dup(ragger::Embedder& emb) {
     int sess1 = db.store_session_summary("Session run 1 rollup.", "memo", G,
                                          static_cast<int64_t>(*first_ep),
                                          static_cast<int64_t>(*last_ep));
-    assert(sess1 > 0);
+    CHECK(sess1 > 0);
     auto later_ep = ragger::parse_db_timestamp("2026-01-02 09:00:00");
-    assert(later_ep.has_value());
+    CHECK(later_ep.has_value());
     int sess2 = db.store_session_summary("Session run 2 rollup.", "memo", G,
                                          static_cast<int64_t>(*later_ep),
                                          static_cast<int64_t>(*later_ep));
-    assert(sess2 > 0);
-    assert(sess1 != sess2);
+    CHECK(sess2 > 0);
+    CHECK(sess1 != sess2);
 
     raw = nullptr;
-    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
     sqlite3_prepare_v2(raw,
         "SELECT COUNT(*) FROM summaries WHERE level='session' "
         "AND session_id=(SELECT session_id FROM sessions WHERE guid='phase2-session')",
         -1, &st, nullptr);
-    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 2);
+    CHECK(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 2);
     sqlite3_finalize(st);
     sqlite3_close(raw);
 
@@ -1300,23 +1300,23 @@ void test_episode_rollup_no_dup(ragger::Embedder& emb) {
     // session-unscoped.
     auto proj_texts = db.bounded_project_rollup_texts(
         static_cast<int64_t>(*first_ep), static_cast<int64_t>(*later_ep));
-    assert(proj_texts.size() == 2);
-    assert(proj_texts[0] == "Session run 1 rollup.");
-    assert(proj_texts[1] == "Session run 2 rollup.");
+    CHECK(proj_texts.size() == 2);
+    CHECK(proj_texts[0] == "Session run 1 rollup.");
+    CHECK(proj_texts[1] == "Session run 2 rollup.");
 
     // store_project_summary: one immutable insert per closed project run.
     int proj1 = db.store_project_summary("Project run 1 rollup.", "memo",
                                          static_cast<int64_t>(*first_ep),
                                          static_cast<int64_t>(*later_ep));
-    assert(proj1 > 0);
+    CHECK(proj1 > 0);
 
     raw = nullptr;
-    assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
     sqlite3_prepare_v2(raw,
         "SELECT COUNT(*), session_id FROM summaries WHERE level='project'",
         -1, &st, nullptr);
-    assert(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1);
-    assert(sqlite3_column_type(st, 1) == SQLITE_NULL);  // session-unscoped
+    CHECK(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1);
+    CHECK(sqlite3_column_type(st, 1) == SQLITE_NULL);  // session-unscoped
     sqlite3_finalize(st);
     sqlite3_close(raw);
 
@@ -1355,19 +1355,19 @@ void test_session_close_no_lookback_before_existing_summary(ragger::Embedder& em
     // session (G2) which edge-closes G1's run and becomes the open tail.
     int t1 = db.store_turn("Q1", "A1", "memo", false, G1, "2026-03-01 10:00:00");
     int t2 = db.store_turn("Q2", "A2", "memo", false, G1, "2026-03-01 10:00:05");
-    assert(db.finalize_turn_summary(t1, "Turn one.", "memo"));
-    assert(db.finalize_turn_summary(t2, "Turn two.", "memo"));
+    CHECK(db.finalize_turn_summary(t1, "Turn one.", "memo"));
+    CHECK(db.finalize_turn_summary(t2, "Turn two.", "memo"));
     (void)db.store_turn("Q3", "A3", "memo", false, G2, "2026-03-01 11:00:00");
 
     auto first_ts = ragger::parse_db_timestamp("2026-03-01 10:00:00");
     auto last_ts  = ragger::parse_db_timestamp("2026-03-01 10:00:05");
-    assert(first_ts.has_value() && last_ts.has_value());
+    CHECK(first_ts.has_value() && last_ts.has_value());
 
     // G1's run has already been summarized once (the normal, correct close).
     int s1 = db.store_session_summary("G1 run rollup.", "memo", G1,
                                       static_cast<int64_t>(*first_ts),
                                       static_cast<int64_t>(*last_ts));
-    assert(s1 > 0);
+    CHECK(s1 > 0);
 
     // Simulate the post-migration state: watermark is 0 (never stamped).
     db.advance_session_boundary_watermark(0);
@@ -1376,7 +1376,7 @@ void test_session_close_no_lookback_before_existing_summary(ragger::Embedder& em
     // open tail -- excluded by the MAX(grp) rule regardless.)
     auto runs = db.sessions_needing_close_boundary();
     for (const auto& r : runs) {
-        assert(r.session_guid != G1 &&
+        CHECK(r.session_guid != G1 &&
                "already-summarized run re-closed with zeroed watermark (lookback bug)");
     }
 
@@ -1389,15 +1389,15 @@ void test_path_normalization(ragger::Embedder& emb) {
     ragger::SqliteBackend db(emb, TEMP_DB);
 
     const char* home = std::getenv("HOME");
-    assert(home != nullptr);
+    CHECK(home != nullptr);
     std::string text = std::string("File at ") + home + "/Documents/test.txt is important.";
     db.store(text);
 
     auto all = db.load_all();
-    assert(all.size() == 1);
+    CHECK(all.size() == 1);
     // Should be normalized to ~/
-    assert(all[0].text.find("~/Documents/test.txt") != std::string::npos);
-    assert(all[0].text.find(home) == std::string::npos);
+    CHECK(all[0].text.find("~/Documents/test.txt") != std::string::npos);
+    CHECK(all[0].text.find(home) == std::string::npos);
 
     db.close();
     cleanup();
@@ -1428,34 +1428,34 @@ void test_search_merges_three_corpora(ragger::Embedder& emb) {
         // then embeds it and must invalidate the decision cache.
         {
             sqlite3* raw = nullptr;
-            assert(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+            CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
             const char* sql =
                 "INSERT INTO decisions (text, status, tags, created_at) "
                 "VALUES ('We will migrate the database to PostgreSQL next quarter.', "
                 "'current', '', '2026-01-01T00:00:00Z')";
             char* err = nullptr;
-            assert(sqlite3_exec(raw, sql, nullptr, nullptr, &err) == SQLITE_OK);
+            CHECK(sqlite3_exec(raw, sql, nullptr, nullptr, &err) == SQLITE_OK);
             sqlite3_close(raw);
         }
 
         // Embed the unembedded decision row (and any other deferred rows).
         int filled = db.backfill_embeddings(emb);
-        assert(filled >= 1);
+        CHECK(filled >= 1);
 
         // Each corpus should surface for its own topical query, tagged by source.
         auto source_of = [&](const std::string& query) -> std::string {
             auto resp = db.search(query, 5, 0.0f, {});
-            assert(!resp.results.empty());
+            CHECK(!resp.results.empty());
             return resp.results[0].metadata.value("source", std::string());
         };
 
-        assert(source_of("interstellar spacecraft golden record") == "summary");
-        assert(source_of("how plants make energy from light")     == "document");
-        assert(source_of("plan to switch to PostgreSQL database")  == "decision");
+        CHECK(source_of("interstellar spacecraft golden record") == "summary");
+        CHECK(source_of("how plants make energy from light")     == "document");
+        CHECK(source_of("plan to switch to PostgreSQL database")  == "decision");
 
         // corpus_size in the timing payload reflects all three tables.
         auto resp = db.search("database", 5, 0.0f, {});
-        assert(resp.timing.value("corpus_size", 0) == 3);
+        CHECK(resp.timing.value("corpus_size", 0) == 3);
 
         db.close();
     }
@@ -1475,12 +1475,12 @@ void test_turn_summary_search_metadata(ragger::Embedder& emb) {
         const std::string G = "meta-shape-session";
         const std::string when = "2026-04-15 09:30:00";
         int t1 = db.store_turn("Q1", "A1", "memo", false, G, when);
-        assert(t1 > 0);
-        assert(db.finalize_turn_summary(
+        CHECK(t1 > 0);
+        CHECK(db.finalize_turn_summary(
             t1, "Discussed the migration to a columnar store.", "memo"));
 
         auto resp = db.search("columnar store migration", 5, 0.0f, {});
-        assert(!resp.results.empty());
+        CHECK(!resp.results.empty());
 
         // Find the turn_summary hit among results.
         const ragger::SearchResult* hit = nullptr;
@@ -1490,17 +1490,17 @@ void test_turn_summary_search_metadata(ragger::Embedder& emb) {
                 break;
             }
         }
-        assert(hit && "expected a turn_summary result");
+        CHECK(hit && "expected a turn_summary result");
 
         // datetime present and mirrors the stored turn timestamp.
-        assert(hit->metadata.contains("datetime"));
-        assert(hit->metadata["datetime"] == when);
+        CHECK(hit->metadata.contains("datetime"));
+        CHECK(hit->metadata["datetime"] == when);
         // The top-level result timestamp is also populated (not blanked).
-        assert(hit->timestamp == when);
+        CHECK(hit->timestamp == when);
         // session_id and turn_id both present.
-        assert(hit->metadata.contains("session_id"));
-        assert(hit->metadata.contains("turn_id"));
-        assert(hit->metadata["turn_id"] == t1);
+        CHECK(hit->metadata.contains("session_id"));
+        CHECK(hit->metadata.contains("turn_id"));
+        CHECK(hit->metadata["turn_id"] == t1);
 
         db.close();
     }
