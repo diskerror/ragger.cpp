@@ -65,7 +65,7 @@ CREATE TRIGGER IF NOT EXISTS users_modified
         UPDATE users SET updated_at = unixepoch() WHERE id = NEW.id;
     END;
 
-CREATE VIEW IF NOT EXISTS users_view AS
+CREATE VIEW users_view AS
 SELECT id, username, token_hash, password_hash,
        datetime(created_at, 'unixepoch', 'localtime') AS created_at,
        datetime(updated_at, 'unixepoch', 'localtime') AS updated_at
@@ -80,7 +80,7 @@ CREATE TABLE models (
     created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
-CREATE VIEW IF NOT EXISTS models_view AS
+CREATE VIEW models_view AS
 SELECT model_id, name,
        datetime(created_at, 'unixepoch', 'localtime') AS created_at
 FROM models;
@@ -99,7 +99,7 @@ CREATE TABLE sessions (
     created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
-CREATE VIEW IF NOT EXISTS sessions_view AS
+CREATE VIEW sessions_view AS
 SELECT session_id, guid, name, name_source,
        datetime(created_at, 'unixepoch', 'localtime') AS created_at
 FROM sessions;
@@ -124,7 +124,7 @@ CREATE INDEX idx_turns_created_at ON turns(created_at);
 CREATE INDEX idx_turns_session    ON turns(session_id);
 CREATE INDEX idx_turns_embedding_version ON turns(embedding_version);
 
-CREATE VIEW IF NOT EXISTS turns_view AS
+CREATE VIEW turns_view AS
 SELECT turn_id, user_text, assistant_text, model_id, session_id,
        datetime(created_at, 'unixepoch', 'localtime') AS created_at,
        unigram_count, bigram_count,
@@ -172,7 +172,7 @@ CREATE INDEX idx_turn_summaries_embedding_version ON turn_summaries(embedding_ve
 CREATE UNIQUE INDEX idx_turn_summaries_turn_id_uniq
     ON turn_summaries(turn_id) WHERE turn_id IS NOT NULL;
 
-CREATE VIEW IF NOT EXISTS turn_summaries_view AS
+CREATE VIEW turn_summaries_view AS
 SELECT
     turn_summary_id, text, turn_id, session_id, turn_model_id, summary_model_id,
     datetime(turn_datetime, 'unixepoch', 'localtime') AS turn_datetime,
@@ -209,7 +209,7 @@ CREATE INDEX idx_summaries_created_at ON summaries(created_at);
 CREATE INDEX idx_summaries_session ON summaries(session_id);
 CREATE INDEX idx_summaries_embedding_version ON summaries(embedding_version);
 
-CREATE VIEW IF NOT EXISTS summaries_view AS
+CREATE VIEW summaries_view AS
 SELECT summary_id, text, level, tags, session_id, model_id,
        datetime(created_at, 'unixepoch', 'localtime') AS created_at,
        datetime(updated_at, 'unixepoch', 'localtime') AS updated_at,
@@ -235,7 +235,7 @@ CREATE TABLE decisions (
 CREATE INDEX idx_decisions_status ON decisions(status);
 CREATE INDEX idx_decisions_embedding_version ON decisions(embedding_version);
 
-CREATE VIEW IF NOT EXISTS decisions_view AS
+CREATE VIEW decisions_view AS
 SELECT decision_id, text, status, tags,
        datetime(created_at, 'unixepoch', 'localtime') AS created_at,
        unigram_count, bigram_count,
@@ -262,7 +262,7 @@ CREATE TABLE document_sources (
 );
 CREATE INDEX idx_document_sources_imported_at ON document_sources(imported_at);
 
-CREATE VIEW IF NOT EXISTS document_sources_view AS
+CREATE VIEW document_sources_view AS
 SELECT document_source_id, title, path, year, tags,
        datetime(imported_at, 'unixepoch', 'localtime') AS imported_at
 FROM document_sources;
@@ -292,7 +292,7 @@ CREATE TABLE documents (
 CREATE INDEX idx_documents_document_source_id ON documents(document_source_id);
 CREATE INDEX idx_documents_embedding_version ON documents(embedding_version);
 
-CREATE VIEW IF NOT EXISTS documents_view AS
+CREATE VIEW documents_view AS
 SELECT document_id, text, tags, chunk_index, document_source_id,
        datetime(modified_on, 'unixepoch', 'localtime') AS modified_on,
        unigram_count, bigram_count,
@@ -374,3 +374,46 @@ CREATE TABLE decisions_terms (
     PRIMARY KEY (decision_id, term_id)
 );
 CREATE INDEX idx_decisions_terms_term ON decisions_terms(term_id);
+
+-- ---------------------------------------------------------------------------
+-- Junction views — resolve term_id to the readable term string.
+--
+-- The raw <t>_terms tables store term_id, which is meaningless on inspection.
+-- These views join through `terms` so you can actually read why a record did
+-- or did not match. Rows are ordered most-frequent-first within each record.
+--
+-- Both literal (stemmed) and DoubleMetaphone tokens live in the same flat
+-- `terms` table with no type flag, so a single record's view output mixes
+-- them: e.g. 'ragg' and 'memori' (stemmed literals) alongside 'RK' and 'MMR'
+-- (primary metaphone codes). That is by design — they self-filter at query
+-- time because a stem and its DMP code are different strings.
+--
+-- INNER JOIN is deliberate: <t>_terms.term_id is NOT NULL with an FK into
+-- terms, so an unmatched row would be corruption, and showing nothing for it
+-- is the correct signal.
+-- ---------------------------------------------------------------------------
+
+CREATE VIEW turns_terms_view AS
+SELECT j.turn_id AS turn_id, t.term, j.count
+FROM turns_terms j JOIN terms t ON t.term_id = j.term_id
+ORDER BY j.turn_id, j.count DESC, t.term;
+
+CREATE VIEW turn_summaries_terms_view AS
+SELECT j.turn_summary_id AS turn_summary_id, t.term, j.count
+FROM turn_summaries_terms j JOIN terms t ON t.term_id = j.term_id
+ORDER BY j.turn_summary_id, j.count DESC, t.term;
+
+CREATE VIEW summaries_terms_view AS
+SELECT j.summary_id AS summary_id, t.term, j.count
+FROM summaries_terms j JOIN terms t ON t.term_id = j.term_id
+ORDER BY j.summary_id, j.count DESC, t.term;
+
+CREATE VIEW documents_terms_view AS
+SELECT j.document_id AS document_id, t.term, j.count
+FROM documents_terms j JOIN terms t ON t.term_id = j.term_id
+ORDER BY j.document_id, j.count DESC, t.term;
+
+CREATE VIEW decisions_terms_view AS
+SELECT j.decision_id AS decision_id, t.term, j.count
+FROM decisions_terms j JOIN terms t ON t.term_id = j.term_id
+ORDER BY j.decision_id, j.count DESC, t.term;

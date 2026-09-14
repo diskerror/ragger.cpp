@@ -1825,82 +1825,113 @@ struct SqliteBackend::Impl {
         return count;
     }
 
-    /// Human-readable views mirroring scripts/schema_db0.12.sql exactly:
-    /// datetime()-rendered epoch timestamps, and has_embedding (0/1)
-    /// collapsing the raw embedding BLOB column. Meant to
-    /// be opened directly in a plain SQLite browser by a human. Idempotent
-    /// — safe to call on every open.
+    /// Convenience views: epoch ints rendered as local datetime, embedding
+    /// BLOBs collapsed to a has_embedding flag, and term_ids resolved to the
+    /// readable term. These exist purely for human inspection (sqlite3 CLI,
+    /// GUI browsers) -- no application code reads them.
+    ///
+    /// DROP-then-CREATE, deliberately NOT "CREATE VIEW IF NOT EXISTS". A view
+    /// holds no data, so recreating is free -- and IF NOT EXISTS meant an
+    /// existing DB kept a stale view definition FOREVER after this DDL changed
+    /// (exactly how the v0.16 views were left still selecting the retired
+    /// `phon` column). Unconditional recreation keeps every DB's views in
+    /// lockstep with this code on every open.
     void create_views() {
-        exec(R"(
-            CREATE VIEW IF NOT EXISTS users_view AS
+        // Column order mirrors the base tables: narrow, readable columns first,
+        // wide/derived ones last, so `SELECT *` stays legible on one screen.
+        auto view = [&](const std::string& name, const std::string& body) {
+            exec(std::format("DROP VIEW IF EXISTS {}", name));
+            exec(std::format("CREATE VIEW {} AS {}", name, body));
+        };
+
+        view("users_view", R"(
             SELECT id, username, token_hash, password_hash,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
                    datetime(updated_at, 'unixepoch', 'localtime') AS updated_at
             FROM users
         )");
-        exec(R"(
-            CREATE VIEW IF NOT EXISTS models_view AS
+        view("models_view", R"(
             SELECT model_id, name,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at
             FROM models
         )");
-        exec(R"(
-            CREATE VIEW IF NOT EXISTS sessions_view AS
+        view("sessions_view", R"(
             SELECT session_id, guid, name, name_source,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at
             FROM sessions
         )");
         exec("CREATE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name)");
-        exec(R"(
-            CREATE VIEW IF NOT EXISTS turns_view AS
+        view("turns_view", R"(
             SELECT turn_id, user_text, assistant_text, model_id, session_id,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
+                   unigram_count, bigram_count,
                    embedding_version,
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM turns
         )");
-        exec(R"(
-            CREATE VIEW IF NOT EXISTS turn_summaries_view AS
+        view("turn_summaries_view", R"(
             SELECT
                 turn_summary_id, text, turn_id, session_id, turn_model_id, summary_model_id,
                 datetime(turn_datetime, 'unixepoch', 'localtime') AS turn_datetime,
                 datetime(summarized_on, 'unixepoch', 'localtime') AS summarized_on,
+                unigram_count, bigram_count,
                 embedding_version,
                 CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM turn_summaries
             WHERE text != ''
         )");
-        exec(R"(
-            CREATE VIEW IF NOT EXISTS summaries_view AS
+        view("summaries_view", R"(
             SELECT summary_id, text, level, tags, session_id, model_id,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
                    datetime(updated_at, 'unixepoch', 'localtime') AS updated_at,
+                   unigram_count, bigram_count,
                    embedding_version,
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM summaries
         )");
-        exec(R"(
-            CREATE VIEW IF NOT EXISTS decisions_view AS
+        view("decisions_view", R"(
             SELECT decision_id, text, status, tags,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
+                   unigram_count, bigram_count,
                    embedding_version,
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM decisions
         )");
-        exec(R"(
-            CREATE VIEW IF NOT EXISTS document_sources_view AS
+        view("document_sources_view", R"(
             SELECT document_source_id, title, path, year, tags,
                    datetime(imported_at, 'unixepoch', 'localtime') AS imported_at
             FROM document_sources
         )");
-        exec(R"(
-            CREATE VIEW IF NOT EXISTS documents_view AS
+        view("documents_view", R"(
             SELECT document_id, text, tags, chunk_index, document_source_id,
                    datetime(modified_on, 'unixepoch', 'localtime') AS modified_on,
+                   unigram_count, bigram_count,
                    embedding_version,
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM documents
         )");
+
+        // Junction views (v0.16): the raw <t>_terms tables store term_id, which
+        // is unreadable on inspection. Each view resolves it to the actual term
+        // string. An INNER JOIN is correct here -- the FK to terms(term_id) is
+        // NOT NULL, so a missing parent would be corruption, and surfacing zero
+        // rows for it is the right signal. Ordered most-frequent-first within a
+        // record, which is what you almost always want when eyeballing why
+        // something did or didn't match.
+        struct J { const char* view; const char* junc; const char* pk; };
+        for (const J& j : {
+                 J{"turns_terms_view",          "turns_terms",          "turn_id"},
+                 J{"turn_summaries_terms_view", "turn_summaries_terms", "turn_summary_id"},
+                 J{"summaries_terms_view",      "summaries_terms",      "summary_id"},
+                 J{"documents_terms_view",      "documents_terms",      "document_id"},
+                 J{"decisions_terms_view",      "decisions_terms",      "decision_id"},
+             }) {
+            view(j.view, std::format(
+                "SELECT j.{} AS {}, t.term, j.count "
+                "FROM {} j JOIN terms t ON t.term_id = j.term_id "
+                "ORDER BY j.{}, j.count DESC, t.term",
+                j.pk, j.pk, j.junc, j.pk));
+        }
     }
 
     // ---- path normalization -------------------------------------------
