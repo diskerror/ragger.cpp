@@ -33,9 +33,9 @@ C++ port of the original Python [Ragger Memory](https://github.com/diskerror/rag
   writes per-turn summaries immediately and closes session summaries on idle, all without blocking
   the agent. If the summarizer model is unreachable, a draft is stored and rewritten later — the
   agent never waits on inference it didn't ask for.
-- **Hybrid search.** BM25/FTS5 keyword search blended with dense vector cosine via Eigen3, plus an
-  optional phonetic ("sounds-like") signal. Configurable weights; all signals normalized before
-  blending.
+- **Hybrid search.** A custom TF-IDF inverted index (stemmed unigrams + bigrams and
+  DoubleMetaphone "sounds-like" codes sharing one flat term table) blended with dense vector
+  cosine via Eigen3. Configurable weights; all signals normalized before blending.
 - **Local or external embeddings.** Internal engine runs an ONNX model on disk (`all-MiniLM-L6-v2`,
   `all-MiniLM-L12-v2`, etc., 384-dim by default); external engine calls any OpenAI-compatible
   `/v1/embeddings` endpoint (llama.cpp, llama-swap, LM Studio, OpenAI). Stored as IEEE half (f16) by
