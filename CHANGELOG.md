@@ -1,9 +1,46 @@
 # Changelog
 
-## v0.16.0 *In Progress*
-The SQLite FTS5 module isn't working as desired or expected. Going to use my own full-text-search 
-algorithm.
-This is similar to the original BM25 used in the project but (hopefully) better.
+## v0.16.0
+SQLite FTS5 didn't behave as needed, so both FTS5 layers were replaced with a hand-rolled
+inverted index — closer to the project's original BM25 approach, but with full control over
+tokenization, bigrams, and weighting.
+
+**Search engine replaced (db_version 0.16)**
+- FTS5 retired entirely: every `<t>_fts` (text) and `<t>_phon_fts` (phonetic) virtual table and its sync triggers dropped, along with the `phon` sidecar column on all five text tables
+- New custom index: one flat `terms` table plus five per-table `<t>_terms` junction tables (FK `ON DELETE CASCADE`, so deletes need no write-path maintenance). Stemmed literals and DoubleMetaphone codes share the table with no type flag — they self-filter, since a stem and its DMP code are different strings
+- TF-IDF scoring with **live** document frequency (`COUNT(*)` at query time) — no `doc_frequency` column to keep in sync. Per-record `unigram_count`/`bigram_count` columns serve as TF denominators
+- Four live-tunable weights: `fts_w_unigram`, `fts_w_bigram`, `fts_w_metaphone`, `fts_literal_enabled`. The last flips to phonetic-only scoring with no reindex, since both token kinds are always stored
+- Dead `phon_weight` setting removed — unused in any scoring path since the rewire, and a schema-exposed knob that does nothing is worse than no knob
+- Index engine extracted into `TextIndex` / `SqliteTextIndex`, out of `sqlite_backend.cpp`; weights are constructor params, not a config dependency, so the unit stays testable
+
+**Tokenizer** (Porter stemmer added to c_lib)
+- Two divergent stopword lists: `STOPWORDS_UNIGRAM` (132, aggressive) and `STOPWORDS_BIGRAM` (39, loose). `not`/`no` are unigram stopwords but *not* bigram ones, so `not_good` survives as a strong signal
+- Modal verbs (will, must, should, can…) deliberately excluded from the bigram stoplist — deontic/epistemic markers change the paired word's sense, unlike pure contraction carriers (is, have, do)
+- n't contractions map directly to `not` rather than expanding to two words; the auxiliary would be filtered as a unigram stopword anyway. Requires preserving apostrophes during the initial split, or `isn't` becomes `[isn, t]`
+- Bigrams are within-sentence only, and a stopword *drops* the pair rather than bridging across it (`king of spain` yields no `king_spain`)
+- Single digits become words (`3` → `three`); multi-digit numbers stay as-is. Math symbols normalize to natural written English (`±` → "plus or minus", `≠` → "not equal to")
+- `:` and `;` are sentence terminators for bigram boundaries
+
+**Migration 0.15 → 0.16** (in-binary, transactional)
+- Text tables are **rebuilt**, not `ALTER`ed. `ADD COLUMN` can only append, which would strand the new count columns after the embedding BLOB and permanently diverge migrated DBs from fresh ones. Rebuilding also retires `phon` for free. Requires `foreign_keys=OFF` and `legacy_alter_table=ON` set *outside* the transaction, or RENAME silently repoints every junction FK at the transient table name
+- Dangling `session_id` references are nulled instead of warned about — the columns are declared `ON DELETE SET NULL`, so that is the schema's own intent; the row is the valuable part, not the pointer
+- `PRAGMA foreign_key_check` is baselined before/after, aborting only on *new* orphans so pre-existing data issues don't fail an otherwise-correct upgrade
+- Pre-migration backup switched from `VACUUM INTO` to `wal_checkpoint(TRUNCATE)` + tar/zip archive, preferring to snapshot the file *without* closing the connection; a post-migration in-place `VACUUM` reclaims space from the dropped schema
+- Fresh installs stamp 0.16 directly and never define `phon` — a migration that retires a column must also remove it from the fresh-install DDL, or an unguarded `ADD COLUMN` block resurrects it on the next open
+- `ragger reindex [table|all]` replaces the removed `rebuild_phon`; idempotent
+
+**Views**
+- `CREATE VIEW IF NOT EXISTS` replaced with unconditional DROP-then-CREATE. Views hold no data, and `IF NOT EXISTS` meant existing DBs kept stale definitions forever — which is how they were left still selecting the retired `phon` column
+- Text-table views now surface `unigram_count`/`bigram_count`
+- New `<t>_terms_view` for all five junction tables, resolving `term_id` to the readable term, ordered most-frequent-first
+- `scripts/refresh_views.sh` refreshes views on an existing DB without running the binary; refuses pre-0.16 DBs and verifies each view actually executes (`CREATE VIEW` accepts bad column refs silently)
+
+**Fixes**
+- `--host`/`--port` were ignored by `count`/`store`/`search`, which used the resolved config instead — so `--port` couldn't isolate a test DB and writes silently reached the live daemon. Added `-H` short option
+- `assert()` is erased by `-DNDEBUG`, *including its expression*. `test_text_index` opened its DB inside an assert, so in Release the open never ran and the first `sqlite3_exec` returned `SQLITE_MISUSE` with a NULL message. Every other assertion in those files was equally a no-op: 289 assertions across three test files were checking nothing. Replaced with a `CHECK()` macro that survives all build types
+- Six model-dependent tests only checked `model_dir/model.onnx`, not the nested `onnx/model.onnx` that production code already handled — all silently reported "skipped" as a pass. Once unblocked they exposed a test still querying the dropped `turns_fts`, and another asserting columns moved to `document_sources` in 0.15
+- Column order convention: narrow, readable columns sort ahead of wide embedding BLOBs, since rows are otherwise too long to inspect without scrolling
+- `CMAKE_OSX_DEPLOYMENT_TARGET` 14.0 → 26.0, clearing the ld "built for newer macOS version" warnings from MacPorts libs and the vendored Rust tokenizer
 
 ## v0.15.1
 - Embedding model filter: tightened e5 hint to `e5-`, widened external-model name filter with plausibility check
