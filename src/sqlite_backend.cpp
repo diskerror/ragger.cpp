@@ -28,6 +28,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <iomanip>
+#include <iterator>
 #include <filesystem>
 #include <numeric>
 #include <optional>
@@ -1328,6 +1329,65 @@ struct SqliteBackend::Impl {
         // documents_fts is rebuilt (new shape) by create_fts_schema() below.
     }
 
+    /// Read a boolean PRAGMA's current value (e.g. "foreign_keys").
+    bool pragma_bool(const char* name) {
+        Stmt s(db, std::format("PRAGMA {}", name));
+        return s.step() && s.column_int(0) != 0;
+    }
+
+    /// Rebuild one table so its PHYSICAL column order matches the fresh-install
+    /// CREATE TABLE in create_schema(). `ALTER TABLE ... ADD COLUMN` can only
+    /// APPEND, so a DB that reached its current shape via migration ends up with
+    /// (e.g.) unigram_count/bigram_count sitting after the embedding BLOB, while
+    /// a fresh DB has them before it. That divergence is not just cosmetic: rows
+    /// are wide, and a trailing multi-KB embedding pushes the small, human-
+    /// meaningful columns off-screen in any ad-hoc `SELECT *` / `.dump` /
+    /// sqlite3 CLI inspection. Keeping the narrow, readable columns to the LEFT
+    /// of the blobs is the whole point of the fixed order.
+    ///
+    /// Standard SQLite table-rebuild dance (see "Making Other Kinds Of Table
+    /// Schema Changes" in the SQLite docs):
+    ///   1. snapshot this table's index DDL (DROP TABLE takes its indexes with it)
+    ///   2. CREATE <t>_rebuild with the canonical column order
+    ///   3. INSERT ... SELECT the named columns (order-independent, by name)
+    ///   4. DROP old, RENAME new into place
+    ///   5. replay the saved index DDL
+    ///
+    /// CALLER CONTRACT: foreign_keys MUST already be OFF and any dependent views
+    /// already dropped. `PRAGMA foreign_keys` is a NO-OP inside a transaction, so
+    /// it has to be set before BEGIN -- see migrate_0_15_to_0_16().
+    ///
+    /// `cols` is the shared column list present in BOTH old and new tables. The
+    /// count columns are deliberately NOT carried over (they are 0 on a
+    /// just-ALTERed DB anyway); reindex_table() populates them right after.
+    void rebuild_table_column_order(const std::string& table,
+                                    const std::string& new_ddl,
+                                    const std::string& cols) {
+        // 1. Snapshot index DDL. Skip sql IS NULL rows: those are the implicit
+        //    indexes SQLite auto-creates for UNIQUE/PRIMARY KEY constraints,
+        //    which the new CREATE TABLE already re-declares for itself.
+        std::vector<std::string> index_ddl;
+        {
+            Stmt s(db, "SELECT sql FROM sqlite_master WHERE type='index' "
+                       "AND tbl_name=? AND sql IS NOT NULL");
+            s.bind(1, table);
+            while (s.step()) index_ddl.push_back(s.column_text(0));
+        }
+
+        const std::string tmp = table + "_rebuild";
+        exec(std::format("DROP TABLE IF EXISTS {}", tmp));
+        exec(new_ddl);
+        exec(std::format("INSERT INTO {} ({}) SELECT {} FROM {}",
+                         tmp, cols, cols, table));
+        exec(std::format("DROP TABLE {}", table));
+        exec(std::format("ALTER TABLE {} RENAME TO {}", tmp, table));
+
+        for (const auto& ddl : index_ddl) exec(ddl);
+
+        Diskerror::Logger::info(
+            std::format("  {}: rebuilt with canonical column order", table));
+    }
+
     /// 0.15 -> 0.16 migration (FTS5 teardown + custom index backfill).
     ///
     /// This is the big cutover:
@@ -1342,8 +1402,41 @@ struct SqliteBackend::Impl {
     void migrate_0_15_to_0_16() {
         Diskerror::Logger::info("Migrating DB 0.15 -> 0.16 (custom FTS index)...");
 
+        // Both pragmas MUST be set OUTSIDE the transaction:
+        //
+        // foreign_keys: a no-op inside a transaction, and it has to be OFF for
+        // the table rebuilds below. The *_terms junction tables hold FKs into
+        // these five tables with ON DELETE CASCADE -- with enforcement on, the
+        // `DROP TABLE <t>` step would cascade away every index row we are about
+        // to rebuild (and the parent-key checks would fire mid-swap).
+        //
+        // legacy_alter_table: with the modern (OFF) behavior, `ALTER TABLE
+        // <t>_rebuild RENAME TO <t>` helpfully rewrites REFERENCES clauses in
+        // OTHER tables that point at the renamed table -- which would silently
+        // repoint every junction table's FK at the transient "<t>_rebuild" name.
+        // ON keeps RENAME purely local, which is what the rebuild dance needs.
+        const bool fk_was_on = pragma_bool("foreign_keys");
+        exec("PRAGMA foreign_keys = OFF");
+        exec("PRAGMA legacy_alter_table = ON");
+
         try {
             Stmt(db, "BEGIN").exec();
+
+            // Baseline the FK violations that ALREADY exist in this DB, so the
+            // post-rebuild check can flag only NEW orphans. Real 0.15 DBs can
+            // carry pre-existing violations (e.g. a summaries row whose session
+            // was deleted while enforcement was off); those are a separate data
+            // issue and must not abort an otherwise-correct schema migration.
+            auto fk_violations = [this]() {
+                std::multiset<std::string> out;
+                Stmt s(db, "PRAGMA foreign_key_check");
+                while (s.step()) {
+                    out.insert(std::format("{}|{}|{}", s.column_text(0),
+                                           s.column_int64(1), s.column_text(2)));
+                }
+                return out;
+            };
+            const std::multiset<std::string> fk_before = fk_violations();
 
             // Drop all FTS5 triggers for the 5 text tables
             // Triggers: <table>_ai/_ad/_au (text) and <table>_pai/_pad/_pau (phon)
@@ -1381,17 +1474,102 @@ struct SqliteBackend::Impl {
             for (const auto* table : tables) {
                 exec(std::format("DROP VIEW IF EXISTS {}_view", table));
             }
-            for (const auto* table : tables) {
-                if (column_exists(table, "phon")) {
-                    try {
-                        exec(std::format("ALTER TABLE {} DROP COLUMN phon", table));
-                    } catch (const std::exception& e) {
-                        // If DROP COLUMN not supported, log but continue
-                        Diskerror::Logger::warn(
-                            std::format("Could not drop phon from {}: {}", table, e.what()));
-                    }
-                }
-            }
+
+            // Full table rebuild rather than `ALTER TABLE ... DROP COLUMN phon`.
+            // DROP COLUMN would retire `phon` but leave unigram_count/bigram_count
+            // stranded AFTER the embedding BLOB (create_schema()'s ADD COLUMN
+            // guards can only append), so a migrated DB's physical layout would
+            // permanently differ from a fresh install's. Rebuilding does both jobs
+            // at once: `phon` is dropped simply by not being carried over, and the
+            // remaining columns land in the canonical fresh-install order with the
+            // narrow, readable ones ahead of the wide embedding blob.
+            //
+            // The DDL below MUST stay in lockstep with create_schema()'s CREATE
+            // TABLE statements for these five tables.
+            Diskerror::Logger::info("Rebuilding text tables in canonical column order...");
+            rebuild_table_column_order("turns", R"(
+                CREATE TABLE turns_rebuild (
+                    turn_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_text      TEXT NOT NULL,
+                    assistant_text TEXT,
+                    model_id       INTEGER REFERENCES models(model_id) ON DELETE SET NULL,
+                    session_id     INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
+                    created_at     INTEGER NOT NULL,
+                    unigram_count  INTEGER NOT NULL DEFAULT 0,
+                    bigram_count   INTEGER NOT NULL DEFAULT 0,
+                    embedding_version INTEGER,
+                    embedding      BLOB
+                ))",
+                "turn_id, user_text, assistant_text, model_id, session_id, "
+                "created_at, embedding_version, embedding");
+
+            rebuild_table_column_order("summaries", R"(
+                CREATE TABLE summaries_rebuild (
+                    summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text       TEXT NOT NULL,
+                    level      TEXT NOT NULL,
+                    tags       TEXT NOT NULL DEFAULT '',
+                    session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
+                    model_id   INTEGER REFERENCES models(model_id),
+                    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                    unigram_count  INTEGER NOT NULL DEFAULT 0,
+                    bigram_count   INTEGER NOT NULL DEFAULT 0,
+                    embedding_version INTEGER,
+                    embedding  BLOB
+                ))",
+                "summary_id, text, level, tags, session_id, model_id, "
+                "created_at, updated_at, embedding_version, embedding");
+
+            rebuild_table_column_order("turn_summaries", R"(
+                CREATE TABLE turn_summaries_rebuild (
+                    turn_summary_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text             TEXT,
+                    turn_id          INTEGER REFERENCES turns(turn_id) ON DELETE SET NULL,
+                    session_id       INTEGER REFERENCES sessions(session_id),
+                    turn_model_id    INTEGER REFERENCES models(model_id),
+                    summary_model_id INTEGER REFERENCES models(model_id),
+                    turn_datetime    INTEGER NOT NULL,
+                    summarized_on    INTEGER NOT NULL DEFAULT (unixepoch()),
+                    unigram_count  INTEGER NOT NULL DEFAULT 0,
+                    bigram_count   INTEGER NOT NULL DEFAULT 0,
+                    embedding_version INTEGER,
+                    embedding        BLOB
+                ))",
+                "turn_summary_id, text, turn_id, session_id, turn_model_id, "
+                "summary_model_id, turn_datetime, summarized_on, "
+                "embedding_version, embedding");
+
+            rebuild_table_column_order("decisions", R"(
+                CREATE TABLE decisions_rebuild (
+                    decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text        TEXT NOT NULL,
+                    status      TEXT NOT NULL,
+                    tags        TEXT NOT NULL DEFAULT '',
+                    created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                    unigram_count  INTEGER NOT NULL DEFAULT 0,
+                    bigram_count   INTEGER NOT NULL DEFAULT 0,
+                    embedding_version INTEGER,
+                    embedding   BLOB
+                ))",
+                "decision_id, text, status, tags, created_at, "
+                "embedding_version, embedding");
+
+            rebuild_table_column_order("documents", R"(
+                CREATE TABLE documents_rebuild (
+                    document_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text               TEXT NOT NULL,
+                    tags               TEXT NOT NULL DEFAULT '',
+                    chunk_index        INTEGER,
+                    document_source_id INTEGER REFERENCES document_sources(document_source_id),
+                    modified_on        INTEGER,
+                    unigram_count      INTEGER NOT NULL DEFAULT 0,
+                    bigram_count       INTEGER NOT NULL DEFAULT 0,
+                    embedding_version  INTEGER,
+                    embedding          BLOB
+                ))",
+                "document_id, text, tags, chunk_index, document_source_id, "
+                "modified_on, embedding_version, embedding");
 
             // Now backfill the custom FTS index for each table
             Diskerror::Logger::info("Populating custom FTS index...");
@@ -1403,11 +1581,43 @@ struct SqliteBackend::Impl {
 
             // Update db_version to 0.16
             set_db_version("0.16");
+
+            // With FK enforcement suspended for the rebuilds, verify we did not
+            // orphan anything NEW before making it permanent. Pre-existing
+            // violations (captured in fk_before) are logged and carried through
+            // unchanged -- they are a data problem, not a migration failure.
+            {
+                const std::multiset<std::string> fk_after = fk_violations();
+                std::vector<std::string> introduced;
+                std::set_difference(fk_after.begin(), fk_after.end(),
+                                    fk_before.begin(), fk_before.end(),
+                                    std::back_inserter(introduced));
+                if (!introduced.empty()) {
+                    throw std::runtime_error(std::format(
+                        "0.15 -> 0.16 migration introduced {} orphaned foreign key "
+                        "row(s) (first: {}); rolling back",
+                        introduced.size(), introduced.front()));
+                }
+                if (!fk_before.empty()) {
+                    Diskerror::Logger::warn(std::format(
+                        "{} pre-existing foreign-key violation(s) carried through "
+                        "the 0.16 migration unchanged (first: {}). Not caused by "
+                        "the migration; worth investigating separately.",
+                        fk_before.size(), *fk_before.begin()));
+                }
+            }
+
             Stmt(db, "COMMIT").exec();
+            exec("PRAGMA legacy_alter_table = OFF");
+            if (fk_was_on) exec("PRAGMA foreign_keys = ON");
             Diskerror::Logger::info("DB migration 0.15 -> 0.16 complete.");
         } catch (...) {
             try {
                 Stmt(db, "ROLLBACK").exec();
+            } catch (...) {}
+            try {
+                exec("PRAGMA legacy_alter_table = OFF");
+                if (fk_was_on) exec("PRAGMA foreign_keys = ON");
             } catch (...) {}
             throw;
         }

@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 if(APPLE)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum macOS version")
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0" CACHE STRING "Minimum macOS version")
 endif()
-project(ragger VERSION 0.15.1 LANGUAGES CXX)
+project(ragger VERSION 0.16.0 LANGUAGES CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
