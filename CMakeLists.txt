@@ -282,7 +282,7 @@ target_link_libraries(ragger_core PUBLIC
     c_lib_utils
     diskerror_embedding_codec
     diskerror_double_metaphone
-    diskerror_stemmer_porter
+    diskerror_stemmer_snowball
     SQLite::SQLite3
     onnxruntime
     tokenizers_cpp

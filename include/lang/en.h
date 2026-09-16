@@ -34,6 +34,17 @@ namespace ragger::lang {
 // =====================================================================
 
 /**
+ * STEMMER_LANGUAGE: Snowball algorithm name used by fts_tokenize's
+ * stem() for every unigram/bigram term. Must be one of the canonical
+ * names Diskerror::snowball_language_supported() recognises (english,
+ * french, german, russian, ... — see StemmerSnowball.h in c_lib for the
+ * full list). Changing this re-stems everything differently, so a
+ * `ragger reindex` (full reindex) is required afterward for search
+ * results to reflect the new language's stemming rules.
+ */
+constexpr const char* STEMMER_LANGUAGE = "english";
+
+/**
  * STOPWORDS_UNIGRAM: aggressive filtering for standalone words.
  * Seeded from the Porter stopword list. Filters out function words
  * that carry minimal meaning on their own.

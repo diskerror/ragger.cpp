@@ -798,13 +798,13 @@ void test_store_turn_dedup(ragger::Embedder& emb) {
 
     // Custom terms index agrees: the prompt's distinctive stemmed bigram term
     // resolves to exactly one turn_id (dedup didn't leave a stale/duplicate
-    // turns_terms row behind). "general" stems to "genera" in this pipeline,
-    // so the stored literal bigram token is "genera_search", not
-    // "general_search".
+    // turns_terms row behind). Snowball's English algorithm leaves "general"
+    // unstemmed (unlike the old Porter pipeline, which reduced it to
+    // "genera"), so the stored literal bigram token is "general_search".
     sqlite3_prepare_v2(raw,
         "SELECT COUNT(*) FROM turns_terms tt "
         "JOIN terms t ON t.term_id = tt.term_id "
-        "WHERE t.term = 'genera_search'",
+        "WHERE t.term = 'general_search'",
         -1, &st, nullptr);
     CHECK(sqlite3_step(st) == SQLITE_ROW);
     CHECK(sqlite3_column_int(st, 0) == 1);

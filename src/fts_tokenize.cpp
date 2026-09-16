@@ -8,7 +8,7 @@
 #include <sstream>
 
 // Include c_lib headers directly (no extern C needed for C++ functions)
-#include "StemmerPorter.h"
+#include "StemmerSnowball.h"
 #include "DoubleMetaphone.h"
 
 namespace ragger::fts {
@@ -229,7 +229,7 @@ std::vector<std::string> normalize_words(std::string_view sentence) {
 // ===== Stemming =====
 
 std::string stem(std::string_view word) {
-    return Diskerror::stem_en(word);
+    return Diskerror::stem_snowball(word, ragger::lang::STEMMER_LANGUAGE);
 }
 
 // ===== Metaphone =====
