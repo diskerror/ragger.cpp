@@ -10,6 +10,21 @@
 
 namespace ragger {
 
+class RaggerMemory;
+
+/// Import one Markdown/text/JSON file as L5 document chunks: chunk via
+/// chunk_markdown, store every chunk without embedding (fast), then embed
+/// the bodies out-of-process with bounded concurrency (see EmbedExecutor).
+/// `title` overrides the default (filename stem) when non-empty; `year`/
+/// `tags` are applied to every chunk of this file. Used by both the
+/// `import-docs` verb and the deprecated bare `import` verb in main.cpp.
+void do_import(RaggerMemory &memory,
+               const std::string &filepath,
+               int min_chunk_size,
+               const std::string &title,
+               int year,
+               const std::string &tags);
+
 struct ImportChunk {
     std::string text;
     std::string section;  // breadcrumb e.g. "Title » Subtitle"

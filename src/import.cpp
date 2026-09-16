@@ -4,17 +4,27 @@
  */
 #include "import.h"
 #include "nlohmann_json.hpp"
+#include "embed_executor.h"
+#include "lang.h"
+#include "memory.h"
+#include "storage_types.h"
+#include "util/fs.h"
+#include "util/time.h"
+#include "Logger.h"
 
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <format>
+#include <print>
 #include <regex>
 #include <sstream>
 
 namespace ragger {
 
 using json = nlohmann::json;
+namespace fs = std::filesystem;
 
 int heading_level(const std::string& line) {
     int level = 0;
@@ -913,6 +923,72 @@ std::vector<SummaryImport> load_summary_jsonl(const std::string& path) {
         out.push_back(std::move(s));
     }
     return out;
+}
+
+void do_import(RaggerMemory &memory,
+               const std::string &filepath,
+               int min_chunk_size,
+               const std::string &title,
+               int year,
+               const std::string &tags) {
+    if (!fs::exists(filepath)) {
+        throw std::runtime_error(std::format(ragger::lang::ERR_FILE_NOT_FOUND, filepath));
+    }
+
+    std::string text = ragger::read_file_to_string(filepath);
+
+    auto chunks = ragger::chunk_markdown(text, min_chunk_size);
+
+    auto filename = fs::path(filepath).filename().string();
+    std::println(ragger::lang::MSG_IMPORTING_CHUNKS, chunks.size(), filename);
+
+    // Single timestamp shared across every chunk of this import (issue #48).
+    std::string import_ts = ragger::db_timestamp();
+
+    const int total = static_cast<int>(chunks.size());
+
+    // Title/year/tags group and prioritise documents (issue #23 search).
+    // `--title` overrides the default (filename stem); `--year`/`--tags`
+    // come from the caller. All chunks of one file share these.
+    const std::string doc_title = title.empty()
+                                      ? fs::path(filepath).stem().string()
+                                      : title;
+
+    // Store every chunk first WITHOUT embedding (fast), then embed the bodies
+    // out-of-process with bounded concurrency + per-call timeout (issue #41).
+    // This keeps a large import from saturating the box: at most
+    // embed_max_workers `ragger embed` subprocesses run at once.
+    std::vector<int>         ids;
+    std::vector<std::string> texts;
+    ids.reserve(total);
+    texts.reserve(total);
+    for (int i = 0; i < total; ++i) {
+        ragger::DocumentChunk doc;
+        doc.text        = ragger::clean_document_text(chunks[i].text);
+        doc.title       = doc_title;
+        doc.tags        = tags;
+        doc.year        = year;
+        doc.path        = ragger::collapse_home(filepath);
+        doc.chunk_index = i + 1;
+        doc.imported_at = import_ts;
+
+        int id = memory.store_document(doc, /*defer_embedding=*/true);
+        ids.push_back(id);
+        texts.push_back(doc.text);
+        std::println(ragger::lang::MSG_IMPORT_CHUNK, (i + 1), total, std::to_string(id));
+    }
+
+    ragger::EmbedExecutor embed_exec;  // timeout / retries / workers from config
+    auto vecs = embed_exec.batch(texts);
+    int skipped = 0;
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (vecs[i]) memory.update_document_embedding(ids[i], *vecs[i]);
+        else ++skipped;   // left NULL — `ragger rebuild-embeddings` can retry
+    }
+    std::println(ragger::lang::MSG_IMPORT_DONE, chunks.size());
+    if (skipped > 0)
+        Diskerror::Logger::warn(std::format(ragger::lang::WARN_IMPORT_EMBED_SKIPPED,
+                                            skipped, total));
 }
 
 } // namespace ragger

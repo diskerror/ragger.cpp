@@ -251,6 +251,7 @@ add_library(ragger_core STATIC
     src/sqlite_backend.cpp
     src/user_store.cpp
     src/import.cpp
+    src/user_commands.cpp
     src/export.cpp
     src/memory.cpp
     src/stats_logger.cpp
