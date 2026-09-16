@@ -129,8 +129,17 @@ std::vector<std::string> normalize_words(std::string_view sentence) {
         result.push_back(current_word);
     }
 
-    // Second pass: handle minus signs and operators before single digits
-    // Detect operator followed by single digit and handle appropriately
+    // Second pass: handle minus signs and operators before small numbers
+    // Detect operator followed by a small number (0-12) and handle appropriately
+    auto is_small_number_token = [](const std::string& s) {
+        if (s.empty() || s.size() > 2) return false;
+        for (char c : s) if (!std::isdigit(static_cast<unsigned char>(c))) return false;
+        for (const auto& [digit, digit_word] : ragger::lang::SMALL_NUMBER_WORDS) {
+            if (s == digit) return true;
+        }
+        return false;
+    };
+
     std::vector<std::string> with_operator_handling;
     for (size_t i = 0; i < result.size(); ++i) {
         const auto& word = result[i];
@@ -146,9 +155,9 @@ std::vector<std::string> normalize_words(std::string_view sentence) {
             is_plus_op = true;
         }
         
-        // If operator is followed by single digit, convert operator to word (no digit skip needed)
-        if ((is_minus_op || is_plus_op) && i + 1 < result.size() && 
-            result[i + 1].size() == 1 && std::isdigit(result[i + 1][0])) {
+        // If operator is followed by a small number, convert operator to word (no number skip needed)
+        if ((is_minus_op || is_plus_op) && i + 1 < result.size() &&
+            is_small_number_token(result[i + 1])) {
             // Replace operator with its word form
             if (is_minus_op) {
                 with_operator_handling.push_back("minus");
@@ -165,11 +174,11 @@ std::vector<std::string> normalize_words(std::string_view sentence) {
     for (size_t i = 0; i < with_operator_handling.size(); ++i) {
         const auto& word = with_operator_handling[i];
         
-        // Check if it's a single digit
-        if (word.size() == 1 && std::isdigit(word[0])) {
-            // Convert single digit to word
+        // Check if it's a small number (0-12)
+        if (word.size() <= 2 && is_small_number_token(word)) {
+            // Convert small number to word
             bool digit_found = false;
-            for (const auto& [digit, digit_word] : ragger::lang::SINGLE_DIGIT_WORDS) {
+            for (const auto& [digit, digit_word] : ragger::lang::SMALL_NUMBER_WORDS) {
                 if (word == digit) {
                     expanded.push_back(std::string(digit_word));
                     digit_found = true;

@@ -81,7 +81,6 @@ inline constexpr std::array<std::string_view, 39> STOPWORDS_BIGRAM = {{
     // Generic/low-info words
     "the", "a", "an",
     "and", "or", "but",
-    "all", "each", "every", "both",
     "same", "such", "other",
     "also", "only", "just",
     "to",  // Preposition connector with no independent meaning
@@ -750,10 +749,14 @@ inline const ConfigMeta* config_meta(std::string_view key) {
 // =====================================================================
 
 /**
- * SINGLE_DIGIT_WORDS: Convert single digits (0-9) to their word forms.
- * Improves search: "I have 3 cats" becomes "I have three cats" → searchable as text.
+ * SMALL_NUMBER_WORDS: Convert small standalone numbers (0-12) to their word
+ * forms. Improves search: "I have 3 cats" becomes "I have three cats" ->
+ * searchable as text. Capped at twelve because 13+ are compound words
+ * (thirteen, twenty-one, ...) built from smaller parts rather than atomic
+ * vocabulary — spelling those out is a distinct, more involved problem
+ * (and multi-digit numbers already read fine as literal numeric tokens).
  */
-inline constexpr std::array<std::pair<std::string_view, std::string_view>, 10> SINGLE_DIGIT_WORDS = {{
+inline constexpr std::array<std::pair<std::string_view, std::string_view>, 13> SMALL_NUMBER_WORDS = {{
     {"0", "zero"},
     {"1", "one"},
     {"2", "two"},
@@ -764,6 +767,9 @@ inline constexpr std::array<std::pair<std::string_view, std::string_view>, 10> S
     {"7", "seven"},
     {"8", "eight"},
     {"9", "nine"},
+    {"10", "ten"},
+    {"11", "eleven"},
+    {"12", "twelve"},
 }};
 
 /**
