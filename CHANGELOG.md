@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.16.1
+- Refactored main.cpp.
+- Altered stop-word lists. Single letters are stopped, Digits converted to words.
+
 ## v0.16.0
 SQLite FTS5 didn't behave as needed, so both FTS5 layers were replaced with a hand-rolled
 inverted index — closer to the project's original BM25 approach, but with full control over

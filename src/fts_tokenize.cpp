@@ -8,7 +8,7 @@
 #include <sstream>
 
 // Include c_lib headers directly (no extern C needed for C++ functions)
-#include "Stemmer.h"
+#include "StemmerPorter.h"
 #include "DoubleMetaphone.h"
 
 namespace ragger::fts {
