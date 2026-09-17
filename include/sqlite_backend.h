@@ -172,14 +172,16 @@ public:
     bool has_embeddings() const override;
 
     /// Total rows across the four embedded tables (rebuild scope).
-    int count_embeddable_rows() const override;
+    int count_embeddable_rows(const std::string& table = "all") const override;
 
     /// Load all memories. Returns vector of SearchResult (score=0).
     std::vector<SearchResult> load_all(const std::string& collection = "") override;
 
     /// Rebuild embeddings for all stored documents. Returns doc count.
-    int rebuild_embeddings(Embedder& embedder, bool progress = true) override;
-    int backfill_embeddings(Embedder& embedder) override;
+    int rebuild_embeddings(Embedder& embedder, bool progress = true,
+                           const std::string& table = "all") override;
+    int backfill_embeddings(Embedder& embedder,
+                            const std::string& table = "all") override;
     uint8_t embedding_version() const override;
     uint8_t increment_embedding_version() override;
     int reindex_table(const std::string& table, bool progress = false) override;

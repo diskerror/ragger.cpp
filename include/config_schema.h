@@ -39,7 +39,7 @@ enum class CfgType {
 enum class CfgEdit {
     Live,            // hot-applies immediately
     RestartRequired, // needs daemon restart to take effect
-    RebuildRequired, // needs `ragger rebuild-embeddings` (model/dims/vec type)
+    RebuildRequired, // needs `ragger re-embed` (model/dims/vec type)
     Locked,          // read-only (bootstrap/system config owns it)
 };
 

@@ -983,7 +983,7 @@ void do_import(RaggerMemory &memory,
     int skipped = 0;
     for (size_t i = 0; i < ids.size(); ++i) {
         if (vecs[i]) memory.update_document_embedding(ids[i], *vecs[i]);
-        else ++skipped;   // left NULL — `ragger rebuild-embeddings` can retry
+        else ++skipped;   // left NULL — `ragger re-embed` can retry
     }
     std::println(ragger::lang::MSG_IMPORT_DONE, chunks.size());
     if (skipped > 0)

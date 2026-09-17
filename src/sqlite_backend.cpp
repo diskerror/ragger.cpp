@@ -4017,9 +4017,10 @@ struct SqliteBackend::Impl {
     // summaries, decisions, documents) — i.e. how many rows
     // `rebuild_embeddings()` will re-encode. (count() alone is just
     // summaries, which understates the rebuild scope.)
-    int count_embeddable_rows() const {
+    int count_embeddable_rows(const std::string& table = "all") const {
         int total = 0;
         for (const char* tbl : {"turns", "turn_summaries", "summaries", "decisions", "documents"}) {
+            if (table != "all" && table != tbl) continue;
             Stmt s(db, std::format("SELECT COUNT(*) FROM {}", tbl));
             if (s.step()) total += s.column_int(0);
         }
@@ -4067,7 +4068,7 @@ struct SqliteBackend::Impl {
     // Re-encode embeddings across all five embedded tables (turns, summaries,
     // decisions, documents, turn_summaries). Two modes, selected by `only_missing`:
     //   * false → re-encode every row (full rebuild; used by CLI
-    //             `ragger rebuild-embeddings` after a model/dtype change)
+    //             `ragger re-embed` after a model/dtype change)
     //   * true  → only rows whose embedding is NULL or whose embedding_version
     //             column doesn't match the current version (cheap backfill
     //             at server startup) — a plain indexed integer comparison
@@ -4086,14 +4087,15 @@ struct SqliteBackend::Impl {
         "THEN '' ELSE char(10) || (SELECT title FROM document_sources ds "
         "WHERE ds.document_source_id = documents.document_source_id) END";
 
-    int embed_tables(Embedder& emb_ref, bool only_missing, bool progress) {
+    int embed_tables(Embedder& emb_ref, bool only_missing, bool progress,
+                      const std::string& table_filter = "all") {
         struct TableSpec {
             const char* table;
             const char* id_col;
             const char* text_col;
             const char* extra_col;  // if set, combined with text_col via turn_embed_text
         };
-        static constexpr TableSpec tables[] = {
+        static constexpr TableSpec kAllTables[] = {
             { "turns",           "turn_id",         "user_text", "assistant_text" },
             { "summaries",       "summary_id",      "text",      nullptr          },
             { "decisions",       "decision_id",     "text",      nullptr          },
@@ -4101,16 +4103,13 @@ struct SqliteBackend::Impl {
             { "turn_summaries",  "turn_summary_id", "text",      nullptr          },
         };
 
-        // Total is only needed for the progress display. For backfill mode
-        // we can't cheaply count stale rows, so use the full row count and
-        // accept the overcount (the progress display will skip ahead).
-        // Counted unconditionally: the non-interactive path logs "done/total"
-        // every 1000 rows, and skipping the count there produced "5000/0".
-        int total_count = 0;
-        for (auto& t : tables) {
-            Stmt s(db, std::format("SELECT COUNT(*) FROM {}", t.table));
-            if (s.step()) total_count += s.column_int(0);
+        // Filter to one table, or run the full fixed set when "all"/empty.
+        std::vector<TableSpec> selected;
+        for (auto& t : kAllTables) {
+            if (table_filter == "all" || table_filter.empty() || table_filter == t.table)
+                selected.push_back(t);
         }
+        const auto& tables = selected;
 
         int done = 0;
 
@@ -4130,7 +4129,13 @@ struct SqliteBackend::Impl {
 
         struct Row { int id; std::string text; };
 
-        auto process = [&](const TableSpec& t, bool stale_only) {
+        // Per-table progress counter: resets to 0 at the start of each table
+        // (not a running total across tables) so the printed number climbs
+        // from 0 up to that table's own row count -- e.g. "turns: 3363/3363"
+        // -- before moving to the next table's line, matching reindex_table's
+        // "\rReindexing {table}: {done}/{total}" style.
+        auto process = [&](const TableSpec& t, bool stale_only, int table_total) {
+            int table_done = 0;
             // stale_only's filter is a plain embedding_version column
             // comparison (db_version 0.15+) — no blob decode needed. Rows
             // with embedding IS NULL were already handled in pass 1, so this
@@ -4212,10 +4217,11 @@ struct SqliteBackend::Impl {
                             t.table, r.id, sqlite3_errmsg(db)));
                     }
                     ++done;
+                    ++table_done;
                     if (progress) {
                         std::cout << std::format(
                             ragger::lang::MSG_REBUILD_EMBEDDINGS_PROGRESS,
-                            done, total_count);
+                            t.table, table_done, table_total);
                         std::cout.flush();
                     }
                     else if (done % 1000 == 0) {
@@ -4224,22 +4230,29 @@ struct SqliteBackend::Impl {
                         // leaves a record of how far it got.
                         Diskerror::Logger::info(std::format(
                             ragger::lang::MSG_REBUILD_EMBEDDINGS_LOG,
-                            done, total_count));
+                            t.table, table_done, table_total));
                     }
                 }
             }
+            if (progress) std::cout << "\n";
         };
 
         // Pass 1: rows with no embedding (or every row, on a full rebuild).
-        for (auto& t : tables) process(t, /*stale_only=*/false);
+        for (auto& t : tables) {
+            Stmt c(db, std::format("SELECT COUNT(*) FROM {}", t.table));
+            int table_total = c.step() ? c.column_int(0) : 0;
+            process(t, /*stale_only=*/false, table_total);
+        }
 
         // Pass 2 (backfill only): re-embed rows with stale version bytes.
         // A full rebuild already covered everything in pass 1.
         if (only_missing) {
-            for (auto& t : tables) process(t, /*stale_only=*/true);
+            for (auto& t : tables) {
+                Stmt c(db, std::format("SELECT COUNT(*) FROM {}", t.table));
+                int table_total = c.step() ? c.column_int(0) : 0;
+                process(t, /*stale_only=*/true, table_total);
+            }
         }
-
-        if (progress) std::cout << "\n";
 
         if (done > 0 || !only_missing) {
             invalidate_cache();
@@ -4249,16 +4262,18 @@ struct SqliteBackend::Impl {
         return done;
     }
 
-    // Full re-encode of every embedded row (interactive, with progress).
-    int rebuild_embeddings(Embedder& emb_ref, bool progress) {
+    // Full re-encode of every embedded row (interactive, with progress),
+    // or one table when `table` != "all".
+    int rebuild_embeddings(Embedder& emb_ref, bool progress, const std::string& table) {
         if (!embedder_usable(emb_ref)) return 0;
-        return embed_tables(emb_ref, /*only_missing=*/false, progress);
+        return embed_tables(emb_ref, /*only_missing=*/false, progress, table);
     }
 
-    // Cheap backfill: embed rows left NULL or with stale version byte.
-    int backfill_embeddings(Embedder& emb_ref) {
+    // Cheap backfill: embed rows left NULL or with stale version byte,
+    // scoped to one table when `table` != "all".
+    int backfill_embeddings(Embedder& emb_ref, const std::string& table) {
         if (!embedder_usable(emb_ref)) return 0;
-        return embed_tables(emb_ref, /*only_missing=*/true, /*progress=*/false);
+        return embed_tables(emb_ref, /*only_missing=*/true, /*progress=*/false, table);
     }
 
     // A disabled embedder returns {} from encode(), which bind_embedding()
@@ -4745,21 +4760,21 @@ std::vector<std::pair<std::string, int64_t>> SqliteBackend::table_row_counts() c
 
 bool SqliteBackend::has_embeddings() const { std::lock_guard<std::mutex> lk(pImpl->mu); return pImpl->has_embeddings(); }
 
-int SqliteBackend::count_embeddable_rows() const { std::lock_guard<std::mutex> lk(pImpl->mu); return pImpl->count_embeddable_rows(); }
+int SqliteBackend::count_embeddable_rows(const std::string& table) const { std::lock_guard<std::mutex> lk(pImpl->mu); return pImpl->count_embeddable_rows(table); }
 
 std::vector<SearchResult> SqliteBackend::load_all(const std::string& collection) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->load_all(collection);
 }
 
-int SqliteBackend::rebuild_embeddings(Embedder& embedder, bool progress) {
+int SqliteBackend::rebuild_embeddings(Embedder& embedder, bool progress, const std::string& table) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->rebuild_embeddings(embedder, progress);
+    return pImpl->rebuild_embeddings(embedder, progress, table);
 }
 
-int SqliteBackend::backfill_embeddings(Embedder& embedder) {
+int SqliteBackend::backfill_embeddings(Embedder& embedder, const std::string& table) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->backfill_embeddings(embedder);
+    return pImpl->backfill_embeddings(embedder, table);
 }
 
 uint8_t SqliteBackend::embedding_version() const {

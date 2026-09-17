@@ -180,10 +180,10 @@ constexpr const char* MSG_BACKFILLED_EMBEDDINGS  = "Backfilled embeddings for {}
 // --- Migration / maintenance ---
 // (The schema is declarative — there is no in-place migration. Pre-v2 data is
 //  copied into a fresh v2 DB out-of-band.)
-constexpr const char* MSG_REBUILD_EMBEDDINGS_PROGRESS = "\rRebuilding embeddings: {}/{}";
+constexpr const char* MSG_REBUILD_EMBEDDINGS_PROGRESS = "\rRe-embedding {}: {}/{}";
 // Same counter for non-interactive callers (the daemon): no leading \r, since
 // it goes to the activity log one line at a time rather than over itself.
-constexpr const char* MSG_REBUILD_EMBEDDINGS_LOG = "Rebuilding embeddings: {}/{}";
+constexpr const char* MSG_REBUILD_EMBEDDINGS_LOG = "Re-embedding {}: {}/{}";
 
 // --- Re-embed (staged model change: promote identity, re-encode, verify) ---
 constexpr const char* MSG_REEMBED_STARTED     = "re-embed started: model '{}', engine '{}'";
@@ -319,7 +319,7 @@ constexpr const char* ERR_TOKENIZER_NOT_FOUND = "Tokenizer file not found: {}";
 constexpr const char* ERR_EMPTY_TOKENIZATION  = "Empty tokenization result";
 constexpr const char* ERR_OUTPUT_SHAPE        = "Unexpected output shape from model";
 constexpr const char* ERR_EMBEDDING_MISMATCH  = "Embedding model mismatch: database was built with '{}' but config specifies '{}'. Reorganise your models directory and run 'ragger rebuild' to re-embed.";
-constexpr const char* ERR_VECTOR_TYPE_MISMATCH = "Vector dtype mismatch: database was built with '{}' embeddings but config specifies '{}'. Run 'ragger rebuild-embeddings' to re-encode at the new precision.";
+constexpr const char* ERR_VECTOR_TYPE_MISMATCH = "Vector dtype mismatch: database was built with '{}' embeddings but config specifies '{}'. Run 'ragger re-embed' to re-encode at the new precision.";
 // Ragger-managed ONNX models live at ~/.ragger/models/<provider>/<model>/, so
 // a valid internal model name is always "provider/model". These report a bad
 // value; nothing repairs one by guessing a provider.
@@ -354,7 +354,7 @@ constexpr const char* MCP_WARN_NO_EMBEDDINGS =
     "dashboard and set a valid embedding model in the Embedding panel; stored "
     "entries will be embedded automatically once it is fixed.";
 
-constexpr const char* ERR_DIMENSIONS_MISMATCH = "Vector length mismatch: database was built with {}-dim embeddings but config specifies {}. Run 'ragger rebuild-embeddings' to re-encode at the new dimensions.";
+constexpr const char* ERR_DIMENSIONS_MISMATCH = "Vector length mismatch: database was built with {}-dim embeddings but config specifies {}. Run 'ragger re-embed' to re-encode at the new dimensions.";
 
 // --- Errors: tokenizer wrapper ---
 constexpr const char* ERR_TOKENIZER_OPEN      = "Failed to open tokenizer.json: {}";
@@ -405,7 +405,9 @@ Commands:
   housekeeping       Trigger housekeeping on running daemon
   reload             Reload config on running daemon (SIGHUP)
                      options: --user <name>, --dry-run
-  rebuild-embeddings Rebuild embeddings for all memories
+  re-embed <table|all> Re-encode embeddings for one table or all memories
+                     (progress per table; tables: turns, turn_summaries,
+                     summaries, decisions, documents, or "all")
   reindex <table|all> Rebuild the custom text index (terms + TF-IDF)
                      tables: turns, turn_summaries, summaries, decisions,
                      documents, or "all"
@@ -616,7 +618,7 @@ inline constexpr std::array<ConfigMeta, 61> kConfigSchema = {{
     // Type and dimensions.
     {"desired_embedding_vector_type", "embedding", "Desired Vector Type", CfgType::Enum, CfgEdit::RebuildRequired,
      "", "f32,f16,bf16,int8",
-     "Target on-disk vector precision. f32 (lossless, 4B/dim), f16 (half, 2B/dim), bf16 (bfloat16, 2B/dim), or int8 (quantized, 1B/dim). Changing this stages a re-embed; run 'Update now' or rebuild-embeddings to re-encode at the new precision."},
+     "Target on-disk vector precision. f32 (lossless, 4B/dim), f16 (half, 2B/dim), bf16 (bfloat16, 2B/dim), or int8 (quantized, 1B/dim). Changing this stages a re-embed; run 'Update now' or ragger re-embed to re-encode at the new precision."},
     {"desired_embedding_dimensions", "embedding", "Desired Dimensions", CfgType::Integer, CfgEdit::RebuildRequired,
      "", "",
      "Target vector dimensionality. Model-determined; usually leave as the model's native size."},

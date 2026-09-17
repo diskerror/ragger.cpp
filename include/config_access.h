@@ -38,7 +38,7 @@ enum class ConfigSetError {
 
 struct ConfigSetResult {
     bool restart_required = false;   // change stored but needs daemon restart
-    bool rebuild_required = false;   // needs `ragger rebuild-embeddings`
+    bool rebuild_required = false;   // needs `ragger re-embed`
 };
 
 /// Read one setting's current value from a Config as TEXT. Returns nullopt

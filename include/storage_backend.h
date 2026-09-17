@@ -441,19 +441,24 @@ public:
     virtual bool has_embeddings() const = 0;
 
     /// Total rows across the four embedded tables (turns, summaries, decisions,
-    /// documents) — the true scope of a `rebuild_embeddings()` pass.
-    virtual int count_embeddable_rows() const = 0;
+    /// documents), or just one table when `table` != "all" — the true scope of
+    /// a `rebuild_embeddings()`/`backfill_embeddings()` pass.
+    virtual int count_embeddable_rows(const std::string& table = "all") const = 0;
 
     /// Load all memories. Returns vector of SearchResult (score=0).
     virtual std::vector<SearchResult> load_all(const std::string& collection = "") = 0;
 
-    /// Rebuild embeddings for all stored documents. Returns doc count.
-    virtual int rebuild_embeddings(Embedder& embedder, bool progress = true) = 0;
+    /// Rebuild embeddings for all stored documents, or for one table when
+    /// `table` != "all" (turns, turn_summaries, summaries, decisions,
+    /// documents). Returns row count (re-)encoded.
+    virtual int rebuild_embeddings(Embedder& embedder, bool progress = true,
+                                    const std::string& table = "all") = 0;
 
-    /// Embed only rows whose embedding is NULL or has a stale version byte.
-    /// Cheap; intended to run on startup and after deferred-embedding writes.
-    /// Returns the number of rows updated.
-    virtual int backfill_embeddings(Embedder& embedder) = 0;
+    /// Embed only rows whose embedding is NULL or has a stale version byte,
+    /// scoped to one table when `table` != "all". Cheap; intended to run on
+    /// startup and after deferred-embedding writes. Returns rows updated.
+    virtual int backfill_embeddings(Embedder& embedder,
+                                     const std::string& table = "all") = 0;
 
     /// Get the current embedding version from the settings table.
     virtual uint8_t embedding_version() const = 0;

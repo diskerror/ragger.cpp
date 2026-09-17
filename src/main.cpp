@@ -538,7 +538,7 @@ int main(int argc, char **argv) {
                 if (r->restart_required)
                     std::cout << "(change saved — restart the daemon to apply)\n";
                 if (r->rebuild_required)
-                    std::cout << "(change saved — run 'ragger rebuild-embeddings' to apply)\n";
+                    std::cout << "(change saved — run 'ragger re-embed' to apply)\n";
                 return 0;
             }
             else {
@@ -1142,15 +1142,32 @@ int main(int argc, char **argv) {
             auto recipe_args = opts.getParams("args");
             return ragger::run_recipe_cli(recipe_args, db_path);
         }
-        else if (command == "rebuild-embeddings") {
+        else if (command == "re-embed") {
+            // Re-encode embeddings for one table, or all five (default).
+            // Mirrors `reindex`'s <table|all> argument handling.
+            static constexpr std::array<const char*, 5> kAllTables = {
+                "turns", "turn_summaries", "summaries", "decisions", "documents"
+            };
+            auto args = opts.getParams("args");
+            std::string target = args.empty() ? "all" : args[0];
+            if (target != "all") {
+                bool found = false;
+                for (auto* t : kAllTables) if (target == t) { found = true; break; }
+                if (!found) {
+                    Diskerror::Logger::error(std::format(
+                        "Unknown table '{}'. Expected one of: turns, turn_summaries, "
+                        "summaries, decisions, documents, or \"all\"", target));
+                    return 1;
+                }
+            }
 
             // Get count first (before loading full memory). Skip the guard so
             // a pending model/dtype/dims change doesn't block the count/confirm.
-            // Count across all four embedded tables — what the rebuild touches,
-            // not just summaries (count()).
+            // Scoped to `target` so the confirmation prompt matches the real
+            // scope of this run, not the whole DB's embeddable rows.
             ragger::RaggerMemory memory_temp(db_path,
                                              /*skip_embedding_guard=*/true);
-            int total_count = memory_temp.backend()->count_embeddable_rows();
+            int total_count = memory_temp.backend()->count_embeddable_rows(target);
             memory_temp.close();
 
             // Warning + confirmation prompt
@@ -1184,32 +1201,39 @@ int main(int argc, char **argv) {
                 Diskerror::Logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
             }
 
-            // Rebuild embeddings. Skip the drift guard — re-encoding at the
-            // new config is exactly the point — then rewrite the settings
+            // Re-embed. Skip the drift guard -- re-encoding at the
+            // new config is exactly the point -- then rewrite the settings
             // identity so the new model/dtype/dimensions "take". Doing this
             // *after* the re-encode means an aborted/failed rebuild leaves
-            // settings≠config, so the guard still catches it next startup.
+            // settings!=config, so the guard still catches it next startup.
             // Log start/finish to the activity log (not just stdout) so the
             // re-embed is visible in the audit trail alongside the daemon's
             // degraded-mode / recovery messages.
             Diskerror::Logger::info(std::format(
-                "rebuild-embeddings started: {} row(s), model '{}', {} {}-dim",
-                total_count, cfg.embedding_model,
+                "re-embed started: {} row(s), table '{}', model '{}', {} {}-dim",
+                total_count, target, cfg.embedding_model,
                 ragger::vector_codec::canonical(cfg.embedding_vector_type),
                 cfg.embedding_dimensions));
             ragger::RaggerMemory memory(db_path,
                                         /*skip_embedding_guard=*/true);
-            int count = memory.rebuild_embeddings();
-            ragger::UserStore settings_store(db_path);
-            settings_store.set_setting(
-                "embedding_model", cfg.embedding_model);
-            settings_store.set_setting(
-                "vector_type", ragger::vector_codec::canonical(cfg.embedding_vector_type));
-            settings_store.set_setting(
-                "dimensions", std::to_string(cfg.embedding_dimensions));
+            int count = memory.rebuild_embeddings(/*progress=*/true, target);
+            // The settings identity records what model/dtype/dims the WHOLE
+            // DB's vectors are in -- only promote it on a full "all" run.
+            // Re-embedding a single table doesn't change that for the rest
+            // of the DB, so a scoped run leaves the identity alone.
+            if (target == "all") {
+                ragger::UserStore settings_store(db_path);
+                settings_store.set_setting(
+                    "embedding_model", cfg.embedding_model);
+                settings_store.set_setting(
+                    "vector_type", ragger::vector_codec::canonical(cfg.embedding_vector_type));
+                settings_store.set_setting(
+                    "dimensions", std::to_string(cfg.embedding_dimensions));
+            }
             Diskerror::Logger::info(std::format(
-                "rebuild-embeddings finished: {} row(s) re-encoded; settings "
-                "identity updated", count));
+                "re-embed finished: {} row(s) re-encoded (table '{}'){}",
+                count, target,
+                target == "all" ? "; settings identity updated" : ""));
             std::cout << std::format(ragger::lang::MSG_EMBEDDINGS_REBUILT, count) << "\n";
 
         }

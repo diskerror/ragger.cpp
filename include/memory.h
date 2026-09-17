@@ -22,7 +22,7 @@ class RaggerMemory {
 public:
     /// Construct against a specific DB path. `skip_embedding_guard` bypasses
     /// the startup model/dtype/dimensions drift check (used by
-    /// `rebuild-embeddings`, which intentionally re-encodes at the new
+    /// `re-embed`, which intentionally re-encodes at the new
     /// config and rewrites the settings afterward). The model directory is
     /// always resolved from config (Config::resolved_model_dir(), which
     /// itself honors the --model-dir override) — it is not a constructor
@@ -151,11 +151,12 @@ public:
     /// Load all memories (for export). Optionally filter by collection.
     std::vector<SearchResult> load_all(const std::string& collection = "");
 
-    /// Rebuild embeddings for all documents. Returns doc count.
+    /// Rebuild embeddings for all documents, or one table when `table` !=
+    /// "all". Returns row count.
     /// `progress` writes a \r-updated counter to stdout — right for the CLI,
     /// wrong for the daemon (it lands in the activity log as one enormous
     /// line); daemon callers pass false and get periodic Logger lines instead.
-    int rebuild_embeddings(bool progress = true);
+    int rebuild_embeddings(bool progress = true, const std::string& table = "all");
 
     // ---- Embedding identity: current vs desired + re-embed control -------
     struct EmbeddingStatus {
@@ -185,7 +186,7 @@ public:
     bool embeddings_degraded() const { return embeddings_degraded_; }
 
     /// Re-check the embedding drift guard. If the stored settings now match
-    /// the config (e.g. after `ragger rebuild-embeddings`), clear the
+    /// the config (e.g. after `ragger re-embed`), clear the
     /// degraded flag, backfill any NULL embeddings, and re-enable semantic
     /// search. Returns true if embeddings were recovered.
     bool try_recover_embeddings();

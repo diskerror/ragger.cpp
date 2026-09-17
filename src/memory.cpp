@@ -146,7 +146,7 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     // minutes — long enough that deploy health checks reported failure while
     // the daemon was actually fine. Backfill is now owned by the server's
     // housekeeping tick (background, ~60s after start). CLI paths that need
-    // it immediately use `ragger rebuild-embeddings`.
+    // it immediately use `ragger re-embed`.
 
 #ifdef RAGGER_STATS
     // Opt-in retrieval instrumentation. Construction never throws into the
@@ -335,8 +335,8 @@ std::vector<SearchResult> RaggerMemory::load_all(const std::string& collection) 
     return backend_->load_all(collection);
 }
 
-int RaggerMemory::rebuild_embeddings(bool progress) {
-    return backend_->rebuild_embeddings(*embedder_, progress);
+int RaggerMemory::rebuild_embeddings(bool progress, const std::string& table) {
+    return backend_->rebuild_embeddings(*embedder_, progress, table);
 }
 
 RaggerMemory::EmbeddingStatus RaggerMemory::embedding_status() {
