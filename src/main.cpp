@@ -43,6 +43,7 @@
 #include "embed_executor.h"
 #include "sqlite_backend.h"
 #include "user_store.h"
+#include "util/fs.h"
 #include "server.h"
 #include "embedder.h"
 #include "daemon_control.h"
@@ -1189,13 +1190,13 @@ int main(int argc, char **argv) {
                 return 0;
             }
 
-            // Backup the database file
+            // Backup the database file(s) — tar.gz (falls back to zip, then
+            // plain copy) via archive_db_files(), same naming convention as
+            // migration snapshots: <name>_BACKUP_<timestamp>.tar.gz.
             std::string actual_db_path = db_path.empty() ? cfg.resolved_db_path() : db_path;
-            std::string backup_path = actual_db_path + ".bak";
             try {
-                fs::copy_file(actual_db_path, backup_path,
-                              fs::copy_options::overwrite_existing);
-                std::println(ragger::lang::MSG_DB_BACKED_UP, backup_path);
+                std::string archive = ragger::archive_db_files(actual_db_path);
+                std::println(ragger::lang::MSG_DB_BACKED_UP, archive);
             }
             catch (const std::exception &e) {
                 Diskerror::Logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
@@ -1267,11 +1268,9 @@ int main(int argc, char **argv) {
             }
 
             std::string actual_db_path = db_path.empty() ? cfg.resolved_db_path() : db_path;
-            std::string backup_path = actual_db_path + ".bak";
             try {
-                fs::copy_file(actual_db_path, backup_path,
-                              fs::copy_options::overwrite_existing);
-                std::println(ragger::lang::MSG_DB_BACKED_UP, backup_path);
+                std::string archive = ragger::archive_db_files(actual_db_path);
+                std::println(ragger::lang::MSG_DB_BACKED_UP, archive);
             }
             catch (const std::exception &e) {
                 Diskerror::Logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));

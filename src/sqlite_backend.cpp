@@ -783,27 +783,9 @@ struct SqliteBackend::Impl {
     void maybe_backup_before_migration(const std::string& current_version) {
         if (!migration_pending(current_version)) return;
 
-        // Timestamped sibling of the DB file: <name>_BACKUP_<YYYYMMDD-HHMMSS>
-        fs::path src(db_path);
-        std::string stem = src.stem().string();               // e.g. "memories"
-        std::string ts;
-        {
-            std::time_t now = std::time(nullptr);
-            std::tm tmv{};
-#if defined(_WIN32)
-            localtime_s(&tmv, &now);
-#else
-            localtime_r(&now, &tmv);
-#endif
-            char buf[32];
-            std::strftime(buf, sizeof(buf), "%Y%m%d-%H%M%S", &tmv);
-            ts = buf;
-        }
-        std::string prefix = stem + "_BACKUP_" + ts;
-
         Diskerror::Logger::info(std::format(
-            "DB schema {} predates {} -- taking pre-migration backup ({})",
-            current_version, std::string(kExpectedDbVersion), prefix));
+            "DB schema {} predates {} -- taking pre-migration backup",
+            current_version, std::string(kExpectedDbVersion)));
 
         // ---- 1. WAL-checkpoint (TRUNCATE) -- try without closing first ---
         // "PRAGMA wal_checkpoint(TRUNCATE);" returns one row: (busy, log,
@@ -843,79 +825,22 @@ struct SqliteBackend::Impl {
         }
 
         // ---- 2. Archive the raw file(s): tar.gz -> zip -> plain copy -----
-        fs::path parent = src.parent_path();
-        std::string db_filename = src.filename().string();          // "memories.db"
-        std::string wal_filename = db_filename + "-wal";
-        std::string shm_filename = db_filename + "-shm";
-        bool has_wal = fs::exists(parent / wal_filename);
-        bool has_shm = fs::exists(parent / shm_filename);
-
-        auto shell_quote = [](const std::string& s) {
-            std::string out = "'";
-            for (char c : s) {
-                if (c == '\'') out += "'\\''";
-                else out += c;
-            }
-            out += "'";
-            return out;
-        };
-
-        std::string method;
-        fs::path archive;
-
-        // -- tar.gz --
-        {
-            fs::path tar_path = parent / (prefix + ".tar.gz");
-            std::string cmd = "tar -czf " + shell_quote(tar_path.string()) +
-                " -C " + shell_quote(parent.string()) +
-                " " + shell_quote(db_filename);
-            if (has_wal) cmd += " " + shell_quote(wal_filename);
-            if (has_shm) cmd += " " + shell_quote(shm_filename);
-            if (std::system(cmd.c_str()) == 0 && fs::exists(tar_path)) {
-                method = "tar";
-                archive = tar_path;
-            }
-        }
-
-        // -- zip fallback --
-        if (method.empty()) {
-            fs::path zip_path = parent / (prefix + ".zip");
-            std::string cmd = "cd " + shell_quote(parent.string()) +
-                " && zip -q " + shell_quote(zip_path.string()) +
-                " -j " + shell_quote(db_filename);
-            if (has_wal) cmd += " " + shell_quote(wal_filename);
-            if (has_shm) cmd += " " + shell_quote(shm_filename);
-            if (std::system(cmd.c_str()) == 0 && fs::exists(zip_path)) {
-                method = "zip";
-                archive = zip_path;
-            }
-        }
-
-        // -- plain copy fallback (old naming/behavior exactly) --
-        if (method.empty()) {
-            fs::path copy_path = parent / (prefix + ".db");
-            try {
-                if (fs::exists(copy_path))
-                    throw std::runtime_error(
-                        "pre-migration backup target already exists: " + copy_path.string());
-                fs::copy_file(src, copy_path);
-                if (has_wal) fs::copy_file(parent / wal_filename, parent / (prefix + ".db-wal"));
-                if (has_shm) fs::copy_file(parent / shm_filename, parent / (prefix + ".db-shm"));
-                method = "copy";
-                archive = copy_path;
-            } catch (const std::exception& e) {
-                // All three methods failed -- if we closed for the backup,
-                // reopen before throwing so we don't leave the backend in a
-                // permanently-closed state, then surface the failure.
-                if (closed_for_backup) reopen_db();
-                throw std::runtime_error(
-                    std::string("pre-migration backup failed (tar, zip, and plain copy all "
-                                 "failed): ") + e.what());
-            }
+        // Shared with the CLI's re-embed/reindex backups (util/fs.h) so both
+        // paths use one implementation and naming convention.
+        std::string archive_path;
+        try {
+            archive_path = archive_db_files(db_path);
+        } catch (const std::exception& e) {
+            // If we closed for the backup, reopen before throwing so we
+            // don't leave the backend in a permanently-closed state, then
+            // surface the failure.
+            if (closed_for_backup) reopen_db();
+            throw std::runtime_error(
+                std::string("pre-migration backup failed: ") + e.what());
         }
 
         Diskerror::Logger::info(std::format(
-            "Pre-migration backup complete via {}: {}", method, archive.string()));
+            "Pre-migration backup complete: {}", archive_path));
 
         // ---- 3. Reopen the connection (only if we closed it) --------------
         if (closed_for_backup) {
