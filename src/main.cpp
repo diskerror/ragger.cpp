@@ -1194,6 +1194,7 @@ int main(int argc, char **argv) {
             // plain copy) via archive_db_files(), same naming convention as
             // migration snapshots: <name>_BACKUP_<timestamp>.tar.gz.
             std::string actual_db_path = db_path.empty() ? cfg.resolved_db_path() : db_path;
+            std::println("{}", ragger::lang::MSG_DB_BACKING_UP);
             try {
                 std::string archive = ragger::archive_db_files(actual_db_path);
                 std::println(ragger::lang::MSG_DB_BACKED_UP, archive);
@@ -1268,6 +1269,7 @@ int main(int argc, char **argv) {
             }
 
             std::string actual_db_path = db_path.empty() ? cfg.resolved_db_path() : db_path;
+            std::println("{}", ragger::lang::MSG_DB_BACKING_UP);
             try {
                 std::string archive = ragger::archive_db_files(actual_db_path);
                 std::println(ragger::lang::MSG_DB_BACKED_UP, archive);

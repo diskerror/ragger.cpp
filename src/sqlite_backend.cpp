@@ -1525,7 +1525,7 @@ struct SqliteBackend::Impl {
             for (const auto* table : tables) {
                 Diskerror::Logger::info(std::format("  Indexing {}...", table));
                 // Call reindex_table directly (we're in the Impl class)
-                reindex_table(table);
+                reindex_table(table, /*progress=*/false);
             }
 
             // Update db_version to 0.16
@@ -4236,8 +4236,8 @@ struct SqliteBackend::Impl {
 
     // (Re)build the custom index for a single text table. Delegates to the
     // SqliteTextIndex engine (schema + tokenize + TF-IDF live there now).
-    int reindex_table(const std::string& table_name) {
-        return text_index_->reindex_table(table_name, /*progress=*/false);
+    int reindex_table(const std::string& table_name, bool progress) {
+        return text_index_->reindex_table(table_name, progress);
     }
 
     // Truncate the shared `terms` table + reset its AUTOINCREMENT counter.
@@ -4727,7 +4727,7 @@ uint8_t SqliteBackend::increment_embedding_version() {
 
 int SqliteBackend::reindex_table(const std::string& table, bool progress) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->reindex_table(table);
+    return pImpl->reindex_table(table, progress);
 }
 
 void SqliteBackend::reset_terms_table() {

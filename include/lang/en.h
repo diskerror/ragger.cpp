@@ -281,6 +281,7 @@ constexpr const char* WARN_DB_DEFERRED        = "Warning: DB registration deferr
 constexpr const char* MSG_REBUILD_CONFIRM     = "This will re-embed all {} stored rows (turns, summaries, decisions, documents). It's safe to run with the server up, but it blocks all other requests until it finishes — the server will appear to hang.";
 constexpr const char* PROMPT_CONTINUE         = "Continue? [y/N] ";
 constexpr const char* MSG_ABORTED             = "Aborted.";
+constexpr const char* MSG_DB_BACKING_UP       = "Backing up database...";
 constexpr const char* MSG_DB_BACKED_UP        = "Database backed up to: {}";
 constexpr const char* WARN_BACKUP_FAILED      = "Warning: Failed to create backup: {}";
 constexpr const char* MSG_EMBEDDINGS_REBUILT  = "✓ Embeddings rebuilt: {} rows";
