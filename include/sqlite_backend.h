@@ -185,6 +185,7 @@ public:
     uint8_t embedding_version() const override;
     uint8_t increment_embedding_version() override;
     int reindex_table(const std::string& table, bool progress = false) override;
+    void reset_terms_table() override;
 
     /// Get distinct collection names.
     std::vector<std::string> collections() const override;

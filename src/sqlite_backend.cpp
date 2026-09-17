@@ -4309,6 +4309,13 @@ struct SqliteBackend::Impl {
         return text_index_->reindex_table(table_name, /*progress=*/false);
     }
 
+    // Truncate the shared `terms` table + reset its AUTOINCREMENT counter.
+    // Delegates to SqliteTextIndex; see its header comment for the "only
+    // safe immediately before reindexing ALL five tables" caveat.
+    void reset_terms_table() {
+        text_index_->reset_terms_table();
+    }
+
     // Set a document's embedding (used by the import path after embedding
     // chunks via the subprocess executor). Returns true on a row update.
     bool update_document_embedding(int document_id, const std::vector<float>& emb) {
@@ -4790,6 +4797,11 @@ uint8_t SqliteBackend::increment_embedding_version() {
 int SqliteBackend::reindex_table(const std::string& table, bool progress) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->reindex_table(table);
+}
+
+void SqliteBackend::reset_terms_table() {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    pImpl->reset_terms_table();
 }
 
 bool SqliteBackend::update_document_embedding(int document_id,

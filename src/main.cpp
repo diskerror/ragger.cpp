@@ -1281,6 +1281,15 @@ int main(int argc, char **argv) {
                                         /*skip_embedding_guard=*/true);
             int total = 0;
             if (target == "all") {
+                // Wipe the shared `terms` table + reset its AUTOINCREMENT
+                // counter before rebuilding every table in the same pass --
+                // safe only because every table gets reindexed right after,
+                // so no junction row is left pointing at a deleted term_id.
+                // Clears out any orphaned/legacy terms accumulated before a
+                // tokenizer fix (e.g. digit/stopword rules changing) and
+                // stops term_id from climbing forever on a DB that's never
+                // fully reindexed.
+                memory.backend()->reset_terms_table();
                 for (auto* t : kAllTables) {
                     int count = memory.backend()->reindex_table(t, /*progress=*/true);
                     std::println("Reindexed {}: {} row(s).", t, count);

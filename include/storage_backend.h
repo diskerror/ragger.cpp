@@ -476,6 +476,14 @@ public:
     /// Returns: number of records reindexed.
     virtual int reindex_table(const std::string& table, bool progress = false) = 0;
 
+    /// Truncate the shared cross-table `terms` list and reset its
+    /// AUTOINCREMENT counter (starts term_ids fresh from 1). ON DELETE
+    /// CASCADE empties every <table>_terms junction row too. Only safe
+    /// immediately before reindexing ALL five text tables in the same run --
+    /// reindexing a subset afterward would leave the other tables' junction
+    /// rows referencing term_ids that no longer exist.
+    virtual void reset_terms_table() = 0;
+
     /// Get distinct collection names.
     virtual std::vector<std::string> collections() const = 0;
 

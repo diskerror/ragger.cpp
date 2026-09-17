@@ -287,24 +287,40 @@ Stmt& SqliteTextIndex::update_counts_stmt(const std::string& table) {
 
 // ---- TextIndex overrides ---------------------------------------------------
 
+void SqliteTextIndex::reset_terms_table() {
+    // sqlite_sequence only has a row for `terms` once an AUTOINCREMENT insert
+    // has happened; DELETE is a no-op (not an error) if the row is absent.
+    char* err = nullptr;
+    auto exec = [&](const char* sql) {
+        if (sqlite3_exec(db_, sql, nullptr, nullptr, &err) != SQLITE_OK) {
+            std::string msg = err ? err : "unknown error";
+            sqlite3_free(err);
+            throw std::runtime_error("SqliteTextIndex reset_terms_table: " + msg);
+        }
+    };
+    // Cascades through every <table>_terms junction row via ON DELETE CASCADE
+    // (foreign_keys must be ON -- SqliteBackend enables it at connection open).
+    exec("DELETE FROM terms");
+    exec("DELETE FROM sqlite_sequence WHERE name = 'terms'");
+}
+
 int SqliteTextIndex::upsert_term(const std::string& term) {
-    {
-        Stmt& ins = insert_term();
-        ins.bind(1, term);
-        ins.exec();
-    }
+    // SELECT-first, not INSERT-OR-IGNORE-first: AUTOINCREMENT allocates the
+    // next term_id BEFORE the uniqueness check runs, so an "ignored" insert
+    // (term already exists) still permanently burns an id -- with upsert_term
+    // called on every tokenize of every store/reindex/backfill, that leaked
+    // ~13M ids against ~900K real terms in the live DB. Checking first avoids
+    // ever attempting the redundant insert for an existing term.
     Stmt& sel = select_term_id();
     sel.bind(1, term);
-    // A cached statement is a long-lived member, not a stack-local Stmt that
-    // finalizes on return -- if we leave it mid-cursor after a single-row
-    // fetch, it holds this connection in an open read transaction (WAL
-    // snapshot) until the NEXT reuse lazily resets it, which can make a
-    // later read on this same connection see a stale snapshot (missed a
-    // commit made via another connection in between). Reset immediately
-    // once we have the value, not lazily.
-    int result = sel.step() ? sel.column_int(0) : 0;
-    sqlite3_reset(sel.raw());
-    return result;
+    int existing = sel.step() ? sel.column_int(0) : 0;
+    sqlite3_reset(sel.raw());  // release the read snapshot immediately, see below
+    if (existing != 0) return existing;
+
+    Stmt& ins = insert_term();
+    ins.bind(1, term);
+    ins.exec();
+    return static_cast<int>(sqlite3_last_insert_rowid(db_));
 }
 
 void SqliteTextIndex::replace_record_terms(

@@ -42,6 +42,17 @@ public:
     // the number of records reindexed. `progress` prints a counter to stdout.
     int reindex_table(const std::string& table, bool progress = false);
 
+    // Truncate the shared `terms` table and reset its AUTOINCREMENT counter,
+    // starting term_ids fresh from 1. Only safe when reindexing ALL five
+    // text tables in the same run: every junction table's term_id column is
+    // `REFERENCES terms(term_id) ON DELETE CASCADE`, so this one DELETE
+    // cascades and empties every junction table too (foreign_keys must be ON,
+    // which SqliteBackend always sets at connection open). Calling this
+    // before reindexing only SOME tables would orphan the other tables'
+    // still-valid junction rows against a wiped terms list -- callers MUST
+    // reindex every table in the same pass after calling this.
+    void reset_terms_table();
+
 protected:
     int  upsert_term(const std::string& term) override;
     void replace_record_terms(const std::string& table, int id,

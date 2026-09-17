@@ -410,7 +410,8 @@ Commands:
                      summaries, decisions, documents, or "all")
   reindex <table|all> Rebuild the custom text index (terms + TF-IDF)
                      tables: turns, turn_summaries, summaries, decisions,
-                     documents, or "all"
+                     documents, or "all" ("all" also resets the shared
+                     terms table + its id counter, clearing orphaned terms)
   show-embedding-model  Show current embedding model info
   embed               Embed text from stdin, write JSON array to stdout
   help               Show this help
