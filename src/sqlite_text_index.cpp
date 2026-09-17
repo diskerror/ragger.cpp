@@ -90,33 +90,234 @@ void SqliteTextIndex::create_schema() {
     }
 }
 
+// ---- cached-statement plumbing --------------------------------------------
+
+Stmt& SqliteTextIndex::cached(std::optional<Stmt>& slot, const char* sql) {
+    if (!slot) {
+        slot.emplace(db_, sql);
+    } else {
+        sqlite3_reset(slot->raw());
+        sqlite3_clear_bindings(slot->raw());
+    }
+    return *slot;
+}
+
+Stmt& SqliteTextIndex::select_term_id() {
+    return cached(select_term_id_, "SELECT term_id FROM terms WHERE term = ?");
+}
+Stmt& SqliteTextIndex::insert_term() {
+    return cached(insert_term_, "INSERT OR IGNORE INTO terms(term) VALUES (?)");
+}
+
+Stmt& SqliteTextIndex::doc_freq_turns() {
+    return cached(doc_freq_turns_, "SELECT COUNT(*) FROM turns_terms WHERE term_id = ?");
+}
+Stmt& SqliteTextIndex::doc_freq_turn_summaries() {
+    return cached(doc_freq_turn_summaries_,
+                  "SELECT COUNT(*) FROM turn_summaries_terms WHERE term_id = ?");
+}
+Stmt& SqliteTextIndex::doc_freq_summaries() {
+    return cached(doc_freq_summaries_,
+                  "SELECT COUNT(*) FROM summaries_terms WHERE term_id = ?");
+}
+Stmt& SqliteTextIndex::doc_freq_documents() {
+    return cached(doc_freq_documents_,
+                  "SELECT COUNT(*) FROM documents_terms WHERE term_id = ?");
+}
+Stmt& SqliteTextIndex::doc_freq_decisions() {
+    return cached(doc_freq_decisions_,
+                  "SELECT COUNT(*) FROM decisions_terms WHERE term_id = ?");
+}
+
+Stmt& SqliteTextIndex::count_turns() {
+    return cached(count_turns_, "SELECT COUNT(*) FROM turns");
+}
+Stmt& SqliteTextIndex::count_turn_summaries() {
+    return cached(count_turn_summaries_, "SELECT COUNT(*) FROM turn_summaries");
+}
+Stmt& SqliteTextIndex::count_summaries() {
+    return cached(count_summaries_, "SELECT COUNT(*) FROM summaries");
+}
+Stmt& SqliteTextIndex::count_documents() {
+    return cached(count_documents_, "SELECT COUNT(*) FROM documents");
+}
+Stmt& SqliteTextIndex::count_decisions() {
+    return cached(count_decisions_, "SELECT COUNT(*) FROM decisions");
+}
+
+Stmt& SqliteTextIndex::postings_turns() {
+    return cached(postings_turns_,
+        "SELECT j.turn_id, j.count, b.unigram_count, b.bigram_count "
+        "FROM turns_terms j JOIN turns b ON b.turn_id = j.turn_id "
+        "WHERE j.term_id = ?");
+}
+Stmt& SqliteTextIndex::postings_turn_summaries() {
+    return cached(postings_turn_summaries_,
+        "SELECT j.turn_summary_id, j.count, b.unigram_count, b.bigram_count "
+        "FROM turn_summaries_terms j JOIN turn_summaries b "
+        "ON b.turn_summary_id = j.turn_summary_id "
+        "WHERE j.term_id = ?");
+}
+Stmt& SqliteTextIndex::postings_summaries() {
+    return cached(postings_summaries_,
+        "SELECT j.summary_id, j.count, b.unigram_count, b.bigram_count "
+        "FROM summaries_terms j JOIN summaries b ON b.summary_id = j.summary_id "
+        "WHERE j.term_id = ?");
+}
+Stmt& SqliteTextIndex::postings_documents() {
+    return cached(postings_documents_,
+        "SELECT j.document_id, j.count, b.unigram_count, b.bigram_count "
+        "FROM documents_terms j JOIN documents b ON b.document_id = j.document_id "
+        "WHERE j.term_id = ?");
+}
+Stmt& SqliteTextIndex::postings_decisions() {
+    return cached(postings_decisions_,
+        "SELECT j.decision_id, j.count, b.unigram_count, b.bigram_count "
+        "FROM decisions_terms j JOIN decisions b ON b.decision_id = j.decision_id "
+        "WHERE j.term_id = ?");
+}
+
+Stmt& SqliteTextIndex::delete_terms_turns() {
+    return cached(delete_terms_turns_, "DELETE FROM turns_terms WHERE turn_id = ?");
+}
+Stmt& SqliteTextIndex::delete_terms_turn_summaries() {
+    return cached(delete_terms_turn_summaries_,
+                  "DELETE FROM turn_summaries_terms WHERE turn_summary_id = ?");
+}
+Stmt& SqliteTextIndex::delete_terms_summaries() {
+    return cached(delete_terms_summaries_, "DELETE FROM summaries_terms WHERE summary_id = ?");
+}
+Stmt& SqliteTextIndex::delete_terms_documents() {
+    return cached(delete_terms_documents_, "DELETE FROM documents_terms WHERE document_id = ?");
+}
+Stmt& SqliteTextIndex::delete_terms_decisions() {
+    return cached(delete_terms_decisions_, "DELETE FROM decisions_terms WHERE decision_id = ?");
+}
+
+Stmt& SqliteTextIndex::insert_terms_turns() {
+    return cached(insert_terms_turns_,
+        "INSERT OR REPLACE INTO turns_terms (turn_id, term_id, count) VALUES (?, ?, ?)");
+}
+Stmt& SqliteTextIndex::insert_terms_turn_summaries() {
+    return cached(insert_terms_turn_summaries_,
+        "INSERT OR REPLACE INTO turn_summaries_terms (turn_summary_id, term_id, count) "
+        "VALUES (?, ?, ?)");
+}
+Stmt& SqliteTextIndex::insert_terms_summaries() {
+    return cached(insert_terms_summaries_,
+        "INSERT OR REPLACE INTO summaries_terms (summary_id, term_id, count) VALUES (?, ?, ?)");
+}
+Stmt& SqliteTextIndex::insert_terms_documents() {
+    return cached(insert_terms_documents_,
+        "INSERT OR REPLACE INTO documents_terms (document_id, term_id, count) "
+        "VALUES (?, ?, ?)");
+}
+Stmt& SqliteTextIndex::insert_terms_decisions() {
+    return cached(insert_terms_decisions_,
+        "INSERT OR REPLACE INTO decisions_terms (decision_id, term_id, count) "
+        "VALUES (?, ?, ?)");
+}
+
+Stmt& SqliteTextIndex::update_counts_turns() {
+    return cached(update_counts_turns_,
+        "UPDATE turns SET unigram_count = ?, bigram_count = ? WHERE turn_id = ?");
+}
+Stmt& SqliteTextIndex::update_counts_turn_summaries() {
+    return cached(update_counts_turn_summaries_,
+        "UPDATE turn_summaries SET unigram_count = ?, bigram_count = ? "
+        "WHERE turn_summary_id = ?");
+}
+Stmt& SqliteTextIndex::update_counts_summaries() {
+    return cached(update_counts_summaries_,
+        "UPDATE summaries SET unigram_count = ?, bigram_count = ? WHERE summary_id = ?");
+}
+Stmt& SqliteTextIndex::update_counts_documents() {
+    return cached(update_counts_documents_,
+        "UPDATE documents SET unigram_count = ?, bigram_count = ? WHERE document_id = ?");
+}
+Stmt& SqliteTextIndex::update_counts_decisions() {
+    return cached(update_counts_decisions_,
+        "UPDATE decisions SET unigram_count = ?, bigram_count = ? WHERE decision_id = ?");
+}
+
+// ---- runtime dispatch over the fixed 5-table set --------------------------
+
+Stmt& SqliteTextIndex::doc_freq_stmt(const std::string& table) {
+    if (table == "turns")          return doc_freq_turns();
+    if (table == "turn_summaries") return doc_freq_turn_summaries();
+    if (table == "summaries")      return doc_freq_summaries();
+    if (table == "documents")      return doc_freq_documents();
+    return doc_freq_decisions();
+}
+Stmt& SqliteTextIndex::count_stmt(const std::string& table) {
+    if (table == "turns")          return count_turns();
+    if (table == "turn_summaries") return count_turn_summaries();
+    if (table == "summaries")      return count_summaries();
+    if (table == "documents")      return count_documents();
+    return count_decisions();
+}
+Stmt& SqliteTextIndex::postings_stmt(const std::string& table) {
+    if (table == "turns")          return postings_turns();
+    if (table == "turn_summaries") return postings_turn_summaries();
+    if (table == "summaries")      return postings_summaries();
+    if (table == "documents")      return postings_documents();
+    return postings_decisions();
+}
+Stmt& SqliteTextIndex::delete_terms_stmt(const std::string& table) {
+    if (table == "turns")          return delete_terms_turns();
+    if (table == "turn_summaries") return delete_terms_turn_summaries();
+    if (table == "summaries")      return delete_terms_summaries();
+    if (table == "documents")      return delete_terms_documents();
+    return delete_terms_decisions();
+}
+Stmt& SqliteTextIndex::insert_terms_stmt(const std::string& table) {
+    if (table == "turns")          return insert_terms_turns();
+    if (table == "turn_summaries") return insert_terms_turn_summaries();
+    if (table == "summaries")      return insert_terms_summaries();
+    if (table == "documents")      return insert_terms_documents();
+    return insert_terms_decisions();
+}
+Stmt& SqliteTextIndex::update_counts_stmt(const std::string& table) {
+    if (table == "turns")          return update_counts_turns();
+    if (table == "turn_summaries") return update_counts_turn_summaries();
+    if (table == "summaries")      return update_counts_summaries();
+    if (table == "documents")      return update_counts_documents();
+    return update_counts_decisions();
+}
+
+// ---- TextIndex overrides ---------------------------------------------------
+
 int SqliteTextIndex::upsert_term(const std::string& term) {
     {
-        Stmt ins(db_, "INSERT OR IGNORE INTO terms(term) VALUES (?)");
+        Stmt& ins = insert_term();
         ins.bind(1, term);
         ins.exec();
     }
-    Stmt sel(db_, "SELECT term_id FROM terms WHERE term = ?");
+    Stmt& sel = select_term_id();
     sel.bind(1, term);
-    if (sel.step()) return sel.column_int(0);
-    return 0;
+    // A cached statement is a long-lived member, not a stack-local Stmt that
+    // finalizes on return -- if we leave it mid-cursor after a single-row
+    // fetch, it holds this connection in an open read transaction (WAL
+    // snapshot) until the NEXT reuse lazily resets it, which can make a
+    // later read on this same connection see a stale snapshot (missed a
+    // commit made via another connection in between). Reset immediately
+    // once we have the value, not lazily.
+    int result = sel.step() ? sel.column_int(0) : 0;
+    sqlite3_reset(sel.raw());
+    return result;
 }
 
 void SqliteTextIndex::replace_record_terms(
     const std::string& table, int id,
     const std::unordered_map<int, int>& term_counts) {
     validate_table(table);
-    const std::string junc = table + "_terms";
-    const std::string id_col = id_col_of(table);
     {
-        Stmt del(db_, std::format("DELETE FROM {} WHERE {} = ?", junc, id_col));
+        Stmt& del = delete_terms_stmt(table);
         del.bind(1, id);
         del.exec();
     }
     for (const auto& [term_id, count] : term_counts) {
-        Stmt ins(db_, std::format(
-            "INSERT OR REPLACE INTO {} ({}, term_id, count) VALUES (?, ?, ?)",
-            junc, id_col));
+        Stmt& ins = insert_terms_stmt(table);
         ins.bind(1, id).bind(2, term_id).bind(3, count);
         ins.exec();
     }
@@ -125,41 +326,40 @@ void SqliteTextIndex::replace_record_terms(
 void SqliteTextIndex::set_counts(const std::string& table, int id,
                                  int unigram_count, int bigram_count) {
     validate_table(table);
-    Stmt upd(db_, std::format(
-        "UPDATE {} SET unigram_count = ?, bigram_count = ? WHERE {} = ?",
-        table, id_col_of(table)));
+    Stmt& upd = update_counts_stmt(table);
     upd.bind(1, unigram_count).bind(2, bigram_count).bind(3, id);
     upd.exec();
 }
 
 int SqliteTextIndex::corpus_size(const std::string& table) {
     validate_table(table);
-    Stmt s(db_, std::format("SELECT COUNT(*) FROM {}", table));
-    return s.step() ? s.column_int(0) : 0;
+    Stmt& s = count_stmt(table);
+    int result = s.step() ? s.column_int(0) : 0;
+    sqlite3_reset(s.raw());  // release the read snapshot immediately, see upsert_term
+    return result;
 }
 
 int SqliteTextIndex::doc_freq(const std::string& table, int term_id) {
     validate_table(table);
-    Stmt s(db_, std::format("SELECT COUNT(*) FROM {}_terms WHERE term_id = ?", table));
+    Stmt& s = doc_freq_stmt(table);
     s.bind(1, term_id);
-    return s.step() ? s.column_int(0) : 0;
+    int result = s.step() ? s.column_int(0) : 0;
+    sqlite3_reset(s.raw());  // release the read snapshot immediately, see upsert_term
+    return result;
 }
 
 int SqliteTextIndex::lookup_term(const std::string& term) {
-    Stmt s(db_, "SELECT term_id FROM terms WHERE term = ?");
+    Stmt& s = select_term_id();
     s.bind(1, term);
-    return s.step() ? s.column_int(0) : 0;
+    int result = s.step() ? s.column_int(0) : 0;
+    sqlite3_reset(s.raw());  // release the read snapshot immediately, see upsert_term
+    return result;
 }
 
 std::vector<TextIndex::Posting> SqliteTextIndex::postings(
     const std::string& table, int term_id) {
     validate_table(table);
-    const std::string id_col = id_col_of(table);
-    Stmt s(db_,
-        "SELECT j." + id_col + ", j.count, b.unigram_count, b.bigram_count "
-        "FROM " + table + "_terms j JOIN " + table + " b "
-        "ON b." + id_col + " = j." + id_col + " "
-        "WHERE j.term_id = ?");
+    Stmt& s = postings_stmt(table);
     s.bind(1, term_id);
     std::vector<Posting> out;
     while (s.step()) {
@@ -176,13 +376,18 @@ int SqliteTextIndex::reindex_table(const std::string& table, bool progress) {
 
     int total = 0;
     if (progress) {
-        Stmt c(db_, std::format("SELECT COUNT(*) FROM {}", table));
+        Stmt& c = count_stmt(table);
         if (c.step()) total = c.column_int(0);
     }
 
     // Two-pass batches: read a bounded batch (finalize the SELECT), then write.
     // Walking a SELECT while UPDATE-ing the same table on one connection can
     // invalidate the cursor mid-scan (see rebuild_phon's note).
+    //
+    // This SELECT's shape is loop-invariant (select_sql doesn't change across
+    // outer iterations) but reindex_table() itself is a rare admin/CLI
+    // operation, not a per-row hot path -- so it's hoisted above the loop for
+    // clarity, not promoted to a cached instance member.
     constexpr int kBatch = 200;
     struct Row { int id; std::string text; };
     int done = 0;
