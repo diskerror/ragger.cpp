@@ -129,6 +129,21 @@ std::vector<std::string> normalize_words(std::string_view sentence) {
         result.push_back(current_word);
     }
 
+    // 1.5 pass: strip a trailing possessive/contraction 's ("user's" -> "user",
+    // "it's" -> "it"). The "is" that 's stands for is a stopword anyway (see
+    // CONTRACTIONS_N_T's rationale for 't above) and the possessive marker
+    // carries no search signal, so drop the suffix outright rather than
+    // indexing "user's" as a distinct term from "user". n't contractions are
+    // untouched here (they end in 't, not 's).
+    for (auto& w : result) {
+        if (w.size() > 2 && w[w.size() - 2] == '\'' && w[w.size() - 1] == 's') {
+            w.erase(w.size() - 2);
+        }
+    }
+    result.erase(std::remove_if(result.begin(), result.end(),
+                                 [](const std::string& w) { return w.empty(); }),
+                 result.end());
+
     // Second pass: handle minus signs and operators before small numbers
     // Detect operator followed by a small number (0-12) and handle appropriately
     auto is_small_number_token = [](const std::string& s) {
@@ -164,6 +179,11 @@ std::vector<std::string> normalize_words(std::string_view sentence) {
             } else if (is_plus_op) {
                 with_operator_handling.push_back("plus");
             }
+        } else if (is_minus_op) {
+            // A bare dash/minus not in front of a kept small number carries no
+            // search signal on its own (word-joining hyphen, list bullet,
+            // etc.) -- drop it rather than indexing a stray "-" token.
+            continue;
         } else {
             with_operator_handling.push_back(word);
         }
@@ -248,6 +268,22 @@ std::string metaphone(std::string_view stem) {
 
 // ===== Unigrams (literals + metaphone) =====
 
+namespace {
+// True only when EVERY character is a digit -- "2024", "42" -- not mixed
+// alphanumerics like "gpt4" or "sha256", which are product/algorithm names
+// and keep their digits. Small numbers (0-12) are already converted to word
+// form earlier in normalize_words(), so any pure-digit token reaching here
+// is outside that range (bare year, id, etc.) and carries no useful stemmed/
+// phonetic signal -- drop it rather than indexing it as a literal term.
+bool is_all_digits(const std::string& s) {
+    if (s.empty()) return false;
+    for (char c : s) {
+        if (!std::isdigit(static_cast<unsigned char>(c))) return false;
+    }
+    return true;
+}
+}  // namespace
+
 std::vector<UnigramToken> unigrams(const std::vector<std::string>& words,
                                    const StopSet& uni_stops) {
     std::vector<UnigramToken> result;
@@ -257,11 +293,14 @@ std::vector<UnigramToken> unigrams(const std::vector<std::string>& words,
         if (uni_stops.find(word) != uni_stops.end()) {
             continue;  // stopword, skip
         }
+        if (is_all_digits(word)) {
+            continue;  // bare number outside 0-12, no search signal
+        }
 
         // Stem the survivor
         std::string stemmed = stem(word);
         if (stemmed.empty()) {
-            continue;  // all-digit or malformed, skip
+            continue;  // malformed, skip
         }
 
         // Compute metaphone on the stem
@@ -284,9 +323,11 @@ std::vector<BigramToken> bigrams(const std::vector<std::string>& words,
     }
 
     for (size_t i = 0; i < words.size() - 1; ++i) {
-        // Check if either raw word is a bigram stopword
+        // Check if either raw word is a bigram stopword, or a bare number
+        // outside 0-12 (see is_all_digits above) -- no bridging either way.
         if (bi_stops.find(words[i]) != bi_stops.end() ||
-            bi_stops.find(words[i + 1]) != bi_stops.end()) {
+            bi_stops.find(words[i + 1]) != bi_stops.end() ||
+            is_all_digits(words[i]) || is_all_digits(words[i + 1])) {
             continue;  // skip this pair (no bridging)
         }
 

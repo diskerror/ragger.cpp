@@ -209,17 +209,78 @@ int main() {
         std::cout << "  ✓ Minus sign and single digit handled correctly\n";
     }
 
-    // ===== Test 8: Multi-digit numbers NOT converted =====
+    // ===== Test 8: Multi-digit numbers NOT converted (but ARE stopped at term stage) =====
     {
-        std::cout << "Test 8: Multi-digit numbers unchanged\n";
+        std::cout << "Test 8: Multi-digit numbers unchanged in normalize_words, dropped from terms\n";
         auto sentences = split_sentences("Year 2024 is here.");
         auto words = normalize_words(sentences[0]);
         std::cout << "  Normalized words: [";
         for (const auto& w : words) std::cout << w << " ";
         std::cout << "]\n";
-        // Multi-digit numbers should NOT be converted
+        // normalize_words() doesn't convert/drop multi-digit numbers itself --
+        // that's a word-shape pass, not a term-admission decision.
         assert(std::find(words.begin(), words.end(), "2024") != words.end());
-        std::cout << "  ✓ Multi-digit numbers preserved\n";
+
+        // But unigrams()/bigrams() (the actual terms-table admission point)
+        // must reject a pure-digit token outside 0-12: no stem/metaphone
+        // signal, and it's not a product/algorithm name (see gpt4/sha256 below).
+        StopSet uni_stops = stopword_set(STOPWORDS_UNIGRAM);
+        StopSet bi_stops = stopword_set(STOPWORDS_BIGRAM);
+        auto uni = unigrams(words, uni_stops);
+        auto bi = bigrams(words, bi_stops);
+        auto uni_lits = unigram_literals(uni);
+        auto bi_lits = bigram_literals(bi);
+        assert(uni_lits.find("2024") == uni_lits.end());
+        for (const auto& lit : bi_lits) {
+            assert(lit.find("2024") == std::string::npos);
+        }
+        std::cout << "  ✓ Multi-digit numbers preserved in word list, stopped from terms\n";
+    }
+
+    // ===== Test 8b: Alphanumeric product/algorithm names keep their digits =====
+    {
+        std::cout << "Test 8b: Mixed alphanumerics (gpt4, sha256) keep digits\n";
+        auto sentences = split_sentences("The gpt4 model uses sha256 hashing.");
+        auto words = normalize_words(sentences[0]);
+        StopSet uni_stops = stopword_set(STOPWORDS_UNIGRAM);
+        auto uni = unigrams(words, uni_stops);
+        auto uni_lits = unigram_literals(uni);
+        assert(uni_lits.find("gpt4") != uni_lits.end());
+        assert(uni_lits.find("sha256") != uni_lits.end());
+        std::cout << "  ✓ Mixed alphanumeric tokens survive term admission intact\n";
+    }
+
+    // ===== Test 8c: Bare dash not before a kept small number is stopped =====
+    {
+        std::cout << "Test 8c: Bare/large-number minus sign is dropped\n";
+        auto sentences = split_sentences("Temperature is -5 degrees, not -100.");
+        auto words = normalize_words(sentences[0]);
+        std::cout << "  Normalized words: [";
+        for (const auto& w : words) std::cout << w << " ";
+        std::cout << "]\n";
+        // -5: 5 is small (0-12), so the dash converts to "minus" and is kept.
+        assert(std::find(words.begin(), words.end(), "minus") != words.end());
+        assert(std::find(words.begin(), words.end(), "five") != words.end());
+        // -100: 100 is not small, so the dash is dropped outright (not left
+        // as a stray "-" token), and "100" itself is dropped later at the
+        // unigrams() term-admission stage (see Test 8).
+        assert(std::find(words.begin(), words.end(), "-") == words.end());
+        std::cout << "  ✓ Dash before a non-small number is dropped, not indexed\n";
+    }
+
+    // ===== Test 8d: Possessive/contraction 's is stripped =====
+    {
+        std::cout << "Test 8d: Possessive 's stripped (\"user's\" -> \"user\")\n";
+        auto sentences = split_sentences("The user's model isn't good.");
+        auto words = normalize_words(sentences[0]);
+        std::cout << "  Normalized words: [";
+        for (const auto& w : words) std::cout << w << " ";
+        std::cout << "]\n";
+        assert(std::find(words.begin(), words.end(), "user") != words.end());
+        assert(std::find(words.begin(), words.end(), "user's") == words.end());
+        // isn't still -> "not" (unaffected: it's an 't contraction, not 's)
+        assert(std::find(words.begin(), words.end(), "not") != words.end());
+        std::cout << "  ✓ Possessive 's stripped; n't contractions unaffected\n";
     }
     {
         // ===== Test 9: Math operators =====
