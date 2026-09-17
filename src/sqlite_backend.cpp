@@ -826,10 +826,16 @@ struct SqliteBackend::Impl {
 
         // ---- 2. Archive the raw file(s): tar.gz -> zip -> plain copy -----
         // Shared with the CLI's re-embed/reindex backups (util/fs.h) so both
-        // paths use one implementation and naming convention.
+        // paths use one implementation and naming convention. stats.db is
+        // opt-in/discardable telemetry (RAGGER_STATS) written by a separate
+        // connection this class doesn't own, so it's bundled best-effort
+        // (whatever's on disk right now, no checkpoint) rather than gated
+        // behind its own migration logic -- add_db_and_siblings() silently
+        // skips it if the file was never created (stats disabled).
         std::string archive_path;
         try {
-            archive_path = archive_db_files(db_path);
+            archive_path = archive_db_files(
+                db_path, {config().resolved_stats_db_path()});
         } catch (const std::exception& e) {
             // If we closed for the backup, reopen before throwing so we
             // don't leave the backend in a permanently-closed state, then

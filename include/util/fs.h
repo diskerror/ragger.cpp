@@ -11,6 +11,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace ragger {
 
@@ -40,15 +41,20 @@ void set_ragger_base_override(const std::string& path);
 /// on-disk footprint for testing, with nothing else to configure.
 std::string ragger_base_dir();
 
-/// Archive a SQLite DB's file(s) (the main file, plus -wal/-shm siblings if
-/// present) as "<stem>_BACKUP_<YYYYMMDD-HHMMSS>.tar.gz" next to the DB --
+/// Archive one or more SQLite DBs' file(s) (each DB's main file, plus its
+/// -wal/-shm siblings if present) into ONE
+/// "<primary-stem>_BACKUP_<YYYYMMDD-HHMMSS>.tar.gz" next to the primary DB --
 /// same naming convention SqliteBackend::maybe_backup_before_migration()
-/// uses for pre-migration snapshots. Falls back to .zip, then a plain .db
-/// copy, if tar/zip aren't available. The caller's DB connection must
-/// already be closed (or otherwise quiescent) before calling this -- it
-/// does not checkpoint or coordinate with a live connection itself.
-/// Returns the archive path actually written. Throws std::runtime_error if
-/// every method fails.
-std::string archive_db_files(const std::string& db_path);
+/// uses for pre-migration snapshots. `extra_db_paths` are bundled into the
+/// same archive (e.g. stats.db alongside memories.db) -- entries that don't
+/// exist are silently skipped, so an optional/never-created sibling DB is
+/// not an error. Falls back to .zip, then a plain .db copy of just the
+/// primary DB, if tar/zip aren't available. The caller's DB connection(s)
+/// must already be closed/checkpointed (or otherwise quiescent) before
+/// calling this -- it does not checkpoint or coordinate with a live
+/// connection itself. Returns the archive path actually written. Throws
+/// std::runtime_error if every method fails.
+std::string archive_db_files(const std::string& db_path,
+                              const std::vector<std::string>& extra_db_paths = {});
 
 } // namespace ragger
