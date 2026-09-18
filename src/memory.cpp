@@ -3,7 +3,7 @@
  */
 
 #include "memory.h"
-#include "sqlite_backend.h"
+#include "sqlite/backend.h"
 #include "embedder.h"
 #include "config.h"
 #include "util/fs.h"
@@ -25,6 +25,7 @@
 #include <unistd.h>
 
 namespace ragger {
+using sqlite::SqliteBackend;
 
 RaggerMemory::RaggerMemory(const std::string& db_path,
                            bool skip_embedding_guard)

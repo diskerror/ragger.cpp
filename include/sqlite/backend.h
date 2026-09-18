@@ -15,11 +15,11 @@
 #include "storage_backend.h"
 #include "nlohmann_json.hpp"
 
-namespace ragger {
+namespace ragger::sqlite {
 
 using json = nlohmann::json;
 
-class Embedder;
+using ragger::Embedder;
 
 class SqliteBackend : public StorageBackend {
 public:
@@ -228,4 +228,4 @@ private:
     std::unique_ptr<Impl> pImpl;
 };
 
-} // namespace ragger
+} // namespace ragger::sqlite

@@ -6,7 +6,7 @@
  */
 #include "config.h"
 #include "embedder.h"
-#include "sqlite_backend.h"
+#include "sqlite/backend.h"
 #include "user_store.h"
 #include "auth.h"
 #include "util/time.h"
@@ -37,7 +37,7 @@ static void cleanup() {
 
 void test_store_and_count(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     CHECK(db.count() == 0);
 
@@ -53,7 +53,7 @@ void test_store_and_count(ragger::Embedder& emb) {
 
 void test_store_with_metadata(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     // Lean v2 summaries: tags (comma-joined) + level round-trip.
     // status was removed from summaries in v0.12.0; any status key in
@@ -77,7 +77,7 @@ void test_store_with_metadata(ragger::Embedder& emb) {
 
 void test_search_basic(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     db.store("The capital of France is Paris.");
     db.store("SQLite is a lightweight database engine.");
@@ -97,7 +97,7 @@ void test_search_basic(ragger::Embedder& emb) {
 // keyword contribution" rather than throw, and vector search still returns.
 void test_search_fts_special_chars(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     db.store("SQLite is a lightweight embedded database engine.");
     db.store("The Eiffel Tower stands in Paris.");
@@ -125,7 +125,7 @@ void test_search_fts_special_chars(ragger::Embedder& emb) {
 
 void test_search_min_score(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     db.store("The weather in Los Angeles is sunny.");
     db.store("Quantum physics studies subatomic particles.");
@@ -149,7 +149,7 @@ void test_search_min_score(ragger::Embedder& emb) {
 //       we never return fewer than min(limit, #qualifying) items.
 void test_search_min_score_before_topk(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     // A cluster of clearly on-topic docs (high cosine to the query) plus some
     // off-topic ones. With a moderate threshold the on-topic docs qualify.
@@ -181,7 +181,7 @@ void test_search_min_score_before_topk(ragger::Embedder& emb) {
 
 void test_search_limit(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     for (int i = 0; i < 10; ++i) {
         db.store("Test document number " + std::to_string(i) + " with some content.");
@@ -196,7 +196,7 @@ void test_search_limit(ragger::Embedder& emb) {
 
 void test_load_all(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     db.store("First memory.");
     db.store("Second memory.");
@@ -211,7 +211,7 @@ void test_load_all(ragger::Embedder& emb) {
 
 void test_rebuild_embeddings(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     // Store some test documents
     db.store("Embedding rebuild test document one.");
@@ -232,7 +232,7 @@ void test_rebuild_embeddings(ragger::Embedder& emb) {
 
 void test_rebuild_embeddings_empty_db(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     // Rebuild on empty DB should return 0
     int count = db.rebuild_embeddings(emb);
@@ -244,7 +244,7 @@ void test_rebuild_embeddings_empty_db(ragger::Embedder& emb) {
 
 void test_rebuild_embeddings_count_matches(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     // Store various numbers of documents
     for (int i = 0; i < 7; ++i) {
@@ -270,7 +270,7 @@ void test_rebuild_embeddings_count_matches(ragger::Embedder& emb) {
 // nobody was reading. Exercise every corpus so a column rename can't do it again.
 void test_search_text_only(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     db.store("A summary about harpsichord tuning.");
     ragger::DocumentChunk doc;
@@ -316,7 +316,7 @@ void test_search_text_only(ragger::Embedder& emb) {
 
 void test_search_timing(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     db.store("Timing test document.");
     auto resp = db.search("timing", 5, 0.0f);
@@ -330,7 +330,7 @@ void test_search_timing(ragger::Embedder& emb) {
 
 void test_delete_memory(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     // Store a memory
     std::string id1 = db.store("Memory to delete.");
@@ -358,7 +358,7 @@ void test_delete_memory(ragger::Embedder& emb) {
 
 void test_delete_batch(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     // Store 3 memories
     std::string id1 = db.store("First memory.");
@@ -391,7 +391,7 @@ void test_delete_batch(ragger::Embedder& emb) {
 
 void test_search_by_metadata(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     // Lean v2: filterable columns are level / status / tags (+ time window).
     db.store("Apple note.",  {{"level", "turn"},    {"tags", {"fruit"}}});
@@ -467,7 +467,7 @@ void test_user_management(ragger::Embedder& emb) {
 
 void test_delete_respects_keep(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     int initial_count = db.count();
     
@@ -496,7 +496,7 @@ void test_delete_respects_keep(ragger::Embedder& emb) {
 
 void test_delete_batch_respects_keep(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     // Store mix of keep and non-keep
     ragger::json keep_meta = {{"keep", true}, {"collection", "memory"}};
@@ -532,7 +532,7 @@ void test_delete_batch_respects_keep(ragger::Embedder& emb) {
 
 void test_timestamp_format(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     db.store("Timestamp format test.");
     auto all = db.load_all();
@@ -564,7 +564,7 @@ void test_timestamp_format(ragger::Embedder& emb) {
 void test_v2_summaries_backing(ragger::Embedder& emb) {
     cleanup();
     {
-        ragger::SqliteBackend db(emb, TEMP_DB);
+        ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
         db.store("v2 summaries backing check.",
                  {{"level", "session"}, {"tags", {"note"}}});
 
@@ -605,7 +605,7 @@ void test_store_document(ragger::Embedder& emb) {
     cleanup();
     int doc_id = -1;
     {
-        ragger::SqliteBackend db(emb, TEMP_DB);
+        ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
         ragger::DocumentChunk doc;
         doc.text        = "The mitochondria is the powerhouse of the cell.";
@@ -663,7 +663,7 @@ void test_store_document(ragger::Embedder& emb) {
 void test_store_turn(ragger::Embedder& emb) {
     cleanup();
     {
-        ragger::SqliteBackend db(emb, TEMP_DB);
+        ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
         // Complete turn in one call — embedded immediately.
         int t1 = db.store_turn("What is the capital of France?",
@@ -716,7 +716,7 @@ void test_store_turn(ragger::Embedder& emb) {
 
     // finalize_turn on a non-existent id returns false.
     {
-        ragger::SqliteBackend db2(emb, TEMP_DB);
+        ragger::sqlite::SqliteBackend db2(emb, TEMP_DB);
         CHECK(!db2.finalize_turn(99999, "x", "test-model"));
         db2.close();
     }
@@ -734,7 +734,7 @@ void test_store_turn_dedup(ragger::Embedder& emb) {
     cleanup();
     int t1 = 0;
     {
-        ragger::SqliteBackend db(emb, TEMP_DB);
+        ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
         // First answer to a prompt, in session A.
         t1 = db.store_turn("Explain the general_search recipe.",
@@ -842,7 +842,7 @@ void test_store_turn_dedup(ragger::Embedder& emb) {
 // mark_turn_summarized() is explicitly called.
 void test_store_turn_creates_no_turn_summaries_row(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     int t1 = db.store_turn("What is the capital of Spain?",
                            "The capital of Spain is Madrid.", "test-model");
@@ -868,7 +868,7 @@ void test_store_turn_creates_no_turn_summaries_row(ragger::Embedder& emb) {
 // same as a complete turn, since store_turn() never creates one at all now.
 void test_store_turn_partial_turn_creates_no_turn_summaries_row(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     int t1 = db.store_turn("Tell me about volcanoes.", "", "test-model",
                           /*defer_embedding=*/true);
@@ -885,7 +885,7 @@ void test_store_turn_partial_turn_creates_no_turn_summaries_row(ragger::Embedder
 // FIRST call's text in place — not the second.
 void test_finalize_turn_summary_rejects_duplicate(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     int t1 = db.store_turn("Summarize this exchange.",
                            "First finalize target.", "test-model");
@@ -923,7 +923,7 @@ void test_finalize_turn_summary_rejects_duplicate(ragger::Embedder& emb) {
 // must fail cleanly (false) and must not insert a row.
 void test_finalize_turn_summary_missing_turn_returns_false(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     const int missing_turn_id = 999999;
     CHECK(!db.finalize_turn_summary(missing_turn_id, "orphan text", "test-model"));
@@ -948,7 +948,7 @@ void test_finalize_turn_summary_missing_turn_returns_false(ragger::Embedder& emb
 // leave text/turn_datetime unchanged.
 void test_turn_summary_survives_turn_deletion(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     int t1 = db.store_turn("A turn destined for deletion.",
                            "Its summary should survive.", "test-model");
@@ -1001,7 +1001,7 @@ void test_turn_summary_survives_turn_deletion(ragger::Embedder& emb) {
 // turn_summaries row and include one that doesn't.
 void test_unsummarized_turns_excludes_summarized(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     int t_summarized = db.store_turn("This turn will be summarized.",
                                      "Summarized turn's reply.", "test-model");
@@ -1031,7 +1031,7 @@ void test_unsummarized_turns_excludes_summarized(ragger::Embedder& emb) {
 // summary_model_id gets resolved to the given model name.
 void test_mark_turn_summarized_trivial_turn(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     // store_turn() no longer creates any turn_summaries row automatically.
     int t1 = db.store_turn("ok", "ok", "test-model");
@@ -1072,7 +1072,7 @@ void test_mark_turn_summarized_trivial_turn(ragger::Embedder& emb) {
 // unsummarized_turns() so housekeeping can retry it for real.
 void test_reset_abandoned_turn_summaries(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     // A genuine trivial-turn skip: must survive the reset untouched.
     int t_trivial = db.store_turn("hi", "hi", "test-model");
@@ -1130,7 +1130,7 @@ void test_reset_abandoned_turn_summaries(ragger::Embedder& emb) {
 // summaries.status was dropped (v0.12.0 boundary-detection rework).
 void test_summary_primitives(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     int l2 = db.store_summary("User asked about France; capital is Paris.",
                               "turn", "memo-model");
@@ -1187,7 +1187,7 @@ void test_summary_primitives(ragger::Embedder& emb) {
 // (repeated rollups after a "close") and asserts exactly one session row.
 void test_episode_rollup_no_dup(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     const std::string G = "phase2-session";
 
@@ -1346,7 +1346,7 @@ void test_episode_rollup_no_dup(ragger::Embedder& emb) {
 // all of session history, one duplicate level='session' row per tick.
 void test_session_close_no_lookback_before_existing_summary(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     const std::string G1 = "already-summarized-session";
     const std::string G2 = "later-session";
@@ -1386,7 +1386,7 @@ void test_session_close_no_lookback_before_existing_summary(ragger::Embedder& em
 
 void test_path_normalization(ragger::Embedder& emb) {
     cleanup();
-    ragger::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
     const char* home = std::getenv("HOME");
     CHECK(home != nullptr);
@@ -1412,7 +1412,7 @@ void test_path_normalization(ragger::Embedder& emb) {
 void test_search_merges_three_corpora(ragger::Embedder& emb) {
     cleanup();
     {
-        ragger::SqliteBackend db(emb, TEMP_DB);
+        ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
         // (1) Summary via the public store API (embedded immediately).
         db.store("The Voyager probes left the solar system carrying golden records.");
@@ -1470,7 +1470,7 @@ void test_search_merges_three_corpora(ragger::Embedder& emb) {
 void test_turn_summary_search_metadata(ragger::Embedder& emb) {
     cleanup();
     {
-        ragger::SqliteBackend db(emb, TEMP_DB);
+        ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
 
         const std::string G = "meta-shape-session";
         const std::string when = "2026-04-15 09:30:00";

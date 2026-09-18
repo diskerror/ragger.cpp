@@ -5,7 +5,7 @@
 #include "server.h"
 #include "memory.h"
 #include "user_store.h"
-#include "sqlite_backend.h"
+#include "sqlite/backend.h"
 #include "lang.h"
 #include "Logger.h"
 #include "auth.h"

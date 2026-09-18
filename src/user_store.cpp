@@ -2,7 +2,7 @@
  * UserStore — user and settings management delegated through StorageBackend.
  */
 #include "user_store.h"
-#include "sqlite_backend.h"
+#include "sqlite/backend.h"
 #include "config.h"
 
 #include <filesystem>
@@ -10,6 +10,7 @@
 #include <string>
 
 namespace ragger {
+using sqlite::SqliteBackend;
 
 namespace fs = std::filesystem;
 

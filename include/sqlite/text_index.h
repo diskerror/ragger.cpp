@@ -25,10 +25,12 @@
 #include <unordered_map>
 #include <vector>
 
-#include "text_index.h"
+#include "../text_index.h"
 #include "util/sqlite.h"
 
-namespace ragger {
+namespace ragger::sqlite {
+
+using ragger::TextIndex;
 
 class SqliteTextIndex final : public TextIndex {
 public:
@@ -167,4 +169,4 @@ private:
                          update_counts_decisions_;
 };
 
-}  // namespace ragger
+}  // namespace ragger::sqlite

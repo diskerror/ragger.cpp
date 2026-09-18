@@ -1,7 +1,7 @@
 /**
  * SQLite backend for Ragger Memory (C++ port)
  */
-#include "sqlite_backend.h"
+#include "sqlite/backend.h"
 #include "embedder.h"
 #include "config.h"
 #include "lang.h"
@@ -10,7 +10,7 @@
 #include "util/sqlite.h"
 #include "double_metaphone.h"
 #include "fts_tokenize.h"
-#include "sqlite_text_index.h"
+#include "sqlite/text_index.h"
 #include "vector_codec.h"
 #include "Logger.h"
 #include <format>
@@ -39,7 +39,7 @@
 #include <sstream>
 #include <stdexcept>
 
-namespace ragger {
+namespace ragger::sqlite {
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -4880,4 +4880,4 @@ void SqliteBackend::iterate_table_rows(const std::string& table,
     pImpl->iterate_table_rows(table, cb);
 }
 
-} // namespace ragger
+} // namespace ragger::sqlite

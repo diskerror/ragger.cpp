@@ -16,7 +16,7 @@
 #include "lang.h"
 #include "Logger.h"
 #include "memory.h"
-#include "sqlite_backend.h"
+#include "sqlite/backend.h"
 #include "util/fs.h"
 #include "nlohmann_json.hpp"
 
@@ -32,6 +32,7 @@
 #include <unistd.h>
 
 namespace ragger {
+using sqlite::SqliteBackend;
 
 // -----------------------------------------------------------------------
 // Internal helpers

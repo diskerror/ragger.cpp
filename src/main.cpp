@@ -41,7 +41,7 @@
 #include "vector_codec.h"
 #include "recipe_cli.h"
 #include "embed_executor.h"
-#include "sqlite_backend.h"
+#include "sqlite/backend.h"
 #include "user_store.h"
 #include "util/fs.h"
 #include "server.h"

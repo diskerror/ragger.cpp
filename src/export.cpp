@@ -9,7 +9,7 @@
  */
 #include "export.h"
 #include "storage_backend.h"
-#include "sqlite_backend.h"
+#include "sqlite/backend.h"
 #include "config.h"
 
 #include <format>
@@ -17,6 +17,7 @@
 #include <vector>
 
 namespace ragger {
+using sqlite::SqliteBackend;
 
 // -- helpers ----------------------------------------------------------------
 

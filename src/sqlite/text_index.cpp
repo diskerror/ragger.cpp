@@ -1,7 +1,7 @@
 /**
  * sqlite_text_index.cpp — SQLite storage hooks for the custom terms index.
  */
-#include "sqlite_text_index.h"
+#include "sqlite/text_index.h"
 
 #include <format>
 #include <iostream>
@@ -10,7 +10,7 @@
 
 #include "util/sqlite.h"
 
-namespace ragger {
+namespace ragger::sqlite {
 
 // Doc embed text formula (title appended when present) — mirrors the constant
 // SqliteBackend uses for embeddings so the index sees the same document text.
@@ -473,4 +473,4 @@ int SqliteTextIndex::reindex_table(const std::string& table, bool progress) {
     return done;
 }
 
-}  // namespace ragger
+}  // namespace ragger::sqlite

@@ -4,7 +4,7 @@
 #include "check.h"
 #include <iostream>
 
-#include "sqlite_text_index.h"
+#include "sqlite/text_index.h"
 
 int main() {
     sqlite3* db = nullptr;
@@ -25,7 +25,7 @@ int main() {
         "('Nothing about animals here');",
         nullptr, nullptr, nullptr) == SQLITE_OK);
 
-    ragger::SqliteTextIndex idx(db);
+    ragger::sqlite::SqliteTextIndex idx(db);
     idx.create_schema();
 
     // terms table must now exist.
