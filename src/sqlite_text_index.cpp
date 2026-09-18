@@ -288,8 +288,24 @@ Stmt& SqliteTextIndex::update_counts_stmt(const std::string& table) {
 // ---- TextIndex overrides ---------------------------------------------------
 
 void SqliteTextIndex::reset_terms_table() {
-    // sqlite_sequence only has a row for `terms` once an AUTOINCREMENT insert
-    // has happened; DELETE is a no-op (not an error) if the row is absent.
+    // Drop-and-recreate instead of DELETE: on ~900K+ rows, DELETE FROM terms
+    // has to walk every row, update the UNIQUE index B-tree, and write a WAL
+    // frame per row -- O(n) work. DROP TABLE is a catalog-only operation
+    // (SQLite just forgets the table/index exist), so it's near-instant
+    // regardless of row count; CREATE TABLE then reuses create_schema()'s
+    // exact DDL, so the two paths can never drift apart.
+    //
+    // Wrapped in one transaction: a crash mid-sequence rolls back to the
+    // pre-reset state instead of leaving tables half-gone.
+    //
+    // No manual sqlite_sequence cleanup needed -- a freshly CREATE'd
+    // AUTOINCREMENT table has no sqlite_sequence row until its first insert.
+    //
+    // Any cached Stmt bound to `terms` or a `<table>_terms` junction (e.g.
+    // select_term_id_, insert_term_, the per-table junction insert/delete
+    // members) is prepared via sqlite3_prepare_v2, which SQLite transparently
+    // reprepares against the new schema on its next step() -- no code
+    // elsewhere needs to change for this.
     char* err = nullptr;
     auto exec = [&](const char* sql) {
         if (sqlite3_exec(db_, sql, nullptr, nullptr, &err) != SQLITE_OK) {
@@ -298,10 +314,24 @@ void SqliteTextIndex::reset_terms_table() {
             throw std::runtime_error("SqliteTextIndex reset_terms_table: " + msg);
         }
     };
-    // Cascades through every <table>_terms junction row via ON DELETE CASCADE
-    // (foreign_keys must be ON -- SqliteBackend enables it at connection open).
-    exec("DELETE FROM terms");
-    exec("DELETE FROM sqlite_sequence WHERE name = 'terms'");
+    exec("BEGIN IMMEDIATE");
+    try {
+        // Junction tables reference terms(term_id); drop them first so no
+        // statement can observe a junction row pointing at a gone table
+        // (though within one transaction this is moot for correctness, it
+        // keeps drop order mirroring the FK dependency direction).
+        exec("DROP TABLE IF EXISTS turns_terms");
+        exec("DROP TABLE IF EXISTS turn_summaries_terms");
+        exec("DROP TABLE IF EXISTS summaries_terms");
+        exec("DROP TABLE IF EXISTS documents_terms");
+        exec("DROP TABLE IF EXISTS decisions_terms");
+        exec("DROP TABLE IF EXISTS terms");
+        create_schema();  // CREATE TABLE/INDEX IF NOT EXISTS -- recreates all 6, empty
+        exec("COMMIT");
+    } catch (...) {
+        exec("ROLLBACK");
+        throw;
+    }
 }
 
 int SqliteTextIndex::upsert_term(const std::string& term) {
