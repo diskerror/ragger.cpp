@@ -282,6 +282,34 @@ bool is_all_digits(const std::string& s) {
     }
     return true;
 }
+
+// True for a "0x"/"x"-prefixed hex literal longer than 4 hex digits -- e.g.
+// "0x1a2b3c", "xdeadbeef", a memory address or hash rendered with the usual
+// programmer prefix. Not a general hex-charset filter: unprefixed hex-only
+// words ("dead", "beef", "cafe", "face", "515006a") are left alone --
+// "515006a" has no "0x"/"x" prefix so it still passes (git short hashes
+// without an explicit prefix aren't distinguishable from a real word this
+// way, so this narrower rule was chosen over a blanket all-hex filter).
+// The length-after-prefix > 4 threshold keeps short/common prefixed forms
+// (e.g. "x86", "0xff") passing through untouched.
+bool is_hex_token(const std::string& s) {
+    std::string_view body = s;
+    if (body.size() > 2 && (body[0] == '0') &&
+        (body[1] == 'x' || body[1] == 'X')) {
+        body.remove_prefix(2);
+    } else if (body.size() > 1 && (body[0] == 'x' || body[0] == 'X')) {
+        body.remove_prefix(1);
+    } else {
+        return false;  // no recognized prefix -- not a hex-literal token
+    }
+    if (body.size() <= 4) return false;  // short form (x86, 0xff) -- keep
+    for (char c : body) {
+        unsigned char uc = static_cast<unsigned char>(c);
+        char lc = static_cast<char>(std::tolower(uc));
+        if (!std::isdigit(uc) && (lc < 'a' || lc > 'f')) return false;
+    }
+    return true;
+}
 }  // namespace
 
 std::vector<UnigramToken> unigrams(const std::vector<std::string>& words,
@@ -295,6 +323,9 @@ std::vector<UnigramToken> unigrams(const std::vector<std::string>& words,
         }
         if (is_all_digits(word)) {
             continue;  // bare number outside 0-12, no search signal
+        }
+        if (is_hex_token(word)) {
+            continue;  // git hash / hex id -- no search signal, not a word
         }
 
         // Stem the survivor
