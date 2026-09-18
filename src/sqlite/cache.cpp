@@ -77,7 +77,7 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
     // headers, raw f16/f32). On any failure (NULL, deferred-but-unbackfilled
     // row, corruption, or a dimension mismatch) a zero vector is returned;
     // the first such row per cache load is logged once (table + id).
-    std::vector<float> SqliteBackend::Impl::decode_embedding_blob(const void* blob, int blob_bytes,
+    std::vector<float> Backend::Impl::decode_embedding_blob(const void* blob, int blob_bytes,
                                              int dims, const char* table,
                                              int row_id, bool& warned) {
         std::vector<float> emb;
@@ -105,7 +105,7 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
     // to parse is a caller error (malformed import timestamp) -- surfaced
     // as a thrown exception rather than silently binding garbage, matching
     // how other malformed-input cases in this file are handled.
-    int64_t SqliteBackend::Impl::resolve_epoch(const std::string& caller_ts) {
+    int64_t Backend::Impl::resolve_epoch(const std::string& caller_ts) {
         if (caller_ts.empty()) return db_epoch();
         auto tt = parse_db_timestamp(caller_ts);
         if (!tt) {
@@ -117,18 +117,18 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
 
 
     // ---- cache --------------------------------------------------------
-    void SqliteBackend::Impl::invalidate_cache() { cache_valid = false; }
+    void Backend::Impl::invalidate_cache() { cache_valid = false; }
 
-    void SqliteBackend::Impl::invalidate_doc_cache() { doc_cache_valid = false; }
+    void Backend::Impl::invalidate_doc_cache() { doc_cache_valid = false; }
 
-    void SqliteBackend::Impl::invalidate_dec_cache() { dec_cache_valid = false; }
+    void Backend::Impl::invalidate_dec_cache() { dec_cache_valid = false; }
 
-    void SqliteBackend::Impl::invalidate_turn_cache() { turn_cache_valid = false; }
+    void Backend::Impl::invalidate_turn_cache() { turn_cache_valid = false; }
 
 
     // Loads the summaries table into the vector cache. Keyword scores come
     // from FTS5 (summaries_fts) at query time — see keyword_scores().
-    void SqliteBackend::Impl::ensure_cache() {
+    void Backend::Impl::ensure_cache() {
         if (cache_valid) return;
 
         cached_ids.clear();
@@ -188,7 +188,7 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
     // ensure_cache(): vector scores come from here, keyword scores from FTS5
     // (documents_fts) at query time. Metadata carries source="document" plus
     // the title so search() consumers can distinguish documents from summaries.
-    void SqliteBackend::Impl::ensure_doc_cache() {
+    void Backend::Impl::ensure_doc_cache() {
         if (doc_cache_valid) return;
 
         doc_ids.clear();
@@ -248,7 +248,7 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
     // (decisions_fts) at query time. Metadata carries source="decision" plus
     // the status so search() consumers can distinguish decisions from the
     // other corpora.
-    void SqliteBackend::Impl::ensure_dec_cache() {
+    void Backend::Impl::ensure_dec_cache() {
         if (dec_cache_valid) return;
 
         dec_ids.clear();
@@ -307,7 +307,7 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
     // — these must never surface in search results or feed the embedding
     // similarity matrix. Metadata carries source="turn_summary" plus
     // turn_id/session_id (turn_summaries has no tags/status/level columns).
-    void SqliteBackend::Impl::ensure_turn_cache() {
+    void Backend::Impl::ensure_turn_cache() {
         if (turn_cache_valid) return;
 
         turn_ids.clear();

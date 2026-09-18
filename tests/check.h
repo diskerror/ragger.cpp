@@ -10,7 +10,7 @@
  * silently never ran that call in a Release build. test_text_index did exactly
  * this: the open never happened, `db` stayed nullptr, and the first real
  * sqlite3_exec() returned SQLITE_MISUSE(21) with a NULL error message --
- * surfacing as the cryptic "SqliteTextIndex schema: unknown error". Every other
+ * surfacing as the cryptic "sqlite::TextIndex schema: unknown error". Every other
  * assertion in those files was also a no-op, so the tests asserted NOTHING.
  *
  * CHECK() always evaluates its expression exactly once, in every build type,

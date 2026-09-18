@@ -5,7 +5,7 @@
  * concrete methods; the per-engine storage (insert term, replace junction
  * rows, COUNT postings) is supplied by the pure-virtual hooks below. A future
  * MariaDB/Mongo/Postgres backend implements only the hooks, reusing the whole
- * indexing + scoring pipeline. SqliteTextIndex is the only concrete impl today.
+ * indexing + scoring pipeline. sqlite::TextIndex is the only concrete impl today.
  */
 #pragma once
 

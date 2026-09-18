@@ -1,6 +1,6 @@
 /**
  * Export tests — exercises SQL dump output against a temp SQLite database.
- * No ONNX model needed; uses SqliteBackend's DB-only constructor + raw SQL.
+ * No ONNX model needed; uses sqlite::Backend's DB-only constructor + raw SQL.
  */
 #include "export.h"
 #include "config.h"

@@ -32,7 +32,7 @@
 #include <unistd.h>
 
 namespace ragger {
-using sqlite::SqliteBackend;
+using sqlite::Backend;
 
 // -----------------------------------------------------------------------
 // Internal helpers
@@ -334,7 +334,7 @@ static void housekeeping_thread(RaggerMemory& memory,
         if (max_age_hours <= 0) continue;
 
         try {
-            SqliteBackend tmp(config().resolved_db_path());
+            sqlite::Backend tmp(config().resolved_db_path());
             const int deleted = tmp.cleanup_old_conversations(max_age_hours);
             if (deleted > 0) {
                 std::string msg(ragger::lang::MSG_MCP_HOUSEKEEPING);

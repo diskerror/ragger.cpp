@@ -2,7 +2,7 @@
  * Export — mysqldump-style SQL dump implementation.
  *
  * The StorageBackend-based overloads are the canonical implementation.
- * The db_path convenience overloads open a read-only SqliteBackend and
+ * The db_path convenience overloads open a read-only sqlite::Backend and
  * delegate — no CREATE TABLE side-effects on arbitrary dump targets.
  * Dumps CREATE TABLE / CREATE INDEX / CREATE TRIGGER + INSERT statements.
  * The `embedding` BLOB column in content tables is skipped unless requested.
@@ -17,7 +17,7 @@
 #include <vector>
 
 namespace ragger {
-using sqlite::SqliteBackend;
+using sqlite::Backend;
 
 // -- helpers ----------------------------------------------------------------
 
@@ -148,14 +148,14 @@ int export_sql(std::ostream& out, StorageBackend& backend, const ExportOptions& 
 // -- db_path convenience overloads (thin wrappers) --------------------------
 
 std::vector<std::string> export_list_tables(const std::string& db_path) {
-    SqliteBackend backend(expand_path(db_path), /*readonly=*/true);
+    sqlite::Backend backend(expand_path(db_path), /*readonly=*/true);
     return export_list_tables(backend);
 }
 
 int export_sql(std::ostream& out,
                const std::string& db_path,
                const ExportOptions& opts) {
-    SqliteBackend backend(expand_path(db_path), /*readonly=*/true);
+    sqlite::Backend backend(expand_path(db_path), /*readonly=*/true);
     return export_sql(out, backend, opts);
 }
 

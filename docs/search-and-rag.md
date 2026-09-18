@@ -271,7 +271,7 @@ Simple, fast for moderate datasets, no external dependencies.
 
 For larger deployments, the pluggable `StorageBackend` interface
 (`include/storage_backend.h`) makes it straightforward to swap
-in a vector database — `SqliteBackend` is the only concrete
+in a vector database — `sqlite::Backend` is the only concrete
 implementation today.
 
 ## Retrieval instrumentation (optional, build-time)

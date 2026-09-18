@@ -1,8 +1,8 @@
 #pragma once
-// Private implementation header for SqliteBackend::Impl.
+// Private implementation header for Backend::Impl.
 // Declarations only -- method bodies live in schema.cpp, admin.cpp,
 // cache.cpp, write.cpp, search.cpp, maintenance.cpp (see backend.cpp
-// for the free helpers and public SqliteBackend:: wrapper methods).
+// for the free helpers and public Backend:: wrapper methods).
 #include "sqlite/backend.h"
 #include "sqlite/text_index.h"
 #include "vector_codec.h"
@@ -19,11 +19,11 @@ namespace ragger::sqlite {
 
 using json = nlohmann::json;
 
-struct SqliteBackend::Impl {
+struct Backend::Impl {
     sqlite3*    db       = nullptr;
     // Custom v0.16 inverted-index engine (schema + reindex + TF-IDF scoring).
     // Holds a non-owning copy of `db`; constructed once `db` is open.
-    std::optional<SqliteTextIndex> text_index_;
+    std::optional<TextIndex> text_index_;
     Embedder*   embedder = nullptr;    // nullable — null for DB-only (user mgmt) mode
     bool        readonly_ = false;     // true for export-path readonly connections
     std::string db_path;
@@ -122,7 +122,7 @@ struct SqliteBackend::Impl {
     // Serializes all public-API access (H1): two httplib thread pools, the
     // housekeeping timer, and the SummarizerService worker share one backend.
     // The non-thread-safe Embedder and the three embedding caches are guarded
-    // by this. Locked once at the SqliteBackend:: public boundary; Impl methods
+    // by this. Locked once at the Backend:: public boundary; Impl methods
     // never re-lock, so no recursive deadlock is possible.
     mutable std::mutex mu;
 
@@ -862,11 +862,11 @@ struct SqliteBackend::Impl {
     uint8_t increment_embedding_version();
 
     // (Re)build the custom index for a single text table. Delegates to the
-    // SqliteTextIndex engine (schema + tokenize + TF-IDF live there now).
+    // TextIndex engine (schema + tokenize + TF-IDF live there now).
     int reindex_table(const std::string& table_name, bool progress);
 
     // Truncate the shared `terms` table + reset its AUTOINCREMENT counter.
-    // Delegates to SqliteTextIndex; see its header comment for the "only
+    // Delegates to TextIndex; see its header comment for the "only
     // safe immediately before reindexing ALL five tables" caveat.
     void reset_terms_table();
 

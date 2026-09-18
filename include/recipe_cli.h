@@ -28,7 +28,7 @@ namespace ragger {
 
 /// Entry point for the `recipe` verb. `args` is everything after the
 /// verb token; one optional element = recipe name. `db_path` is forwarded
-/// to the DB-only SqliteBackend so the choice can be persisted into the
+/// to the DB-only sqlite::Backend so the choice can be persisted into the
 /// `settings` table. Returns a process exit code (0 success, non-zero
 /// on error / no recipes found / unknown name).
 int run_recipe_cli(const std::vector<std::string>& args,

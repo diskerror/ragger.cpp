@@ -69,7 +69,7 @@ static std::string tags_from_metadata(const json& metadata) {
 
 
     // ---- path normalization -------------------------------------------
-    std::string SqliteBackend::Impl::normalize_path(const std::string& text) {
+    std::string Backend::Impl::normalize_path(const std::string& text) {
         if (!config().normalize_home_path) return text;
         std::string home = home_dir();
         if (home.empty()) return text;
@@ -94,7 +94,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // (and drifts out of sync with the real decision_id over time).
     // Markdown emphasis markers ("**"/"*") wrapping the label are also
     // consumed. No-op if the text doesn't start with this pattern.
-    std::string SqliteBackend::Impl::strip_decision_number_prefix(const std::string& text) {
+    std::string Backend::Impl::strip_decision_number_prefix(const std::string& text) {
         static const std::regex prefix_re(
             R"(^\s*\*{0,2}(?:Design\s+)?Decision(?:\s+Log)?\s*#\d+\s*)"
             R"((?:Logged)?\s*(?:\([^)]*\))?\s*\*{0,2}\s*:\s*\*{0,2}\s*)",
@@ -128,9 +128,9 @@ static std::string tags_from_metadata(const json& metadata) {
     // ---- local timestamp ("%F %T" == "YYYY-MM-DD HH:MM:SS") ----------
     // Thin aliases over the shared formatter (ragger/util/time.h) so every
     // DB timestamp uses one local-time format.
-    std::string SqliteBackend::Impl::local_timestamp(std::time_t tt) { return db_timestamp(tt); }
+    std::string Backend::Impl::local_timestamp(std::time_t tt) { return db_timestamp(tt); }
 
-    std::string SqliteBackend::Impl::local_timestamp() { return db_timestamp(); }
+    std::string Backend::Impl::local_timestamp() { return db_timestamp(); }
 
 
     // ---- public API ---------------------------------------------------
@@ -141,7 +141,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // collection/category and the free-form metadata blob are gone in v2 —
     // metadata fields are either promoted to columns or dropped. FTS5 sync
     // triggers index the row, so there is no explicit BM25 step.
-    std::string SqliteBackend::Impl::store(const std::string& raw_text, json metadata, bool defer_embedding) {
+    std::string Backend::Impl::store(const std::string& raw_text, json metadata, bool defer_embedding) {
         if (metadata.is_null()) metadata = json::object();
 
         std::string level  = metadata.value("level",  std::string("session"));
@@ -211,7 +211,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // or 'YYYYMMDD', interpreted LOCAL); empty -> now. On an existing source
     // the stored epoch is returned (the first import's time wins), so every
     // chunk of a document shares one imported_at.
-    std::pair<long long, long long> SqliteBackend::Impl::get_or_create_document_source(
+    std::pair<long long, long long> Backend::Impl::get_or_create_document_source(
             const std::string& path, const std::string& title,
             int year, const std::string& tags,
             const std::string& imported_at_text) {
@@ -247,7 +247,7 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    int SqliteBackend::Impl::store_document(const DocumentChunk& chunk, bool defer_embedding) {
+    int Backend::Impl::store_document(const DocumentChunk& chunk, bool defer_embedding) {
         // Path-normalise the body text for consistency with store().
         std::string text = normalize_path(chunk.text);
 
@@ -306,7 +306,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // ---- turns (L1) raw exchange capture ------------------------------
     // Resolve a model name to its models.model_id, creating the row if it
     // doesn't exist. Empty name → 0 (callers bind NULL).
-    int SqliteBackend::Impl::get_or_create_model(const std::string& name) {
+    int Backend::Impl::get_or_create_model(const std::string& name) {
         if (name.empty()) return 0;
         Stmt s(db, "SELECT model_id FROM models WHERE name = ?");
         s.bind(1, name);
@@ -324,7 +324,7 @@ static std::string tags_from_metadata(const json& metadata) {
     /// sighting. Empty guid → 0 (NULL session_id), mirroring get_or_create_model.
     /// If session_name is non-empty, sets sessions.name (and name_source) on
     /// first sighting or updates it if the title has changed since last capture.
-    int SqliteBackend::Impl::get_or_create_session(const std::string& guid,
+    int Backend::Impl::get_or_create_session(const std::string& guid,
                               const std::string& session_name,
                               const std::string& name_source) {
         if (guid.empty()) return 0;
@@ -358,7 +358,7 @@ static std::string tags_from_metadata(const json& metadata) {
 
     // Embedding for a turn is over the joined exchange (user + assistant),
     // using the same U+001F unit-separator as chat's summary turns.
-    std::string SqliteBackend::Impl::turn_embed_text(const std::string& u, const std::string& a) {
+    std::string Backend::Impl::turn_embed_text(const std::string& u, const std::string& a) {
         return a.empty() ? u : (u + "\n\x1F\n" + a);
     }
 
@@ -370,7 +370,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // `source_timestamp` (non-empty, db format) overrides created_at for
     // historical imports; the regeneration-dedup window is skipped in that
     // case (it reasons about "now", which is meaningless for old turns).
-    int SqliteBackend::Impl::store_turn(const std::string& user_text, const std::string& assistant_text,
+    int Backend::Impl::store_turn(const std::string& user_text, const std::string& assistant_text,
                    const std::string& model_name, bool defer_embedding,
                    const std::string& session_guid,
                    const std::string& source_timestamp,
@@ -471,7 +471,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // Shared implementation for turn queries over a session GUID.
     // asc=true → oldest-first (ORDER BY turn_id ASC, no limit).
     // asc=false → newest-first (ORDER BY timestamp DESC, turn_id DESC) with optional limit.
-    std::vector<TurnRecord> SqliteBackend::Impl::turns_by_session_impl(
+    std::vector<TurnRecord> Backend::Impl::turns_by_session_impl(
             const std::string& session_guid, bool asc, int limit) {
         std::vector<TurnRecord> out;
         if (session_guid.empty()) return out;
@@ -503,14 +503,14 @@ static std::string tags_from_metadata(const json& metadata) {
 
 
     /// All turns belonging to a session GUID, oldest first.
-    std::vector<TurnRecord> SqliteBackend::Impl::turns_by_session(const std::string& session_guid) {
+    std::vector<TurnRecord> Backend::Impl::turns_by_session(const std::string& session_guid) {
         return turns_by_session_impl(session_guid, true);
     }
 
 
     // Finalize a partial turn: set assistant_text, (re)embed the exchange,
     // and record the model. Returns false if the turn doesn't exist.
-    bool SqliteBackend::Impl::finalize_turn(int turn_id, const std::string& assistant_text,
+    bool Backend::Impl::finalize_turn(int turn_id, const std::string& assistant_text,
                        const std::string& model_name) {
         Stmt g(db, "SELECT user_text FROM turns WHERE turn_id = ?");
         g.bind(1, turn_id);
@@ -547,7 +547,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // summaries inherit the source turn's timestamp so the (session_id,
     // timestamp) pair links a turn to its summary (no FK column needed) and
     // stays stable across embedding-model changes.
-    int SqliteBackend::Impl::store_summary(const std::string& text, const std::string& level,
+    int Backend::Impl::store_summary(const std::string& text, const std::string& level,
                       const std::string& model_name,
                       const std::string& session_guid,
                       const std::string& source_timestamp,
@@ -584,7 +584,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // Mirrors store_summary but the decisions table has no level/model/session
     // columns — just text/embedding/status/tags/timestamp. defer_embedding
     // leaves embedding NULL for a later backfill pass.
-    int SqliteBackend::Impl::store_decision(const std::string& text, const std::string& status,
+    int Backend::Impl::store_decision(const std::string& text, const std::string& status,
                        const std::string& tags,
                        const std::string& source_timestamp,
                        bool defer_embedding) {
@@ -624,7 +624,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // ones, and with catch_up_batch_size capping each tick, newest-first
     // means those show up with real summaries soonest instead of waiting
     // behind a long tail of old backlog.
-    std::vector<TurnRecord> SqliteBackend::Impl::unsummarized_turns(int limit) {
+    std::vector<TurnRecord> Backend::Impl::unsummarized_turns(int limit) {
         std::vector<TurnRecord> out;
         std::string sql =
             "SELECT t.turn_id, t.user_text, t.assistant_text, m.name, "
@@ -654,7 +654,7 @@ static std::string tags_from_metadata(const json& metadata) {
 
 
     // ---- turn_id-based turn_summaries helpers (v0.12.0) ----------------
-    bool SqliteBackend::Impl::turn_summary_exists(int turn_id) {
+    bool Backend::Impl::turn_summary_exists(int turn_id) {
         Stmt s(db, "SELECT 1 FROM turn_summaries WHERE turn_id = ? LIMIT 1");
         s.bind(1, turn_id);
         return s.step();
@@ -674,7 +674,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // attempts. Trivial-turn skips are NOT touched -- those are tagged with
     // the real summarizer model name, never "bad", so this only targets
     // genuine poison-abandon rows.
-    int SqliteBackend::Impl::reset_abandoned_turn_summaries(int limit) {
+    int Backend::Impl::reset_abandoned_turn_summaries(int limit) {
         // SQLite's DELETE doesn't support ORDER BY/LIMIT without a special
         // build flag (SQLITE_ENABLE_UPDATE_DELETE_LIMIT), which we don't
         // assume is compiled in. Select target ids first, then delete by id.
@@ -704,7 +704,7 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    bool SqliteBackend::Impl::finalize_turn_summary(int turn_id, const std::string& text,
+    bool Backend::Impl::finalize_turn_summary(int turn_id, const std::string& text,
                                 const std::string& summary_model_name) {
         std::string t = normalize_path(text);
         int model_id = get_or_create_model(summary_model_name);
@@ -759,7 +759,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // Reid's design decision: no placeholder mechanism, so a turn_summaries
     // row now always represents completed work (real summary, trivial-skip,
     // or poison-abandon), never an in-progress sentinel.
-    bool SqliteBackend::Impl::mark_turn_summarized(int turn_id, const std::string& model_name) {
+    bool Backend::Impl::mark_turn_summarized(int turn_id, const std::string& model_name) {
         int model_id = get_or_create_model(model_name);
         if (!model_id) return false;
 
@@ -791,7 +791,7 @@ static std::string tags_from_metadata(const json& metadata) {
 
 
     // Draft-tagged summary rows for re-summarization (housekeeping retry).
-    std::vector<DraftSummary> SqliteBackend::Impl::draft_summaries(int limit) {
+    std::vector<DraftSummary> Backend::Impl::draft_summaries(int limit) {
         std::vector<DraftSummary> out;
         std::string sql =
             "SELECT s.summary_id, s.level, COALESCE(ss.guid, ''), "
@@ -819,7 +819,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // that have at least one non-draft L2 summary but no complete L3 yet.
     // The summarizer's pause timer treats this set as "ready to finalize."
     // Returns session GUIDs; anonymous (session_id NULL) turns are skipped.
-    std::vector<std::string> SqliteBackend::Impl::sessions_needing_close(int pause_minutes) {
+    std::vector<std::string> Backend::Impl::sessions_needing_close(int pause_minutes) {
         std::vector<std::string> out;
         if (pause_minutes <= 0) return out;
         const std::string cutoff =
@@ -853,7 +853,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // ---- episode layer (EPISODE_PLAN Phase 1) --------------------------
     // Most recent episode's span-end (stored in updated_at) for a session.
     // Empty when the session has no episode rows yet.
-    std::string SqliteBackend::Impl::last_episode_end(const std::string& session_guid) {
+    std::string Backend::Impl::last_episode_end(const std::string& session_guid) {
         if (session_guid.empty()) return {};
         Stmt s(db,
             "SELECT datetime(COALESCE(s.updated_at, s.created_at),'unixepoch','localtime') "
@@ -872,7 +872,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // since_ts arrives as a "%F %T" string (from last_episode_end(), which
     // renders the epoch column back to that format) -- parse it back to
     // epoch seconds to compare against the INTEGER created_at column.
-    std::vector<SummaryRecord> SqliteBackend::Impl::l2_summaries_since(
+    std::vector<SummaryRecord> Backend::Impl::l2_summaries_since(
             const std::string& session_guid, const std::string& since_ts) {
         std::vector<SummaryRecord> out;
         if (session_guid.empty()) return out;
@@ -904,7 +904,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // turn_summaries against turns to fetch both embeddings (turn + summary)
     // plus the turn-summary text. Rows where EITHER embedding is NULL are
     // skipped (boundary detection requires both signals).
-    std::vector<EpisodeCandidateTurn> SqliteBackend::Impl::episode_candidate_turns(
+    std::vector<EpisodeCandidateTurn> Backend::Impl::episode_candidate_turns(
             const std::string& session_guid, const std::string& since_ts) {
         std::vector<EpisodeCandidateTurn> out;
         if (session_guid.empty()) return out;
@@ -948,7 +948,7 @@ static std::string tags_from_metadata(const json& metadata) {
 
     // Insert one immutable level='episode' row: timestamp=first_ts (span
     // start), updated_at=last_ts (span end). Mirrors store_summary.
-    int SqliteBackend::Impl::store_episode(const std::string& text, const std::string& model_name,
+    int Backend::Impl::store_episode(const std::string& text, const std::string& model_name,
                       const std::string& session_guid,
                       const std::string& first_ts, const std::string& last_ts) {
         std::string t = normalize_path(text);
@@ -981,7 +981,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // Sessions whose open episode is ready to close: they have >=1 non-draft
     // L2 turn summary past the last episode's end, and their newest turn is
     // older than idle_minutes. Returns session GUIDs.
-    std::vector<std::string> SqliteBackend::Impl::episodes_needing_close(int idle_minutes) {
+    std::vector<std::string> Backend::Impl::episodes_needing_close(int idle_minutes) {
         std::vector<std::string> out;
         if (idle_minutes <= 0) return out;
         const std::string cutoff =
@@ -1016,7 +1016,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // ---- Phase 2: boundary-triggered session/project rollups -----------
     // All episode texts for a session, oldest-first. Corpus for the session
     // rollup (episodes + any tail L2 turns are combined by the caller).
-    std::vector<std::string> SqliteBackend::Impl::episode_texts(const std::string& session_guid) {
+    std::vector<std::string> Backend::Impl::episode_texts(const std::string& session_guid) {
         std::vector<std::string> out;
         if (session_guid.empty()) return out;
         Stmt s(db,
@@ -1034,7 +1034,7 @@ static std::string tags_from_metadata(const json& metadata) {
 
 
     // Stamp updated_at = now for a running rollup row.
-    bool SqliteBackend::Impl::set_summary_updated_at(int summary_id) {
+    bool Backend::Impl::set_summary_updated_at(int summary_id) {
         Stmt s(db, "UPDATE summaries SET updated_at = ? WHERE summary_id = ?");
         s.bind(1, db_epoch()).bind(2, summary_id);
         return s.exec() && sqlite3_changes(db) > 0;
@@ -1042,7 +1042,7 @@ static std::string tags_from_metadata(const json& metadata) {
 
 
     // ---- boundary-detection watermark (settings key/value table) --------
-    int64_t SqliteBackend::Impl::get_watermark(const std::string& key) {
+    int64_t Backend::Impl::get_watermark(const std::string& key) {
         Stmt s(db, "SELECT value FROM settings WHERE key = ?");
         s.bind(1, key);
         if (s.step()) {
@@ -1052,7 +1052,7 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    void SqliteBackend::Impl::set_watermark(const std::string& key, int64_t turn_id) {
+    void Backend::Impl::set_watermark(const std::string& key, int64_t turn_id) {
         Stmt s(db, "INSERT INTO settings (key, value) VALUES (?, ?) "
                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value");
         s.bind(1, key);
@@ -1066,7 +1066,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // increments whenever session_id changes from the previous row. The
     // final/currently-open group (grp == MAX(grp)) is always excluded —
     // it's still open because a future turn could extend it.
-    std::vector<ClosedRun> SqliteBackend::Impl::sessions_needing_close_boundary() {
+    std::vector<ClosedRun> Backend::Impl::sessions_needing_close_boundary() {
         std::vector<ClosedRun> out;
         int64_t watermark = get_watermark(std::string(kSessionBoundaryWatermarkKey));
         // Structural floor (Reid's invariant: "no automatic lookback to do
@@ -1127,7 +1127,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // time gap (>= gap_days days) between consecutive turns (by turn_id)
     // rather than a session_id change, and NOT restricted to non-NULL
     // session_id (project runs span all turns, anonymous included).
-    std::vector<ClosedRun> SqliteBackend::Impl::projects_needing_close_boundary(int gap_days) {
+    std::vector<ClosedRun> Backend::Impl::projects_needing_close_boundary(int gap_days) {
         std::vector<ClosedRun> out;
         if (gap_days <= 0) return out;
         int64_t gap_seconds = static_cast<int64_t>(gap_days) * 86400;
@@ -1170,12 +1170,12 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    void SqliteBackend::Impl::advance_session_boundary_watermark(int turn_id) {
+    void Backend::Impl::advance_session_boundary_watermark(int turn_id) {
         set_watermark(std::string(kSessionBoundaryWatermarkKey), turn_id);
     }
 
 
-    void SqliteBackend::Impl::advance_project_boundary_watermark(int turn_id) {
+    void Backend::Impl::advance_project_boundary_watermark(int turn_id) {
         set_watermark(std::string(kProjectBoundaryWatermarkKey), turn_id);
     }
 
@@ -1187,7 +1187,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // first_ts if there are none) up to last_ts. Unlike episode_texts()/
     // l2_summaries_since() (unbounded above), this never reaches into a
     // LATER run of the same session_guid.
-    std::vector<std::string> SqliteBackend::Impl::bounded_session_rollup_texts(
+    std::vector<std::string> Backend::Impl::bounded_session_rollup_texts(
             const std::string& session_guid, int64_t first_ts, int64_t last_ts) {
         std::vector<std::string> out;
         if (session_guid.empty()) return out;
@@ -1233,7 +1233,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // row whose full span [created_at, COALESCE(updated_at,created_at)]
     // lies entirely within [first_ts, last_ts], session-unscoped (a project
     // run spans sessions), oldest-first.
-    std::vector<std::string> SqliteBackend::Impl::bounded_project_rollup_texts(
+    std::vector<std::string> Backend::Impl::bounded_project_rollup_texts(
             int64_t first_ts, int64_t last_ts) {
         std::vector<std::string> out;
         Stmt s(db,
@@ -1255,7 +1255,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // Mirrors store_episode's shape exactly, except created_at/updated_at
     // are bound directly as epoch ints (ClosedRun already carries real
     // epoch seconds — no resolve_epoch() round-trip needed).
-    int SqliteBackend::Impl::store_session_summary(const std::string& text, const std::string& model_name,
+    int Backend::Impl::store_session_summary(const std::string& text, const std::string& model_name,
                               const std::string& session_guid,
                               int64_t first_ts, int64_t last_ts) {
         std::string t = normalize_path(text);
@@ -1287,7 +1287,7 @@ static std::string tags_from_metadata(const json& metadata) {
 
     // Insert one immutable level='project' row spanning a closed run.
     // Session-unscoped (session_id NULL). Otherwise mirrors store_episode.
-    int SqliteBackend::Impl::store_project_summary(const std::string& text, const std::string& model_name,
+    int Backend::Impl::store_project_summary(const std::string& text, const std::string& model_name,
                               int64_t first_ts, int64_t last_ts) {
         std::string t = normalize_path(text);
         int model_id   = get_or_create_model(model_name);
@@ -1314,14 +1314,14 @@ static std::string tags_from_metadata(const json& metadata) {
         return pid;
     }
 
-    std::vector<TurnRecord> SqliteBackend::Impl::turns_by_session_desc(
+    std::vector<TurnRecord> Backend::Impl::turns_by_session_desc(
             const std::string& session_guid, int limit) {
         return turns_by_session_impl(session_guid, false, limit);
     }
 
 
     // Shared query: summaries for a session filtered by level, newest-first.
-    std::vector<SummaryRecord> SqliteBackend::Impl::summaries_by_level_desc(
+    std::vector<SummaryRecord> Backend::Impl::summaries_by_level_desc(
             const std::string& session_guid, const std::string& level, int limit) {
         std::vector<SummaryRecord> out;
         if (session_guid.empty()) return out;
@@ -1344,14 +1344,14 @@ static std::string tags_from_metadata(const json& metadata) {
 
 
     // L2 (turn) summaries for a session, newest-first.
-    std::vector<SummaryRecord> SqliteBackend::Impl::turn_summaries_by_session_desc(
+    std::vector<SummaryRecord> Backend::Impl::turn_summaries_by_session_desc(
             const std::string& session_guid, int limit) {
         return summaries_by_level_desc(session_guid, "turn", limit);
     }
 
 
     // L3 (session) summaries for a session, newest-first.
-    std::vector<SummaryRecord> SqliteBackend::Impl::session_summaries_desc(
+    std::vector<SummaryRecord> Backend::Impl::session_summaries_desc(
             const std::string& session_guid, int limit) {
         return summaries_by_level_desc(session_guid, "session", limit);
     }
@@ -1365,7 +1365,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // (absolute home-dir paths -> "~/") — otherwise a chunk containing
     // e.g. "/Users/reid/..." never matches what's actually in the table
     // (already normalized to "~/...") and gets re-inserted on every run.
-    bool SqliteBackend::Impl::summary_exists_exact(const std::string& text, const std::string& created_at) {
+    bool Backend::Impl::summary_exists_exact(const std::string& text, const std::string& created_at) {
         std::string t = normalize_path(text);
         Stmt s(db, "SELECT 1 FROM summaries WHERE text = ? AND created_at = ? LIMIT 1");
         s.bind(1, t);
@@ -1378,7 +1378,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // normalize-before-compare fix applies here too — plus the
     // decision-number-prefix strip, since store_decision() strips that
     // before storing too).
-    bool SqliteBackend::Impl::decision_exists_exact(const std::string& text, const std::string& created_at) {
+    bool Backend::Impl::decision_exists_exact(const std::string& text, const std::string& created_at) {
         std::string t = normalize_path(strip_decision_number_prefix(text));
         Stmt s(db, "SELECT 1 FROM decisions WHERE text = ? AND created_at = ? LIMIT 1");
         s.bind(1, t);
@@ -1391,7 +1391,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // within ±window_seconds. Catches import overlap with turns Ragger
     // captured live (identical content, a few seconds of clock skew —
     // message send time vs. capture time, plus any tz-conversion rounding).
-    bool SqliteBackend::Impl::turn_exists_fuzzy(const std::string& user_text, const std::string& ts,
+    bool Backend::Impl::turn_exists_fuzzy(const std::string& user_text, const std::string& ts,
                            int window_seconds) {
         Stmt s(db,
             "SELECT 1 FROM turns WHERE user_text = ? "
@@ -1409,7 +1409,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // characters, and case-fold so the same exchange pasted through two
     // different clients (Telegram markdown escaping vs. Claude.ai's raw
     // text) compares equal. Comparison-only — never used for storage.
-    std::string SqliteBackend::Impl::normalize_for_compare(const std::string& s) {
+    std::string Backend::Impl::normalize_for_compare(const std::string& s) {
         std::string out;
         out.reserve(s.size());
         bool prev_space = false;
@@ -1435,7 +1435,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // normalizes-equal (see normalize_for_compare), ignoring timestamp
     // entirely. Used to reconcile the same exchange captured from two
     // different importers whose timestamps have no reason to agree.
-    std::optional<TurnRecord> SqliteBackend::Impl::find_turn_by_text(const std::string& user_text) {
+    std::optional<TurnRecord> Backend::Impl::find_turn_by_text(const std::string& user_text) {
         std::string target = normalize_for_compare(user_text);
         if (target.empty()) return std::nullopt;
         Stmt s(db,
@@ -1465,7 +1465,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // Upgrade an existing turn's timestamp/session_guid in place. Empty
     // args leave that field untouched. session_guid resolves/creates a
     // sessions row same as store_turn.
-    bool SqliteBackend::Impl::update_turn_meta(int turn_id, const std::string& timestamp,
+    bool Backend::Impl::update_turn_meta(int turn_id, const std::string& timestamp,
                           const std::string& session_guid) {
         if (timestamp.empty() && session_guid.empty()) return true;
         std::string sql = "UPDATE turns SET ";
@@ -1489,7 +1489,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // Recipe ingredients (issue #23): recent summaries of a given level, and
     // current decisions — fetched by recency (not semantic search) for the
     // default tiered payload. Returned newest-first.
-    std::vector<std::string> SqliteBackend::Impl::recent_summaries(const std::string& level, int limit) {
+    std::vector<std::string> Backend::Impl::recent_summaries(const std::string& level, int limit) {
         std::vector<std::string> out;
         if (limit <= 0) return out;
         Stmt s(db,
@@ -1504,7 +1504,7 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    std::vector<std::string> SqliteBackend::Impl::current_decisions(int limit) {
+    std::vector<std::string> Backend::Impl::current_decisions(int limit) {
         std::vector<std::string> out;
         if (limit <= 0) return out;
         Stmt s(db,
@@ -1521,7 +1521,7 @@ static std::string tags_from_metadata(const json& metadata) {
 
     // Set a decision's status (e.g. "roadmap" -> "current" once planned
     // work is done, or -> "superseded"/"deprecated" once stale).
-    bool SqliteBackend::Impl::set_decision_status(int decision_id, const std::string& status) {
+    bool Backend::Impl::set_decision_status(int decision_id, const std::string& status) {
         Stmt s(db, "UPDATE decisions SET status = ? WHERE decision_id = ?");
         s.bind(1, status).bind(2, decision_id);
         bool ok = s.exec() && sqlite3_changes(db) > 0;
@@ -1535,7 +1535,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // entries are deliberately excluded from current_decisions()'s
     // recall-pipeline query so unfinished plans don't clutter every
     // session's context).
-    std::vector<std::string> SqliteBackend::Impl::decisions_by_status(const std::string& status, int limit) {
+    std::vector<std::string> Backend::Impl::decisions_by_status(const std::string& status, int limit) {
         std::vector<std::string> out;
         if (limit <= 0) return out;
         Stmt s(db,
@@ -1552,7 +1552,7 @@ static std::string tags_from_metadata(const json& metadata) {
 
 
     // Replace a summary's text + embedding, update its model. False if absent.
-    bool SqliteBackend::Impl::update_summary_text(int summary_id, const std::string& text,
+    bool Backend::Impl::update_summary_text(int summary_id, const std::string& text,
                              const std::string& model_name) {
         std::string t = normalize_path(text);
         int model_id  = get_or_create_model(model_name);
@@ -1577,7 +1577,7 @@ static std::string tags_from_metadata(const json& metadata) {
 
     // Replace a summary's tags column. Used by the summarizer to clear
     // "draft" once a row has been rewritten with a real summary.
-    bool SqliteBackend::Impl::set_summary_tags(int summary_id, const std::string& tags) {
+    bool Backend::Impl::set_summary_tags(int summary_id, const std::string& tags) {
         Stmt s(db,
             "UPDATE summaries SET tags = ? WHERE summary_id = ?");
         s.bind(1, tags).bind(2, summary_id);
@@ -1585,7 +1585,7 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    bool SqliteBackend::Impl::update_text(int memory_id, const std::string& raw_text, json metadata, bool defer_embedding) {
+    bool Backend::Impl::update_text(int memory_id, const std::string& raw_text, json metadata, bool defer_embedding) {
         if (metadata.is_null()) metadata = json::object();
 
         // Refuse to mutate protected rows for parity with delete_memory.

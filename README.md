@@ -56,7 +56,7 @@ no network calls once the model is on disk.
 Three seams are built to be replaced without touching the rest of the code:
 
 - **Storage backend.** All memory storage goes through the abstract
-  `StorageBackend` interface (`include/storage_backend.h`); `SqliteBackend`
+  `StorageBackend` interface (`include/storage_backend.h`); `sqlite::Backend`
   is the only implementation today. Dropping in another engine — MariaDB, MongoDB, or a dedicated
   vector DB for large corpora — means implementing that one interface.
 - **Interface language.** All CLI and daemon strings — help, status, progress, warnings, errors —

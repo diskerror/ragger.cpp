@@ -42,7 +42,7 @@ using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 
-    SqliteBackend::Impl::Impl(Embedder& emb, const std::string& path)
+    Backend::Impl::Impl(Embedder& emb, const std::string& path)
         : embedder(&emb)
     {
         const auto& cfg = config();
@@ -92,7 +92,7 @@ namespace fs = std::filesystem;
     /// DB-only constructor — no embedder.
     /// readonly=true: opens SQLITE_OPEN_READONLY, skips schema creation (for export).
     /// readonly=false: opens read-write and creates users/settings tables.
-    SqliteBackend::Impl::Impl(const std::string& path, bool readonly)
+    Backend::Impl::Impl(const std::string& path, bool readonly)
         : embedder(nullptr), readonly_(readonly)
     {
         db_path = expand_path(path);
@@ -126,11 +126,11 @@ namespace fs = std::filesystem;
     }
 
 
-    SqliteBackend::Impl::~Impl() { close(); }
+    Backend::Impl::~Impl() { close(); }
 
 
     // ---- helpers -------------------------------------------------------
-    void SqliteBackend::Impl::exec(const char* sql) {
+    void Backend::Impl::exec(const char* sql) {
         char* errmsg = nullptr;
         int rc = sqlite3_exec(db, sql, nullptr, nullptr, &errmsg);
         if (rc != SQLITE_OK) {
@@ -140,14 +140,14 @@ namespace fs = std::filesystem;
         }
     }
 
-    void SqliteBackend::Impl::exec(const std::string& sql) { exec(sql.c_str()); }
+    void Backend::Impl::exec(const std::string& sql) { exec(sql.c_str()); }
 
 
     /// True if `table` has a column named `col`. Used to guard one-time
     /// ADD COLUMN migrations (SQLite has no ADD COLUMN IF NOT EXISTS).
     /// The table name is inlined (PRAGMA table_info doesn't take a bound
     /// parameter reliably); callers pass internal constants, never user input.
-    bool SqliteBackend::Impl::column_exists(const std::string& table, const std::string& col) {
+    bool Backend::Impl::column_exists(const std::string& table, const std::string& col) {
         Stmt s(db, "PRAGMA table_info(" + table + ")");
         while (s.step()) {
             if (s.column_text(1) == col) return true;  // col 1 = column name
@@ -156,14 +156,14 @@ namespace fs = std::filesystem;
     }
 
 
-    bool SqliteBackend::Impl::table_exists(const std::string& table) {
+    bool Backend::Impl::table_exists(const std::string& table) {
         Stmt s(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?");
         s.bind(1, table);
         return s.step();
     }
 
 
-    void SqliteBackend::Impl::create_schema() {
+    void Backend::Impl::create_schema() {
         // Capture "was this DB already populated?" BEFORE any CREATE TABLE
         // IF NOT EXISTS runs below -- this is the only reliable way to tell
         // a genuinely fresh install (no memory tables at all yet) from an
@@ -501,14 +501,14 @@ namespace fs = std::filesystem;
     }
 
 
-    std::string SqliteBackend::Impl::db_version() {
+    std::string Backend::Impl::db_version() {
         Stmt s(db, "SELECT value FROM settings WHERE key = 'db_version'");
         if (s.step()) return s.column_text(0);
         return "";  // absent
     }
 
 
-    void SqliteBackend::Impl::set_db_version(const std::string& v) {
+    void Backend::Impl::set_db_version(const std::string& v) {
         Stmt s(db,
             "INSERT INTO settings (key, value) VALUES ('db_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value");
@@ -532,7 +532,7 @@ namespace fs = std::filesystem;
     /// conditions maybe_backup_before_migration() has always used: shared
     /// by that function and by the post-migration VACUUM decision so both
     /// stay in lockstep.
-    bool SqliteBackend::Impl::migration_pending(const std::string& current_version) {
+    bool Backend::Impl::migration_pending(const std::string& current_version) {
         if (current_version.empty()) return false;               // fresh/pre-version DB
         if (current_version == kExpectedDbVersion) return false;  // already current
         // Only for versions we actually migrate FROM in-binary. An unknown
@@ -570,7 +570,7 @@ namespace fs = std::filesystem;
     /// database via a separate materialized copy query), this archives the
     /// raw file(s) directly using the existing timestamped naming
     /// convention (tar.gz -> zip -> plain copy fallback chain).
-    void SqliteBackend::Impl::maybe_backup_before_migration(const std::string& current_version) {
+    void Backend::Impl::maybe_backup_before_migration(const std::string& current_version) {
         if (!migration_pending(current_version)) return;
 
         Diskerror::Logger::info(std::format(
@@ -651,7 +651,7 @@ namespace fs = std::filesystem;
     /// with the exact same open flags/pragmas used in the constructor, and
     /// re-point the non-owning text_index_ at the new handle -- sqlite3_open
     /// is not guaranteed to reuse the same pointer value.
-    void SqliteBackend::Impl::reopen_db() {
+    void Backend::Impl::reopen_db() {
         int rc = sqlite3_open(db_path.c_str(), &db);
         if (rc != SQLITE_OK) {
             std::string err = db ? sqlite3_errmsg(db) : sqlite3_errstr(rc);
@@ -664,7 +664,7 @@ namespace fs = std::filesystem;
 
         // text_index_ holds a NON-OWNING sqlite3* captured at construction;
         // re-emplace it against the new handle. Cheap (no allocation, just a
-        // pointer member) and safe (no other state in SqliteTextIndex).
+        // pointer member) and safe (no other state in TextIndex).
         text_index_.reset();
         text_index_.emplace(db);
     }
@@ -676,7 +676,7 @@ namespace fs = std::filesystem;
     /// before create_schema() mutated anything. Each leg advances db_version;
     /// the loop re-reads it so 0.12 flows 0.12 -> 0.15 -> (0.16 once its leg
     /// lands) under the single backup taken above.
-    void SqliteBackend::Impl::run_pending_migrations(const std::string& from_version) {
+    void Backend::Impl::run_pending_migrations(const std::string& from_version) {
         std::string v = from_version;
         // Guard against an unbounded loop if a leg ever fails to advance the
         // version. Legs are few; a handful of iterations is plenty.
@@ -720,7 +720,7 @@ namespace fs = std::filesystem;
     /// Whole thing runs in one transaction. On any verification failure the
     /// transaction is rolled back (original rows untouched) and the throw
     /// propagates -- the pre-migration backup made above is the safety net.
-    void SqliteBackend::Impl::migrate_0_12_to_0_15() {
+    void Backend::Impl::migrate_0_12_to_0_15() {
         Diskerror::Logger::info(
             "Migrating DB 0.12 -> 0.15 (embedding version-byte split)...");
 
@@ -831,7 +831,7 @@ namespace fs = std::filesystem;
     /// phon on every doc row (so housekeeping re-embeds with title appended),
     /// then drops the four extracted columns. Whole thing runs in one
     /// transaction. Caller gates on column_exists("documents","path").
-    void SqliteBackend::Impl::migrate_documents_normalize() {
+    void Backend::Impl::migrate_documents_normalize() {
         Diskerror::Logger::info("Migrating documents to normalized schema (document_sources)...");
         Stmt(db, "BEGIN").exec();
         try {
@@ -1056,7 +1056,7 @@ namespace fs = std::filesystem;
 
 
     /// Read a boolean PRAGMA's current value (e.g. "foreign_keys").
-    bool SqliteBackend::Impl::pragma_bool(const char* name) {
+    bool Backend::Impl::pragma_bool(const char* name) {
         Stmt s(db, std::format("PRAGMA {}", name));
         return s.step() && s.column_int(0) != 0;
     }
@@ -1087,7 +1087,7 @@ namespace fs = std::filesystem;
     /// `cols` is the shared column list present in BOTH old and new tables. The
     /// count columns are deliberately NOT carried over (they are 0 on a
     /// just-ALTERed DB anyway); reindex_table() populates them right after.
-    void SqliteBackend::Impl::rebuild_table_column_order(const std::string& table,
+    void Backend::Impl::rebuild_table_column_order(const std::string& table,
                                     const std::string& new_ddl,
                                     const std::string& cols) {
         // 1. Snapshot index DDL. Skip sql IS NULL rows: those are the implicit
@@ -1127,7 +1127,7 @@ namespace fs = std::filesystem;
     ///
     /// The schema (terms, *_terms, count columns) is created by create_schema()
     /// BEFORE this runs, and reindex_table() (Step 6) populates them.
-    void SqliteBackend::Impl::migrate_0_15_to_0_16() {
+    void Backend::Impl::migrate_0_15_to_0_16() {
         Diskerror::Logger::info("Migrating DB 0.15 -> 0.16 (custom FTS index)...");
 
         // Both pragmas MUST be set OUTSIDE the transaction:
@@ -1380,7 +1380,7 @@ namespace fs = std::filesystem;
     /// because a stemmed word and its DMP code are different strings that both
     /// resolve to the same term_id. No doc_frequency column: df is computed
     /// live via COUNT(*) on the per-table *_terms join (Decision C).
-    void SqliteBackend::Impl::create_terms_schema() {
+    void Backend::Impl::create_terms_schema() {
         text_index_->create_schema();
     }
 

@@ -20,7 +20,7 @@ namespace ragger {
 class UserStore {
 public:
     /// Open the users/settings tables in the given database file.
-    /// The file must already exist (created by SqliteBackend on first use).
+    /// The file must already exist (created by sqlite::Backend on first use).
     explicit UserStore(const std::string& db_path);
     ~UserStore();
 

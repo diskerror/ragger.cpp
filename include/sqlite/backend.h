@@ -21,15 +21,15 @@ using json = nlohmann::json;
 
 using ragger::Embedder;
 
-class SqliteBackend : public StorageBackend {
+class Backend : public StorageBackend {
 public:
-    SqliteBackend(Embedder& embedder, const std::string& db_path = "");
+    Backend(Embedder& embedder, const std::string& db_path = "");
 
     /// DB-only constructor — no embedder required.
     /// readonly=true: opens with SQLITE_OPEN_READONLY, skips schema creation (for export).
     /// readonly=false (default): opens read-write and creates users/settings tables.
-    explicit SqliteBackend(const std::string& db_path, bool readonly = false);
-    ~SqliteBackend() override;
+    explicit Backend(const std::string& db_path, bool readonly = false);
+    ~Backend() override;
 
     /// Path to the database file.
     std::string db_path() const override;

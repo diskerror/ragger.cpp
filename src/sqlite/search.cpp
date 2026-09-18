@@ -56,7 +56,7 @@ namespace fs = std::filesystem;
     // single ranked top-k returned here. Each SearchResult's metadata["source"]
     // is "summary", "document", or "decision" so callers can tell the corpora
     // apart.
-    SearchResponse SqliteBackend::Impl::search(const std::string& query, int limit,
+    SearchResponse Backend::Impl::search(const std::string& query, int limit,
                           float min_score,
                           std::vector<std::string> /*collections*/) {
         using clock = std::chrono::high_resolution_clock;
@@ -226,7 +226,7 @@ namespace fs = std::filesystem;
     // Text-only search: FTS5 keyword + phonetic scoring across all four
     // corpora. No embedding caches, no embedder call. Used when embeddings
     // are degraded (drift mismatch at startup).
-    SearchResponse SqliteBackend::Impl::search_text_only(const std::string& query, int limit) {
+    SearchResponse Backend::Impl::search_text_only(const std::string& query, int limit) {
         using clock = std::chrono::high_resolution_clock;
         auto t_start = clock::now();
 

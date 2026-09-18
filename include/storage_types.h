@@ -1,7 +1,7 @@
 /**
  * Data types for storage operations.
  *
- * Separated from SqliteBackend/StorageBackend to reduce header dependencies
+ * Separated from sqlite::Backend/StorageBackend to reduce header dependencies
  * for files that only need the data structures.
  */
 #pragma once
@@ -61,7 +61,7 @@ struct SearchResponse {
     json                      timing;
 };
 
-/// User information (extracted from SqliteBackend for modularity)
+/// User information (extracted from sqlite::Backend for modularity)
 struct UserInfo {
     int         id;
     std::string username;

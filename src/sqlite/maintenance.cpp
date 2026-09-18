@@ -42,7 +42,7 @@ using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 
-    int SqliteBackend::Impl::count() const {
+    int Backend::Impl::count() const {
         Stmt s(db, "SELECT COUNT(*) FROM summaries");
         int c = 0;
         if (s.step())
@@ -51,7 +51,7 @@ namespace fs = std::filesystem;
     }
 
 
-    std::vector<std::pair<std::string, int64_t>> SqliteBackend::Impl::table_row_counts() const {
+    std::vector<std::pair<std::string, int64_t>> Backend::Impl::table_row_counts() const {
         // User-facing tables for the dashboard status pane, in display order.
         static const char* kTables[] = {
             "turns", "summaries", "turn_summaries", "sessions",
@@ -75,7 +75,7 @@ namespace fs = std::filesystem;
     // summaries, decisions, documents) — i.e. how many rows
     // `rebuild_embeddings()` will re-encode. (count() alone is just
     // summaries, which understates the rebuild scope.)
-    int SqliteBackend::Impl::count_embeddable_rows(const std::string& table) const {
+    int Backend::Impl::count_embeddable_rows(const std::string& table) const {
         int total = 0;
         for (const char* tbl : {"turns", "turn_summaries", "summaries", "decisions", "documents"}) {
             if (table != "all" && table != tbl) continue;
@@ -89,7 +89,7 @@ namespace fs = std::filesystem;
     // True if any embedded table holds a non-NULL embedding. EXISTS short-
     // circuits on the first hit. Deferred (NULL-embedding) rows don't count —
     // they get the current model on backfill, so they aren't incompatible.
-    bool SqliteBackend::Impl::has_embeddings() const {
+    bool Backend::Impl::has_embeddings() const {
         Stmt s(db,
             "SELECT EXISTS("
             "  SELECT 1 FROM summaries  WHERE embedding IS NOT NULL "
@@ -103,7 +103,7 @@ namespace fs = std::filesystem;
 
     // Lean v2 summaries have no collection column; the `collection` argument
     // is ignored (kept for API compat). Returns every summary, score 0.
-    std::vector<SearchResult> SqliteBackend::Impl::load_all(const std::string& /*collection*/) {
+    std::vector<SearchResult> Backend::Impl::load_all(const std::string& /*collection*/) {
         std::vector<SearchResult> results;
         Stmt s(db,
             "SELECT summary_id, text, level, tags, created_at "
@@ -126,7 +126,7 @@ namespace fs = std::filesystem;
     }
 
 
-    int SqliteBackend::Impl::embed_tables(Embedder& emb_ref, bool only_missing, bool progress,
+    int Backend::Impl::embed_tables(Embedder& emb_ref, bool only_missing, bool progress,
                       const std::string& table_filter) {
         struct TableSpec {
             const char* table;
@@ -304,7 +304,7 @@ namespace fs = std::filesystem;
 
     // Full re-encode of every embedded row (interactive, with progress),
     // or one table when `table` != "all".
-    int SqliteBackend::Impl::rebuild_embeddings(Embedder& emb_ref, bool progress, const std::string& table) {
+    int Backend::Impl::rebuild_embeddings(Embedder& emb_ref, bool progress, const std::string& table) {
         if (!embedder_usable(emb_ref)) return 0;
         return embed_tables(emb_ref, /*only_missing=*/false, progress, table);
     }
@@ -312,7 +312,7 @@ namespace fs = std::filesystem;
 
     // Cheap backfill: embed rows left NULL or with stale version byte,
     // scoped to one table when `table` != "all".
-    int SqliteBackend::Impl::backfill_embeddings(Embedder& emb_ref, const std::string& table) {
+    int Backend::Impl::backfill_embeddings(Embedder& emb_ref, const std::string& table) {
         if (!embedder_usable(emb_ref)) return 0;
         return embed_tables(emb_ref, /*only_missing=*/true, /*progress=*/false, table);
     }
@@ -322,19 +322,19 @@ namespace fs = std::filesystem;
     // turns into NULL. That is right for a single store, but catastrophic for
     // a bulk pass: a full rebuild would walk every table replacing good
     // vectors with NULL. Refuse instead.
-    bool SqliteBackend::Impl::embedder_usable(const Embedder& emb_ref) const {
+    bool Backend::Impl::embedder_usable(const Embedder& emb_ref) const {
         if (emb_ref.ready()) return true;
         Diskerror::Logger::error(ragger::lang::ERR_EMBED_NO_MODEL_BULK);
         return false;
     }
 
 
-    uint8_t SqliteBackend::Impl::get_embedding_version() const {
+    uint8_t Backend::Impl::get_embedding_version() const {
         return embedding_version_;
     }
 
 
-    uint8_t SqliteBackend::Impl::increment_embedding_version() {
+    uint8_t Backend::Impl::increment_embedding_version() {
         // Cycle 1–255; 0 is reserved for empty/placeholder blobs.
         int next = static_cast<int>(embedding_version_) + 1;
         if (next > 255) next = 1;
@@ -349,23 +349,23 @@ namespace fs = std::filesystem;
 
 
     // (Re)build the custom index for a single text table. Delegates to the
-    // SqliteTextIndex engine (schema + tokenize + TF-IDF live there now).
-    int SqliteBackend::Impl::reindex_table(const std::string& table_name, bool progress) {
+    // TextIndex engine (schema + tokenize + TF-IDF live there now).
+    int Backend::Impl::reindex_table(const std::string& table_name, bool progress) {
         return text_index_->reindex_table(table_name, progress);
     }
 
 
     // Truncate the shared `terms` table + reset its AUTOINCREMENT counter.
-    // Delegates to SqliteTextIndex; see its header comment for the "only
+    // Delegates to TextIndex; see its header comment for the "only
     // safe immediately before reindexing ALL five tables" caveat.
-    void SqliteBackend::Impl::reset_terms_table() {
+    void Backend::Impl::reset_terms_table() {
         text_index_->reset_terms_table();
     }
 
 
     // Set a document's embedding (used by the import path after embedding
     // chunks via the subprocess executor). Returns true on a row update.
-    bool SqliteBackend::Impl::update_document_embedding(int document_id, const std::vector<float>& emb) {
+    bool Backend::Impl::update_document_embedding(int document_id, const std::vector<float>& emb) {
         Stmt s(db,
             "UPDATE documents SET embedding_version = ?, embedding = ? WHERE document_id = ?");
         bind_embedding_version(s.raw(), 1, emb);
@@ -382,7 +382,7 @@ namespace fs = std::filesystem;
     // Per-row embedding write-back for the other three context tables.
     // Mirrors update_document_embedding; each invalidates the cache that
     // backs its table's vector search.
-    bool SqliteBackend::Impl::update_decision_embedding(int decision_id, const std::vector<float>& emb) {
+    bool Backend::Impl::update_decision_embedding(int decision_id, const std::vector<float>& emb) {
         Stmt s(db, "UPDATE decisions SET embedding_version = ?, embedding = ? WHERE decision_id = ?");
         bind_embedding_version(s.raw(), 1, emb);
         bind_embedding(s.raw(), 2, emb);
@@ -395,7 +395,7 @@ namespace fs = std::filesystem;
     }
 
 
-    bool SqliteBackend::Impl::update_summary_embedding(int summary_id, const std::vector<float>& emb) {
+    bool Backend::Impl::update_summary_embedding(int summary_id, const std::vector<float>& emb) {
         Stmt s(db, "UPDATE summaries SET embedding_version = ?, embedding = ? WHERE summary_id = ?");
         bind_embedding_version(s.raw(), 1, emb);
         bind_embedding(s.raw(), 2, emb);
@@ -408,7 +408,7 @@ namespace fs = std::filesystem;
     }
 
 
-    bool SqliteBackend::Impl::update_turn_embedding(int turn_id, const std::vector<float>& emb) {
+    bool Backend::Impl::update_turn_embedding(int turn_id, const std::vector<float>& emb) {
         Stmt s(db, "UPDATE turns SET embedding_version = ?, embedding = ? WHERE turn_id = ?");
         bind_embedding_version(s.raw(), 1, emb);
         bind_embedding(s.raw(), 2, emb);
@@ -421,7 +421,7 @@ namespace fs = std::filesystem;
     }
 
 
-    std::vector<std::string> SqliteBackend::Impl::collections() const {
+    std::vector<std::string> Backend::Impl::collections() const {
         std::vector<std::string> result;
         // Lean v2 summaries have no collection column — collections are not a
         // v2 concept. Return empty (kept for API compat).
@@ -430,7 +430,7 @@ namespace fs = std::filesystem;
 
 
     // Returns true if the summaries row exists and has a "keep" tag.
-    bool SqliteBackend::Impl::has_keep_tag(int summary_id) {
+    bool Backend::Impl::has_keep_tag(int summary_id) {
         Stmt s(db, "SELECT tags FROM summaries WHERE summary_id = ?");
         s.bind(1, summary_id);
         if (!s.step()) return false;
@@ -438,7 +438,7 @@ namespace fs = std::filesystem;
     }
 
 
-    bool SqliteBackend::Impl::delete_memory(int memory_id) {
+    bool Backend::Impl::delete_memory(int memory_id) {
         if (has_keep_tag(memory_id)) return false;
         Stmt stmt(db, "DELETE FROM summaries WHERE summary_id = ?");
         stmt.bind(1, memory_id);
@@ -452,7 +452,7 @@ namespace fs = std::filesystem;
     }
 
 
-    int SqliteBackend::Impl::delete_batch(const std::vector<int>& memory_ids) {
+    int Backend::Impl::delete_batch(const std::vector<int>& memory_ids) {
         if (memory_ids.empty()) return 0;
         // Single atomic DELETE filtered by keep-tag, entirely in SQL.
         std::string sql = "DELETE FROM summaries WHERE summary_id IN (";
@@ -473,7 +473,7 @@ namespace fs = std::filesystem;
     }
 
 
-    std::vector<SearchResult> SqliteBackend::Impl::search_by_metadata(const json& metadata_filter, int limit,
+    std::vector<SearchResult> Backend::Impl::search_by_metadata(const json& metadata_filter, int limit,
                                                  const std::string& after,
                                                  const std::string& before) {
         std::vector<SearchResult> results;
@@ -534,7 +534,7 @@ namespace fs = std::filesystem;
     }
 
 
-    void SqliteBackend::Impl::close() {
+    void Backend::Impl::close() {
         if (db) {
             sqlite3_close(db);
             db = nullptr;

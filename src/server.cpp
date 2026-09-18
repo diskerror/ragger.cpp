@@ -234,7 +234,7 @@ struct Server::Impl {
         float max_age_hours = cfg.cleanup_max_age_hours;
 
         // 1. Purge old conversation entries — use the main memory backend,
-        //    not a separate SqliteBackend. Opening a second connection to the
+        //    not a separate sqlite::Backend. Opening a second connection to the
         //    same file while the main backend holds it can produce SQLite
         //    BUSY/LOCKED contention that silently prevents the backfill UPDATE
         //    in step 3 from committing.

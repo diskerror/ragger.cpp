@@ -44,7 +44,7 @@ std::string ragger_base_dir();
 /// Archive one or more SQLite DBs' file(s) (each DB's main file, plus its
 /// -wal/-shm siblings if present) into ONE
 /// "<primary-stem>_BACKUP_<YYYYMMDD-HHMMSS>.tar.gz" next to the primary DB --
-/// same naming convention SqliteBackend::maybe_backup_before_migration()
+/// same naming convention sqlite::Backend::maybe_backup_before_migration()
 /// uses for pre-migration snapshots. `extra_db_paths` are bundled into the
 /// same archive (e.g. stats.db alongside memories.db) -- entries that don't
 /// exist are silently skipped, so an optional/never-created sibling DB is

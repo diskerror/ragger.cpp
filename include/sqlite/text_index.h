@@ -1,7 +1,7 @@
 /**
- * SqliteTextIndex — SQLite implementation of the custom v0.16 terms index.
+ * sqlite::TextIndex — SQLite implementation of the custom v0.16 terms index.
  *
- * Holds a NON-OWNING sqlite3* (the SqliteBackend owns the handle). Implements
+ * Holds a NON-OWNING sqlite3* (the sqlite::Backend owns the handle). Implements
  * the TextIndex storage hooks with ragger::Stmt, and provides create_schema()
  * (terms + 5 junction tables) and a batched full-table reindex_table().
  *
@@ -30,11 +30,9 @@
 
 namespace ragger::sqlite {
 
-using ragger::TextIndex;
-
-class SqliteTextIndex final : public TextIndex {
+class TextIndex final : public ragger::TextIndex {
 public:
-    explicit SqliteTextIndex(sqlite3* db) : db_(db) {}
+    explicit TextIndex(sqlite3* db) : db_(db) {}
 
     // CREATE terms + <t>_terms junction tables + term_id indexes (idempotent).
     void create_schema();
@@ -49,7 +47,7 @@ public:
     // text tables in the same run: every junction table's term_id column is
     // `REFERENCES terms(term_id) ON DELETE CASCADE`, so this one DELETE
     // cascades and empties every junction table too (foreign_keys must be ON,
-    // which SqliteBackend always sets at connection open). Calling this
+    // which sqlite::Backend always sets at connection open). Calling this
     // before reindexing only SOME tables would orphan the other tables'
     // still-valid junction rows against a wiped terms list -- callers MUST
     // reindex every table in the same pass after calling this.
@@ -136,7 +134,7 @@ private:
     Stmt& insert_terms_stmt(const std::string& table);
     Stmt& update_counts_stmt(const std::string& table);
 
-    sqlite3* db_;   // non-owning; lifetime managed by SqliteBackend
+    sqlite3* db_;   // non-owning; lifetime managed by sqlite::Backend
 
     // db_ is declared above these members so it outlives them: C++ destroys
     // members in reverse declaration order, so every cached Stmt finalizes

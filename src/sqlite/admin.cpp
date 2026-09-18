@@ -46,7 +46,7 @@ namespace fs = std::filesystem;
     /// (single-user app; pre-v2 data is exported out-of-band). `users` mirrors
     /// the reference DDL plus `password_hash` for credentialed access.
     /// Shared by both constructors.
-    void SqliteBackend::Impl::create_user_schema() {
+    void Backend::Impl::create_user_schema() {
         exec(R"(
             CREATE TABLE IF NOT EXISTS users (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,7 +76,7 @@ namespace fs = std::filesystem;
 
     // ---- User / settings CRUD (gap closure) --------------------------------
 
-    std::optional<UserInfo> SqliteBackend::Impl::get_user_by_username(const std::string& username) {
+    std::optional<UserInfo> Backend::Impl::get_user_by_username(const std::string& username) {
         Stmt s(db, "SELECT id, username, token_hash FROM users WHERE username = ?");
         s.bind(1, username);
         if (s.step()) return UserInfo{s.column_int(0), s.column_text(1), s.column_text(2)};
@@ -84,7 +84,7 @@ namespace fs = std::filesystem;
     }
 
 
-    std::optional<UserInfo> SqliteBackend::Impl::get_user_by_token_hash(const std::string& token_hash) {
+    std::optional<UserInfo> Backend::Impl::get_user_by_token_hash(const std::string& token_hash) {
         Stmt s(db, "SELECT id, username, token_hash FROM users WHERE token_hash = ?");
         s.bind(1, token_hash);
         if (s.step()) return UserInfo{s.column_int(0), s.column_text(1), s.column_text(2)};
@@ -92,7 +92,7 @@ namespace fs = std::filesystem;
     }
 
 
-    std::optional<std::string> SqliteBackend::Impl::get_user_password(const std::string& username) {
+    std::optional<std::string> Backend::Impl::get_user_password(const std::string& username) {
         Stmt s(db, "SELECT password_hash FROM users WHERE username = ?");
         s.bind(1, username);
         if (s.step()) return s.column_text_opt(0);
@@ -100,13 +100,13 @@ namespace fs = std::filesystem;
     }
 
 
-    void SqliteBackend::Impl::set_user_password(const std::string& username, const std::string& pw_hash) {
+    void Backend::Impl::set_user_password(const std::string& username, const std::string& pw_hash) {
         Stmt s(db, "UPDATE users SET password_hash = ? WHERE username = ?");
         s.bind(1, pw_hash).bind(2, username).step();
     }
 
 
-    int SqliteBackend::Impl::create_user(const std::string& username, const std::string& token_hash) {
+    int Backend::Impl::create_user(const std::string& username, const std::string& token_hash) {
         int64_t ts = db_epoch();
         Stmt s(db,
             "INSERT INTO users (username, token_hash, created_at, updated_at) VALUES (?,?,?,?)");
@@ -117,20 +117,20 @@ namespace fs = std::filesystem;
     }
 
 
-    bool SqliteBackend::Impl::delete_user(const std::string& username) {
+    bool Backend::Impl::delete_user(const std::string& username) {
         Stmt s(db, "DELETE FROM users WHERE username = ?");
         s.bind(1, username).step();
         return sqlite3_changes(db) > 0;
     }
 
 
-    void SqliteBackend::Impl::update_user_token(const std::string& username, const std::string& new_hash) {
+    void Backend::Impl::update_user_token(const std::string& username, const std::string& new_hash) {
         Stmt s(db, "UPDATE users SET token_hash = ? WHERE username = ?");
         s.bind(1, new_hash).bind(2, username).step();
     }
 
 
-    std::optional<std::string> SqliteBackend::Impl::get_setting(const std::string& key) {
+    std::optional<std::string> Backend::Impl::get_setting(const std::string& key) {
         Stmt s(db, "SELECT value FROM settings WHERE key = ?");
         s.bind(1, key);
         if (s.step()) return s.column_text_opt(0);
@@ -138,7 +138,7 @@ namespace fs = std::filesystem;
     }
 
 
-    void SqliteBackend::Impl::set_setting(const std::string& key, const std::string& value) {
+    void Backend::Impl::set_setting(const std::string& key, const std::string& value) {
         Stmt s(db, "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
         s.bind(1, key).bind(2, value).step();
     }
@@ -146,7 +146,7 @@ namespace fs = std::filesystem;
 
     // ---- Schema introspection (gap closure) --------------------------------
 
-    std::vector<SchemaObject> SqliteBackend::Impl::list_schema_objects() {
+    std::vector<SchemaObject> Backend::Impl::list_schema_objects() {
         std::vector<SchemaObject> result;
         Stmt s(db,
             "SELECT type, name, tbl_name, sql FROM sqlite_master "
@@ -170,7 +170,7 @@ namespace fs = std::filesystem;
     }
 
 
-    std::vector<std::string> SqliteBackend::Impl::table_column_names(const std::string& table) {
+    std::vector<std::string> Backend::Impl::table_column_names(const std::string& table) {
         std::vector<std::string> names;
         Stmt s(db, "PRAGMA table_info(" + table + ")");
         while (s.step_checked()) {
@@ -180,7 +180,7 @@ namespace fs = std::filesystem;
     }
 
 
-    int SqliteBackend::Impl::iterate_table_rows(const std::string& table,
+    int Backend::Impl::iterate_table_rows(const std::string& table,
                            const std::function<void(const ExportRow&)>& cb) {
         Stmt s(db, "SELECT * FROM " + table);
         int count = 0;
@@ -236,7 +236,7 @@ namespace fs = std::filesystem;
     /// (exactly how the v0.16 views were left still selecting the retired
     /// `phon` column). Unconditional recreation keeps every DB's views in
     /// lockstep with this code on every open.
-    void SqliteBackend::Impl::create_views() {
+    void Backend::Impl::create_views() {
         // Column order mirrors the base tables: narrow, readable columns first,
         // wide/derived ones last, so `SELECT *` stays legible on one screen.
         auto view = [&](const std::string& name, const std::string& body) {

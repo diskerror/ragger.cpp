@@ -7,10 +7,10 @@
  * GAP CLOSED (fix/storage-gap):
  * UserStore (user_store.cpp) and export.cpp both previously bypassed this
  * interface with raw sqlite3_* calls. Both are now fully abstracted:
- *   - UserStore delegates all CRUD through SqliteBackend (DB-only mode).
+ *   - UserStore delegates all CRUD through sqlite::Backend (DB-only mode).
  *   - export.cpp uses list_schema_objects(), table_column_names(), and
  *     iterate_table_rows() from this interface. The db_path convenience
- *     overloads open a SqliteBackend with readonly=true, which uses
+ *     overloads open a sqlite::Backend with readonly=true, which uses
  *     SQLITE_OPEN_READONLY and skips schema creation — a legitimate
  *     SQLite-level detail at the right abstraction level (interface specifies
  *     behavior; implementation optimizes with a readonly connection).
@@ -81,7 +81,7 @@ struct ClosedRun {
  * Abstract base class for storage backends.
  *
  * This interface defines all methods that client code expects from a backend.
- * Concrete implementations (like SqliteBackend) inherit from this and
+ * Concrete implementations (like sqlite::Backend) inherit from this and
  * implement the actual storage logic.
  */
 class StorageBackend {

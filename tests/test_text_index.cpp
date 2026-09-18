@@ -1,4 +1,4 @@
-// test_text_index — SqliteTextIndex over an in-memory DB: schema, index, score.
+// test_text_index — sqlite::TextIndex over an in-memory DB: schema, index, score.
 #include <sqlite3.h>
 
 #include "check.h"
@@ -25,7 +25,7 @@ int main() {
         "('Nothing about animals here');",
         nullptr, nullptr, nullptr) == SQLITE_OK);
 
-    ragger::sqlite::SqliteTextIndex idx(db);
+    ragger::sqlite::TextIndex idx(db);
     idx.create_schema();
 
     // terms table must now exist.

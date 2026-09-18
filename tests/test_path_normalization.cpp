@@ -3,7 +3,7 @@
  *
  * Tests that $HOME/ is replaced with ~/ in stored text.
  * Uses store + load_all to verify normalization through the public API
- * (normalize_path is a private static method in SqliteBackend).
+ * (normalize_path is a private static method in sqlite::Backend).
  */
 #include "config.h"
 #include "embedder.h"
@@ -28,7 +28,7 @@ void test_normalize_home_in_stored_text(ragger::Embedder& emb) {
     std::println("  test_normalize_home_in_stored_text...");
     cleanup();
 
-    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::Backend db(emb, TEMP_DB);
     const char* home = std::getenv("HOME");
     assert(home != nullptr);
 
@@ -48,7 +48,7 @@ void test_normalize_preserves_non_home_paths(ragger::Embedder& emb) {
     std::println("  test_normalize_preserves_non_home_paths...");
     cleanup();
 
-    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::Backend db(emb, TEMP_DB);
     std::string input = "/usr/local/bin/python";
     db.store(input);
 
@@ -65,7 +65,7 @@ void test_normalize_multiple_occurrences(ragger::Embedder& emb) {
     std::println("  test_normalize_multiple_occurrences...");
     cleanup();
 
-    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::Backend db(emb, TEMP_DB);
     const char* home = std::getenv("HOME");
     assert(home != nullptr);
 
@@ -89,7 +89,7 @@ void test_normalize_partial_match_not_replaced(ragger::Embedder& emb) {
     std::println("  test_normalize_partial_match_not_replaced...");
     cleanup();
 
-    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::Backend db(emb, TEMP_DB);
     const char* home = std::getenv("HOME");
     assert(home != nullptr);
 
@@ -111,7 +111,7 @@ void test_normalize_embedded_in_longer_text(ragger::Embedder& emb) {
     std::println("  test_normalize_embedded_in_longer_text...");
     cleanup();
 
-    ragger::sqlite::SqliteBackend db(emb, TEMP_DB);
+    ragger::sqlite::Backend db(emb, TEMP_DB);
     const char* home = std::getenv("HOME");
     assert(home != nullptr);
 
@@ -135,7 +135,7 @@ int main() {
     auto cfg = ragger::config();
     assert(cfg.normalize_home_path == true);
 
-    // Embedder needed for SqliteBackend store()
+    // Embedder needed for sqlite::Backend store()
     auto model_dir = cfg.resolved_model_dir();
     if (!std::filesystem::exists(model_dir + "/model.onnx") && !std::filesystem::exists(model_dir + "/onnx/model.onnx")) {
         std::cerr << "Skipping path normalization tests: model not found at " << model_dir << "\n";

@@ -10,17 +10,17 @@
 #include <string>
 
 namespace ragger {
-using sqlite::SqliteBackend;
+using sqlite::Backend;
 
 namespace fs = std::filesystem;
 
 struct UserStore::Impl {
-    std::unique_ptr<SqliteBackend> backend;
+    std::unique_ptr<sqlite::Backend> backend;
 
     explicit Impl(const std::string& path) {
         std::string resolved = expand_path(path);
         fs::create_directories(fs::path(resolved).parent_path());
-        backend = std::make_unique<SqliteBackend>(resolved);
+        backend = std::make_unique<sqlite::Backend>(resolved);
     }
 };
 

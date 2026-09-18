@@ -25,7 +25,7 @@
 #include <unistd.h>
 
 namespace ragger {
-using sqlite::SqliteBackend;
+using sqlite::Backend;
 
 RaggerMemory::RaggerMemory(const std::string& db_path,
                            bool skip_embedding_guard)
@@ -83,7 +83,7 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     // The resolved path — used for both the storage backend and the user store.
     const std::string resolved_db = expand_path(db_path);
 
-    backend_    = std::make_unique<SqliteBackend>(*embedder_, resolved_db);
+    backend_    = std::make_unique<sqlite::Backend>(*embedder_, resolved_db);
     user_store_ = std::make_unique<UserStore>(resolved_db);
 
     // NOTE: no legacy "prepend a provider" migration here. A stored value that
