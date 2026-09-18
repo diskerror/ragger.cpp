@@ -1060,8 +1060,25 @@ struct Server::Impl {
             }
             // Use an Endpoint object to probe — it already handles /v1/models.
             Endpoint ep("summarizer", url);
-            auto ids = ep.list_models();
+
+            // Prefer LM Studio's own authoritative model-type classification
+            // (GET /api/v0/models, "type": "llm"/"embeddings"/"vlm") when the
+            // endpoint is LM Studio and answers it. This replaces the
+            // name-based keyword filter below for LM Studio specifically —
+            // llama.cpp/Ollama/vLLM don't expose this and keep using the
+            // keyword heuristic.
+            auto typed = ep.list_models_lmstudio_typed();
             json arr = json::array();
+            if (!typed.empty()) {
+                for (const auto& m : typed) {
+                    if (m.type == "embeddings") continue;  // not useful for summarization
+                    arr.push_back(m.id);
+                }
+                respond_json(res, json{{"models", arr}});
+                return;
+            }
+
+            auto ids = ep.list_models();
             for (const auto& id : ids) {
                 // Skip embedding models — they aren't useful for summarization.
                 std::string lower = id;
@@ -1075,11 +1092,13 @@ struct Server::Impl {
 
         // GET /models/embedding-external -> query the local inference endpoint
         // for embedding models only (the inverse of /models/summarizer).
-        // Filters by model-id substring since LM Studio/llama-swap don't
-        // reliably tag embedding models as such in /v1/models — matches
-        // known embedding-model family names, not just the literal word
-        // "embed" (see /models/embedding-external/probe for a runtime
-        // plausibility check on top of this name-based prefilter).
+        // Prefers LM Studio's own authoritative model-type classification
+        // (GET /api/v0/models, "type": "embeddings") when available; falls
+        // back to a name-based substring prefilter for backends that don't
+        // expose it (llama.cpp/Ollama/vLLM — explicitly out of scope for the
+        // authoritative path) or when the LM Studio call fails for any
+        // reason (see /models/embedding-external/probe for a runtime
+        // plausibility check on top of either path).
         svr.Get("/models/embedding-external", guarded([this](const UserInfo&, const httplib::Request&,
                                                               httplib::Response& res) {
             std::string url = config().summarizer_api_url;
@@ -1089,6 +1108,17 @@ struct Server::Impl {
                 return;
             }
             Endpoint ep("embedding-external", url);
+
+            auto typed = ep.list_models_lmstudio_typed();
+            if (!typed.empty()) {
+                json arr = json::array();
+                for (const auto& m : typed) {
+                    if (m.type == "embeddings") arr.push_back(m.id);
+                }
+                respond_json(res, json{{"models", arr}});
+                return;
+            }
+
             auto ids = ep.list_models();
             static const std::vector<std::string> kEmbeddingHints = {
                 "embed", "minilm", "bge", "gte", "e5-", "nomic", "gist",

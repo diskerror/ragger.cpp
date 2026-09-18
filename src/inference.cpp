@@ -296,6 +296,50 @@ std::vector<std::string> Endpoint::list_models() const {
     return result;
 }
 
+std::vector<Endpoint::TypedModel> Endpoint::list_models_lmstudio_typed() const {
+    std::vector<TypedModel> result;
+
+    // LM Studio's native REST API lives at {scheme}://{host}:{port}/api/v0/models
+    // — a sibling of the OpenAI-compatible /v1 tree, not a path under it.
+    // Strip any trailing /v1(/...) to get the server base, then append
+    // /api/v0/models.
+    std::string url = api_url;
+    auto pos = url.find("/v1");
+    std::string base = (pos != std::string::npos) ? url.substr(0, pos) : url;
+    // Trim any trailing slash before appending.
+    while (!base.empty() && base.back() == '/') base.pop_back();
+    url = base + "/api/v0/models";
+
+    std::vector<std::string> headers;
+    if (!api_key.empty()) {
+        headers.push_back("Authorization: *** " + api_key);
+    }
+
+    util::HttpClient http;
+    auto resp = http.get(url, headers, /*timeout_sec=*/5);
+
+    // Non-LM-Studio servers (llama.cpp, Ollama, vLLM) will 404/timeout/refuse
+    // here — that's expected and callers must fall back to heuristics.
+    if (!resp.ok() || resp.status >= 400) return result;
+
+    try {
+        auto json = nlohmann::json::parse(resp.body);
+        if (json.contains("data") && json["data"].is_array()) {
+            for (const auto& m : json["data"]) {
+                if (!m.contains("id") || !m["id"].is_string()) continue;
+                TypedModel tm;
+                tm.id = m["id"].get<std::string>();
+                tm.type = m.value("type", "");
+                result.push_back(std::move(tm));
+            }
+        }
+    } catch (...) {
+        result.clear();
+    }
+
+    return result;
+}
+
 // -----------------------------------------------------------------------
 // SSE streaming parse helper (used by chat_stream, defined below)
 // -----------------------------------------------------------------------

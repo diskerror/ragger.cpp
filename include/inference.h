@@ -46,6 +46,23 @@ struct Endpoint {
 
     /// Query available models from endpoint (GET /v1/models)
     std::vector<std::string> list_models() const;
+
+    /// One model entry from LM Studio's authoritative type-tagged listing.
+    struct TypedModel {
+        std::string id;
+        std::string type;  // "llm", "embeddings", "vlm", etc. (LM Studio's own classification)
+    };
+
+    /// Query LM Studio's native REST API (GET {base}/api/v0/models), which
+    /// tags each model with an authoritative "type" field ("llm" /
+    /// "embeddings" / "vlm") — unlike the OpenAI-compatible /v1/models,
+    /// which LM Studio (like llama.cpp/Ollama/vLLM) does not annotate.
+    /// Returns empty on any failure (wrong port, not LM Studio, old LM
+    /// Studio version, network error) — callers must treat that as "unknown,
+    /// fall back to name-based heuristics" and NOT as "no models available".
+    /// Scoped to LM Studio only; other backends should keep using
+    /// list_models() + keyword heuristics.
+    std::vector<TypedModel> list_models_lmstudio_typed() const;
 };
 
 /// Multi-endpoint inference client
