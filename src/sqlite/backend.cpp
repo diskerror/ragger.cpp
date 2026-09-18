@@ -2,7 +2,7 @@
  * SQLite backend for Ragger Memory (C++ port)
  */
 #include "sqlite/backend.h"
-#include "backend_impl.h"
+#include "sqlite/backend_impl.h"
 #include "config.h"
 #include "util/time.h"
 #include "nlohmann_json.hpp"
