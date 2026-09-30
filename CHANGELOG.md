@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.16.2.2
+- SQLite now comes from c_lib's vendored build (`diskerror_sqlite3`, SQLite 3.54.0) with `SQLITE_DEFAULT_FOREIGN_KEYS=1` — FK rules are enforced on every connection by default; `PRAGMA foreign_keys = OFF` still works for migrations. `-DRAGGER_SYSTEM_SQLITE=ON` links the system library instead
+- Startup integrity check: every DB open verifies `PRAGMA foreign_keys` is actually on and refuses to run otherwise (`ERR_FOREIGN_KEYS_OFF`)
+- c_lib is linked as prebuilt, optimized libraries from `../c_lib/build` (built by c_lib's `build_libs.sh`, run automatically and incrementally before each build; never cleaned by Ragger). A Ragger clean rebuild no longer recompiles c_lib or SQLite. Falls back to fetching c_lib from GitHub without a local checkout
+- Version/commit/date are generated at build time (`cmake/build_info.cmake` → `build_info.cpp`): a new commit or tag recompiles one file instead of needing a reconfigure or full rebuild. Commit shows `-dirty` for uncommitted changes
+- System `sqlite3` dev package no longer required to build
+
 ## v0.16.2
 - SQLite backend reorganized: moved into `src/sqlite/`, `include/sqlite/`, namespaced `ragger::sqlite`; the 4,900-line `Impl` struct split into 8 cohesive files (schema, admin, cache, write, search, maintenance); classes renamed `SqliteBackend` → `sqlite::Backend`, `SqliteTextIndex` → `sqlite::TextIndex`
 - Fixed `terms.term_id` AUTOINCREMENT leak; `reset_terms_table()` now drops+recreates `terms` and its junction tables instead of `DELETE FROM`, scoped to `reindex all`

@@ -36,4 +36,3 @@ scripts/import/*.session
 
 # Python bytecode from scripts/import/
 __pycache__/
-SQLITE_BACKEND_SPLIT_REPORT.md

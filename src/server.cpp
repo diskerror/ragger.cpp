@@ -2,6 +2,7 @@
  * HTTP server for Ragger Memory implementation
  */
 
+#include "build_info.h"
 #include "server.h"
 #include "memory.h"
 #include "user_store.h"

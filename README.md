@@ -149,29 +149,33 @@ common to embedding models.
 
 ## Build dependencies
 
-- **System:** SQLite3, Eigen3, Boost (program_options), OpenSSL, libcurl, Rust (for tokenizers-cpp;
+- **System:** Eigen3, Boost (program_options), OpenSSL, libcurl, Rust (for tokenizers-cpp;
   rustup stable is fine).
+- **c_lib** ([diskerror/c_lib](https://github.com/diskerror/c_lib), shared C++ utilities + the
+  vendored SQLite, foreign keys on by default): with a sibling checkout at `../c_lib`, Ragger links
+  its prebuilt libraries from `../c_lib/build` and runs `../c_lib/build_libs.sh` (incremental) before
+  each build; without one, it is fetched from GitHub and built as a subproject.
 - **Auto-fetched at configure time:** ONNX Runtime (downloaded into the build dir for your
-  platform), [diskerror/c_lib](https://github.com/diskerror/c_lib) (shared C++ utilities). Drop a matching `vendor/onnxruntime/`
+  platform). Drop a matching `vendor/onnxruntime/`
   in place if you want an offline build.
 - **Vendored** (already in the repo): cpp-httplib, nlohmann/json, tokenizers-cpp source.
 
 ```bash
 # macOS — MacPorts
-sudo port install boost eigen3 sqlite3 rust openssl curl cmake
+sudo port install boost eigen3 rust openssl curl cmake
 
 # macOS — Homebrew
-brew install boost eigen sqlite openssl@3 curl cmake rustup-init && rustup-init -y
+brew install boost eigen openssl@3 curl cmake rustup-init && rustup-init -y
 
 # Debian / Ubuntu
 sudo apt install build-essential cmake pkg-config \
-                 libboost-program-options-dev libeigen3-dev libsqlite3-dev \
+                 libboost-program-options-dev libeigen3-dev \
                  libssl-dev libcurl4-openssl-dev
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
 # Fedora / RHEL
 sudo dnf install gcc-c++ cmake pkgconf-pkg-config \
-                 boost-devel eigen3-devel sqlite-devel \
+                 boost-devel eigen3-devel \
                  openssl-devel libcurl-devel
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ```
@@ -185,23 +189,10 @@ Then:
 
 ### Dev build (local c_lib)
 
-If you have a local checkout of [diskerror/c_lib](https://github.com/diskerror/c_lib), create a
-`CMakeUserPresets.json` (gitignored) to use it instead of fetching from GitHub:
-
-```json
-{
-  "version": 6,
-  "configurePresets": [
-    {
-      "name": "dev",
-      "inherits": "default",
-      "cacheVariables": {
-        "FETCHCONTENT_SOURCE_DIR_C_LIB": "/path/to/your/c_lib"
-      }
-    }
-  ]
-}
-```
+Check out [diskerror/c_lib](https://github.com/diskerror/c_lib) next to this repo (`../c_lib`).
+It is picked up automatically: c_lib builds its optimized libraries once into `../c_lib/build`
+and Ragger links them. Cleaning Ragger never touches them; to rebuild c_lib from scratch, run
+`../c_lib/build_libs.sh --clean`. c_lib's own tests: `../c_lib/build_tests.sh`.
 
 The build script auto-detects this file and passes the variable to cmake. CLion also picks up the
 `dev` preset from its CMake profile dropdown.

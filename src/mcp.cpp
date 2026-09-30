@@ -10,6 +10,7 @@
  * grow unbounded when the user only uses MCP mode.
  */
 
+#include "build_info.h"
 #include "mcp.h"
 #include "config.h"
 #include "config_access.h"

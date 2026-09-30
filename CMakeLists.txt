@@ -3,41 +3,12 @@ if(APPLE)
     # Has compiled successfully with earlier versions of MacOS. Caveat emptor.
     set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0" CACHE STRING "Minimum macOS version")
 endif()
-project(ragger VERSION 0.16.2.1 LANGUAGES CXX)
+project(ragger VERSION 0.16.2.2 LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Build metadata: version, commit, build date
-string(TIMESTAMP RAGGER_BUILD_DATE "%Y-%m-%d %H:%M:%S")
-
-# Git commit (short hash)
-execute_process(
-    COMMAND git rev-parse --short=7 HEAD
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    OUTPUT_VARIABLE RAGGER_COMMIT
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-    RESULT_VARIABLE GIT_HASH_RESULT
-)
-if(NOT GIT_HASH_RESULT EQUAL 0)
-    set(RAGGER_COMMIT "unknown")
-endif()
-
-# Use tag as version if on a tagged commit, otherwise version+commit
-execute_process(
-    COMMAND git describe --tags --exact-match
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    OUTPUT_VARIABLE GIT_TAG
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-    RESULT_VARIABLE GIT_TAG_RESULT
-)
-if(GIT_TAG_RESULT EQUAL 0)
-    set(RAGGER_BUILD_VERSION "${PROJECT_VERSION}")
-else()
-    set(RAGGER_BUILD_VERSION "${PROJECT_VERSION}+${RAGGER_COMMIT}")
-endif()
-message(STATUS "VERSION: ${RAGGER_BUILD_VERSION}")
+# Build metadata (version, commit, build date) is generated at BUILD time —
+# see "build_info" below — so a new commit/tag never needs a reconfigure.
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -60,9 +31,18 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
-# SQLite3
+# SQLite3 — c_lib's vendored build (diskerror_sqlite3, foreign keys default
+# ON). -DRAGGER_SYSTEM_SQLITE=ON links the system library instead; FK
+# enforcement then relies only on the per-connection PRAGMA.
 # ---------------------------------------------------------------------------
-find_package(SQLite3 REQUIRED)
+option(RAGGER_SYSTEM_SQLITE "Link the system SQLite instead of c_lib's diskerror_sqlite3" OFF)
+if(RAGGER_SYSTEM_SQLITE)
+    find_package(SQLite3 REQUIRED)
+    set(RAGGER_SQLITE_TARGET SQLite::SQLite3)
+    message(STATUS "SQLite: system library (foreign keys NOT compiled-in default)")
+else()
+    set(RAGGER_SQLITE_TARGET diskerror_sqlite3)
+endif()
 
 # ---------------------------------------------------------------------------
 # ONNX Runtime — vendored if present, else fetched at configure time
@@ -163,13 +143,16 @@ target_include_directories(vendor_headers INTERFACE
 target_compile_definitions(vendor_headers INTERFACE CPPHTTPLIB_OPENSSL_SUPPORT)
 
 # ---------------------------------------------------------------------------
-# c_lib (local if ../c_lib exists, else FetchContent from GitHub)
+# c_lib — prebuilt libraries from sibling ../c_lib/build (optimized,
+# built and tested by c_lib itself; see ../c_lib/cmake/UseCLib.cmake). A
+# Ragger clean never recompiles c_lib. Without a local ../c_lib (fresh
+# clone / CI), falls back to building it from GitHub as a subproject.
 # ---------------------------------------------------------------------------
-if(EXISTS "${CMAKE_SOURCE_DIR}/../c_lib/CMakeLists.txt")
-    message(STATUS "c_lib: using local ../c_lib")
-    add_subdirectory("${CMAKE_SOURCE_DIR}/../c_lib" "${CMAKE_BINARY_DIR}/_c_lib")
+if(EXISTS "${CMAKE_SOURCE_DIR}/../c_lib/cmake/UseCLib.cmake")
+    include("${CMAKE_SOURCE_DIR}/../c_lib/cmake/UseCLib.cmake")
+    use_c_lib(0.2)
 else()
-    message(STATUS "c_lib: fetching from GitHub (set FETCHCONTENT_SOURCE_DIR_C_LIB to use local)")
+    message(STATUS "c_lib: fetching from GitHub (no local ../c_lib)")
     include(FetchContent)
     FetchContent_Declare(c_lib
         GIT_REPOSITORY https://github.com/diskerror/c_lib.git
@@ -276,11 +259,21 @@ target_include_directories(ragger_core PRIVATE
 )
 add_dependencies(ragger_core generate_default_config)
 add_dependencies(ragger_core generate_dashboard_html)
-target_compile_definitions(ragger_core PUBLIC
-    RAGGER_VERSION="${PROJECT_VERSION}"
-    RAGGER_COMMIT="${RAGGER_COMMIT}"
-    RAGGER_BUILD_DATE="${RAGGER_BUILD_DATE}"
+# Build info: regenerated on every build, rewritten only when the
+# version/commit changes (then only build_info.cpp recompiles).
+set(RAGGER_BUILD_INFO_CPP "${CMAKE_BINARY_DIR}/generated/build_info.cpp")
+add_custom_target(ragger_build_info
+    COMMAND "${CMAKE_COMMAND}" -DSRC_DIR="${CMAKE_SOURCE_DIR}"
+            -DOUT="${RAGGER_BUILD_INFO_CPP}" -DVERSION="${PROJECT_VERSION}"
+            -P "${CMAKE_SOURCE_DIR}/cmake/build_info.cmake"
+    BYPRODUCTS "${RAGGER_BUILD_INFO_CPP}"
+    COMMENT "ragger: build info"
 )
+target_sources(ragger_core PRIVATE "${RAGGER_BUILD_INFO_CPP}")
+add_dependencies(ragger_core ragger_build_info)
+if(TARGET c_lib_build)
+    add_dependencies(ragger_core c_lib_build)
+endif()
 if(RAGGER_STATS)
     target_compile_definitions(ragger_core PUBLIC RAGGER_STATS)
     message(STATUS "RAGGER_STATS: ON — retrieval stats logged to ~/.ragger/stats.db")
@@ -290,7 +283,7 @@ target_link_libraries(ragger_core PUBLIC
     diskerror_embedding_codec
     diskerror_double_metaphone
     diskerror_stemmer_snowball
-    SQLite::SQLite3
+    ${RAGGER_SQLITE_TARGET}
     onnxruntime
     tokenizers_cpp
     Eigen3::Eigen

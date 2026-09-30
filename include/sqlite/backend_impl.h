@@ -272,6 +272,7 @@ struct Backend::Impl {
 
     /// Read a boolean PRAGMA's current value (e.g. "foreign_keys").
     bool pragma_bool(const char* name);
+    void require_foreign_keys();
 
     /// Rebuild one table so its PHYSICAL column order matches the fresh-install
     /// CREATE TABLE in create_schema(). `ALTER TABLE ... ADD COLUMN` can only

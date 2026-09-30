@@ -309,6 +309,7 @@ constexpr const char* ERR_CONFIG_NOT_INIT     = "Config not initialized — call
 
 // --- Errors: database ---
 constexpr const char* ERR_SQLITE_OPEN         = "SQLite open failed: {}";
+constexpr const char* ERR_FOREIGN_KEYS_OFF    = "SQLite foreign key enforcement is OFF on this connection (PRAGMA foreign_keys ignored) — refusing to run without the schema's integrity rules";
 constexpr const char* ERR_SQL                 = "SQL error: {}";
 constexpr const char* ERR_EMBED_UPDATE_FAILED = "embed_tables: UPDATE {} id {} failed: {}";
 constexpr const char* ERR_EXPORT_SCAN_FAILED  = "export: scan of {} failed mid-read (rc={}): {}";

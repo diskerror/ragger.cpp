@@ -4,6 +4,7 @@
  * Verb-style CLI: ragger <verb> [options] [args]
  * No verb or 'help' prints usage.
  */
+#include "build_info.h"
 #include <cstdio>
 #include <filesystem>
 #include <format>

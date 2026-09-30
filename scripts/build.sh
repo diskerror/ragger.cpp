@@ -75,7 +75,6 @@ cd "$BUILD_DIR"
 
 # Check for required libraries
 lib_missing=()
-pkg-config --exists sqlite3 2>/dev/null || lib_missing+=("sqlite3")
 pkg-config --exists eigen3 2>/dev/null || lib_missing+=("eigen3")
 pkg-config --exists libcurl 2>/dev/null || lib_missing+=("libcurl")
 pkg-config --exists openssl 2>/dev/null || lib_missing+=("openssl")

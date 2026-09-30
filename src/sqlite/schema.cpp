@@ -63,6 +63,7 @@ namespace fs = std::filesystem;
 
         exec("PRAGMA journal_mode=WAL");
         exec("PRAGMA foreign_keys = ON");
+        require_foreign_keys();
         // Wait up to 10s on a locked DB instead of failing instantly —
         // WAL allows concurrent readers, but two writers (daemon +
         // import CLI) still serialize; without this any collision is an
@@ -115,6 +116,7 @@ namespace fs = std::filesystem;
         if (!readonly) {
             exec("PRAGMA journal_mode=WAL");
             exec("PRAGMA foreign_keys = ON");
+            require_foreign_keys();
         }
         sqlite3_busy_timeout(db, 10000);
         text_index_.emplace(db);
@@ -660,6 +662,7 @@ namespace fs = std::filesystem;
         }
         exec("PRAGMA journal_mode=WAL");
         exec("PRAGMA foreign_keys = ON");
+        require_foreign_keys();
         sqlite3_busy_timeout(db, 10000);
 
         // text_index_ holds a NON-OWNING sqlite3* captured at construction;
@@ -1052,6 +1055,17 @@ namespace fs = std::filesystem;
             throw;
         }
         // documents_fts is rebuilt (new shape) by create_fts_schema() below.
+    }
+
+
+    /// Integrity guard: the schema's FK rules (ON DELETE SET NULL/RESTRICT)
+    /// only hold if enforcement is actually on. c_lib's SQLite defaults it
+    /// ON and we also set it per connection; this catches a build linked
+    /// against a library that silently ignores the PRAGMA (e.g. compiled
+    /// with SQLITE_OMIT_FOREIGN_KEY) instead of running unprotected.
+    void Backend::Impl::require_foreign_keys() {
+        if (!pragma_bool("foreign_keys"))
+            throw std::runtime_error(lang::ERR_FOREIGN_KEYS_OFF);
     }
 
 
