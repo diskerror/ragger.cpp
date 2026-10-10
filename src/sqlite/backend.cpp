@@ -353,6 +353,11 @@ int Backend::store_decision(const std::string& text,
     return pImpl->store_decision(text, status, tags, source_timestamp, defer_embedding);
 }
 
+StructuredDecisionResult Backend::store_structured_decision(const DecisionInput& in) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->store_structured_decision(in);
+}
+
 bool Backend::update_decision_embedding(int decision_id,
                                               const std::vector<float>& emb) {
     std::lock_guard<std::mutex> lk(pImpl->mu);

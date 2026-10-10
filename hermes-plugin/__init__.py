@@ -281,6 +281,38 @@ STORE_SCHEMA = {
 }
 
 
+DECISION_SCHEMA = {
+    "name": "memory_decision",
+    "description": (
+        "Record a standing decision: a ruling plus the situation it applies to. "
+        "`trigger` is REQUIRED and is written the way a FUTURE question would be "
+        "asked (e.g. 'Use when choosing a full-text index strategy') -- search "
+        "matches on it, so phrase it in the asker's words, not the conclusion's. "
+        "To replace an earlier decision, pass its id in `supersedes`; the old one "
+        "is kept and marked superseded, never overwritten. Prefer this over "
+        "ragger_store(category='decision') for anything with a rationale."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "The ruling itself, imperative."},
+            "trigger": {"type": "string",
+                        "description": "When this applies, in the vocabulary of a future query."},
+            "rationale": {"type": "string",
+                          "description": "Why; alternatives considered and rejected."},
+            "scope": {"type": "string", "description": "What this does NOT apply to."},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "status": {"type": "string", "enum": ["current", "provisional", "pending"],
+                       "description": "Default current. provisional = agreed, not yet proven."},
+            "supersedes": {"type": "integer", "description": "decision id this replaces."},
+            "evidence": {"type": "array", "items": {"type": "integer"},
+                         "description": "turn_summary ids (from search results) this rests on."},
+        },
+        "required": ["text", "trigger"],
+    },
+}
+
+
 # ---------------------------------------------------------------------------
 # MemoryProvider implementation
 # ---------------------------------------------------------------------------
@@ -296,6 +328,7 @@ class RaggerMemoryProvider(MemoryProvider):
         self._socket_path = str(Path.home() / ".ragger" / "ragger.sock")
         self._prefetch_result = ""
         self._model = ""
+        self._session_id = ""   # Hermes session id; provenance for memory_decision
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
         # Circuit breaker
@@ -368,6 +401,34 @@ class RaggerMemoryProvider(MemoryProvider):
             logger.debug("Ragger POST %s: %s", path, exc)
             return None
 
+    def _post_status(self, path: str, payload: dict, timeout: float = 5.0):
+        """POST and return (http_status, body_text), or None on a TRANSPORT
+        failure (daemon down, timeout). Unlike _post(), a 4xx comes back as a
+        value: a validation error is the caller's mistake and must neither be
+        reported as 'daemon down' nor trip the circuit breaker."""
+        body = json.dumps(payload).encode()
+        if self._socket_enable:
+            conn = _UnixSocketHTTPConnection(self._socket_path, timeout=timeout)
+            try:
+                conn.request("POST", path, body=body, headers=self._headers())
+                resp = conn.getresponse()
+                return resp.status, resp.read().decode("utf-8", "replace")
+            except Exception as exc:
+                logger.debug("Ragger POST %s (socket): %s", path, exc)
+                return None
+            finally:
+                conn.close()
+        req = urllib.request.Request(self._base_url + path, data=body,
+                                     headers=self._headers(), method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status, resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode("utf-8", "replace")
+        except Exception as exc:
+            logger.debug("Ragger POST %s: %s", path, exc)
+            return None
+
     def _request_unix(self, method: str, path: str, payload: Optional[dict], timeout: float) -> Optional[dict]:
         """Send a request over the Ragger Unix domain socket."""
         conn = _UnixSocketHTTPConnection(self._socket_path, timeout=timeout)
@@ -419,6 +480,7 @@ class RaggerMemoryProvider(MemoryProvider):
             return False
 
     def initialize(self, session_id: str, **kwargs) -> None:
+        self._session_id = session_id or ""
         cfg = _load_ragger_config()
         self._base_url = f"http://{cfg['host']}:{cfg['port']}"
         self._auth_token = cfg["auth_token"]
@@ -594,7 +656,7 @@ class RaggerMemoryProvider(MemoryProvider):
             self._record_ok()
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [SEARCH_SCHEMA, STORE_SCHEMA]
+        return [SEARCH_SCHEMA, STORE_SCHEMA, DECISION_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._breaker_open():
@@ -643,6 +705,36 @@ class RaggerMemoryProvider(MemoryProvider):
                 })
             self._record_ok()
             return json.dumps({"result": "Stored.", "id": result.get("id", "")})
+
+        elif tool_name == "memory_decision":
+            text = str(args.get("text", "")).strip()
+            trigger = str(args.get("trigger", "")).strip()
+            if not text or not trigger:
+                return json.dumps({"error": "memory_decision requires both text and trigger"})
+            payload = {"text": text, "trigger": trigger, "session": self._session_id}
+            for key in ("rationale", "scope", "status"):
+                if args.get(key):
+                    payload[key] = str(args[key])
+            if args.get("tags"):
+                payload["tags"] = [str(t) for t in args["tags"]]
+            if args.get("supersedes") is not None:
+                payload["supersedes"] = int(args["supersedes"])
+            if args.get("evidence"):
+                payload["evidence"] = [int(x) for x in args["evidence"]]
+            got = self._post_status("/decision", payload)
+            if got is None:
+                self._record_fail()
+                return json.dumps({
+                    "error": "Ragger store failed. Is the daemon running? Try: ragger start"
+                })
+            self._record_ok()   # the daemon answered, even if it said 400
+            status, body = got
+            if status >= 400:
+                return json.dumps({"error": body.strip()})
+            try:
+                return json.dumps(json.loads(body))
+            except ValueError:
+                return json.dumps({"error": "Ragger returned a non-JSON reply: " + body[:200]})
 
         return json.dumps({"error": f"Unknown tool: {tool_name}"})
 

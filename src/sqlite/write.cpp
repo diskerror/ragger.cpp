@@ -614,6 +614,125 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
+    // ---- store_structured_decision: agent API Phase 1 (db 0.17) ---------
+    // Order matters (EXACTLY as written):
+    //   1. validate everything that can be checked without writing,
+    //   2. embed OUTSIDE the transaction (the embedder can take 100+ ms and
+    //      we must not hold a write lock across it),
+    //   3. BEGIN; insert; flip the superseded row; link evidence; index; COMMIT.
+    // Any throw inside step 3 rolls back, so a failed evidence link never
+    // leaves a half-written decision or an orphaned 'superseded' flip.
+    StructuredDecisionResult Backend::Impl::store_structured_decision(const DecisionInput& in) {
+        auto trim = [](const std::string& s) {
+            size_t a = s.find_first_not_of(" \t\r\n");
+            if (a == std::string::npos) return std::string();
+            size_t b = s.find_last_not_of(" \t\r\n");
+            return s.substr(a, b - a + 1);
+        };
+        const std::string text    = normalize_path(strip_decision_number_prefix(trim(in.text)));
+        const std::string trigger = trim(in.trigger);
+        const std::string status  = in.status.empty() ? "current" : in.status;
+
+        // ---- 1. validate ----------------------------------------------
+        if (text.empty())
+            throw std::invalid_argument("decision text is required");
+        if (trigger.empty())
+            throw std::invalid_argument("decision trigger is required");
+        // Statuses a NEW row may start in. 'superseded' and 'retired' are
+        // reached only by curation, never on create.
+        if (status != "current" && status != "provisional" && status != "pending")
+            throw std::invalid_argument(
+                "status must be one of: current, provisional, pending");
+
+        if (in.supersedes) {
+            Stmt s(db, "SELECT status FROM decisions WHERE decision_id = ?");
+            s.bind(1, *in.supersedes);
+            if (!s.step())
+                throw std::invalid_argument(std::format(
+                    "supersedes: decision {} does not exist", *in.supersedes));
+            const std::string old_status = s.column_text(0);
+            if (old_status == "superseded" || old_status == "retired")
+                throw std::invalid_argument(std::format(
+                    "supersedes: decision {} is already {}", *in.supersedes, old_status));
+        }
+
+        for (int ts_id : in.evidence) {
+            Stmt s(db, "SELECT 1 FROM turn_summaries "
+                       "WHERE turn_summary_id = ? AND text != ''");
+            s.bind(1, ts_id);
+            if (!s.step())
+                throw std::invalid_argument(std::format(
+                    "evidence: turn_summary {} does not exist or is empty", ts_id));
+        }
+
+        std::optional<int> session_id;
+        if (!in.session_guid.empty()) {
+            // Look up only -- never create a session from here. An unknown
+            // GUID just means no provenance link (NULL), not an error.
+            Stmt s(db, "SELECT session_id FROM sessions WHERE guid = ?");
+            s.bind(1, in.session_guid);
+            if (s.step()) session_id = s.column_int(0);
+        }
+
+        // ---- 2. embed (outside the transaction) ------------------------
+        // MUST equal kDecisionEmbedTextSQL's result for this row, so a
+        // housekeeping re-embed produces the same vector.
+        const std::string embed_text = trigger + "\n" + text;
+        auto emb = embedder->encode(embed_text);
+
+        // ---- 3. write ---------------------------------------------------
+        StructuredDecisionResult out;
+        Stmt(db, "BEGIN").exec();
+        try {
+            Stmt ins(db,
+                "INSERT INTO decisions (text, status, tags, trigger, rationale, scope, "
+                "supersedes, source_session_id, created_at, embedding_version, embedding) "
+                "VALUES (?,?,?,?,?,?,?,?,unixepoch(),?,?)");
+            ins.bind(1, text);
+            ins.bind(2, status);
+            ins.bind(3, in.tags);
+            ins.bind(4, trigger);
+            const std::string rationale = trim(in.rationale);
+            const std::string scope     = trim(in.scope);
+            if (rationale.empty()) ins.bind_null(5); else ins.bind(5, rationale);
+            if (scope.empty())     ins.bind_null(6); else ins.bind(6, scope);
+            if (in.supersedes)     ins.bind(7, *in.supersedes); else ins.bind_null(7);
+            if (session_id)        ins.bind(8, *session_id);    else ins.bind_null(8);
+            bind_embedding_version(ins.raw(), 9, emb);
+            bind_embedding(ins.raw(), 10, emb);
+            if (!ins.exec())
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            out.id = static_cast<int>(sqlite3_last_insert_rowid(db));
+
+            if (in.supersedes) {
+                Stmt up(db, "UPDATE decisions SET status = 'superseded' WHERE decision_id = ?");
+                up.bind(1, *in.supersedes);
+                if (!up.exec())
+                    throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+                out.superseded = *in.supersedes;
+            }
+
+            for (int ts_id : in.evidence) {
+                // OR IGNORE: a caller listing the same id twice is harmless.
+                Stmt ev(db, "INSERT OR IGNORE INTO decision_evidence "
+                            "(decision_id, turn_summary_id) VALUES (?,?)");
+                ev.bind(1, out.id);
+                ev.bind(2, ts_id);
+                if (!ev.exec())
+                    throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            }
+
+            text_index_->index_record("decisions", out.id, embed_text);
+            Stmt(db, "COMMIT").exec();
+        } catch (...) {
+            Stmt(db, "ROLLBACK").exec();
+            throw;
+        }
+        invalidate_dec_cache();
+        return out;
+    }
+
+
     // ---- catch-up / recipe helpers ------------------------------------
     // Turns lacking an L2 summary, linked by (session_id, timestamp).
     // LEFT JOIN keeps turns whose summary row doesn't exist; ordered
@@ -683,7 +802,7 @@ static std::string tags_from_metadata(const json& metadata) {
             std::string sel =
                 "SELECT ts.turn_summary_id FROM turn_summaries ts "
                 "JOIN models m ON m.model_id = ts.summary_model_id "
-                "WHERE m.name = 'bad' AND ts.text = '' "
+                "WHERE m.name = 'bad' AND ts.text = '' AND ts.turn_id IS NOT NULL "
                 "ORDER BY ts.turn_summary_id ASC";
             if (limit > 0) sel += " LIMIT ?";
             Stmt s(db, sel);

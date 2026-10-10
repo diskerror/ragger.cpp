@@ -157,7 +157,7 @@ struct Backend::Impl {
     // (e.g. "0.12"). Absent means pre-versioning (legacy v3/v4 DB from
     // before this key existed) -- returns "" in that case. Startup hard-gates
     // on this via kExpectedDbVersion below; there is no in-binary migration.
-    static constexpr std::string_view kExpectedDbVersion = "0.16";
+    static constexpr std::string_view kExpectedDbVersion = "0.17";
 
     // Watermark keys for the boundary-detection housekeeping scans (see
     // sessions_needing_close_boundary()/projects_needing_close_boundary()
@@ -315,6 +315,14 @@ struct Backend::Impl {
     /// The schema (terms, *_terms, count columns) is created by create_schema()
     /// BEFORE this runs, and reindex_table() (Step 6) populates them.
     void migrate_0_15_to_0_16();
+
+    /// 0.16 -> 0.17 migration (agent API Phase 1: structured decisions).
+    /// Rebuilds `decisions` in the new canonical column order (adds trigger,
+    /// rationale, scope, supersedes, source_session_id) and moves stray
+    /// category words that leaked into decisions.status ('fact', 'lesson')
+    /// into tags, setting status 'current'. decision_evidence and the
+    /// orphan-protection trigger are created after migration in create_schema().
+    void migrate_0_16_to_0_17();
 
     /// Custom terms index (v0.16) — replaces both FTS5 layers with a single
     /// flat term table + per-content-type junction tables. See
@@ -545,6 +553,12 @@ struct Backend::Impl {
                        const std::string& tags,
                        const std::string& source_timestamp,
                        bool defer_embedding);
+
+    // ---- store_structured_decision: agent API Phase 1 (db 0.17) ---------
+    // Validates, embeds trigger+text, then in ONE transaction inserts the
+    // row, flips the superseded row (if any) to 'superseded', and links the
+    // evidence turn_summaries. Throws std::invalid_argument on bad input.
+    StructuredDecisionResult store_structured_decision(const DecisionInput& in);
 
     // ---- catch-up / recipe helpers ------------------------------------
     // Turns lacking an L2 summary, linked by (session_id, timestamp).
@@ -835,6 +849,15 @@ struct Backend::Impl {
     // rebuilds carry the same title signal the write path bakes in. Used as a
     // SELECT column expression in embed_tables()/rebuild_phon(); empty/absent
     // title -> body only. char(10) == '\n'.
+    // decisions' embed/index input: `trigger + '\n' + text` when a trigger
+    // is present, else text alone (pre-0.17 rows). Trigger first on purpose:
+    // it is phrased in the future query's vocabulary (design doc §5.3a).
+    // Shared by store_structured_decision (C++ side builds the same string),
+    // embed_tables() and TextIndex::text_select_of().
+    static constexpr const char* kDecisionEmbedTextSQL =
+        "CASE WHEN ifnull(trigger,'') = '' THEN text "
+        "ELSE trigger || char(10) || text END";
+
     static constexpr const char* kDocEmbedTextSQL =
         "text || CASE WHEN (SELECT ifnull(title,'') FROM document_sources ds "
         "WHERE ds.document_source_id = documents.document_source_id) = '' "

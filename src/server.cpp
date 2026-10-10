@@ -514,6 +514,54 @@ struct Server::Impl {
         respond_json(res, json{{"id", id}, {"status", "stored"}});
     }
 
+    // POST /decision -- structured decision (agent API Phase 1, db 0.17).
+    // Body: {text, trigger, rationale?, scope?, tags?, status?, supersedes?,
+    //        session?, evidence?: [turn_summary_id,...]}
+    // tags may be a string ("a,b") or an array of strings.
+    // Validation failures are 400 with the message; they are caller errors,
+    // not server faults, so they must not fall through to guarded()'s 500.
+    void handle_decision(const UserInfo& user, const httplib::Request& req,
+                         httplib::Response& res) {
+        auto body = json::parse(req.body);
+        DecisionInput in;
+        in.text      = body.value("text", "");
+        in.trigger   = body.value("trigger", "");
+        in.rationale = body.value("rationale", "");
+        in.scope     = body.value("scope", "");
+        in.status    = body.value("status", "current");
+        in.session_guid = body.value("session", "");
+        if (body.contains("tags")) {
+            const auto& t = body["tags"];
+            if (t.is_array()) {
+                for (const auto& x : t) {
+                    if (!in.tags.empty()) in.tags += ',';
+                    in.tags += x.get<std::string>();
+                }
+            } else if (t.is_string()) {
+                in.tags = t.get<std::string>();
+            }
+        }
+        if (body.contains("supersedes") && !body["supersedes"].is_null())
+            in.supersedes = body["supersedes"].get<int>();
+        if (body.contains("evidence"))
+            in.evidence = body["evidence"].get<std::vector<int>>();
+
+        auto& mem = _get_memory(user.username);
+        try {
+            auto r = mem.store_structured_decision(in);
+            Diskerror::Logger::debug("POST /decision 200");
+            respond_json(res, json{
+                {"id", r.id},
+                {"table", "decisions"},
+                {"status", "stored"},
+                {"superseded", r.superseded ? json(*r.superseded) : json(nullptr)}});
+        } catch (const std::invalid_argument& e) {
+            Diskerror::Logger::debug("POST /decision 400");
+            res.status = 400;
+            res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
+        }
+    }
+
     void handle_search(const UserInfo& user, const httplib::Request& req,
                        httplib::Response& res) {
         auto body = json::parse(req.body);
@@ -675,6 +723,7 @@ struct Server::Impl {
         }));
 
         svr.Post("/store",              guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_store(u, req, res); }));
+        svr.Post("/decision",           guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_decision(u, req, res); }));
         svr.Post("/search",             guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_search(u, req, res); }));
         svr.Post("/turn",               guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_turn(u, req, res); }));
         svr.Get(R"(/session/([^/]+))",  guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_session(u, req, res); }));

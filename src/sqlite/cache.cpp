@@ -258,8 +258,15 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
 
         Stmt s(db,
             "SELECT decision_id, text, embedding, status, tags, "
-            "       datetime(created_at,'unixepoch','localtime') "
-            "FROM decisions");
+            "       datetime(created_at,'unixepoch','localtime'), "
+            "       ifnull(trigger,'') "
+            "FROM decisions "
+            // db 0.17: superseded / retired / pending rows are history or
+            // unreviewed drafts -- kept in the table, hidden from search.
+            // Allow-list, not deny-list, so a future status stays hidden
+            // until someone decides it should surface. 'roadmap' keeps its
+            // pre-0.17 visibility.
+            "WHERE status IN ('current','provisional','roadmap')");
 
         std::vector<std::vector<float>> emb_rows;
         const int expected_dims = config().embedding_dimensions;
@@ -282,6 +289,8 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
             meta["status"] = col_text(3);
             std::string tags = col_text(4);
             if (!tags.empty()) meta["tags"] = tags;
+            std::string trig = col_text(6);
+            if (!trig.empty()) meta["trigger"] = trig;
             dec_metadata.push_back(std::move(meta));
 
             dec_timestamps.push_back(col_text(5));

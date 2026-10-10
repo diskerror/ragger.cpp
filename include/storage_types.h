@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,25 @@
 namespace ragger {
 
 using json = nlohmann::json;
+
+/// Input for a structured (skill-shaped) decision — agent API Phase 1.
+/// text + trigger are required; everything else is optional.
+struct DecisionInput {
+    std::string text;                 ///< the ruling itself
+    std::string trigger;              ///< "Use when ..." — future-query vocabulary
+    std::string rationale;            ///< why; alternatives rejected ("" = NULL)
+    std::string scope;                ///< what it does NOT apply to ("" = NULL)
+    std::string tags;                 ///< comma-separated, stored verbatim
+    std::string status = "current";   ///< current | provisional | pending
+    std::optional<int> supersedes;    ///< decision_id this replaces
+    std::string session_guid;         ///< source session GUID ("" = none)
+    std::vector<int> evidence;        ///< turn_summary_ids backing the decision
+};
+
+struct StructuredDecisionResult {
+    int id = 0;                       ///< new decision_id
+    std::optional<int> superseded;    ///< decision_id flipped to 'superseded'
+};
 
 struct SearchResult {
     int         id;

@@ -150,6 +150,11 @@ public:
                                const std::string& source_timestamp = "",
                                bool defer_embedding = false) = 0;
 
+    /// Store a structured decision (agent API Phase 1, db 0.17). Throws
+    /// std::invalid_argument on validation failure (empty text/trigger,
+    /// bad status, unknown or inactive supersedes target, unknown evidence id).
+    virtual StructuredDecisionResult store_structured_decision(const DecisionInput& in) = 0;
+
     /// Write back a single row's embedding for the remaining context tables
     /// (documents already covered above). Returns true if a row was updated.
     virtual bool update_decision_embedding(int decision_id,

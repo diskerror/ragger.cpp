@@ -137,7 +137,7 @@ namespace fs = std::filesystem;
         static constexpr TableSpec kAllTables[] = {
             { "turns",           "turn_id",         "user_text", "assistant_text" },
             { "summaries",       "summary_id",      "text",      nullptr          },
-            { "decisions",       "decision_id",     "text",      nullptr          },
+            { "decisions",       "decision_id",     kDecisionEmbedTextSQL, nullptr },
             { "documents",       "document_id",     kDocEmbedTextSQL, nullptr       },
             { "turn_summaries",  "turn_summary_id", "text",      nullptr          },
         };

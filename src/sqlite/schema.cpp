@@ -311,13 +311,23 @@ namespace fs = std::filesystem;
         exec("CREATE INDEX IF NOT EXISTS idx_turns_session     ON turns(session_id)");
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_session ON summaries(session_id)");
 
-        // decisions (L6). v4 column order: keys/data, created_at, embedding, phon.
+        // decisions (L6). Column order: keys/data, created_at, counts, embedding.
+        // trigger..source_session_id added at db 0.17 (agent API Phase 1). The
+        // DDL in migrate_0_16_to_0_17() MUST stay in lockstep with this one.
+        // status is deliberately NOT CHECK-constrained: the vocabulary grows
+        // (current|provisional|pending|superseded|retired, + legacy roadmap/
+        // deprecated) and a CHECK would need a table rebuild to extend.
         exec(R"(
             CREATE TABLE IF NOT EXISTS decisions (
                 decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 text        TEXT NOT NULL,
                 status      TEXT NOT NULL,
                 tags        TEXT NOT NULL DEFAULT '',
+                trigger     TEXT,
+                rationale   TEXT,
+                scope       TEXT,
+                supersedes  INTEGER REFERENCES decisions(decision_id),
+                source_session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                 created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
                 unigram_count  INTEGER NOT NULL DEFAULT 0,
                 bigram_count   INTEGER NOT NULL DEFAULT 0,
@@ -483,6 +493,37 @@ namespace fs = std::filesystem;
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_created_at  ON summaries(created_at)");
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_session     ON summaries(session_id)");
         exec("CREATE INDEX IF NOT EXISTS idx_decisions_status      ON decisions(status)");
+        exec("CREATE INDEX IF NOT EXISTS idx_decisions_supersedes  ON decisions(supersedes)");
+
+        // decision_evidence (db 0.17) -- many-to-many: which turn_summaries a
+        // decision rests on. Real FKs (design §10.4: integrity lives in the
+        // schema). CASCADE on the decision side (an operator prune of a
+        // decision takes its links with it); RESTRICT on the turn_summary side
+        // so evidence can't vanish from under a claim. Created here, AFTER
+        // migrations, so it never takes part in the decisions table rebuild.
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS decision_evidence (
+                decision_id     INTEGER NOT NULL
+                    REFERENCES decisions(decision_id) ON DELETE CASCADE,
+                turn_summary_id INTEGER NOT NULL
+                    REFERENCES turn_summaries(turn_summary_id) ON DELETE RESTRICT,
+                PRIMARY KEY (decision_id, turn_summary_id)
+            )
+        )");
+        exec("CREATE INDEX IF NOT EXISTS idx_decision_evidence_ts "
+             "ON decision_evidence(turn_summary_id)");
+
+        // An orphaned turn summary (its turn culled) is the only surviving
+        // record of that exchange. Code never deletes one; this makes the
+        // schema refuse too. Empty-text marker rows stay deletable so
+        // reset_abandoned_turn_summaries() keeps working.
+        exec(R"(
+            CREATE TRIGGER IF NOT EXISTS protect_orphan_turn_summaries
+            BEFORE DELETE ON turn_summaries
+            WHEN OLD.turn_id IS NULL AND OLD.text <> ''
+            BEGIN SELECT RAISE(ABORT, 'orphaned turn summary is sole evidence'); END
+        )");
+
         exec("CREATE INDEX IF NOT EXISTS idx_document_sources_imported_at ON document_sources(imported_at)");
         exec("CREATE INDEX IF NOT EXISTS idx_documents_document_source_id ON documents(document_source_id)");
         exec("CREATE INDEX IF NOT EXISTS idx_turn_summaries_turn_id    ON turn_summaries(turn_id)");
@@ -539,7 +580,8 @@ namespace fs = std::filesystem;
         if (current_version == kExpectedDbVersion) return false;  // already current
         // Only for versions we actually migrate FROM in-binary. An unknown
         // version is rejected by the gate without mutation.
-        if (current_version != "0.12" && current_version != "0.15") return false;
+        if (current_version != "0.12" && current_version != "0.15" &&
+            current_version != "0.16") return false;
         return true;
     }
 
@@ -692,6 +734,11 @@ namespace fs = std::filesystem;
             }
             if (v == "0.15") {
                 migrate_0_15_to_0_16();
+                v = db_version();
+                continue;
+            }
+            if (v == "0.16") {
+                migrate_0_16_to_0_17();
                 v = db_version();
                 continue;
             }
@@ -1375,6 +1422,88 @@ namespace fs = std::filesystem;
             try {
                 Stmt(db, "ROLLBACK").exec();
             } catch (...) {}
+            try {
+                exec("PRAGMA legacy_alter_table = OFF");
+                if (fk_was_on) exec("PRAGMA foreign_keys = ON");
+            } catch (...) {}
+            throw;
+        }
+    }
+
+
+    /// 0.16 -> 0.17 migration (agent API Phase 1: structured decisions).
+    /// Same pragma dance as migrate_0_15_to_0_16() and for the same reasons:
+    /// foreign_keys OFF (decisions_terms has ON DELETE CASCADE into decisions;
+    /// DROP TABLE would wipe the index) and legacy_alter_table ON (keeps the
+    /// RENAME from repointing other tables' REFERENCES at "decisions_rebuild").
+    /// Both must be set OUTSIDE the transaction.
+    void Backend::Impl::migrate_0_16_to_0_17() {
+        Diskerror::Logger::info("Migrating DB 0.16 -> 0.17 (structured decisions)...");
+
+        const bool fk_was_on = pragma_bool("foreign_keys");
+        exec("PRAGMA foreign_keys = OFF");
+        exec("PRAGMA legacy_alter_table = ON");
+
+        try {
+            Stmt(db, "BEGIN").exec();
+
+            // decisions_view SELECTs decisions' columns; rebuild_table_column_order
+            // requires dependent views dropped. create_views() recreates it.
+            exec("DROP VIEW IF EXISTS decisions_view");
+
+            // Counts ARE carried over (unlike 0.16): they are valid, and
+            // decisions_terms rows still point at the same decision_ids, so no
+            // reindex is needed. New columns start NULL.
+            rebuild_table_column_order("decisions", R"(
+                CREATE TABLE decisions_rebuild (
+                    decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text        TEXT NOT NULL,
+                    status      TEXT NOT NULL,
+                    tags        TEXT NOT NULL DEFAULT '',
+                    trigger     TEXT,
+                    rationale   TEXT,
+                    scope       TEXT,
+                    supersedes  INTEGER REFERENCES decisions(decision_id),
+                    source_session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
+                    created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                    unigram_count  INTEGER NOT NULL DEFAULT 0,
+                    bigram_count   INTEGER NOT NULL DEFAULT 0,
+                    embedding_version INTEGER,
+                    embedding   BLOB
+                ))",
+                "decision_id, text, status, tags, created_at, unigram_count, "
+                "bigram_count, embedding_version, embedding");
+
+            // Category words that leaked into status (old ragger_store callers
+            // passed category as status). Keep the word -- append it to tags --
+            // and set status to 'current'. Nothing is discarded.
+            exec(R"(
+                UPDATE decisions
+                SET tags = CASE WHEN tags = '' THEN status ELSE tags || ',' || status END,
+                    status = 'current'
+                WHERE status NOT IN ('current','provisional','pending','superseded',
+                                     'retired','roadmap','deprecated')
+            )");
+            if (int n = sqlite3_changes(db); n > 0)
+                Diskerror::Logger::info(std::format(
+                    "  decisions: moved {} non-status value(s) from status into tags", n));
+
+            set_db_version("0.17");
+
+            {
+                Stmt s(db, "PRAGMA foreign_key_check(decisions)");
+                if (s.step())
+                    throw std::runtime_error(
+                        "0.16 -> 0.17 migration: foreign_key_check(decisions) "
+                        "failed; rolling back");
+            }
+
+            Stmt(db, "COMMIT").exec();
+            exec("PRAGMA legacy_alter_table = OFF");
+            if (fk_was_on) exec("PRAGMA foreign_keys = ON");
+            Diskerror::Logger::info("DB migration 0.16 -> 0.17 complete.");
+        } catch (...) {
+            try { Stmt(db, "ROLLBACK").exec(); } catch (...) {}
             try {
                 exec("PRAGMA legacy_alter_table = OFF");
                 if (fk_was_on) exec("PRAGMA foreign_keys = ON");

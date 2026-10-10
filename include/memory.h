@@ -73,6 +73,10 @@ public:
                        const std::string& source_timestamp = "",
                        bool defer_embedding = false);
 
+    /// Store a structured decision (agent API Phase 1). Throws
+    /// std::invalid_argument on validation failure.
+    StructuredDecisionResult store_structured_decision(const DecisionInput& in);
+
     /// Per-row embedding write-back for the remaining context tables.
     bool update_decision_embedding(int decision_id, const std::vector<float>& emb);
     bool update_summary_embedding(int summary_id, const std::vector<float>& emb);

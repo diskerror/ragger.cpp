@@ -211,6 +211,10 @@ int RaggerMemory::store_decision(const std::string& text,
     return backend_->store_decision(text, status, tags, source_timestamp, defer_embedding);
 }
 
+StructuredDecisionResult RaggerMemory::store_structured_decision(const DecisionInput& in) {
+    return backend_->store_structured_decision(in);
+}
+
 bool RaggerMemory::update_decision_embedding(int decision_id,
                                              const std::vector<float>& emb) {
     return backend_->update_decision_embedding(decision_id, emb);

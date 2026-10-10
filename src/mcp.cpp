@@ -97,6 +97,40 @@ static nlohmann::json tools_list() {
             }}
         },
         {
+            {"name", "memory_decision"},
+            {"description",
+             "Record a standing decision: a ruling plus the situation it applies to. "
+             "`trigger` is required and is phrased the way a FUTURE question would be "
+             "asked (\"Use when choosing a full-text index strategy\"), because that is "
+             "what search matches against. To replace an earlier decision, pass its id "
+             "in `supersedes`; the old row is kept and marked superseded."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"text",       {{"type", "string"},
+                                    {"description", "The ruling itself, imperative."}}},
+                    {"trigger",    {{"type", "string"},
+                                    {"description", "When this applies, in the vocabulary of a future query."}}},
+                    {"rationale",  {{"type", "string"},
+                                    {"description", "Why; alternatives considered and rejected."}}},
+                    {"scope",      {{"type", "string"},
+                                    {"description", "What this does NOT apply to."}}},
+                    {"tags",       {{"type", "array"}, {"items", {{"type", "string"}}},
+                                    {"description", "Optional tags."}}},
+                    {"status",     {{"type", "string"},
+                                    {"enum", nlohmann::json::array({"current", "provisional", "pending"})},
+                                    {"description", "Default current. provisional = agreed, not yet proven."}}},
+                    {"supersedes", {{"type", "integer"},
+                                    {"description", "decision_id this replaces."}}},
+                    {"session",    {{"type", "string"},
+                                    {"description", "Current session GUID, for provenance."}}},
+                    {"evidence",   {{"type", "array"}, {"items", {{"type", "integer"}}},
+                                    {"description", "turn_summary ids this decision rests on."}}}
+                }},
+                {"required", nlohmann::json::array({"text", "trigger"})}
+            }}
+        },
+        {
             {"name", "search"},
             {"description", "Search stored memories by semantic similarity."},
             {"inputSchema", {
@@ -229,6 +263,31 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         const auto metadata = arguments.value("metadata", nlohmann::json::object());
         const auto id = memory.store(text, metadata);
         return text_result(nlohmann::json({{"id", id}, {"status", "stored"}}).dump());
+
+    } else if (tool_name == "memory_decision") {
+        DecisionInput in;
+        in.text         = arguments.value("text", "");
+        in.trigger      = arguments.value("trigger", "");
+        in.rationale    = arguments.value("rationale", "");
+        in.scope        = arguments.value("scope", "");
+        in.status       = arguments.value("status", "current");
+        in.session_guid = arguments.value("session", "");
+        for (const auto& t : arguments.value("tags", std::vector<std::string>{})) {
+            if (!in.tags.empty()) in.tags += ',';
+            in.tags += t;
+        }
+        if (arguments.contains("supersedes") && !arguments["supersedes"].is_null())
+            in.supersedes = arguments["supersedes"].get<int>();
+        in.evidence = arguments.value("evidence", std::vector<int>{});
+        try {
+            const auto r = memory.store_structured_decision(in);
+            return text_result(nlohmann::json({
+                {"id", r.id}, {"status", "stored"},
+                {"superseded", r.superseded ? nlohmann::json(*r.superseded)
+                                            : nlohmann::json(nullptr)}}).dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
 
     } else if (tool_name == "search") {
         const auto query = arguments.value("query", "");

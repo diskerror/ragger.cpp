@@ -15,6 +15,7 @@ int main() {
         "CREATE TABLE decisions ("
         "  decision_id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  text TEXT,"
+        "  trigger TEXT,"   /* db 0.17: TextIndex reads trigger + text */
         "  unigram_count INTEGER NOT NULL DEFAULT 0,"
         "  bigram_count  INTEGER NOT NULL DEFAULT 0);";
     CHECK(sqlite3_exec(db, ddl, nullptr, nullptr, nullptr) == SQLITE_OK);

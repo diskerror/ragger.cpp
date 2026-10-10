@@ -68,6 +68,8 @@ public:
                        const std::string& source_timestamp = "",
                        bool defer_embedding = false) override;
 
+    StructuredDecisionResult store_structured_decision(const DecisionInput& in) override;
+
     /// Write back a single row's embedding for any embedded context table.
     bool update_decision_embedding(int decision_id,
                                    const std::vector<float>& emb) override;

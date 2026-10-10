@@ -291,6 +291,7 @@ namespace fs = std::filesystem;
         )");
         view("decisions_view", R"(
             SELECT decision_id, text, status, tags,
+                   trigger, rationale, scope, supersedes, source_session_id,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
                    unigram_count, bigram_count,
                    embedding_version,

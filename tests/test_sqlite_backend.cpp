@@ -18,6 +18,8 @@
 #include <thread>
 #include <chrono>
 #include <ctime>
+#include <stdexcept>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -1510,6 +1512,317 @@ void test_turn_summary_search_metadata(ragger::Embedder& emb) {
 // -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
+// =======================================================================
+// Agent API Phase 1 (db 0.17): structured decisions
+// =======================================================================
+
+// Raw-sqlite helpers for Phase 1 tests. Named for what they do (never
+// "run"/"exec" alone) so they cannot collide with anything else here.
+static sqlite3* p1_open_raw() {
+    sqlite3* raw = nullptr;
+    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    CHECK(sqlite3_exec(raw, "PRAGMA foreign_keys = ON", nullptr, nullptr, nullptr) == SQLITE_OK);
+    return raw;
+}
+static long long p1_scalar_int(sqlite3* raw, const std::string& sql) {
+    sqlite3_stmt* st = nullptr;
+    CHECK(sqlite3_prepare_v2(raw, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
+    long long v = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+    return v;
+}
+static std::string p1_scalar_text(sqlite3* raw, const std::string& sql) {
+    sqlite3_stmt* st = nullptr;
+    CHECK(sqlite3_prepare_v2(raw, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
+    const unsigned char* t = sqlite3_column_text(st, 0);
+    std::string v = t ? reinterpret_cast<const char*>(t) : "<NULL>";
+    sqlite3_finalize(st);
+    return v;
+}
+// Store a turn and its summary; return the new turn_summary_id.
+static int p1_make_turn_summary(ragger::sqlite::Backend& db, const std::string& tag) {
+    int t = db.store_turn("Question about " + tag, "Answer about " + tag, "test-model");
+    CHECK(t > 0);
+    CHECK(db.finalize_turn_summary(t, "Summary about " + tag, "summarizer-model"));
+    sqlite3* raw = p1_open_raw();
+    int id = static_cast<int>(p1_scalar_int(raw, std::format(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = {}", t)));
+    sqlite3_close(raw);
+    return id;
+}
+static bool p1_throws_invalid(ragger::sqlite::Backend& db, const ragger::DecisionInput& in) {
+    try { db.store_structured_decision(in); }
+    catch (const std::invalid_argument&) { return true; }
+    return false;
+}
+
+void test_structured_decision_basic(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    ragger::DecisionInput in;
+    in.text      = "  Use a custom inverted index, not FTS5.  ";
+    in.trigger   = "Use when choosing a full-text index strategy";
+    in.rationale = "FTS5 MATCH is AND-only without query rewriting.";
+    in.tags      = "search,sqlite";
+    auto r = db.store_structured_decision(in);
+    CHECK(r.id > 0);
+    CHECK(!r.superseded.has_value());
+
+    sqlite3* raw = p1_open_raw();
+    const std::string w = std::format(" FROM decisions WHERE decision_id = {}", r.id);
+    CHECK(p1_scalar_text(raw, "SELECT text" + w) == "Use a custom inverted index, not FTS5.");
+    CHECK(p1_scalar_text(raw, "SELECT trigger" + w) == "Use when choosing a full-text index strategy");
+    CHECK(p1_scalar_text(raw, "SELECT rationale" + w) == "FTS5 MATCH is AND-only without query rewriting.");
+    CHECK(p1_scalar_text(raw, "SELECT scope" + w) == "<NULL>");          // "" -> NULL
+    CHECK(p1_scalar_text(raw, "SELECT status" + w) == "current");
+    CHECK(p1_scalar_text(raw, "SELECT tags" + w) == "search,sqlite");
+    CHECK(p1_scalar_int(raw, "SELECT embedding IS NOT NULL" + w) == 1);
+    CHECK(p1_scalar_int(raw, "SELECT unigram_count > 0" + w) == 1);
+    sqlite3_close(raw);
+
+    // Search surfaces the trigger in metadata.
+    auto resp = db.search("full-text index strategy", 5, 0.0f);
+    bool found = false;
+    for (const auto& h : resp.results)
+        if (h.metadata.value("source", "") == "decision" &&
+            h.metadata.value("trigger", "") == in.trigger) found = true;
+    CHECK(found);
+
+    db.close();
+    cleanup();
+}
+
+// The C++ embed/index string (trigger + "\n" + text) MUST equal
+// kDecisionEmbedTextSQL, or a housekeeping rebuild silently changes the
+// vector and the term counts. Prove it: store, rebuild both, compare.
+void test_structured_decision_rebuild_is_stable(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    ragger::DecisionInput in;
+    in.text    = "Keep 'current' as the active decision status.";
+    in.trigger = "Use when choosing decision status values";
+    int id = db.store_structured_decision(in).id;
+
+    sqlite3* raw = p1_open_raw();
+    const std::string w = std::format(" FROM decisions WHERE decision_id = {}", id);
+    const std::string blob_before = p1_scalar_text(raw, "SELECT hex(embedding)" + w);
+    const long long   uni_before  = p1_scalar_int(raw, "SELECT unigram_count" + w);
+    const long long   bi_before   = p1_scalar_int(raw, "SELECT bigram_count" + w);
+    sqlite3_close(raw);
+
+    db.rebuild_embeddings(emb, false, "decisions");
+    db.reindex_table("decisions", false);
+
+    raw = p1_open_raw();
+    CHECK(p1_scalar_text(raw, "SELECT hex(embedding)" + w) == blob_before);
+    CHECK(p1_scalar_int(raw, "SELECT unigram_count" + w) == uni_before);
+    CHECK(p1_scalar_int(raw, "SELECT bigram_count" + w) == bi_before);
+    sqlite3_close(raw);
+    db.close();
+    cleanup();
+}
+
+void test_structured_decision_validation(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    ragger::DecisionInput ok;
+    ok.text = "Valid ruling.";
+    ok.trigger = "Use when testing validation";
+
+    auto bad = ok; bad.text = "   ";
+    CHECK(p1_throws_invalid(db, bad));
+    bad = ok; bad.trigger = "";
+    CHECK(p1_throws_invalid(db, bad));
+    bad = ok; bad.status = "superseded";
+    CHECK(p1_throws_invalid(db, bad));
+    bad = ok; bad.status = "fact";
+    CHECK(p1_throws_invalid(db, bad));
+    bad = ok; bad.supersedes = 9999;
+    CHECK(p1_throws_invalid(db, bad));
+    bad = ok; bad.evidence = {9999};
+    CHECK(p1_throws_invalid(db, bad));
+
+    sqlite3* raw = p1_open_raw();
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM decisions") == 0);   // nothing written
+    sqlite3_close(raw);
+
+    // provisional and pending are valid starting statuses.
+    auto p = ok; p.status = "provisional";
+    CHECK(db.store_structured_decision(p).id > 0);
+    p.status = "pending";
+    CHECK(db.store_structured_decision(p).id > 0);
+    db.close();
+    cleanup();
+}
+
+void test_structured_decision_supersedes(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    ragger::DecisionInput a;
+    a.text = "Embed decisions as text only.";
+    a.trigger = "Use when choosing what to embed for a decision";
+    int a_id = db.store_structured_decision(a).id;
+
+    ragger::DecisionInput b;
+    b.text = "Embed decisions as trigger then text.";
+    b.trigger = a.trigger;
+    b.supersedes = a_id;
+    auto rb = db.store_structured_decision(b);
+    CHECK(rb.superseded.has_value() && *rb.superseded == a_id);
+
+    sqlite3* raw = p1_open_raw();
+    CHECK(p1_scalar_text(raw, std::format(
+        "SELECT status FROM decisions WHERE decision_id = {}", a_id)) == "superseded");
+    CHECK(p1_scalar_int(raw, std::format(
+        "SELECT supersedes FROM decisions WHERE decision_id = {}", rb.id)) == a_id);
+    // Old row is kept, text untouched (honest history).
+    CHECK(p1_scalar_text(raw, std::format(
+        "SELECT text FROM decisions WHERE decision_id = {}", a_id)) == "Embed decisions as text only.");
+    sqlite3_close(raw);
+
+    // Search no longer surfaces the superseded row; it does surface the new one.
+    auto resp = db.search("Embed decisions as text only", 10, 0.0f);
+    bool saw_old = false, saw_new = false;
+    for (const auto& h : resp.results) {
+        if (h.metadata.value("source", "") != "decision") continue;
+        if (h.id == a_id)  saw_old = true;
+        if (h.id == rb.id) saw_new = true;
+    }
+    CHECK(!saw_old);
+    CHECK(saw_new);
+
+    // A superseded row can't be superseded again.
+    ragger::DecisionInput c = b;
+    c.supersedes = a_id;
+    CHECK(p1_throws_invalid(db, c));
+    db.close();
+    cleanup();
+}
+
+void test_structured_decision_evidence(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    int ts1 = p1_make_turn_summary(db, "evidence one");
+    int ts2 = p1_make_turn_summary(db, "evidence two");
+
+    ragger::DecisionInput in;
+    in.text = "Link decisions to turn summaries.";
+    in.trigger = "Use when recording why a decision was made";
+    in.evidence = {ts1, ts2, ts1};   // duplicate is ignored
+    int id = db.store_structured_decision(in).id;
+
+    sqlite3* raw = p1_open_raw();
+    CHECK(p1_scalar_int(raw, std::format(
+        "SELECT COUNT(*) FROM decision_evidence WHERE decision_id = {}", id)) == 2);
+    // RESTRICT: a turn summary that is evidence cannot be deleted.
+    int rc = sqlite3_exec(raw, std::format(
+        "DELETE FROM turn_summaries WHERE turn_summary_id = {}", ts1).c_str(),
+        nullptr, nullptr, nullptr);
+    CHECK(rc != SQLITE_OK);
+    // CASCADE: deleting the decision removes its links.
+    CHECK(sqlite3_exec(raw, std::format(
+        "DELETE FROM decisions WHERE decision_id = {}", id).c_str(),
+        nullptr, nullptr, nullptr) == SQLITE_OK);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM decision_evidence") == 0);
+    sqlite3_close(raw);
+    db.close();
+    cleanup();
+}
+
+void test_orphan_turn_summary_protected(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    int ts = p1_make_turn_summary(db, "orphan");
+    sqlite3* raw = p1_open_raw();
+    // Cull the turn: ON DELETE SET NULL leaves the summary orphaned.
+    CHECK(sqlite3_exec(raw, std::format(
+        "DELETE FROM turns WHERE turn_id = (SELECT turn_id FROM turn_summaries "
+        "WHERE turn_summary_id = {})", ts).c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+    CHECK(p1_scalar_int(raw, std::format(
+        "SELECT turn_id IS NULL FROM turn_summaries WHERE turn_summary_id = {}", ts)) == 1);
+
+    char* err = nullptr;
+    int rc = sqlite3_exec(raw, std::format(
+        "DELETE FROM turn_summaries WHERE turn_summary_id = {}", ts).c_str(),
+        nullptr, nullptr, &err);
+    CHECK(rc != SQLITE_OK);
+    CHECK(err && std::string(err).find("sole evidence") != std::string::npos);
+    sqlite3_free(err);
+
+    // An EMPTY orphan marker row stays deletable.
+    CHECK(sqlite3_exec(raw,
+        "INSERT INTO turn_summaries (text, turn_id, turn_datetime) VALUES ('', NULL, 0)",
+        nullptr, nullptr, nullptr) == SQLITE_OK);
+    CHECK(sqlite3_exec(raw,
+        "DELETE FROM turn_summaries WHERE text = '' AND turn_id IS NULL",
+        nullptr, nullptr, nullptr) == SQLITE_OK);
+    sqlite3_close(raw);
+    db.close();
+    cleanup();
+}
+
+// A hand-built 0.16-shaped DB must migrate to 0.17: new columns in canonical
+// order, stray status words moved into tags, evidence table + trigger present,
+// existing decisions_terms rows intact.
+void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
+    cleanup();
+    {
+        sqlite3* raw = nullptr;
+        CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+        const char* ddl = R"(
+            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO settings VALUES ('db_version', '0.16');
+            CREATE TABLE turns (
+                turn_id INTEGER PRIMARY KEY AUTOINCREMENT, user_text TEXT NOT NULL,
+                assistant_text TEXT, model_id INTEGER, session_id INTEGER,
+                created_at INTEGER NOT NULL,
+                unigram_count INTEGER NOT NULL DEFAULT 0,
+                bigram_count INTEGER NOT NULL DEFAULT 0,
+                embedding_version INTEGER, embedding BLOB);
+            CREATE TABLE decisions (
+                decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                text TEXT NOT NULL, status TEXT NOT NULL,
+                tags TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                unigram_count INTEGER NOT NULL DEFAULT 0,
+                bigram_count INTEGER NOT NULL DEFAULT 0,
+                embedding_version INTEGER, embedding BLOB);
+            INSERT INTO decisions (text, status, tags, unigram_count) VALUES
+                ('first ruling', 'current', '', 2),
+                ('a fact',       'fact',    '', 2),
+                ('a lesson',     'lesson',  'x', 2);
+        )";
+        CHECK(sqlite3_exec(raw, ddl, nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(raw);
+    }
+    {
+        ragger::sqlite::Backend db(emb, TEMP_DB);   // runs the migration
+        db.close();
+    }
+    sqlite3* raw = p1_open_raw();
+    CHECK(p1_scalar_text(raw, "SELECT value FROM settings WHERE key='db_version'") == "0.17");
+    // Canonical order: trigger is column index 4, created_at index 9.
+    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('decisions') WHERE cid = 4") == "trigger");
+    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('decisions') WHERE cid = 9") == "created_at");
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM decisions") == 3);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM decisions WHERE status != 'current'") == 0);
+    CHECK(p1_scalar_text(raw, "SELECT tags FROM decisions WHERE text = 'a fact'") == "fact");
+    CHECK(p1_scalar_text(raw, "SELECT tags FROM decisions WHERE text = 'a lesson'") == "x,lesson");
+    CHECK(p1_scalar_int(raw, "SELECT unigram_count FROM decisions WHERE text = 'first ruling'") == 2);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'decision_evidence'") == 1);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'protect_orphan_turn_summaries'") == 1);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_foreign_key_check") == 0);
+    sqlite3_close(raw);
+
+    // The pre-migration backup archive lands next to the DB; remove it.
+    for (const auto& e : fs::directory_iterator(fs::path(TEMP_DB).parent_path()))
+        if (e.path().filename().string().starts_with("ragger_test_backend_BACKUP_"))
+            fs::remove(e.path());
+    cleanup();
+}
+
 int main() {
     // Need config for model dir
     ragger::init_config();
@@ -1560,6 +1873,13 @@ int main() {
     test_episode_rollup_no_dup(emb);
     test_session_close_no_lookback_before_existing_summary(emb);
     test_path_normalization(emb);
+    test_structured_decision_basic(emb);
+    test_structured_decision_rebuild_is_stable(emb);
+    test_structured_decision_validation(emb);
+    test_structured_decision_supersedes(emb);
+    test_structured_decision_evidence(emb);
+    test_orphan_turn_summary_protected(emb);
+    test_migrate_0_16_to_0_17(emb);
 
     std::println("test_sqlite_backend: all passed");
     return 0;
