@@ -290,7 +290,9 @@ DECISION_SCHEMA = {
         "matches on it, so phrase it in the asker's words, not the conclusion's. "
         "To replace an earlier decision, pass its id in `supersedes`; the old one "
         "is kept and marked superseded, never overwritten. Prefer this over "
-        "ragger_store(category='decision') for anything with a rationale."
+        "ragger_store(category='decision') for anything with a rationale. "
+        "The result may carry `possible_supersedes`: other active decisions this "
+        "one may be replacing (hint only — nothing was changed; review them)."
     ),
     "parameters": {
         "type": "object",
@@ -309,6 +311,69 @@ DECISION_SCHEMA = {
                          "description": "turn_summary ids (from search results) this rests on."},
         },
         "required": ["text", "trigger"],
+    },
+}
+
+
+MEMORY_SEARCH_SCHEMA = {
+    "name": "memory_search",
+    "description": (
+        "Layered search across all memory corpora (turns, turn summaries, "
+        "session/episode summaries, documents, decisions). Returns typed handles "
+        "+ snippets only -- call memory_get with chosen handles for full text. "
+        "`layers` narrows by kind; omit for all. Pass session='current' to search "
+        "only this conversation, or exclude_session='current' to skip it. "
+        "status: 'active' (default) hides superseded/retired decisions; 'any' "
+        "includes them. since/until: 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or "
+        "relative ('30d', '12h')."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "What to search for."},
+            "layers": {"type": "array", "items": {"type": "string"},
+                       "description": "Subset of: turn, turn_summary, summary, document, decision."},
+            "since": {"type": "string", "description": "Only results at/after this time."},
+            "until": {"type": "string", "description": "Only results at/before this time."},
+            "status": {"type": "string",
+                       "description": "Decisions only: active (default) | any | one exact status."},
+            "session": {"type": "string",
+                        "description": "Only this session GUID ('current' = this session)."},
+            "exclude_session": {"type": "string",
+                                "description": "Drop this session GUID ('current' = this session)."},
+            "limit": {"type": "integer", "description": "Max results (default 10, max 50)."},
+            "max_tokens": {"type": "integer",
+                           "description": "Token budget (~chars/4) over snippets; 0 = none."},
+        },
+        "required": ["query"],
+    },
+}
+
+
+MEMORY_GET_SCHEMA = {
+    "name": "memory_get",
+    "description": (
+        "Read full memory rows by typed handles (from memory_search), or page "
+        "through one session's conversation history. Exactly one mode per call: "
+        "ids, or session (+optional after_turn/before_turn/limit). expand: none | "
+        "context (neighbouring turns/chunks) | sources (a decision's evidence, a "
+        "summary's constituent turn summaries) | chain (a decision's full supersede "
+        "lineage, oldest to newest). Pass session='current' for this conversation."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "ids": {"type": "array", "items": {"type": "string"},
+                    "description": "Typed handles '<layer>:<rowid>' (mode 1)."},
+            "expand": {"type": "string", "description": "none | context | sources | chain."},
+            "session": {"type": "string",
+                        "description": "Session GUID for history paging (mode 2; 'current' = this session)."},
+            "after_turn": {"type": "integer",
+                           "description": "History: turns with turn_id > this (0 = from start)."},
+            "before_turn": {"type": "integer",
+                            "description": "History: turns with turn_id < this (0 = to end)."},
+            "limit": {"type": "integer", "description": "History page size (default 20, max 100)."},
+        },
     },
 }
 
@@ -355,6 +420,24 @@ class RaggerMemoryProvider(MemoryProvider):
 
     def _record_ok(self) -> None:
         self._failures = 0
+
+    def _agent_tool_result(self, got):
+        """Shared result handling for the Phase 2 agent tools (memory_search /
+        memory_get): _post_status returned None (daemon down) or a
+        (status, body) pair. A 4xx body is the server's ERROR message."""
+        if got is None:
+            self._record_fail()
+            return json.dumps({
+                "error": "Ragger request failed. Is the daemon running? Try: ragger start"
+            })
+        self._record_ok()
+        status, body = got
+        if status >= 400:
+            return json.dumps({"error": body.strip()})
+        try:
+            return json.dumps(json.loads(body))
+        except ValueError:
+            return json.dumps({"error": "Ragger returned a non-JSON reply: " + body[:200]})
 
     def _record_fail(self) -> None:
         self._failures += 1
@@ -656,7 +739,8 @@ class RaggerMemoryProvider(MemoryProvider):
             self._record_ok()
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [SEARCH_SCHEMA, STORE_SCHEMA, DECISION_SCHEMA]
+        return [SEARCH_SCHEMA, STORE_SCHEMA, DECISION_SCHEMA,
+                MEMORY_SEARCH_SCHEMA, MEMORY_GET_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._breaker_open():
@@ -735,6 +819,47 @@ class RaggerMemoryProvider(MemoryProvider):
                 return json.dumps(json.loads(body))
             except ValueError:
                 return json.dumps({"error": "Ragger returned a non-JSON reply: " + body[:200]})
+
+        elif tool_name == "memory_search":
+            query = str(args.get("query", "")).strip()
+            if not query:
+                return json.dumps({"error": "Missing required parameter: query"})
+            payload: dict = {"query": query}
+            for key in ("since", "until", "status"):
+                if args.get(key):
+                    payload[key] = str(args[key])
+            if args.get("layers"):
+                payload["layers"] = [str(x) for x in args["layers"]]
+            # 'current' resolves to this Hermes session before posting.
+            if args.get("session"):
+                s = str(args["session"])
+                payload["session"] = self._session_id if s == "current" else s
+            if args.get("exclude_session"):
+                s = str(args["exclude_session"])
+                payload["exclude_session"] = self._session_id if s == "current" else s
+            if args.get("limit") is not None:
+                payload["limit"] = int(args["limit"])
+            if args.get("max_tokens") is not None:
+                payload["max_tokens"] = int(args["max_tokens"])
+            got = self._post_status("/memory/search", payload)
+            return self._agent_tool_result(got)
+
+        elif tool_name == "memory_get":
+            payload: dict = {}
+            if args.get("ids"):
+                payload["ids"] = [str(x) for x in args["ids"]]
+            if args.get("expand"):
+                payload["expand"] = str(args["expand"])
+            if args.get("session"):
+                s = str(args["session"])
+                payload["session"] = self._session_id if s == "current" else s
+            for key in ("after_turn", "before_turn", "limit"):
+                if args.get(key) is not None:
+                    payload[key] = int(args[key])
+            if not payload.get("ids") and not payload.get("session"):
+                return json.dumps({"error": "memory_get needs either ids or session"})
+            got = self._post_status("/memory/get", payload)
+            return self._agent_tool_result(got)
 
         return json.dumps({"error": f"Unknown tool: {tool_name}"})
 

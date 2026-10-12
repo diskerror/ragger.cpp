@@ -70,6 +70,10 @@ public:
 
     StructuredDecisionResult store_structured_decision(const DecisionInput& in) override;
 
+    /// Agent API Phase 2 reads (see StorageBackend docs).
+    std::vector<AgentHit> agent_search(const AgentSearchQuery& q) override;
+    json agent_get(const AgentGetQuery& q) override;
+
     /// Write back a single row's embedding for any embedded context table.
     bool update_decision_embedding(int decision_id,
                                    const std::vector<float>& emb) override;

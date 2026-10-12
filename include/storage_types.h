@@ -34,6 +34,10 @@ struct DecisionInput {
 struct StructuredDecisionResult {
     int id = 0;                       ///< new decision_id
     std::optional<int> superseded;    ///< decision_id flipped to 'superseded'
+    /// Flag-only hint (Phase 2 step 5): up to 3 OTHER active decisions whose
+    /// embedding cosine with the new row is >= decision_supersede_threshold.
+    /// Never a merge — the caller decides what to do with them.
+    std::vector<std::pair<int,float>> possible_supersedes;
 };
 
 struct SearchResult {
@@ -79,6 +83,40 @@ struct DocumentChunk {
 struct SearchResponse {
     std::vector<SearchResult> results;
     json                      timing;
+};
+
+/// memory_search request (agent API Phase 2). Empty vectors/strings = no filter.
+struct AgentSearchQuery {
+    std::string query;
+    std::vector<std::string> layers;   ///< subset of turn|turn_summary|summary|document|decision; empty = all
+    std::string since;                 ///< "YYYY-MM-DD", "YYYY-MM-DD HH:MM:SS", or relative "30d"/"12h"; "" = none
+    std::string until;                 ///< same formats; "" = none
+    std::string status = "active";     ///< decisions only: "active" (current+provisional) | "any" | one exact status
+    std::string session;               ///< only this session GUID
+    std::string exclude_session;       ///< drop this session GUID
+    int limit = 10;
+    int max_tokens = 0;                ///< 0 = no budget; else stop adding results past ~max_tokens (chars/4)
+};
+
+struct AgentHit {
+    std::string id;          ///< typed handle "<layer>:<rowid>"
+    std::string layer;
+    float score = 0;
+    std::string matched_by;  ///< "vector" | "lexical" | "both"
+    std::string created;     ///< local "YYYY-MM-DD HH:MM:SS"
+    std::string snippet;     ///< first <=240 chars of text, cut at a word boundary, "…" appended if cut
+    json extra;              ///< layer-specific: decision → {status, trigger}; summary → {level}; turn_summary → {turn_id, session}
+};
+
+/// memory_get request (agent API Phase 2). Exactly one mode per call:
+/// ids (mode 1) XOR session (mode 2) — both or neither is invalid_argument.
+struct AgentGetQuery {
+    std::vector<std::string> ids;   ///< typed handles; mode 1
+    std::string expand = "none";    ///< none | context | sources | chain
+    std::string session;            ///< mode 2: history range for this session GUID
+    int after_turn = 0;             ///< mode 2: turns with turn_id > after_turn (0 = from start)
+    int before_turn = 0;            ///< mode 2: turns with turn_id < before_turn (0 = to end)
+    int limit = 20;                 ///< mode 2 page size, clamped [1,100]
 };
 
 /// User information (extracted from sqlite::Backend for modularity)

@@ -729,6 +729,52 @@ static std::string tags_from_metadata(const json& metadata) {
             throw;
         }
         invalidate_dec_cache();
+
+        // ---- possible_supersedes hint (Phase 2 step 5) -------------------
+        // Flag only: up to 3 OTHER active decisions whose embedding cosine
+        // with the new row reaches decision_supersede_threshold. The row the
+        // call already superseded is skipped (it's in out.superseded). NO row
+        // is ever changed here — the caller decides what to do with the hint.
+        // Purely vector-based on purpose: a near-duplicate ruling is exactly
+        // what this looks like in embedding space, and lexical overlap is
+        // already guaranteed by the shared trigger vocabulary.
+        if (!emb.empty()) {
+            Eigen::Map<Eigen::VectorXf> v(emb.data(), static_cast<int>(emb.size()));
+            float vnorm = v.norm();
+            if (vnorm > 1e-12f) {
+                const float threshold = config().decision_supersede_threshold;
+                const int expected_dims = config().embedding_dimensions;
+                std::vector<std::pair<int,float>> scored;
+                bool blob_warned = false;
+                // Exclude self; the already-superseded row is excluded by the
+                // status filter (it is 'superseded' now), but exclude it by id
+                // too so a failed flip can never sneak it back in.
+                std::string sql =
+                    "SELECT decision_id, embedding FROM decisions "
+                    "WHERE status IN ('current','provisional') "
+                    "  AND decision_id != ? ";
+                if (out.superseded) sql += "  AND decision_id != ? ";
+                sql += "  AND embedding IS NOT NULL";
+                Stmt s(db, sql);
+                s.bind(1, out.id);
+                if (out.superseded) s.bind(2, *out.superseded);
+                while (s.step()) {
+                    std::vector<float> other = decode_embedding_blob(
+                        s.column_blob(1), s.column_bytes(1), expected_dims,
+                        "decisions", s.column_int(0), blob_warned);
+                    if (static_cast<int>(other.size()) != expected_dims) continue;
+                    Eigen::Map<Eigen::VectorXf> o(other.data(), expected_dims);
+                    float onorm = o.norm();
+                    if (onorm <= 1e-12f) continue;   // zero/undecodable vector
+                    float cos = (v.dot(o)) / (vnorm * onorm);
+                    if (cos >= threshold) scored.emplace_back(s.column_int(0), cos);
+                }
+                std::sort(scored.begin(), scored.end(),
+                          [](const auto& a, const auto& b) { return a.second > b.second; });
+                if (scored.size() > 3) scored.resize(3);
+                out.possible_supersedes = std::move(scored);
+            }
+        }
         return out;
     }
 

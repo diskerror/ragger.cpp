@@ -553,7 +553,7 @@ constexpr const char* ERR_PERMISSION_DENIED_SIGNAL= "Permission denied: cannot s
 // Sections drive the dashboard's left-hand tabs (server, embedding,
 // search, summarizer, logging, housekeeping, import).
 // =====================================================================
-inline constexpr std::array<ConfigMeta, 61> kConfigSchema = {{
+inline constexpr std::array<ConfigMeta, 62> kConfigSchema = {{
     // ---- server ----
     {"socket_enable", "server", "Socket Enable", CfgType::Boolean, CfgEdit::RestartRequired,
      "true", "",
@@ -653,6 +653,9 @@ inline constexpr std::array<ConfigMeta, 61> kConfigSchema = {{
     {"default_min_score", "search", "Default Min Score", CfgType::Float, CfgEdit::Live,
      "0.4", "",
      "Minimum similarity score for results (0.0 - 1.0)."},
+    {"decision_supersede_threshold", "search", "Supersede Hint Threshold", CfgType::Float, CfgEdit::Live,
+     "0.8", "",
+     "When storing a decision, other active decisions whose embedding similarity to it reaches this value (0.0 - 1.0) are returned as possible_supersedes hints. Flag only — nothing is merged or changed."},
     {"bm25_enabled", "search", "BM25 Enabled", CfgType::Boolean, CfgEdit::Live,
      "true", "",
      "Enable BM25 keyword matching alongside vector search."},

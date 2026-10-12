@@ -150,6 +150,66 @@ static nlohmann::json tools_list() {
             }}
         },
         {
+            {"name", "memory_search"},
+            {"description",
+             "Layered search across all memory corpora. Returns handles + snippets only — "
+             "call memory_get with chosen handles for full text. `layers` narrows by kind "
+             "(turn, turn_summary, summary, document, decision); empty = all. "
+             "status: 'active' (default) hides superseded/retired decisions, 'any' includes them. "
+             "since/until: 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or relative ('30d', '12h'). "
+             "For conversation history use memory_get(session=..., after_turn=...)."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"query",           {{"type", "string"},
+                                          {"description", "The search query."}}},
+                    {"layers",          {{"type", "array"}, {"items", {{"type", "string"}}},
+                                          {"description", "Restrict to these layers."}}},
+                    {"since",           {{"type", "string"},
+                                          {"description", "Only results at/after this time."}}},
+                    {"until",           {{"type", "string"},
+                                          {"description", "Only results at/before this time."}}},
+                    {"status",          {{"type", "string"},
+                                          {"description", "Decisions only: active (default) | any | one exact status."}}},
+                    {"session",         {{"type", "string"},
+                                          {"description", "Only results from this session GUID."}}},
+                    {"exclude_session", {{"type", "string"},
+                                          {"description", "Drop results from this session GUID."}}},
+                    {"limit",           {{"type", "integer"},
+                                          {"description", "Max results (default 10, max 50)."}}},
+                    {"max_tokens",      {{"type", "integer"},
+                                          {"description", "Token budget (~chars/4) over snippets; 0 = none."}}}
+                }},
+                {"required", nlohmann::json::array({"query"})}
+            }}
+        },
+        {
+            {"name", "memory_get"},
+            {"description",
+             "Read full rows by typed handles ('<layer>:<rowid>' from memory_search), or page "
+             "through one session's conversation history. Exactly one mode per call: ids, or "
+             "session (+optional after_turn/before_turn/limit). expand: none | context "
+             "(neighbouring turns/chunks) | sources (evidence / constituent summaries) | chain "
+             "(decision supersede lineage, oldest to newest)."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"ids",         {{"type", "array"}, {"items", {{"type", "string"}}},
+                                      {"description", "Typed handles (mode 1)."}}},
+                    {"expand",      {{"type", "string"},
+                                      {"description", "none | context | sources | chain."}}},
+                    {"session",     {{"type", "string"},
+                                      {"description", "Session GUID for history paging (mode 2)."}}},
+                    {"after_turn",  {{"type", "integer"},
+                                      {"description", "History: turns with turn_id > this (0 = from start)."}}},
+                    {"before_turn", {{"type", "integer"},
+                                      {"description", "History: turns with turn_id < this (0 = to end)."}}},
+                    {"limit",       {{"type", "integer"},
+                                      {"description", "History page size (default 20, max 100)."}}}
+                }}
+            }}
+        },
+        {
             {"name", "get_config"},
             {"description", "Read Ragger's live configuration. Returns every "
                            "setting with its current value and schema metadata "
@@ -281,10 +341,58 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         in.evidence = arguments.value("evidence", std::vector<int>{});
         try {
             const auto r = memory.store_structured_decision(in);
+            nlohmann::json ps = nlohmann::json::array();
+            for (const auto& [pid, score] : r.possible_supersedes)
+                ps.push_back({{"id", pid}, {"score", score}});
             return text_result(nlohmann::json({
                 {"id", r.id}, {"status", "stored"},
                 {"superseded", r.superseded ? nlohmann::json(*r.superseded)
-                                            : nlohmann::json(nullptr)}}).dump());
+                                            : nlohmann::json(nullptr)},
+                {"possible_supersedes", std::move(ps)}}).dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
+
+    } else if (tool_name == "memory_search") {
+        const auto query = arguments.value("query", "");
+        if (query.empty())
+            return error_result(ragger::lang::ERR_MCP_QUERY_REQUIRED);
+        AgentSearchQuery q;
+        q.query           = query;
+        q.since           = arguments.value("since", "");
+        q.until           = arguments.value("until", "");
+        q.status          = arguments.value("status", "active");
+        q.session         = arguments.value("session", "");
+        q.exclude_session = arguments.value("exclude_session", "");
+        q.limit           = arguments.value("limit", 10);
+        q.max_tokens      = arguments.value("max_tokens", 0);
+        if (arguments.contains("layers"))
+            q.layers = arguments["layers"].get<std::vector<std::string>>();
+        try {
+            const auto hits = memory.agent_search(q);
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& h : hits) {
+                arr.push_back({{"id", h.id}, {"layer", h.layer},
+                               {"score", h.score}, {"matched_by", h.matched_by},
+                               {"created", h.created}, {"snippet", h.snippet},
+                               {"extra", h.extra}});
+            }
+            return text_result(nlohmann::json({{"results", std::move(arr)}}).dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
+
+    } else if (tool_name == "memory_get") {
+        AgentGetQuery q;
+        q.expand      = arguments.value("expand", "none");
+        q.session     = arguments.value("session", "");
+        q.after_turn  = arguments.value("after_turn", 0);
+        q.before_turn = arguments.value("before_turn", 0);
+        q.limit       = arguments.value("limit", 20);
+        if (arguments.contains("ids"))
+            q.ids = arguments["ids"].get<std::vector<std::string>>();
+        try {
+            return text_result(memory.agent_get(q).dump());
         } catch (const std::invalid_argument& e) {
             return error_result(e.what());
         }

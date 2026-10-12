@@ -1,0 +1,602 @@
+// Agent API Phase 2 reads: layered search (memory_search) and full-row reads
+// with hierarchy expansion / conversation-history paging (memory_get).
+//
+// Design contract lives in StorageBackend's docs and PHASE2-STEPS.md; this
+// file implements Backend::Impl::agent_search / agent_get only. The hybrid
+// scoring itself is reused untouched (Impl::search); everything here is
+// post-filtering, handle formatting, and row fetches.
+#include "sqlite/backend_impl.h"
+#include "embedder.h"
+#include "config.h"
+#include "util/time.h"
+#include "util/sqlite.h"
+#include "sqlite/text_index.h"
+#include <format>
+#include "nlohmann_json.hpp"
+
+#include <sqlite3.h>
+#include <Eigen/Dense>
+
+#include <algorithm>
+#include <ctime>
+#include <optional>
+#include <regex>
+#include <set>
+#include <stdexcept>
+#include <unordered_set>
+
+namespace ragger::sqlite {
+
+using json = nlohmann::json;
+
+namespace {
+
+// ---- since/until resolution -------------------------------------------
+// Accepted formats (PHASE2-STEPS step 3): "YYYY-MM-DD",
+// "YYYY-MM-DD HH:MM:SS", or relative "<N>d" / "<N>h" (ago). Returns a local
+// "YYYY-MM-DD HH:MM:SS" string so the comparison against the rendered
+// datetime() columns is a plain lexicographic compare (same format, same
+// local timezone). A bare date for `until` expands to end-of-day so the
+// day itself is inclusive. Anything else -> invalid_argument.
+std::string resolve_agent_time_bound(const std::string& s, bool end_of_day) {
+    auto fail = [&s]() -> std::string {
+        throw std::invalid_argument("bad since/until value: '" + s + "'");
+    };
+    static const std::regex re_date(R"(^(\d{4})-(\d{2})-(\d{2})$)");
+    static const std::regex re_dt(R"(^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$)");
+    static const std::regex re_rel(R"(^(\d+)([dh])$)");
+
+    auto valid_date = [](int mo, int d) { return mo >= 1 && mo <= 12 && d >= 1 && d <= 31; };
+    auto valid_time = [](int h, int mi, int se) { return h <= 23 && mi <= 59 && se <= 59; };
+
+    std::smatch m;
+    if (std::regex_match(s, m, re_date)) {
+        if (!valid_date(std::stoi(m[2]), std::stoi(m[3]))) fail();
+        return s + (end_of_day ? " 23:59:59" : " 00:00:00");
+    }
+    if (std::regex_match(s, m, re_dt)) {
+        if (!valid_date(std::stoi(m[2]), std::stoi(m[3]))) fail();
+        if (!valid_time(std::stoi(m[4]), std::stoi(m[5]), std::stoi(m[6]))) fail();
+        return s;
+    }
+    if (std::regex_match(s, m, re_rel)) {
+        long n = std::stol(m[1].str());
+        if (n > 100000000L) fail();   // absurd offset; reject rather than overflow
+        long long secs = (m[2].str() == "d") ? n * 86400LL : n * 3600LL;
+        std::time_t tt = static_cast<std::time_t>(db_epoch() - secs);
+        return db_timestamp(tt);
+    }
+    return fail();
+}
+
+// ---- snippet -----------------------------------------------------------
+// First <=240 BYTES, cut at a whitespace boundary; "…" (3 bytes UTF-8) is
+// appended only when the text was actually cut. When no whitespace exists in
+// the window (one giant token), back off to a UTF-8 lead boundary so a
+// multi-byte character is never split.
+std::string agent_snippet(const std::string& text) {
+    constexpr size_t kMax = 240;
+    if (text.size() <= kMax) return text;
+    size_t cut = kMax;
+    size_t sp = text.find_last_of(" \t\n\r", kMax);
+    if (sp != std::string::npos && sp > 0) {
+        cut = sp;
+    } else {
+        while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80)
+            --cut;
+    }
+    return text.substr(0, cut) + "…";
+}
+
+// ---- typed handle ------------------------------------------------------
+// "<layer>:<rowid>" (API format only, never stored). Strict parse: exactly
+// one colon, known layer, all-digits positive rowid.
+bool parse_agent_handle(const std::string& handle, std::string& layer, int& rowid) {
+    static const std::regex re(R"(^(turn|turn_summary|summary|document|decision):([1-9][0-9]*)$)");
+    std::smatch m;
+    if (!std::regex_match(handle, m, re)) return false;
+    layer = m[1].str();
+    rowid = std::stoi(m[2].str());
+    return true;
+}
+
+} // anonymous namespace
+
+
+// =======================================================================
+// agent_search — one hybrid search over a wide pool, then post-filters:
+// layer, time window, session/exclude_session, decision status. Returns
+// handles + snippets only (full text via agent_get).
+// =======================================================================
+std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
+    // ---- 1. validate ----------------------------------------------------
+    static const std::set<std::string> kKnownLayers = {
+        "turn", "turn_summary", "summary", "document", "decision"};
+    for (const auto& l : q.layers)
+        if (!kKnownLayers.count(l))
+            throw std::invalid_argument("unknown layer: '" + l + "'");
+    const std::string since_b = q.since.empty() ? "" : resolve_agent_time_bound(q.since, false);
+    const std::string until_b = q.until.empty() ? "" : resolve_agent_time_bound(q.until, true);
+    const int limit = std::clamp(q.limit, 1, 50);
+
+    // ---- 2. wide-pool hybrid search --------------------------------------
+    // Degraded (no usable embedder) mirrors RaggerMemory::search's fallback:
+    // text-only scoring across the same four corpora.
+    const int pool = std::max(limit * 5, 50);
+    std::vector<SearchResult> cands;
+    if (embedder && embedder->ready())
+        cands = search(q.query, pool, 0.0f, {}).results;
+    else
+        cands = search_text_only(q.query, pool).results;
+
+    // Decision status comes from the row, never from cache metadata: the
+    // hybrid cache only holds active rows and the text-only path carries no
+    // status at all, so one authoritative lookup per decision hit keeps every
+    // path consistent. (Pool is <= 50 hits; the extra queries are trivial.)
+    auto dec_status_of = [this](int id) -> std::string {
+        Stmt s(db, "SELECT status FROM decisions WHERE decision_id = ?");
+        s.bind(1, id);
+        return s.step() ? s.column_text(0) : std::string();
+    };
+
+    // 'active' / exact-status needs rows the hybrid cache deliberately hides
+    // (superseded/retired/pending). SEPARATE query path — ensure_dec_cache()
+    // keeps its narrow allow-list for normal search. Lexical-only signal;
+    // ids already scored by the hybrid pass are not duplicated.
+    if (q.status != "active") {
+        text_index_->set_weights({config().fts_w_unigram, config().fts_w_bigram,
+                                  config().fts_w_metaphone, config().fts_literal_enabled});
+        std::unordered_set<int> seen;
+        for (const auto& r : cands)
+            if (r.metadata.value("source", "") == "decision") seen.insert(r.id);
+        for (const auto& hit : text_index_->score_query("decisions", q.query)) {
+            if (seen.count(hit.id)) continue;
+            Stmt s(db, "SELECT text, status, ifnull(trigger,''), "
+                       "datetime(created_at,'unixepoch','localtime') "
+                       "FROM decisions WHERE decision_id = ?");
+            s.bind(1, hit.id);
+            if (!s.step()) continue;
+            const std::string status = s.column_text(1);
+            if (q.status != "any" && status != q.status) continue;
+            json meta = json::object();
+            meta["source"] = "decision";
+            meta["status"] = status;
+            SearchResult sr{hit.id, s.column_text(0), hit.score, std::move(meta), s.column_text(3)};
+            sr.vec_score  = -1.0f;
+            sr.bm25_score = hit.score;
+            sr.blended    = hit.score;
+            cands.push_back(std::move(sr));
+        }
+    }
+
+    // ---- session filter helpers ------------------------------------------
+    // GUID -> sessions.session_id once per filter (unknown GUID -> nullopt:
+    // `session` then matches nothing, `exclude_session` excludes nothing).
+    auto guid_to_id = [this](const std::string& guid) -> std::optional<int> {
+        Stmt s(db, "SELECT session_id FROM sessions WHERE guid = ?");
+        s.bind(1, guid);
+        if (!s.step()) return std::nullopt;
+        return s.column_int(0);
+    };
+    // Owning session id per layer (documents have none; turn layer is never
+    // produced by the search corpora).
+    auto owning_session = [this](const std::string& layer, int id) -> std::optional<int> {
+        const char* sql = nullptr;
+        if (layer == "turn_summary")
+            sql = "SELECT session_id FROM turn_summaries WHERE turn_summary_id = ?";
+        else if (layer == "summary")
+            sql = "SELECT session_id FROM summaries WHERE summary_id = ?";
+        else if (layer == "decision")
+            sql = "SELECT source_session_id FROM decisions WHERE decision_id = ?";
+        else
+            return std::nullopt;
+        Stmt s(db, sql);
+        s.bind(1, id);
+        if (!s.step() || s.is_null(0)) return std::nullopt;
+        return s.column_int(0);
+    };
+    std::optional<int> sess_id, excl_id;
+    if (!q.session.empty())         sess_id = guid_to_id(q.session);
+    if (!q.exclude_session.empty()) excl_id = guid_to_id(q.exclude_session);
+
+    auto session_id_of = [this](int sid) -> std::string {
+        Stmt s(db, "SELECT guid FROM sessions WHERE session_id = ?");
+        s.bind(1, sid);
+        return s.step() ? s.column_text(0) : std::string();
+    };
+
+    // ---- 3. post-filter + shape ------------------------------------------
+    std::vector<AgentHit> hits;
+    for (const auto& r : cands) {
+        const std::string layer = r.metadata.value("source", "");
+        if (!q.layers.empty() &&
+            std::find(q.layers.begin(), q.layers.end(), layer) == q.layers.end())
+            continue;
+
+        std::string dec_status;
+        if (layer == "decision") {
+            dec_status = dec_status_of(r.id);
+            if (dec_status.empty()) continue;   // row vanished mid-search
+            if (q.status == "active") {
+                // NOTE: deliberately narrower than the search cache's
+                // allow-list: 'roadmap' is planned work, not an active ruling.
+                if (dec_status != "current" && dec_status != "provisional") continue;
+            } else if (q.status != "any" && dec_status != q.status) {
+                continue;
+            }
+        }
+
+        if (!since_b.empty() && r.timestamp <  since_b) continue;
+        if (!until_b.empty() && r.timestamp >  until_b) continue;
+
+        if (sess_id || excl_id) {
+            auto sid = owning_session(layer, r.id);
+            if (sess_id && (!sid || *sid != *sess_id)) continue;
+            if (excl_id && sid && *sid == *excl_id) continue;
+        }
+
+        AgentHit h;
+        h.id    = layer + ":" + std::to_string(r.id);
+        h.layer = layer;
+        h.score = r.blended;   // the value that actually ranked this hit
+        if (r.vec_score > 0.0f && r.bm25_score > 0.0f)      h.matched_by = "both";
+        else if (r.bm25_score > 0.0f)                       h.matched_by = "lexical";
+        else                                                h.matched_by = "vector";
+        h.created = r.timestamp;
+        h.snippet = agent_snippet(r.text);
+        if (layer == "decision") {
+            Stmt s(db, "SELECT ifnull(trigger,'') FROM decisions WHERE decision_id = ?");
+            s.bind(1, r.id);
+            h.extra = json{{"status", dec_status}};
+            if (s.step() && !s.column_text(0).empty())
+                h.extra["trigger"] = s.column_text(0);
+        } else if (layer == "summary") {
+            h.extra = json{{"level", r.metadata.value("level", "")}};
+        } else if (layer == "turn_summary") {
+            h.extra = json::object();
+            if (r.metadata.contains("turn_id"))
+                h.extra["turn_id"] = r.metadata["turn_id"];
+            if (r.metadata.contains("session_id"))
+                h.extra["session"] = session_id_of(r.metadata["session_id"].get<int>());
+        } else if (layer == "document") {
+            h.extra = json{{"title", r.metadata.value("title", "")}};
+        }
+        hits.push_back(std::move(h));
+    }
+
+    // ---- 4. rank, budget, truncate ----------------------------------------
+    std::sort(hits.begin(), hits.end(),
+              [](const AgentHit& a, const AgentHit& b) { return a.score > b.score; });
+
+    std::vector<AgentHit> out;
+    long long token_sum = 0;   // running chars/4 over accepted snippets
+    for (auto& h : hits) {
+        if (static_cast<int>(out.size()) >= limit) break;
+        // Budget check happens BEFORE adding, but the first accepted hit is
+        // always kept ("always return at least 1 hit if any matched").
+        if (q.max_tokens > 0 && !out.empty() &&
+            (token_sum + static_cast<long long>(h.snippet.size())) / 4 > q.max_tokens)
+            break;
+        token_sum += static_cast<long long>(h.snippet.size());
+        out.push_back(std::move(h));
+    }
+    return out;
+}
+
+
+// =======================================================================
+// agent_get — full rows by typed handle (mode 1) or paged session history
+// (mode 2). Exactly one mode per call.
+// =======================================================================
+namespace {
+
+// Row fetchers. Each returns the full row as JSON, or json(nullptr) when the
+// row does not exist. Shapes follow PHASE2-STEPS step 4: id/layer/text/created
+// plus the layer's own columns.
+json fetch_agent_row(sqlite3* db, const std::string& layer, int rowid) {
+    if (layer == "decision") {
+        Stmt s(db, "SELECT text, status, tags, trigger, rationale, scope, supersedes, "
+                   "datetime(created_at,'unixepoch','localtime') "
+                   "FROM decisions WHERE decision_id = ?");
+        s.bind(1, rowid);
+        if (!s.step()) return json(nullptr);
+        json item = {
+            {"id",      std::format("decision:{}", rowid)},
+            {"layer",   "decision"},
+            {"text",    s.column_text(0)},
+            {"status",  s.column_text(1)},
+            {"tags",    s.column_text(2)},
+            {"trigger", s.is_null(3) ? json(nullptr) : json(s.column_text(3))},
+            {"rationale", s.is_null(4) ? json(nullptr) : json(s.column_text(4))},
+            {"scope",   s.is_null(5) ? json(nullptr) : json(s.column_text(5))},
+            {"supersedes", s.is_null(6) ? json(nullptr) : json(s.column_int(6))},
+            {"created", s.column_text(7)},
+        };
+        json ev = json::array();
+        Stmt e(db, "SELECT turn_summary_id FROM decision_evidence WHERE decision_id = ? "
+                   "ORDER BY turn_summary_id");
+        e.bind(1, rowid);
+        while (e.step()) ev.push_back(e.column_int(0));
+        item["evidence"] = std::move(ev);
+        return item;
+    }
+    if (layer == "turn") {
+        Stmt s(db, "SELECT user_text, assistant_text, "
+                   "datetime(created_at,'unixepoch','localtime'), "
+                   "COALESCE((SELECT guid FROM sessions WHERE session_id = turns.session_id), ''), "
+                   "COALESCE((SELECT name FROM models WHERE model_id = turns.model_id), '') "
+                   "FROM turns WHERE turn_id = ?");
+        s.bind(1, rowid);
+        if (!s.step()) return json(nullptr);
+        return {
+            {"id",            std::format("turn:{}", rowid)},
+            {"layer",         "turn"},
+            {"text",          s.column_text(0)},   // user_text is the turn's primary text
+            {"user_text",     s.column_text(0)},
+            {"assistant_text", s.is_null(1) ? json(nullptr) : json(s.column_text(1))},
+            {"created",       s.column_text(2)},
+            {"session",       s.column_text(3)},
+            {"model",         s.column_text(4)},
+        };
+    }
+    if (layer == "turn_summary") {
+        Stmt s(db, "SELECT text, turn_id, "
+                   "datetime(turn_datetime,'unixepoch','localtime'), "
+                   "COALESCE((SELECT guid FROM sessions WHERE session_id = turn_summaries.session_id), '') "
+                   "FROM turn_summaries WHERE turn_summary_id = ?");
+        s.bind(1, rowid);
+        if (!s.step()) return json(nullptr);
+        return {
+            {"id",      std::format("turn_summary:{}", rowid)},
+            {"layer",   "turn_summary"},
+            {"text",    s.column_text(0)},
+            {"turn_id", s.is_null(1) ? json(nullptr) : json(s.column_int(1))},
+            {"created", s.column_text(2)},
+            {"session", s.column_text(3)},
+        };
+    }
+    if (layer == "summary") {
+        Stmt s(db, "SELECT text, level, tags, "
+                   "datetime(created_at,'unixepoch','localtime'), "
+                   "datetime(updated_at,'unixepoch','localtime'), "
+                   "COALESCE((SELECT guid FROM sessions WHERE session_id = summaries.session_id), '') "
+                   "FROM summaries WHERE summary_id = ?");
+        s.bind(1, rowid);
+        if (!s.step()) return json(nullptr);
+        return {
+            {"id",      std::format("summary:{}", rowid)},
+            {"layer",   "summary"},
+            {"text",    s.column_text(0)},
+            {"level",   s.column_text(1)},
+            {"tags",    s.column_text(2)},
+            {"created", s.column_text(3)},
+            {"updated", s.column_text(4)},
+            {"session", s.column_text(5)},
+        };
+    }
+    if (layer == "document") {
+        Stmt s(db, "SELECT d.text, d.tags, d.chunk_index, d.document_source_id, "
+                   "COALESCE(ds.title, ''), "
+                   "datetime(COALESCE(d.modified_on, ds.imported_at, 0),'unixepoch','localtime') "
+                   "FROM documents d "
+                   "LEFT JOIN document_sources ds ON ds.document_source_id = d.document_source_id "
+                   "WHERE d.document_id = ?");
+        s.bind(1, rowid);
+        if (!s.step()) return json(nullptr);
+        return {
+            {"id",                 std::format("document:{}", rowid)},
+            {"layer",              "document"},
+            {"text",               s.column_text(0)},
+            {"tags",               s.column_text(1)},
+            {"chunk_index",        s.is_null(2) ? json(nullptr) : json(s.column_int(2))},
+            {"document_source_id", s.is_null(3) ? json(nullptr) : json(s.column_int(3))},
+            {"title",              s.column_text(4)},
+            {"created",            s.column_text(5)},
+        };
+    }
+    return json(nullptr);
+}
+
+} // anonymous namespace
+
+
+json Backend::Impl::agent_get(const AgentGetQuery& q) {
+    const bool has_ids  = !q.ids.empty();
+    const bool has_sess = !q.session.empty();
+    if (has_ids == has_sess)
+        throw std::invalid_argument(
+            "agent_get: exactly one of ids or session must be set");
+
+    // ---- mode 1: full rows by handle -------------------------------------
+    if (has_ids) {
+        json items = json::array();
+        for (const auto& handle : q.ids) {
+            std::string layer;
+            int rowid = 0;
+            if (!parse_agent_handle(handle, layer, rowid)) {
+                items.push_back({{"id", handle}, {"error", "not found"}});
+                continue;
+            }
+            json item = fetch_agent_row(db, layer, rowid);
+            if (item.is_null()) {
+                items.push_back({{"id", handle}, {"error", "not found"}});
+                continue;
+            }
+
+            if (q.expand == "context") {
+                json expanded = json::array();
+                if (layer == "turn" || layer == "turn_summary") {
+                    // The 2 turns before and after in the same session. A
+                    // turn_summary anchors on its source turn; a pruned
+                    // (turn_id NULL) summary or an anonymous turn has no
+                    // context window.
+                    int anchor = rowid;
+                    if (layer == "turn_summary") {
+                        Stmt t(db, "SELECT turn_id FROM turn_summaries WHERE turn_summary_id = ?");
+                        t.bind(1, rowid);
+                        if (!t.step() || t.is_null(0)) anchor = -1;
+                        else anchor = t.column_int(0);
+                    }
+                    if (anchor >= 0) {
+                        Stmt c(db, "SELECT turn_id FROM turns "
+                                   "WHERE session_id = (SELECT session_id FROM turns WHERE turn_id = ?) "
+                                   "  AND session_id IS NOT NULL "
+                                   "  AND turn_id BETWEEN ? AND ? AND turn_id != ? "
+                                   "ORDER BY turn_id");
+                        c.bind(1, anchor);
+                        c.bind(2, anchor - 2);
+                        c.bind(3, anchor + 2);
+                        c.bind(4, anchor);
+                        while (c.step())
+                            expanded.push_back(fetch_agent_row(db, "turn", c.column_int(0)));
+                    }
+                } else if (layer == "document") {
+                    // chunk_index ±1 from the same document_source_id.
+                    Stmt c(db, "SELECT document_id FROM documents "
+                               "WHERE document_source_id = ("
+                               "  SELECT document_source_id FROM documents WHERE document_id = ?) "
+                               "  AND document_source_id IS NOT NULL "
+                               "  AND chunk_index IN ("
+                               "    (SELECT chunk_index FROM documents WHERE document_id = ?) - 1, "
+                               "    (SELECT chunk_index FROM documents WHERE document_id = ?) + 1) "
+                               "ORDER BY chunk_index");
+                    c.bind(1, rowid);
+                    c.bind(2, rowid);
+                    c.bind(3, rowid);
+                    while (c.step())
+                        expanded.push_back(fetch_agent_row(db, "document", c.column_int(0)));
+                }
+                if (!expanded.empty()) item["expanded"] = std::move(expanded);
+            } else if (q.expand == "sources") {
+                json expanded = json::array();
+                if (layer == "decision") {
+                    // Its evidence turn_summaries, full rows. The join filter
+                    // keeps done-marker rows (text='') out of expansion even
+                    // if a source turn was later abandoned (RULES 6).
+                    Stmt e(db, "SELECT de.turn_summary_id FROM decision_evidence de "
+                               "JOIN turn_summaries ts ON ts.turn_summary_id = de.turn_summary_id "
+                               "WHERE de.decision_id = ? AND ts.text != '' "
+                               "ORDER BY de.turn_summary_id");
+                    e.bind(1, rowid);
+                    while (e.step())
+                        expanded.push_back(fetch_agent_row(db, "turn_summary", e.column_int(0)));
+                } else if (layer == "summary") {
+                    // The turn_summaries in its session within its span.
+                    // Episodes/turn_summaries only — never depends on session
+                    // summaries existing (design §10.2.5).
+                    Stmt c(db, "SELECT turn_summary_id FROM turn_summaries ts "
+                               "WHERE ts.session_id = ("
+                               "  SELECT session_id FROM summaries WHERE summary_id = ?) "
+                               "  AND ts.session_id IS NOT NULL "
+                               "  AND ts.text != '' "
+                               "  AND ts.turn_datetime BETWEEN "
+                               "    (SELECT created_at FROM summaries WHERE summary_id = ?) "
+                               "    AND (SELECT updated_at FROM summaries WHERE summary_id = ?) "
+                               "ORDER BY ts.turn_datetime");
+                    c.bind(1, rowid);
+                    c.bind(2, rowid);
+                    c.bind(3, rowid);
+                    while (c.step())
+                        expanded.push_back(fetch_agent_row(db, "turn_summary", c.column_int(0)));
+                }
+                if (!expanded.empty()) item["expanded"] = std::move(expanded);
+            } else if (q.expand == "chain" && layer == "decision") {
+                // Full supersede lineage oldest -> newest: walk `supersedes`
+                // backwards to the root, then forwards from the anchor. The
+                // visited set makes a corrupt cycle terminate.
+                std::vector<int> chain_ids;
+                std::unordered_set<int> visited{rowid};
+                {
+                    std::vector<int> up;
+                    int cur = rowid;
+                    while (true) {
+                        Stmt p(db, "SELECT supersedes FROM decisions WHERE decision_id = ?");
+                        p.bind(1, cur);
+                        if (!p.step() || p.is_null(0)) break;
+                        int parent = p.column_int(0);
+                        if (visited.count(parent)) break;
+                        visited.insert(parent);
+                        up.push_back(parent);
+                        cur = parent;
+                    }
+                    std::reverse(up.begin(), up.end());
+                    chain_ids = std::move(up);
+                    chain_ids.push_back(rowid);
+                }
+                {
+                    std::vector<int> queue{rowid};
+                    while (!queue.empty()) {
+                        std::vector<int> next;
+                        for (int cur : queue) {
+                            Stmt c(db, "SELECT decision_id FROM decisions WHERE supersedes = ? "
+                                       "ORDER BY decision_id");
+                            c.bind(1, cur);
+                            while (c.step()) {
+                                int child = c.column_int(0);
+                                if (visited.count(child)) continue;
+                                visited.insert(child);
+                                chain_ids.push_back(child);
+                                next.push_back(child);
+                            }
+                        }
+                        queue = std::move(next);
+                    }
+                }
+                json expanded = json::array();
+                for (int id : chain_ids)
+                    expanded.push_back(fetch_agent_row(db, "decision", id));
+                item["expanded"] = std::move(expanded);
+            }
+
+            items.push_back(std::move(item));
+        }
+        return json{{"items", std::move(items)}};
+    }
+
+    // ---- mode 2: paged conversation history for one session --------------
+    // "current" is NOT resolved here — the HTTP/MCP layer passes a real GUID.
+    const int limit = std::clamp(q.limit, 1, 100);
+    std::string sql =
+        "SELECT t.turn_id, t.user_text, t.assistant_text, "
+        "       datetime(t.created_at,'unixepoch','localtime'), "
+        "       (SELECT text FROM turn_summaries ts "
+        "         WHERE ts.turn_id = t.turn_id AND ts.text != '' LIMIT 1) "
+        "FROM turns t JOIN sessions s ON s.session_id = t.session_id "
+        "WHERE s.guid = ?";
+    if (q.after_turn  > 0) sql += " AND t.turn_id > ?";
+    if (q.before_turn > 0) sql += " AND t.turn_id < ?";
+    sql += " ORDER BY t.turn_id ASC LIMIT ?";
+
+    Stmt s(db, sql);
+    int bind = 1;
+    s.bind(bind++, q.session);
+    if (q.after_turn  > 0) s.bind(bind++, q.after_turn);
+    if (q.before_turn > 0) s.bind(bind++, q.before_turn);
+    s.bind(bind, limit + 1);   // one extra row tells us whether more exist
+
+    json turns = json::array();
+    int last_turn_id = 0;
+    bool more = false;
+    int rows = 0;
+    while (s.step()) {
+        ++rows;
+        if (rows > limit) { more = true; break; }   // the probe row exists
+        json t = {
+            {"id",        std::format("turn:{}", s.column_int(0))},
+            {"user",      s.column_text(1)},
+            {"assistant", s.is_null(2) ? json(nullptr) : json(s.column_text(2))},
+            {"created",   s.column_text(3)},
+            {"summary",   s.is_null(4) ? json(nullptr) : json(s.column_text(4))},
+        };
+        last_turn_id = s.column_int(0);
+        turns.push_back(std::move(t));
+    }
+
+    return json{
+        {"session",    q.session},
+        {"turns",      std::move(turns)},
+        {"next_after", more ? json(last_turn_id) : json(nullptr)},
+    };
+}
+
+} // namespace ragger::sqlite

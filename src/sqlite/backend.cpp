@@ -358,6 +358,16 @@ StructuredDecisionResult Backend::store_structured_decision(const DecisionInput&
     return pImpl->store_structured_decision(in);
 }
 
+std::vector<AgentHit> Backend::agent_search(const AgentSearchQuery& q) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->agent_search(q);
+}
+
+json Backend::agent_get(const AgentGetQuery& q) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->agent_get(q);
+}
+
 bool Backend::update_decision_embedding(int decision_id,
                                               const std::vector<float>& emb) {
     std::lock_guard<std::mutex> lk(pImpl->mu);

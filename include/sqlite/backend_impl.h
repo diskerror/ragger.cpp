@@ -439,6 +439,16 @@ struct Backend::Impl {
     // turn_id/session_id (turn_summaries has no tags/status/level columns).
     void ensure_turn_cache();
 
+    // --- agent API Phase 2 reads (src/sqlite/agent_read.cpp) ---
+
+    // Layered hybrid search over all caches with post-filters; see
+    // StorageBackend::agent_search for the contract.
+    std::vector<AgentHit> agent_search(const AgentSearchQuery& q);
+
+    // Full-row reads / hierarchy expansion / history paging; see
+    // StorageBackend::agent_get for the contract.
+    json agent_get(const AgentGetQuery& q);
+
     // --- write ---
 
     // ---- path normalization -------------------------------------------

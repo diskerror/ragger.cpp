@@ -1823,6 +1823,412 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
     cleanup();
 }
 
+// Phase 2 Step 1: degraded (text-only) search must apply the same decision
+// status allow-list as ensure_dec_cache() — a superseded row stays hidden.
+void test_p2_text_only_hides_superseded(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    ragger::DecisionInput a;
+    a.text = "Prefer WAL checkpointing before archiving the database.";
+    a.trigger = "Use when archiving a live SQLite database";
+    int a_id = db.store_structured_decision(a).id;
+
+    ragger::DecisionInput b;
+    b.text = "Checkpoint in TRUNCATE mode without closing the connection.";
+    b.trigger = "Use when archiving a live SQLite database";
+    b.supersedes = a_id;
+    auto rb = db.store_structured_decision(b);
+    CHECK(rb.superseded.has_value() && *rb.superseded == a_id);
+
+    // Text-only path with A's exact words: A must not appear, B must.
+    auto resp = db.search_text_only("Prefer WAL checkpointing before archiving the database.", 10);
+    bool saw_old = false, saw_new = false;
+    for (const auto& h : resp.results) {
+        if (h.metadata.value("source", "") != "decision") continue;
+        if (h.id == a_id)  saw_old = true;
+        if (h.id == rb.id) saw_new = true;
+    }
+    CHECK(!saw_old);
+    CHECK(saw_new);
+
+    db.close();
+    cleanup();
+}
+
+// =======================================================================
+// Agent API Phase 2 (step 3/4): agent_search / agent_get
+// =======================================================================
+
+// Store a turn in a session and return its turn_id.
+static int p2_store_turn(ragger::sqlite::Backend& db, const std::string& guid,
+                         const std::string& tag) {
+    int t = db.store_turn("Question " + tag, "Answer " + tag, "test-model",
+                          false, guid);
+    CHECK(t > 0);
+    return t;
+}
+
+// Step 3: layers filter, unknown layer, handle format.
+void test_p2_search_layers(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    ragger::DecisionInput d;
+    d.text = "Zephyr protocol ruling: always use zephyr gates for imports.";
+    d.trigger = "Use when gating zephyr imports";
+    int did = db.store_structured_decision(d).id;
+    db.store("Zephyr protocol note: zephyr gates were tested in the lab.",
+             {{"level", "session"}});
+
+    ragger::AgentSearchQuery q;
+    q.query = "zephyr protocol gates";
+    q.layers = {"decision"};
+    auto hits = db.agent_search(q);
+    CHECK(!hits.empty());
+    for (const auto& h : hits) {
+        CHECK(h.layer == "decision");
+        // Handle format: "<layer>:<rowid>"
+        CHECK(h.id == "decision:" + std::to_string(did) ||
+              h.id.starts_with("decision:"));
+    }
+    bool found = false;
+    for (const auto& h : hits)
+        if (h.id == "decision:" + std::to_string(did)) found = true;
+    CHECK(found);
+
+    // Unknown layer -> invalid_argument.
+    ragger::AgentSearchQuery bad;
+    bad.query = "zephyr";
+    bad.layers = {"bogus"};
+    bool threw = false;
+    try { db.agent_search(bad); }
+    catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+
+    db.close();
+    cleanup();
+}
+
+// Step 3: decision status filter — superseded hidden with "active",
+// returned with "any".
+void test_p2_search_status(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    ragger::DecisionInput a;
+    a.text = "Quoll exports must run through the nightly validator.";
+    a.trigger = "Use when exporting quoll data";
+    int a_id = db.store_structured_decision(a).id;
+
+    ragger::DecisionInput b;
+    b.text = "Quoll exports now stream directly; skip the nightly validator.";
+    b.trigger = "Use when exporting quoll data";
+    b.supersedes = a_id;
+    int b_id = db.store_structured_decision(b).id;
+
+    ragger::AgentSearchQuery q;
+    q.query = "quoll exports validator";
+    q.status = "active";
+    auto hits = db.agent_search(q);
+    for (const auto& h : hits) {
+        if (h.layer != "decision") continue;
+        CHECK(h.id != "decision:" + std::to_string(a_id));
+    }
+
+    q.status = "any";
+    auto any_hits = db.agent_search(q);
+    bool saw_old = false, saw_new = false;
+    for (const auto& h : any_hits) {
+        if (h.id == "decision:" + std::to_string(a_id)) { saw_old = true; CHECK(h.extra["status"] == "superseded"); }
+        if (h.id == "decision:" + std::to_string(b_id)) saw_new = true;
+    }
+    CHECK(saw_old);
+    CHECK(saw_new);
+
+    db.close();
+    cleanup();
+}
+
+// Step 3: since/until parsing — future since -> 0 hits; "30d" -> hits;
+// malformed -> throws.
+void test_p2_search_since(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    db.store("Kestrel habitat notes: kestrels nest in old towers.");
+
+    ragger::AgentSearchQuery q;
+    q.query = "kestrel habitat nest";
+    q.since = "2099-01-01";
+    CHECK(db.agent_search(q).empty());
+
+    q.since = "30d";
+    CHECK(!db.agent_search(q).empty());
+
+    q.since = "2026-13-45";
+    bool threw = false;
+    try { db.agent_search(q); }
+    catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+
+    db.close();
+    cleanup();
+}
+
+// Step 3: snippet cutting — 1000-char text -> <=243 bytes ending in "…".
+void test_p2_search_snippet(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    std::string long_text = "Wombat warren survey. ";
+    while (long_text.size() < 1000) long_text += "The wombat surveyed the warren thoroughly. ";
+    db.store(long_text);
+
+    ragger::AgentSearchQuery q;
+    q.query = "wombat warren survey";
+    auto hits = db.agent_search(q);
+    CHECK(!hits.empty());
+    bool saw_long = false;
+    for (const auto& h : hits) {
+        CHECK(h.snippet.size() <= 243);
+        if (h.snippet.size() > 100) {   // the long row (others are short)
+            saw_long = true;
+            CHECK(h.snippet.ends_with("…"));
+        }
+    }
+    CHECK(saw_long);
+
+    db.close();
+    cleanup();
+}
+
+// Step 3: max_tokens budget — 3 matches, budget 1 -> exactly 1 hit.
+void test_p2_search_max_tokens(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    db.store("Xenon lamp calibration record one.");
+    db.store("Xenon lamp calibration record two.");
+    db.store("Xenon lamp calibration record three.");
+
+    ragger::AgentSearchQuery q;
+    q.query = "xenon lamp calibration record";
+    q.max_tokens = 1;
+    auto hits = db.agent_search(q);
+    CHECK(hits.size() == 1);
+
+    db.close();
+    cleanup();
+}
+
+// Step 4: mode 1 — decision handle returns full row with trigger + evidence.
+void test_p2_get_decision(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    int ts1 = p1_make_turn_summary(db, "alpha");
+    int ts2 = p1_make_turn_summary(db, "beta");
+
+    ragger::DecisionInput d;
+    d.text = "Always cite the failing test when filing a bug.";
+    d.trigger = "Use when filing a bug report";
+    d.rationale = "Reproducible failures need receipts.";
+    d.scope = "Not needed for feature requests.";
+    d.evidence = {ts1, ts2};
+    int did = db.store_structured_decision(d).id;
+
+    ragger::AgentGetQuery q;
+    q.ids = {"decision:" + std::to_string(did)};
+    auto got = db.agent_get(q);
+    CHECK(got["items"].size() == 1);
+    const auto& item = got["items"][0];
+    CHECK(!item.contains("error"));
+    CHECK(item["layer"] == "decision");
+    CHECK(item["trigger"] == "Use when filing a bug report");
+    CHECK(item["rationale"] == "Reproducible failures need receipts.");
+    CHECK(item["evidence"].size() == 2);
+    CHECK(item["evidence"][0] == ts1);
+    CHECK(item["evidence"][1] == ts2);
+
+    // Unknown id -> per-item error, not a throw.
+    ragger::AgentGetQuery bad;
+    bad.ids = {"decision:999999"};
+    auto bad_got = db.agent_get(bad);
+    CHECK(bad_got["items"].size() == 1);
+    CHECK(bad_got["items"][0].contains("error"));
+    CHECK(bad_got["items"][0]["error"] == "not found");
+
+    // Malformed handle -> same per-item error.
+    ragger::AgentGetQuery malformed;
+    malformed.ids = {"nonsense:1", "decision:-3", "decision:"};
+    auto m_got = db.agent_get(malformed);
+    CHECK(m_got["items"].size() == 3);
+    for (const auto& it : m_got["items"]) CHECK(it.contains("error"));
+
+    db.close();
+    cleanup();
+}
+
+// Step 4: expand=chain — A <- B <- C, get(B) -> expanded [A, B, C].
+void test_p2_get_chain(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    ragger::DecisionInput a;
+    a.text = "Chain link one: use plan alpha for the widget.";
+    a.trigger = "Use when planning the widget";
+    int a_id = db.store_structured_decision(a).id;
+
+    ragger::DecisionInput b;
+    b.text = "Chain link two: use plan beta for the widget.";
+    b.trigger = "Use when planning the widget";
+    b.supersedes = a_id;
+    int b_id = db.store_structured_decision(b).id;
+
+    ragger::DecisionInput c;
+    c.text = "Chain link three: use plan gamma for the widget.";
+    c.trigger = "Use when planning the widget";
+    c.supersedes = b_id;
+    int c_id = db.store_structured_decision(c).id;
+
+    ragger::AgentGetQuery q;
+    q.ids = {"decision:" + std::to_string(b_id)};
+    q.expand = "chain";
+    auto got = db.agent_get(q);
+    const auto& exp = got["items"][0]["expanded"];
+    CHECK(exp.size() == 3);
+    CHECK(exp[0]["id"] == "decision:" + std::to_string(a_id));
+    CHECK(exp[1]["id"] == "decision:" + std::to_string(b_id));
+    CHECK(exp[2]["id"] == "decision:" + std::to_string(c_id));
+
+    db.close();
+    cleanup();
+}
+
+// Step 4: expand=context — 6 turns in one session, get(turn 3) -> 1,2,4,5.
+void test_p2_get_context(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    const std::string guid = "ctx-session-guid";
+    std::vector<int> ids;
+    for (int i = 0; i < 6; ++i)
+        ids.push_back(p2_store_turn(db, guid, "ctx" + std::to_string(i)));
+    CHECK(ids.size() == 6);
+
+    ragger::AgentGetQuery q;
+    q.ids = {"turn:" + std::to_string(ids[2])};
+    q.expand = "context";
+    auto got = db.agent_get(q);
+    const auto& exp = got["items"][0]["expanded"];
+    CHECK(exp.size() == 4);
+    CHECK(exp[0]["id"] == "turn:" + std::to_string(ids[0]));
+    CHECK(exp[1]["id"] == "turn:" + std::to_string(ids[1]));
+    CHECK(exp[2]["id"] == "turn:" + std::to_string(ids[3]));
+    CHECK(exp[3]["id"] == "turn:" + std::to_string(ids[4]));
+
+    db.close();
+    cleanup();
+}
+
+// Step 4: mode 2 — history paging: 25 turns, limit 10 -> 10/10/5,
+// next_after null on the last page.
+void test_p2_get_history(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    const std::string guid = "hist-session-guid";
+    for (int i = 0; i < 25; ++i)
+        p2_store_turn(db, guid, "h" + std::to_string(i));
+
+    ragger::AgentGetQuery q;
+    q.session = guid;
+    q.limit = 10;
+
+    auto p1 = db.agent_get(q);
+    CHECK(p1["session"] == guid);
+    CHECK(p1["turns"].size() == 10);
+    CHECK(!p1["next_after"].is_null());
+    int after = p1["next_after"].get<int>();
+
+    q.after_turn = after;
+    auto p2 = db.agent_get(q);
+    CHECK(p2["turns"].size() == 10);
+    CHECK(!p2["next_after"].is_null());
+    after = p2["next_after"].get<int>();
+
+    q.after_turn = after;
+    auto p3 = db.agent_get(q);
+    CHECK(p3["turns"].size() == 5);
+    CHECK(p3["next_after"].is_null());
+
+    // Ascending turn_id order across pages.
+    CHECK(p1["turns"][0]["id"] == "turn:1");
+
+    db.close();
+    cleanup();
+}
+
+// Step 4: exactly one mode — both or neither -> invalid_argument.
+void test_p2_get_mode_exclusive(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    bool threw_both = false, threw_neither = false;
+    ragger::AgentGetQuery both;
+    both.ids = {"decision:1"};
+    both.session = "some-guid";
+    try { db.agent_get(both); }
+    catch (const std::invalid_argument&) { threw_both = true; }
+
+    ragger::AgentGetQuery neither;
+    try { db.agent_get(neither); }
+    catch (const std::invalid_argument&) { threw_neither = true; }
+
+    CHECK(threw_both);
+    CHECK(threw_neither);
+
+    db.close();
+    cleanup();
+}
+
+// Step 5: possible_supersedes hint — a near-duplicate decision flags the
+// original; an unrelated one returns an empty list. No row is ever changed.
+void test_p2_possible_supersedes(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    ragger::DecisionInput a;
+    a.text = "Always run the full test suite before tagging a release.";
+    a.trigger = "Use when preparing a release tag";
+    int a_id = db.store_structured_decision(a).id;
+
+    // Near-duplicate: same ruling reworded, same trigger.
+    ragger::DecisionInput b;
+    b.text = "Run the complete test suite before every release tag.";
+    b.trigger = "Use when preparing a release tag";
+    auto rb = db.store_structured_decision(b);
+    bool flags_a = false;
+    for (const auto& [id, score] : rb.possible_supersedes) {
+        CHECK(score >= 0.80f);
+        if (id == a_id) flags_a = true;
+    }
+    CHECK(flags_a);
+    // Flag only: A must still be 'current'.
+    CHECK(!rb.superseded.has_value());
+
+    // Unrelated text -> empty list.
+    ragger::DecisionInput c;
+    c.text = "The harpsichord was tuned in meantone temperament in 1742.";
+    c.trigger = "Use when tuning baroque keyboard instruments";
+    auto rc = db.store_structured_decision(c);
+    CHECK(rc.possible_supersedes.empty());
+
+    db.close();
+    cleanup();
+}
+
 int main() {
     // Need config for model dir
     ragger::init_config();
@@ -1880,6 +2286,18 @@ int main() {
     test_structured_decision_evidence(emb);
     test_orphan_turn_summary_protected(emb);
     test_migrate_0_16_to_0_17(emb);
+    test_p2_text_only_hides_superseded(emb);
+    test_p2_search_layers(emb);
+    test_p2_search_status(emb);
+    test_p2_search_since(emb);
+    test_p2_search_snippet(emb);
+    test_p2_search_max_tokens(emb);
+    test_p2_get_decision(emb);
+    test_p2_get_chain(emb);
+    test_p2_get_context(emb);
+    test_p2_get_history(emb);
+    test_p2_get_mode_exclusive(emb);
+    test_p2_possible_supersedes(emb);
 
     std::println("test_sqlite_backend: all passed");
     return 0;

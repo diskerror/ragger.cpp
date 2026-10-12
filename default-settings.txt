@@ -75,6 +75,9 @@ vector_type = f16              # on-disk vector precision: f32 (lossless, 4B/dim
 [search]
 default_limit     = 5
 default_min_score = 0.4
+# Cosine threshold for the possible_supersedes hint on stored decisions
+# (flag only — never merges or changes rows).
+decision_supersede_threshold = 0.8
 bm25_enabled      = true
 # Weights are ratios — don't need to sum to 1.0. "3 and 7" == "0.3 and 0.7"
 bm25_weight   = 4

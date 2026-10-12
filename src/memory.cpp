@@ -215,6 +215,14 @@ StructuredDecisionResult RaggerMemory::store_structured_decision(const DecisionI
     return backend_->store_structured_decision(in);
 }
 
+std::vector<AgentHit> RaggerMemory::agent_search(const AgentSearchQuery& q) {
+    return backend_->agent_search(q);
+}
+
+json RaggerMemory::agent_get(const AgentGetQuery& q) {
+    return backend_->agent_get(q);
+}
+
 bool RaggerMemory::update_decision_embedding(int decision_id,
                                              const std::vector<float>& emb) {
     return backend_->update_decision_embedding(decision_id, emb);

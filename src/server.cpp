@@ -549,14 +549,82 @@ struct Server::Impl {
         auto& mem = _get_memory(user.username);
         try {
             auto r = mem.store_structured_decision(in);
+            json ps = json::array();
+            for (const auto& [pid, score] : r.possible_supersedes)
+                ps.push_back({{"id", pid}, {"score", score}});
             Diskerror::Logger::debug("POST /decision 200");
             respond_json(res, json{
                 {"id", r.id},
                 {"table", "decisions"},
                 {"status", "stored"},
-                {"superseded", r.superseded ? json(*r.superseded) : json(nullptr)}});
+                {"superseded", r.superseded ? json(*r.superseded) : json(nullptr)},
+                {"possible_supersedes", std::move(ps)}});
         } catch (const std::invalid_argument& e) {
             Diskerror::Logger::debug("POST /decision 400");
+            res.status = 400;
+            res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
+        }
+    }
+
+    // POST /memory/search — layered agent search (agent API Phase 2).
+    // Body = AgentSearchQuery fields: {query, layers?: [..], since?, until?,
+    // status?, session?, exclude_session?, limit?, max_tokens?}.
+    // Returns {"results":[AgentHit...]}. Validation failures are 400.
+    void handle_memory_search(const UserInfo& user, const httplib::Request& req,
+                              httplib::Response& res) {
+        auto body = json::parse(req.body);
+        AgentSearchQuery q;
+        q.query           = body.value("query", "");
+        q.since           = body.value("since", "");
+        q.until           = body.value("until", "");
+        q.status          = body.value("status", "active");
+        q.session         = body.value("session", "");
+        q.exclude_session = body.value("exclude_session", "");
+        q.limit           = body.value("limit", 10);
+        q.max_tokens      = body.value("max_tokens", 0);
+        if (body.contains("layers"))
+            q.layers = body["layers"].get<std::vector<std::string>>();
+
+        auto& mem = _get_memory(user.username);
+        try {
+            auto hits = mem.agent_search(q);
+            json arr = json::array();
+            for (const auto& h : hits) {
+                arr.push_back({{"id", h.id}, {"layer", h.layer},
+                               {"score", h.score}, {"matched_by", h.matched_by},
+                               {"created", h.created}, {"snippet", h.snippet},
+                               {"extra", h.extra}});
+            }
+            Diskerror::Logger::debug("POST /memory/search 200");
+            respond_json(res, json{{"results", std::move(arr)}});
+        } catch (const std::invalid_argument& e) {
+            Diskerror::Logger::debug("POST /memory/search 400");
+            res.status = 400;
+            res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
+        }
+    }
+
+    // POST /memory/get — agent row reads (agent API Phase 2).
+    // Body = AgentGetQuery fields: {ids?: [handles], expand?, session?,
+    // after_turn?, before_turn?, limit?}. Exactly one mode per call.
+    void handle_memory_get(const UserInfo& user, const httplib::Request& req,
+                           httplib::Response& res) {
+        auto body = json::parse(req.body);
+        AgentGetQuery q;
+        q.expand      = body.value("expand", "none");
+        q.session     = body.value("session", "");
+        q.after_turn  = body.value("after_turn", 0);
+        q.before_turn = body.value("before_turn", 0);
+        q.limit       = body.value("limit", 20);
+        if (body.contains("ids"))
+            q.ids = body["ids"].get<std::vector<std::string>>();
+
+        auto& mem = _get_memory(user.username);
+        try {
+            Diskerror::Logger::debug("POST /memory/get 200");
+            respond_json(res, mem.agent_get(q));
+        } catch (const std::invalid_argument& e) {
+            Diskerror::Logger::debug("POST /memory/get 400");
             res.status = 400;
             res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
         }
@@ -725,6 +793,8 @@ struct Server::Impl {
         svr.Post("/store",              guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_store(u, req, res); }));
         svr.Post("/decision",           guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_decision(u, req, res); }));
         svr.Post("/search",             guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_search(u, req, res); }));
+        svr.Post("/memory/search",      guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_search(u, req, res); }));
+        svr.Post("/memory/get",         guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_get(u, req, res); }));
         svr.Post("/turn",               guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_turn(u, req, res); }));
         svr.Get(R"(/session/([^/]+))",  guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_session(u, req, res); }));
         svr.Delete(R"(/memory/(\d+))",  guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_delete_memory(u, req, res); }));

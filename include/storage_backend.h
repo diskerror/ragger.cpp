@@ -155,6 +155,17 @@ public:
     /// bad status, unknown or inactive supersedes target, unknown evidence id).
     virtual StructuredDecisionResult store_structured_decision(const DecisionInput& in) = 0;
 
+    /// Layered agent search (agent API Phase 2). Returns handles + snippets
+    /// only (full text via agent_get). Throws std::invalid_argument on an
+    /// unknown layer name or a malformed since/until bound.
+    virtual std::vector<AgentHit> agent_search(const AgentSearchQuery& q) = 0;
+
+    /// Agent row reads (agent API Phase 2): full rows by typed handle with
+    /// optional hierarchy expansion (mode 1), or paged conversation history
+    /// for one session (mode 2). Exactly one mode per call; both or neither
+    /// throws std::invalid_argument.
+    virtual json agent_get(const AgentGetQuery& q) = 0;
+
     /// Write back a single row's embedding for the remaining context tables
     /// (documents already covered above). Returns true if a row was updated.
     virtual bool update_decision_embedding(int decision_id,

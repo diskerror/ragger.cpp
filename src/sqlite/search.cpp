@@ -244,14 +244,15 @@ namespace fs = std::filesystem;
         auto score_text_corpus = [&](
                 const char* table, const char* id_col, const char* text_col,
                 const char* source_label,
-                const char* ts_expr) {
+                const char* ts_expr,
+                const char* extra_where = "") {
             std::vector<TextScore> hits = text_index_->score_query(table, query);
             if (hits.empty()) return;
 
             for (const auto& hit : hits) {
                 Stmt s(db, std::format(
-                    "SELECT {}, {} FROM {} WHERE {} = ?",
-                    text_col, ts_expr, table, id_col));
+                    "SELECT {}, {} FROM {} WHERE {} = ?{}",
+                    text_col, ts_expr, table, id_col, extra_where));
                 s.bind(1, hit.id);
                 if (!s.step()) continue;
                 std::string text = s.column_text(0);
@@ -300,9 +301,13 @@ namespace fs = std::filesystem;
                 candidates.push_back({hit.score, std::move(sr)});
             }
         }
-        // Decisions
+        // Decisions. Same status allow-list as ensure_dec_cache(): superseded /
+        // retired / pending rows are history or unreviewed drafts — they must
+        // stay hidden here too, or degraded (text-only) search leaks them while
+        // normal search hides them.
         score_text_corpus("decisions", "decision_id", "text", "decision",
-                          "datetime(created_at,'unixepoch','localtime')");
+                          "datetime(created_at,'unixepoch','localtime')",
+                          " AND status IN ('current','provisional','roadmap')");
         // Turn summaries. NOTE: this table has no created_at — an L2 summary
         // inherits its source turn's timestamp in turn_datetime (the
         // (session_id, turn_datetime) pair is the join back to the turn). The

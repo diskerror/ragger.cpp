@@ -77,6 +77,12 @@ public:
     /// std::invalid_argument on validation failure.
     StructuredDecisionResult store_structured_decision(const DecisionInput& in);
 
+    /// Layered agent search (agent API Phase 2) — handles + snippets only.
+    std::vector<AgentHit> agent_search(const AgentSearchQuery& q);
+
+    /// Agent row reads (agent API Phase 2) — full rows / expansion / history.
+    json agent_get(const AgentGetQuery& q);
+
     /// Per-row embedding write-back for the remaining context tables.
     bool update_decision_embedding(int decision_id, const std::vector<float>& emb);
     bool update_summary_embedding(int summary_id, const std::vector<float>& emb);

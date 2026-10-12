@@ -76,6 +76,7 @@ const std::unordered_map<std::string_view, int Config::*>& int_fields() {
 const std::unordered_map<std::string_view, float Config::*>& float_fields() {
     static const std::unordered_map<std::string_view, float Config::*> m = {
         {"default_min_score",       &Config::default_min_score},
+        {"decision_supersede_threshold", &Config::decision_supersede_threshold},
         {"bm25_weight",             &Config::bm25_weight},
         {"vector_weight",           &Config::vector_weight},
         {"fts_w_unigram",           &Config::fts_w_unigram},
