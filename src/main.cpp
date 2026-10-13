@@ -85,6 +85,10 @@ int main(int argc, char **argv) {
             ("tags", Diskerror::po::value<std::string>()->default_value(""), CLI_TAGS)
             ("status", Diskerror::po::value<std::string>()->default_value(""),
                 "decision: status to store/filter by (current|roadmap|superseded|deprecated)")
+            ("path", Diskerror::po::value<std::string>()->default_value(""),
+                "project add/set: project root path (absolute or ~/...)")
+            ("description", Diskerror::po::value<std::string>()->default_value(""),
+                "project add/set: what the project is")
             // `import conversations` filters & inputs
             ("format", Diskerror::po::value<std::string>()->default_value(""),
                 "Conversation source format: code | web | telegram")
@@ -405,6 +409,79 @@ int main(int argc, char **argv) {
                 return 0;
             }
             Diskerror::Logger::error(ragger::lang::CLI_USAGE_DECISION);
+            return 1;
+        }
+        else if (command == "project") {
+            // Agent API Phase 3: projects table (Reid's one-off backfill).
+            // Direct DB access, same pattern as `decision` (the daemon reads
+            // the DB per query, so concurrent writes are safe under WAL).
+            //   ragger project list [--status S]
+            //   ragger project add <name> [--path P] [--description D]
+            //   ragger project set <name> [--status S] [--path P] [--description D]
+            auto args = opts.getParams("args");
+            if (args.empty()) {
+                Diskerror::Logger::error(
+                    "Usage: ragger project list [--status S]\n"
+                    "       ragger project add <name> [--path P] [--description D]\n"
+                    "       ragger project set <name> [--status S] [--path P] [--description D]");
+                return 1;
+            }
+            std::string sub = args[0];
+            ragger::RaggerMemory memory(db_path);
+
+            if (sub == "list") {
+                auto arr = memory.list_projects(opts["status"].as<std::string>());
+                if (arr.empty()) {
+                    std::println("No projects.");
+                    return 0;
+                }
+                for (const auto& p : arr) {
+                    std::println("- {} [{}]{}{}",
+                        p["name"].get<std::string>(),
+                        p["status"].get<std::string>(),
+                        p["path"].is_null() ? "" : "  path=" + p["path"].get<std::string>(),
+                        p["description"].is_null() ? "" : "  " + p["description"].get<std::string>());
+                }
+                return 0;
+            }
+            if (sub == "add") {
+                if (args.size() < 2) {
+                    Diskerror::Logger::error("project add: <name> is required");
+                    return 1;
+                }
+                int id = memory.create_project(args[1],
+                    opts["path"].as<std::string>(),
+                    opts["description"].as<std::string>());
+                std::println("Created project {} (id {}).", args[1], id);
+                return 0;
+            }
+            if (sub == "set") {
+                if (args.size() < 2) {
+                    Diskerror::Logger::error("project set: <name> is required");
+                    return 1;
+                }
+                std::optional<std::string> status, description, path;
+                if (opts.count("status") && !opts["status"].as<std::string>().empty())
+                    status = opts["status"].as<std::string>();
+                if (opts.count("description") && !opts["description"].as<std::string>().empty())
+                    description = opts["description"].as<std::string>();
+                if (opts.count("path") && !opts["path"].as<std::string>().empty())
+                    path = opts["path"].as<std::string>();
+                if (!status && !description && !path) {
+                    Diskerror::Logger::error("project set: nothing to change (pass --status/--path/--description)");
+                    return 1;
+                }
+                try {
+                    memory.update_project(args[1], status, description, path);
+                } catch (const std::invalid_argument& e) {
+                    Diskerror::Logger::error(e.what());
+                    return 1;
+                }
+                std::println("Project \"{}\" updated.", args[1]);
+                return 0;
+            }
+            Diskerror::Logger::error(
+                "Unknown project subcommand. Use: list, add, set");
             return 1;
         }
         else if (command == "count") {

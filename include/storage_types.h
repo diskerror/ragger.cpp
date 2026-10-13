@@ -29,6 +29,9 @@ struct DecisionInput {
     std::optional<int> supersedes;    ///< decision_id this replaces
     std::string session_guid;         ///< source session GUID ("" = none)
     std::vector<int> evidence;        ///< turn_summary_ids backing the decision
+    std::string project;              ///< project name or path (Phase 3);
+                                      ///  resolved via resolve_project — an
+                                      ///  unknown value throws. "" = none.
 };
 
 struct StructuredDecisionResult {
@@ -94,6 +97,8 @@ struct AgentSearchQuery {
     std::string status = "active";     ///< decisions only: "active" (current+provisional) | "any" | one exact status
     std::string session;               ///< only this session GUID
     std::string exclude_session;       ///< drop this session GUID
+    std::string project;               ///< only rows tied to this project id/name
+                                       ///  (resolved via resolve_project; "" = no filter)
     int limit = 10;
     int max_tokens = 0;                ///< 0 = no budget; else stop adding results past ~max_tokens (chars/4)
 };

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import http.client
 import socket
@@ -309,8 +310,66 @@ DECISION_SCHEMA = {
             "supersedes": {"type": "integer", "description": "decision id this replaces."},
             "evidence": {"type": "array", "items": {"type": "integer"},
                          "description": "turn_summary ids (from search results) this rests on."},
+            "project": {"type": "string",
+                        "description": "Project name or path this ruling belongs to (optional; auto-inferred from cwd when omitted)."},
+            "cwd": {"type": "string",
+                    "description": "Working directory for project inference (the plugin fills os.getcwd() automatically when project is omitted)."},
         },
         "required": ["text", "trigger"],
+    },
+}
+
+
+MEMORY_NOTE_SCHEMA = {
+    "name": "memory_note",
+    "description": (
+        "Store a note (fact, preference, lesson) into memory, optionally filed "
+        "under a project. `project` is a project name or path; when omitted the "
+        "server infers the project from `cwd` (the plugin fills os.getcwd() "
+        "automatically). The result may carry `possible_supersedes`: current "
+        "decisions this note may contradict (hint only -- nothing was changed; "
+        "review them and use memory_decision for a real ruling)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "The note text."},
+            "project": {"type": "string",
+                        "description": "Project name or path (optional)."},
+            "tags": {"type": "array", "items": {"type": "string"},
+                     "description": "Optional tags."},
+            "cwd": {"type": "string",
+                    "description": "Working directory for project inference (auto-filled when project is omitted)."},
+        },
+        "required": ["text"],
+    },
+}
+
+
+MEMORY_PROJECT_SCHEMA = {
+    "name": "memory_project",
+    "description": (
+        "Projects: named bodies of work. action 'list' returns all projects "
+        "(optional status filter); 'create' needs name (unique; path optional, "
+        "used for cwd inference); 'get' returns the project briefing packet -- "
+        "current rulings, latest project summary, recent episodes, open "
+        "questions -- read it before working on a project; 'update' changes "
+        "status/description/path (only supplied fields)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["list", "create", "get", "update"],
+                       "description": "list | create | get | update."},
+            "name": {"type": "string",
+                     "description": "Project name (required for create/get/update)."},
+            "status": {"type": "string",
+                       "description": "active|paused|done|abandoned (vocabulary may grow). For list: filter."},
+            "description": {"type": "string", "description": "What this project is."},
+            "path": {"type": "string",
+                     "description": "Project root path (absolute or ~/...), used for cwd inference."},
+        },
+        "required": ["action"],
     },
 }
 
@@ -344,6 +403,10 @@ MEMORY_SEARCH_SCHEMA = {
             "limit": {"type": "integer", "description": "Max results (default 10, max 50)."},
             "max_tokens": {"type": "integer",
                            "description": "Token budget (~chars/4) over snippets; 0 = none."},
+            "project": {"type": "string",
+                        "description": "Only results tied to this project (name or path)."},
+            "cwd": {"type": "string",
+                    "description": "Working directory for project inference (auto-filled when project is omitted)."},
         },
         "required": ["query"],
     },
@@ -740,7 +803,8 @@ class RaggerMemoryProvider(MemoryProvider):
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [SEARCH_SCHEMA, STORE_SCHEMA, DECISION_SCHEMA,
-                MEMORY_SEARCH_SCHEMA, MEMORY_GET_SCHEMA]
+                MEMORY_SEARCH_SCHEMA, MEMORY_GET_SCHEMA,
+                MEMORY_NOTE_SCHEMA, MEMORY_PROJECT_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._breaker_open():
@@ -805,6 +869,12 @@ class RaggerMemoryProvider(MemoryProvider):
                 payload["supersedes"] = int(args["supersedes"])
             if args.get("evidence"):
                 payload["evidence"] = [int(x) for x in args["evidence"]]
+            # Project (Phase 3): explicit wins; else pass cwd so the server
+            # infers (longest-prefix match). No match = unfiled, not an error.
+            if args.get("project"):
+                payload["project"] = str(args["project"])
+            else:
+                payload["cwd"] = str(args.get("cwd") or os.getcwd())
             got = self._post_status("/decision", payload)
             if got is None:
                 self._record_fail()
@@ -841,7 +911,37 @@ class RaggerMemoryProvider(MemoryProvider):
                 payload["limit"] = int(args["limit"])
             if args.get("max_tokens") is not None:
                 payload["max_tokens"] = int(args["max_tokens"])
+            # Project filter (Phase 3): explicit wins; else cwd inference.
+            if args.get("project"):
+                payload["project"] = str(args["project"])
+            else:
+                payload["cwd"] = str(args.get("cwd") or os.getcwd())
             got = self._post_status("/memory/search", payload)
+            return self._agent_tool_result(got)
+
+        elif tool_name == "memory_note":
+            text = str(args.get("text", "")).strip()
+            if not text:
+                return json.dumps({"error": "Missing required parameter: text"})
+            payload = {"text": text}
+            if args.get("tags"):
+                payload["tags"] = [str(t) for t in args["tags"]]
+            if args.get("project"):
+                payload["project"] = str(args["project"])
+            else:
+                payload["cwd"] = str(args.get("cwd") or os.getcwd())
+            got = self._post_status("/memory/note", payload)
+            return self._agent_tool_result(got)
+
+        elif tool_name == "memory_project":
+            action = str(args.get("action", "")).strip()
+            if action not in ("list", "create", "get", "update"):
+                return json.dumps({"error": "memory_project action must be list|create|get|update"})
+            payload = {"action": action}
+            for key in ("name", "status", "description", "path"):
+                if args.get(key) is not None:
+                    payload[key] = str(args[key])
+            got = self._post_status("/memory/project", payload)
             return self._agent_tool_result(got)
 
         elif tool_name == "memory_get":

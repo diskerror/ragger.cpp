@@ -255,8 +255,14 @@ namespace fs = std::filesystem;
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at
             FROM models
         )");
+        view("projects_view", R"(
+            SELECT project_id, name, status, description, path,
+                   datetime(created_at, 'unixepoch', 'localtime') AS created_at,
+                   datetime(updated_at, 'unixepoch', 'localtime') AS updated_at
+            FROM projects
+        )");
         view("sessions_view", R"(
-            SELECT session_id, guid, name, name_source,
+            SELECT session_id, guid, name, name_source, project_id,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at
             FROM sessions
         )");
@@ -281,7 +287,7 @@ namespace fs = std::filesystem;
             WHERE text != ''
         )");
         view("summaries_view", R"(
-            SELECT summary_id, text, level, tags, session_id, model_id,
+            SELECT summary_id, text, level, tags, session_id, model_id, project_id,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
                    datetime(updated_at, 'unixepoch', 'localtime') AS updated_at,
                    unigram_count, bigram_count,
@@ -291,7 +297,7 @@ namespace fs = std::filesystem;
         )");
         view("decisions_view", R"(
             SELECT decision_id, text, status, tags,
-                   trigger, rationale, scope, supersedes, source_session_id,
+                   trigger, rationale, scope, supersedes, source_session_id, project_id,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
                    unigram_count, bigram_count,
                    embedding_version,
@@ -299,7 +305,7 @@ namespace fs = std::filesystem;
             FROM decisions
         )");
         view("document_sources_view", R"(
-            SELECT document_source_id, title, path, year, tags,
+            SELECT document_source_id, title, path, year, tags, project_id,
                    datetime(imported_at, 'unixepoch', 'localtime') AS imported_at
             FROM document_sources
         )");

@@ -546,6 +546,14 @@ struct Server::Impl {
         if (body.contains("evidence"))
             in.evidence = body["evidence"].get<std::vector<int>>();
 
+        // Project (Phase 3): explicit name/path wins; otherwise infer from
+        // cwd (longest-prefix match). No match leaves it empty — not an error.
+        auto& mem0 = _get_memory(user.username);
+        in.project = body.value("project", "");
+        if (in.project.empty() && body.contains("cwd") && body["cwd"].is_string())
+            if (auto pid = mem0.resolve_project(body["cwd"].get<std::string>()); pid)
+                in.project = body["cwd"].get<std::string>();
+
         auto& mem = _get_memory(user.username);
         try {
             auto r = mem.store_structured_decision(in);
@@ -561,6 +569,101 @@ struct Server::Impl {
                 {"possible_supersedes", std::move(ps)}});
         } catch (const std::invalid_argument& e) {
             Diskerror::Logger::debug("POST /decision 400");
+            res.status = 400;
+            res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
+        }
+    }
+
+    // POST /memory/note — agent note (agent API Phase 3).
+    // Body: {text, project?, tags?, cwd?}. Stores via store(), so the row
+    // lands where ragger_store notes land today (summaries), plus
+    // project_id. The response carries possible_supersedes exactly like
+    // /decision — compared against current decisions, hint only, nothing
+    // is changed. Explicit unknown project -> 400; a cwd that matches
+    // nothing simply leaves the note unfiled (not an error).
+    void handle_memory_note(const UserInfo& user, const httplib::Request& req,
+                            httplib::Response& res) {
+        auto body = json::parse(req.body);
+        std::string text = body.value("text", "");
+        if (text.empty()) {
+            Diskerror::Logger::debug("POST /memory/note 400");
+            res.status = 400;
+            res.set_content(lang::HTTP_MISSING_TEXT, "text/plain");
+            return;
+        }
+
+        json metadata = json::object();
+        metadata["source"] = user.username;
+        if (body.contains("tags"))
+            metadata["tags"] = body["tags"];
+
+        // Project (Phase 3): explicit name/path wins; otherwise infer from
+        // cwd. store() resolves it and throws on an unknown explicit project.
+        std::string project = body.value("project", "");
+        if (project.empty() && body.contains("cwd") && body["cwd"].is_string())
+            if (auto pid = _get_memory(user.username).resolve_project(body["cwd"].get<std::string>()); pid)
+                project = body["cwd"].get<std::string>();
+        if (!project.empty())
+            metadata["project"] = project;
+
+        auto& mem = _get_memory(user.username);
+        try {
+            std::string id = mem.store(text, metadata);
+            json ps = json::array();
+            for (const auto& [did, score] : mem.possible_supersedes_for_text(text))
+                ps.push_back({{"id", did}, {"score", score}});
+            Diskerror::Logger::debug("POST /memory/note 200");
+            respond_json(res, json{
+                {"id", id},
+                {"status", "stored"},
+                {"possible_supersedes", std::move(ps)}});
+        } catch (const std::invalid_argument& e) {
+            Diskerror::Logger::debug("POST /memory/note 400");
+            res.status = 400;
+            res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
+        }
+    }
+
+    // POST /memory/project — projects (agent API Phase 3).
+    // Body: {action, name?, status?, description?, path?}.
+    //   list   -> {projects: [...]} (status filter optional; "" = all)
+    //   create -> {id, status:"stored"} (name required, unique)
+    //   get    -> the briefing packet (PHASE3-STEPS step 3 shape)
+    //   update -> {status:"ok"} (only supplied fields change)
+    // Validation failures are 400.
+    void handle_memory_project(const UserInfo& user, const httplib::Request& req,
+                               httplib::Response& res) {
+        auto body = json::parse(req.body);
+        const std::string action = body.value("action", "");
+        const std::string name   = body.value("name", "");
+        auto& mem = _get_memory(user.username);
+        try {
+            if (action == "list") {
+                respond_json(res, json{{"projects",
+                    mem.list_projects(body.value("status", ""))}});
+            } else if (action == "create") {
+                int id = mem.create_project(name,
+                    body.value("path", ""), body.value("description", ""));
+                respond_json(res, json{{"id", id}, {"status", "stored"}});
+            } else if (action == "get") {
+                respond_json(res, mem.project_briefing(name));
+            } else if (action == "update") {
+                std::optional<std::string> status, description, path;
+                if (body.contains("status") && !body["status"].is_null())
+                    status = body["status"].get<std::string>();
+                if (body.contains("description") && !body["description"].is_null())
+                    description = body["description"].get<std::string>();
+                if (body.contains("path") && !body["path"].is_null())
+                    path = body["path"].get<std::string>();
+                mem.update_project(name, status, description, path);
+                respond_json(res, json{{"status", "ok"}});
+            } else {
+                throw std::invalid_argument(
+                    "action must be one of: list, create, get, update");
+            }
+            Diskerror::Logger::debug("POST /memory/project 200");
+        } catch (const std::invalid_argument& e) {
+            Diskerror::Logger::debug("POST /memory/project 400");
             res.status = 400;
             res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
         }
@@ -584,6 +687,15 @@ struct Server::Impl {
         q.max_tokens      = body.value("max_tokens", 0);
         if (body.contains("layers"))
             q.layers = body["layers"].get<std::vector<std::string>>();
+
+        // Project filter (Phase 3): explicit first, else cwd inference; a
+        // non-matching cwd simply leaves the filter empty. An explicit
+        // unknown project throws below -> 400.
+        auto& mem0 = _get_memory(user.username);
+        q.project = body.value("project", "");
+        if (q.project.empty() && body.contains("cwd") && body["cwd"].is_string())
+            if (auto pid = mem0.resolve_project(body["cwd"].get<std::string>()); pid)
+                q.project = body["cwd"].get<std::string>();
 
         auto& mem = _get_memory(user.username);
         try {
@@ -795,6 +907,8 @@ struct Server::Impl {
         svr.Post("/search",             guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_search(u, req, res); }));
         svr.Post("/memory/search",      guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_search(u, req, res); }));
         svr.Post("/memory/get",         guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_get(u, req, res); }));
+        svr.Post("/memory/note",        guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_note(u, req, res); }));
+        svr.Post("/memory/project",     guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_project(u, req, res); }));
         svr.Post("/turn",               guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_turn(u, req, res); }));
         svr.Get(R"(/session/([^/]+))",  guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_session(u, req, res); }));
         svr.Delete(R"(/memory/(\d+))",  guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_delete_memory(u, req, res); }));

@@ -166,6 +166,31 @@ public:
     /// throws std::invalid_argument.
     virtual json agent_get(const AgentGetQuery& q) = 0;
 
+    /// Projects (agent API Phase 3, db 0.18). create_project: name must be
+    /// non-empty and unique (duplicate -> std::invalid_argument); path is
+    /// stored ~-collapsed. list_projects: "" status = all. update_project:
+    /// only supplied fields change; unknown name -> std::invalid_argument.
+    /// resolve_project: exact name first, else longest-prefix path match on
+    /// a component boundary; nullopt when nothing matches. project_briefing:
+    /// the pre-work packet (current rulings, latest project summary, recent
+    /// episodes, open questions); unknown name -> std::invalid_argument.
+    virtual int create_project(const std::string& name, const std::string& path,
+                               const std::string& description) = 0;
+    virtual json list_projects(const std::string& status_filter) = 0;
+    virtual void update_project(const std::string& name,
+                                std::optional<std::string> status,
+                                std::optional<std::string> description,
+                                std::optional<std::string> path) = 0;
+    virtual std::optional<int> resolve_project(const std::string& name_or_path) = 0;
+    virtual json project_briefing(const std::string& name) = 0;
+
+    /// Near-duplicate decision hints for free text: embeds the text and runs
+    /// the same cosine scan as possible_supersedes (compares against current
+    /// decisions). Empty when the embedder is degraded. Used by the Phase 3
+    /// note surface so a note can flag a ruling it may contradict.
+    virtual std::vector<std::pair<int,float>> possible_supersedes_for_text(
+        const std::string& text) = 0;
+
     /// Write back a single row's embedding for the remaining context tables
     /// (documents already covered above). Returns true if a row was updated.
     virtual bool update_decision_embedding(int decision_id,

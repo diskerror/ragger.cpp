@@ -157,7 +157,7 @@ struct Backend::Impl {
     // (e.g. "0.12"). Absent means pre-versioning (legacy v3/v4 DB from
     // before this key existed) -- returns "" in that case. Startup hard-gates
     // on this via kExpectedDbVersion below; there is no in-binary migration.
-    static constexpr std::string_view kExpectedDbVersion = "0.17";
+    static constexpr std::string_view kExpectedDbVersion = "0.18";
 
     // Watermark keys for the boundary-detection housekeeping scans (see
     // sessions_needing_close_boundary()/projects_needing_close_boundary()
@@ -324,6 +324,12 @@ struct Backend::Impl {
     /// orphan-protection trigger are created after migration in create_schema().
     void migrate_0_16_to_0_17();
 
+    /// 0.17 -> 0.18 migration (agent API Phase 3: projects). Creates the
+    /// project_id FK on sessions/document_sources via ALTER (append is fine
+    /// there — no BLOB columns) and rebuilds summaries/decisions so the new
+    /// column sits BEFORE the embedding BLOB, matching fresh installs.
+    void migrate_0_17_to_0_18();
+
     /// Custom terms index (v0.16) — replaces both FTS5 layers with a single
     /// flat term table + per-content-type junction tables. See
     /// ownCloud/Ragger/custom-search-schema.md for the design rationale and
@@ -449,6 +455,18 @@ struct Backend::Impl {
     // StorageBackend::agent_get for the contract.
     json agent_get(const AgentGetQuery& q);
 
+    // --- agent API Phase 3 projects (src/sqlite/projects.cpp) ---
+
+    int create_project(const std::string& name, const std::string& path,
+                       const std::string& description);
+    json list_projects(const std::string& status_filter);
+    void update_project(const std::string& name,
+                        std::optional<std::string> status,
+                        std::optional<std::string> description,
+                        std::optional<std::string> path);
+    std::optional<int> resolve_project(const std::string& name_or_path);
+    json project_briefing(const std::string& name);
+
     // --- write ---
 
     // ---- path normalization -------------------------------------------
@@ -569,6 +587,17 @@ struct Backend::Impl {
     // row, flips the superseded row (if any) to 'superseded', and links the
     // evidence turn_summaries. Throws std::invalid_argument on bad input.
     StructuredDecisionResult store_structured_decision(const DecisionInput& in);
+
+    // Cosine near-duplicate scan over active decisions (possible_supersedes
+    // hint; Phase 2 step 5). Shared with the Phase 3 note path.
+    std::vector<std::pair<int,float>> supersede_hints(
+        const std::vector<float>& emb, const std::vector<int>& exclude_ids);
+
+    // Embed `text` (when the embedder is usable) and run supersede_hints
+    // over it. Used by the Phase 3 note surface, where the stored row is a
+    // summary but the hint compares against current decisions.
+    std::vector<std::pair<int,float>> possible_supersedes_for_text(
+        const std::string& text);
 
     // ---- catch-up / recipe helpers ------------------------------------
     // Turns lacking an L2 summary, linked by (session_id, timestamp).

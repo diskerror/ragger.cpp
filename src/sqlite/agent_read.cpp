@@ -199,6 +199,42 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
     if (!q.session.empty())         sess_id = guid_to_id(q.session);
     if (!q.exclude_session.empty()) excl_id = guid_to_id(q.exclude_session);
 
+    // ---- project filter (Phase 3) ----------------------------------------
+    // An explicitly named project that doesn't resolve is an error (400);
+    // cwd INFERENCE happens at the HTTP layer and leaves the filter empty
+    // when nothing matches, per PHASE3-STEPS step 4.
+    std::optional<int> proj_id;
+    if (!q.project.empty()) {
+        proj_id = resolve_project(q.project);
+        if (!proj_id)
+            throw std::invalid_argument(std::format(
+                "project '{}' does not exist", q.project));
+    }
+    // Owning project id per layer: decisions/summaries carry it directly;
+    // turn_summaries reach it through their session; documents through
+    // their document_sources row.
+    auto project_id_of = [this](const std::string& layer, int id) -> std::optional<int> {
+        const char* sql = nullptr;
+        if (layer == "decision")
+            sql = "SELECT project_id FROM decisions WHERE decision_id = ?";
+        else if (layer == "summary")
+            sql = "SELECT project_id FROM summaries WHERE summary_id = ?";
+        else if (layer == "turn_summary")
+            sql = "SELECT s.project_id FROM turn_summaries ts "
+                  "JOIN sessions s ON s.session_id = ts.session_id "
+                  "WHERE ts.turn_summary_id = ?";
+        else if (layer == "document")
+            sql = "SELECT ds.project_id FROM documents d "
+                  "JOIN document_sources ds ON ds.document_source_id = d.document_source_id "
+                  "WHERE d.document_id = ?";
+        else
+            return std::nullopt;
+        Stmt s(db, sql);
+        s.bind(1, id);
+        if (!s.step() || s.is_null(0)) return std::nullopt;
+        return s.column_int(0);
+    };
+
     auto session_id_of = [this](int sid) -> std::string {
         Stmt s(db, "SELECT guid FROM sessions WHERE session_id = ?");
         s.bind(1, sid);
@@ -233,6 +269,11 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
             auto sid = owning_session(layer, r.id);
             if (sess_id && (!sid || *sid != *sess_id)) continue;
             if (excl_id && sid && *sid == *excl_id) continue;
+        }
+
+        if (proj_id) {
+            auto pid = project_id_of(layer, r.id);
+            if (!pid || *pid != *proj_id) continue;
         }
 
         AgentHit h;

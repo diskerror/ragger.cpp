@@ -223,6 +223,35 @@ json RaggerMemory::agent_get(const AgentGetQuery& q) {
     return backend_->agent_get(q);
 }
 
+int RaggerMemory::create_project(const std::string& name, const std::string& path,
+                                 const std::string& description) {
+    return backend_->create_project(name, path, description);
+}
+
+json RaggerMemory::list_projects(const std::string& status_filter) {
+    return backend_->list_projects(status_filter);
+}
+
+void RaggerMemory::update_project(const std::string& name,
+                                  std::optional<std::string> status,
+                                  std::optional<std::string> description,
+                                  std::optional<std::string> path) {
+    backend_->update_project(name, status, description, path);
+}
+
+std::optional<int> RaggerMemory::resolve_project(const std::string& name_or_path) {
+    return backend_->resolve_project(name_or_path);
+}
+
+json RaggerMemory::project_briefing(const std::string& name) {
+    return backend_->project_briefing(name);
+}
+
+std::vector<std::pair<int,float>> RaggerMemory::possible_supersedes_for_text(
+        const std::string& text) {
+    return backend_->possible_supersedes_for_text(text);
+}
+
 bool RaggerMemory::update_decision_embedding(int decision_id,
                                              const std::vector<float>& emb) {
     return backend_->update_decision_embedding(decision_id, emb);

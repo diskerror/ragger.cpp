@@ -74,6 +74,21 @@ public:
     std::vector<AgentHit> agent_search(const AgentSearchQuery& q) override;
     json agent_get(const AgentGetQuery& q) override;
 
+    /// Agent API Phase 3: projects (see StorageBackend docs).
+    int create_project(const std::string& name, const std::string& path,
+                       const std::string& description) override;
+    json list_projects(const std::string& status_filter) override;
+    void update_project(const std::string& name,
+                        std::optional<std::string> status,
+                        std::optional<std::string> description,
+                        std::optional<std::string> path) override;
+    std::optional<int> resolve_project(const std::string& name_or_path) override;
+    json project_briefing(const std::string& name) override;
+
+    /// Near-duplicate decision hints for free text (Phase 3 note surface).
+    std::vector<std::pair<int,float>> possible_supersedes_for_text(
+        const std::string& text) override;
+
     /// Write back a single row's embedding for any embedded context table.
     bool update_decision_embedding(int decision_id,
                                    const std::vector<float>& emb) override;

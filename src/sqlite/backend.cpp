@@ -368,6 +368,41 @@ json Backend::agent_get(const AgentGetQuery& q) {
     return pImpl->agent_get(q);
 }
 
+int Backend::create_project(const std::string& name, const std::string& path,
+                            const std::string& description) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->create_project(name, path, description);
+}
+
+json Backend::list_projects(const std::string& status_filter) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->list_projects(status_filter);
+}
+
+void Backend::update_project(const std::string& name,
+                             std::optional<std::string> status,
+                             std::optional<std::string> description,
+                             std::optional<std::string> path) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    pImpl->update_project(name, status, description, path);
+}
+
+std::optional<int> Backend::resolve_project(const std::string& name_or_path) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->resolve_project(name_or_path);
+}
+
+json Backend::project_briefing(const std::string& name) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->project_briefing(name);
+}
+
+std::vector<std::pair<int,float>> Backend::possible_supersedes_for_text(
+        const std::string& text) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->possible_supersedes_for_text(text);
+}
+
 bool Backend::update_decision_embedding(int decision_id,
                                               const std::vector<float>& emb) {
     std::lock_guard<std::mutex> lk(pImpl->mu);

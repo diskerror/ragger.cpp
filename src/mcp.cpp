@@ -125,7 +125,11 @@ static nlohmann::json tools_list() {
                     {"session",    {{"type", "string"},
                                     {"description", "Current session GUID, for provenance."}}},
                     {"evidence",   {{"type", "array"}, {"items", {{"type", "integer"}}},
-                                    {"description", "turn_summary ids this decision rests on."}}}
+                                    {"description", "turn_summary ids this decision rests on."}}},
+                    {"project",    {{"type", "string"},
+                                    {"description", "Project name or path this ruling belongs to (optional)."}}},
+                    {"cwd",        {{"type", "string"},
+                                    {"description", "Working directory, for project inference when project is omitted."}}}
                 }},
                 {"required", nlohmann::json::array({"text", "trigger"})}
             }}
@@ -178,7 +182,11 @@ static nlohmann::json tools_list() {
                     {"limit",           {{"type", "integer"},
                                           {"description", "Max results (default 10, max 50)."}}},
                     {"max_tokens",      {{"type", "integer"},
-                                          {"description", "Token budget (~chars/4) over snippets; 0 = none."}}}
+                                          {"description", "Token budget (~chars/4) over snippets; 0 = none."}}},
+                    {"project",         {{"type", "string"},
+                                          {"description", "Only results tied to this project (name or path)."}}},
+                    {"cwd",             {{"type", "string"},
+                                          {"description", "Working directory, for project inference when project is omitted."}}}
                 }},
                 {"required", nlohmann::json::array({"query"})}
             }}
@@ -207,6 +215,57 @@ static nlohmann::json tools_list() {
                     {"limit",       {{"type", "integer"},
                                       {"description", "History page size (default 20, max 100)."}}}
                 }}
+            }}
+        },
+        {
+            {"name", "memory_note"},
+            {"description",
+             "Store a note (fact, preference, lesson) into memory. `project` is a "
+             "project name or path; omit it and the server infers the project from "
+             "the working directory when `cwd` is given. The result may carry "
+             "`possible_supersedes`: current decisions this note may contradict "
+             "(hint only — nothing was changed; review them, and record a real "
+             "ruling with memory_decision instead)."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"text",    {{"type", "string"},
+                                 {"description", "The note text."}}},
+                    {"project", {{"type", "string"},
+                                 {"description", "Project name or path (optional)."}}},
+                    {"tags",    {{"type", "array"}, {"items", {{"type", "string"}}},
+                                 {"description", "Optional tags."}}},
+                    {"cwd",     {{"type", "string"},
+                                 {"description", "Working directory, for project inference when project is omitted."}}}
+                }},
+                {"required", nlohmann::json::array({"text"})}
+            }}
+        },
+        {
+            {"name", "memory_project"},
+            {"description",
+             "Projects: named bodies of work. action 'list' returns all projects "
+             "(optional status filter); 'create' needs name (unique; path optional, "
+             "used for cwd inference); 'get' returns the project briefing packet — "
+             "current rulings, latest project summary, recent episodes, open "
+             "questions — read it before working on a project; 'update' changes "
+             "status/description/path (only supplied fields)."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"action",      {{"type", "string"},
+                                     {"enum", nlohmann::json::array({"list", "create", "get", "update"})},
+                                     {"description", "list | create | get | update."}}},
+                    {"name",        {{"type", "string"},
+                                     {"description", "Project name (required for create/get/update)."}}},
+                    {"status",      {{"type", "string"},
+                                     {"description", "create default active; update sets it (active|paused|done|abandoned, vocabulary may grow). For list: filter."}}},
+                    {"description", {{"type", "string"},
+                                     {"description", "What this project is."}}},
+                    {"path",        {{"type", "string"},
+                                     {"description", "Project root path (absolute or ~/...), used for cwd inference."}}}
+                }},
+                {"required", nlohmann::json::array({"action"})}
             }}
         },
         {
@@ -339,6 +398,11 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         if (arguments.contains("supersedes") && !arguments["supersedes"].is_null())
             in.supersedes = arguments["supersedes"].get<int>();
         in.evidence = arguments.value("evidence", std::vector<int>{});
+        // Project (Phase 3): explicit name/path wins; else infer from cwd.
+        in.project = arguments.value("project", "");
+        if (in.project.empty() && arguments.contains("cwd") && arguments["cwd"].is_string())
+            if (auto pid = memory.resolve_project(arguments["cwd"].get<std::string>()); pid)
+                in.project = arguments["cwd"].get<std::string>();
         try {
             const auto r = memory.store_structured_decision(in);
             nlohmann::json ps = nlohmann::json::array();
@@ -368,6 +432,13 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         q.max_tokens      = arguments.value("max_tokens", 0);
         if (arguments.contains("layers"))
             q.layers = arguments["layers"].get<std::vector<std::string>>();
+        // Project filter (Phase 3): explicit first, else cwd inference; a
+        // non-matching cwd leaves the filter empty. An explicit unknown
+        // project throws below -> error_result.
+        q.project = arguments.value("project", "");
+        if (q.project.empty() && arguments.contains("cwd") && arguments["cwd"].is_string())
+            if (auto pid = memory.resolve_project(arguments["cwd"].get<std::string>()); pid)
+                q.project = arguments["cwd"].get<std::string>();
         try {
             const auto hits = memory.agent_search(q);
             nlohmann::json arr = nlohmann::json::array();
@@ -393,6 +464,62 @@ static nlohmann::json tool_call(RaggerMemory& memory,
             q.ids = arguments["ids"].get<std::vector<std::string>>();
         try {
             return text_result(memory.agent_get(q).dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
+
+    } else if (tool_name == "memory_note") {
+        // Phase 3: today's ragger_store plus project/tags. Lands where notes
+        // land today (summaries via store()), plus project_id.
+        const auto text = arguments.value("text", "");
+        if (text.empty())
+            return error_result(ragger::lang::ERR_MCP_TEXT_REQUIRED);
+        json metadata = json::object();
+        metadata["source"] = "mcp";
+        if (arguments.contains("tags"))
+            metadata["tags"] = arguments["tags"];
+        std::string project = arguments.value("project", "");
+        if (project.empty() && arguments.contains("cwd") && arguments["cwd"].is_string())
+            if (auto pid = memory.resolve_project(arguments["cwd"].get<std::string>()); pid)
+                project = arguments["cwd"].get<std::string>();
+        if (!project.empty())
+            metadata["project"] = project;
+        try {
+            const auto id = memory.store(text, metadata);
+            json ps = json::array();
+            for (const auto& [did, score] : memory.possible_supersedes_for_text(text))
+                ps.push_back({{"id", did}, {"score", score}});
+            return text_result(json({{"id", id}, {"status", "stored"},
+                                     {"possible_supersedes", std::move(ps)}}).dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
+
+    } else if (tool_name == "memory_project") {
+        const auto action = arguments.value("action", "");
+        const auto name   = arguments.value("name", "");
+        try {
+            if (action == "list") {
+                return text_result(json({{"projects",
+                    memory.list_projects(arguments.value("status", ""))}}).dump());
+            } else if (action == "create") {
+                const int id = memory.create_project(name,
+                    arguments.value("path", ""), arguments.value("description", ""));
+                return text_result(json({{"id", id}, {"status", "stored"}}).dump());
+            } else if (action == "get") {
+                return text_result(memory.project_briefing(name).dump());
+            } else if (action == "update") {
+                std::optional<std::string> status, description, path;
+                if (arguments.contains("status") && !arguments["status"].is_null())
+                    status = arguments["status"].get<std::string>();
+                if (arguments.contains("description") && !arguments["description"].is_null())
+                    description = arguments["description"].get<std::string>();
+                if (arguments.contains("path") && !arguments["path"].is_null())
+                    path = arguments["path"].get<std::string>();
+                memory.update_project(name, status, description, path);
+                return text_result(json({{"status", "ok"}}).dump());
+            }
+            return error_result("action must be one of: list, create, get, update");
         } catch (const std::invalid_argument& e) {
             return error_result(e.what());
         }

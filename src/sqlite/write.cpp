@@ -174,11 +174,25 @@ static std::string tags_from_metadata(const json& metadata) {
         std::string model_name = metadata.value("model", std::string(""));
         int model_id = get_or_create_model(model_name);
 
+        // Project (Phase 3): metadata key "project", a name or path resolved
+        // via resolve_project. An explicitly named project that doesn't exist
+        // throws (parity with store_structured_decision).
+        std::optional<int> project_id;
+        if (metadata.contains("project") && metadata["project"].is_string()) {
+            const std::string p = metadata["project"].get<std::string>();
+            if (!p.empty()) {
+                project_id = resolve_project(p);
+                if (!project_id)
+                    throw std::invalid_argument(std::format(
+                        "project '{}' does not exist", p));
+            }
+        }
+
         // Custom text index (v0.16): index_record() below tokenizes text and
         // maintains terms/*_terms/count columns — no FTS5 triggers involved.
         Stmt s(db,
-            "INSERT INTO summaries (text, embedding_version, embedding, level, tags, created_at, model_id, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?)");
+            "INSERT INTO summaries (text, embedding_version, embedding, level, tags, created_at, model_id, updated_at, project_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?)");
 
         s.bind(1, text);
         if (defer_embedding) {
@@ -191,6 +205,7 @@ static std::string tags_from_metadata(const json& metadata) {
         s.bind(4, level).bind(5, tags_str).bind(6, ts);
         if (model_id) s.bind(7, model_id); else s.bind_null(7);
         s.bind(8, ts);  // updated_at == created_at on insert
+        if (project_id) s.bind(9, *project_id); else s.bind_null(9);
 
         if (!s.exec()) {
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
@@ -674,6 +689,18 @@ static std::string tags_from_metadata(const json& metadata) {
             if (s.step()) session_id = s.column_int(0);
         }
 
+        // Project (Phase 3): name or path, resolved the same way every other
+        // caller resolves it. Unlike session provenance, an explicitly named
+        // project that doesn't exist IS an error -- silently filing a decision
+        // unfiled is worse than failing the call.
+        std::optional<int> project_id;
+        if (!in.project.empty()) {
+            project_id = resolve_project(in.project);
+            if (!project_id)
+                throw std::invalid_argument(std::format(
+                    "project '{}' does not exist", in.project));
+        }
+
         // ---- 2. embed (outside the transaction) ------------------------
         // MUST equal kDecisionEmbedTextSQL's result for this row, so a
         // housekeeping re-embed produces the same vector.
@@ -686,8 +713,8 @@ static std::string tags_from_metadata(const json& metadata) {
         try {
             Stmt ins(db,
                 "INSERT INTO decisions (text, status, tags, trigger, rationale, scope, "
-                "supersedes, source_session_id, created_at, embedding_version, embedding) "
-                "VALUES (?,?,?,?,?,?,?,?,unixepoch(),?,?)");
+                "supersedes, source_session_id, project_id, created_at, embedding_version, embedding) "
+                "VALUES (?,?,?,?,?,?,?,?,?,unixepoch(),?,?)");
             ins.bind(1, text);
             ins.bind(2, status);
             ins.bind(3, in.tags);
@@ -698,8 +725,9 @@ static std::string tags_from_metadata(const json& metadata) {
             if (scope.empty())     ins.bind_null(6); else ins.bind(6, scope);
             if (in.supersedes)     ins.bind(7, *in.supersedes); else ins.bind_null(7);
             if (session_id)        ins.bind(8, *session_id);    else ins.bind_null(8);
-            bind_embedding_version(ins.raw(), 9, emb);
-            bind_embedding(ins.raw(), 10, emb);
+            if (project_id)        ins.bind(9, *project_id);    else ins.bind_null(9);
+            bind_embedding_version(ins.raw(), 10, emb);
+            bind_embedding(ins.raw(), 11, emb);
             if (!ins.exec())
                 throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
             out.id = static_cast<int>(sqlite3_last_insert_rowid(db));
@@ -735,47 +763,64 @@ static std::string tags_from_metadata(const json& metadata) {
         // with the new row reaches decision_supersede_threshold. The row the
         // call already superseded is skipped (it's in out.superseded). NO row
         // is ever changed here — the caller decides what to do with the hint.
-        // Purely vector-based on purpose: a near-duplicate ruling is exactly
-        // what this looks like in embedding space, and lexical overlap is
-        // already guaranteed by the shared trigger vocabulary.
-        if (!emb.empty()) {
-            Eigen::Map<Eigen::VectorXf> v(emb.data(), static_cast<int>(emb.size()));
-            float vnorm = v.norm();
-            if (vnorm > 1e-12f) {
-                const float threshold = config().decision_supersede_threshold;
-                const int expected_dims = config().embedding_dimensions;
-                std::vector<std::pair<int,float>> scored;
-                bool blob_warned = false;
-                // Exclude self; the already-superseded row is excluded by the
-                // status filter (it is 'superseded' now), but exclude it by id
-                // too so a failed flip can never sneak it back in.
-                std::string sql =
-                    "SELECT decision_id, embedding FROM decisions "
-                    "WHERE status IN ('current','provisional') "
-                    "  AND decision_id != ? ";
-                if (out.superseded) sql += "  AND decision_id != ? ";
-                sql += "  AND embedding IS NOT NULL";
-                Stmt s(db, sql);
-                s.bind(1, out.id);
-                if (out.superseded) s.bind(2, *out.superseded);
-                while (s.step()) {
-                    std::vector<float> other = decode_embedding_blob(
-                        s.column_blob(1), s.column_bytes(1), expected_dims,
-                        "decisions", s.column_int(0), blob_warned);
-                    if (static_cast<int>(other.size()) != expected_dims) continue;
-                    Eigen::Map<Eigen::VectorXf> o(other.data(), expected_dims);
-                    float onorm = o.norm();
-                    if (onorm <= 1e-12f) continue;   // zero/undecodable vector
-                    float cos = (v.dot(o)) / (vnorm * onorm);
-                    if (cos >= threshold) scored.emplace_back(s.column_int(0), cos);
-                }
-                std::sort(scored.begin(), scored.end(),
-                          [](const auto& a, const auto& b) { return a.second > b.second; });
-                if (scored.size() > 3) scored.resize(3);
-                out.possible_supersedes = std::move(scored);
-            }
+        {
+            std::vector<int> exclude{out.id};
+            if (out.superseded) exclude.push_back(*out.superseded);
+            out.possible_supersedes = supersede_hints(emb, exclude);
         }
         return out;
+    }
+
+
+    // Cosine near-duplicate scan over active decisions (Phase 2 step 5,
+    // reused by Phase 3 notes). Purely vector-based on purpose: a
+    // near-duplicate ruling is exactly what this looks like in embedding
+    // space, and lexical overlap is already guaranteed by the shared trigger
+    // vocabulary. Returns up to 3 (decision_id, cosine) pairs at or above
+    // decision_supersede_threshold, highest first. Never changes a row.
+    std::vector<std::pair<int,float>> Backend::Impl::supersede_hints(
+            const std::vector<float>& emb,
+            const std::vector<int>& exclude_ids) {
+        std::vector<std::pair<int,float>> scored;
+        if (emb.empty()) return scored;
+        Eigen::Map<const Eigen::VectorXf> v(emb.data(), static_cast<int>(emb.size()));
+        float vnorm = v.norm();
+        if (vnorm <= 1e-12f) return scored;
+        const float threshold = config().decision_supersede_threshold;
+        const int expected_dims = config().embedding_dimensions;
+        bool blob_warned = false;
+        std::string sql =
+            "SELECT decision_id, embedding FROM decisions "
+            "WHERE status IN ('current','provisional') ";
+        for (size_t i = 0; i < exclude_ids.size(); ++i)
+            sql += "  AND decision_id != ? ";
+        sql += "  AND embedding IS NOT NULL";
+        Stmt s(db, sql);
+        for (size_t i = 0; i < exclude_ids.size(); ++i)
+            s.bind(static_cast<int>(i) + 1, exclude_ids[i]);
+        while (s.step()) {
+            std::vector<float> other = decode_embedding_blob(
+                s.column_blob(1), s.column_bytes(1), expected_dims,
+                "decisions", s.column_int(0), blob_warned);
+            if (static_cast<int>(other.size()) != expected_dims) continue;
+            Eigen::Map<Eigen::VectorXf> o(other.data(), expected_dims);
+            float onorm = o.norm();
+            if (onorm <= 1e-12f) continue;   // zero/undecodable vector
+            float cos = (v.dot(o)) / (vnorm * onorm);
+            if (cos >= threshold) scored.emplace_back(s.column_int(0), cos);
+        }
+        std::sort(scored.begin(), scored.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        if (scored.size() > 3) scored.resize(3);
+        return scored;
+    }
+
+
+    std::vector<std::pair<int,float>> Backend::Impl::possible_supersedes_for_text(
+            const std::string& text) {
+        if (!embedder || !embedder->ready() || text.empty())
+            return {};                       // degraded: no hints (per P2 rule)
+        return supersede_hints(embedder->encode(text), {});
     }
 
 
