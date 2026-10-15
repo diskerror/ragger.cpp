@@ -3,7 +3,7 @@ if(APPLE)
     # Has compiled successfully with earlier versions of MacOS. Caveat emptor.
     set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0" CACHE STRING "Minimum macOS version")
 endif()
-project(ragger VERSION 0.16.2.2 LANGUAGES C CXX)
+project(ragger VERSION 0.16.2.3 LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 

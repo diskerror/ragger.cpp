@@ -72,9 +72,13 @@ Three seams are built to be replaced without touching the rest of the code:
 
 ## Quick start
 
+> **Note:** the default branch (`dev`) holds in-progress work. For the latest stable release, clone `master`
+> (as below) or check out a release tag.
+
 Per-user, no sudo (binary → `~/.local/bin`, data → `~/.ragger/`):
 
 ```bash
+git clone -b master https://github.com/diskerror/ragger.cpp.git && cd ragger.cpp
 ./scripts/build.sh        # check deps, build
 ./scripts/install-bin.sh  # install binary + user service unit + recipes
 ragger start              # start the daemon
