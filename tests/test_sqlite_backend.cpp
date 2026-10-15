@@ -830,6 +830,83 @@ void test_store_turn_dedup(ragger::Embedder& emb) {
     cleanup();
 }
 
+// PHASE-REVIEW-0.17 step 2: same-session regeneration dedup. The existing
+// test_store_turn_dedup covers the cross-session path (crash-restart GUID
+// churn); this pins the ordinary healthy-agent case: the re-answer arrives
+// in the SAME session as the original prompt.
+void test_store_turn_dedup_same_session(ragger::Embedder& emb) {
+    cleanup();
+    const std::string S = "dedup-same-session-guid";
+    int t1 = 0;
+    {
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+
+        t1 = db.store_turn("U1", "A1", "test-model",
+                           /*defer_embedding=*/false, S);
+        CHECK(t1 > 0);
+
+        // Same prompt, same session, new answer, inside the 5-minute window
+        // (no sleep needed: same-second is well within it). Must keep-latest.
+        int t2 = db.store_turn("U1", "A2", "test-model",
+                               /*defer_embedding=*/false, S);
+        CHECK(t2 == t1);  // same row id returned — dedup branch reached
+
+        db.close();
+    }
+
+    {
+        // Exactly one row for that session after the deduped pair, and the
+        // surviving row carries the LATEST assistant_text.
+        sqlite3* raw = nullptr;
+        CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+        sqlite3_stmt* st = nullptr;
+        sqlite3_prepare_v2(raw,
+            "SELECT COUNT(*) FROM turns t "
+            "JOIN sessions s ON s.session_id = t.session_id WHERE s.guid = ?",
+            -1, &st, nullptr);
+        sqlite3_bind_text(st, 1, S.c_str(), -1, SQLITE_STATIC);
+        CHECK(sqlite3_step(st) == SQLITE_ROW);
+        CHECK(sqlite3_column_int(st, 0) == 1);
+        sqlite3_finalize(st);
+
+        sqlite3_prepare_v2(raw,
+            "SELECT assistant_text FROM turns WHERE turn_id = ?",
+            -1, &st, nullptr);
+        sqlite3_bind_int(st, 1, t1);
+        CHECK(sqlite3_step(st) == SQLITE_ROW);
+        const char* a = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+        CHECK(a && std::string(a) == "A2");
+        sqlite3_finalize(st);
+        sqlite3_close(raw);
+    }
+
+    {
+        // A genuinely different prompt in the same session inserts a fresh row.
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        int t3 = db.store_turn("U2", "A2b", "test-model",
+                               /*defer_embedding=*/false, S);
+        CHECK(t3 > 0 && t3 != t1);
+        db.close();
+    }
+
+    {
+        sqlite3* raw = nullptr;
+        CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+        sqlite3_stmt* st = nullptr;
+        sqlite3_prepare_v2(raw,
+            "SELECT COUNT(*) FROM turns t "
+            "JOIN sessions s ON s.session_id = t.session_id WHERE s.guid = ?",
+            -1, &st, nullptr);
+        sqlite3_bind_text(st, 1, S.c_str(), -1, SQLITE_STATIC);
+        CHECK(sqlite3_step(st) == SQLITE_ROW);
+        CHECK(sqlite3_column_int(st, 0) == 2);
+        sqlite3_finalize(st);
+        sqlite3_close(raw);
+    }
+
+    cleanup();
+}
+
 // --- v0.12.0 turn_summaries regression tests -------------------------------
 // The turn_id-FK-based turn_summaries table replaces the old
 // (session_guid, source_timestamp)-keyed linkage. Per Reid's explicit design
@@ -3368,6 +3445,7 @@ int main() {
     test_turn_summary_search_metadata(emb);
     test_store_turn(emb);
     test_store_turn_dedup(emb);
+    test_store_turn_dedup_same_session(emb);
     test_store_turn_creates_no_turn_summaries_row(emb);
     test_store_turn_partial_turn_creates_no_turn_summaries_row(emb);
     test_finalize_turn_summary_rejects_duplicate(emb);
