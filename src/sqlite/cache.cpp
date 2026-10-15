@@ -69,6 +69,23 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
     return false;
 }
 
+// Pack decoded rows into a cache's L2-normalized row matrix — the tail
+// shared by all five ensure_*_cache() loaders (review 2C). Templated on the
+// cache type because Backend::Impl is private; deduction from the concrete
+// EmbeddingCache instance keeps the boundary intact.
+template <class Cache>
+void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
+                     int dims) {
+    const int n = static_cast<int>(rows.size());
+    c.embeddings.resize(n, dims);
+    for (int i = 0; i < n; ++i) {
+        c.embeddings.row(i) =
+            Eigen::Map<const Eigen::RowVectorXf>(rows[i].data(), dims);
+        float nrm = c.embeddings.row(i).norm();
+        if (nrm > 1e-12f) c.embeddings.row(i) /= nrm;
+    }
+}
+
 }  // anonymous namespace
 
 
@@ -117,26 +134,26 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
 
 
     // ---- cache --------------------------------------------------------
-    void Backend::Impl::invalidate_cache() { cache_valid = false; }
+    void Backend::Impl::invalidate_cache() { summary_cache_.valid = false; }
 
-    void Backend::Impl::invalidate_doc_cache() { doc_cache_valid = false; }
+    void Backend::Impl::invalidate_doc_cache() { doc_cache_.valid = false; }
 
-    void Backend::Impl::invalidate_dec_cache() { dec_cache_valid = false; }
+    void Backend::Impl::invalidate_dec_cache() { dec_cache_.valid = false; }
 
-    void Backend::Impl::invalidate_ins_cache() { ins_cache_valid = false; }
+    void Backend::Impl::invalidate_ins_cache() { ins_cache_.valid = false; }
 
-    void Backend::Impl::invalidate_turn_cache() { turn_cache_valid = false; }
+    void Backend::Impl::invalidate_turn_cache() { turn_cache_.valid = false; }
 
 
     // Loads the summaries table into the vector cache. Keyword scores come
     // from FTS5 (summaries_fts) at query time — see keyword_scores().
     void Backend::Impl::ensure_cache() {
-        if (cache_valid) return;
+        if (summary_cache_.valid) return;
 
-        cached_ids.clear();
-        cached_texts.clear();
-        cached_metadata.clear();
-        cached_timestamps.clear();
+        summary_cache_.ids.clear();
+        summary_cache_.texts.clear();
+        summary_cache_.metadata.clear();
+        summary_cache_.timestamps.clear();
 
         Stmt s(db,
             "SELECT summary_id, text, embedding, level, tags, "
@@ -149,14 +166,14 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
 
         while (s.step()) {
             auto col_text = [&](int i) -> std::string { return s.column_text(i); };
-            cached_ids.push_back(s.column_int(0));
-            cached_texts.push_back(col_text(1));
+            summary_cache_.ids.push_back(s.column_int(0));
+            summary_cache_.texts.push_back(col_text(1));
 
             const void* blob = s.column_blob(2);
             int blob_bytes   = s.column_bytes(2);
             std::vector<float> emb = decode_embedding_blob(
                 blob, blob_bytes, expected_dims, "summaries",
-                cached_ids.back(), blob_warned);
+                summary_cache_.ids.back(), blob_warned);
             emb_rows.push_back(std::move(emb));
 
             // Lean v2 summaries: surface level/tags as metadata so the
@@ -166,23 +183,15 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
             meta["level"]  = col_text(3);
             std::string tags = col_text(4);
             if (!tags.empty()) meta["tags"] = tags;
-            cached_metadata.push_back(std::move(meta));
+            summary_cache_.metadata.push_back(std::move(meta));
 
-            cached_timestamps.push_back(col_text(5));
+            summary_cache_.timestamps.push_back(col_text(5));
         }
 
         // Pack into Eigen matrix (rows × dims). Every row is padded/zeroed to
         // expected_dims so NULL-embedding rows don't poison the matrix shape.
-        int n = static_cast<int>(emb_rows.size());
-        cached_embeddings.resize(n, expected_dims);
-        for (int i = 0; i < n; ++i) {
-            cached_embeddings.row(i) =
-                Eigen::Map<Eigen::RowVectorXf>(emb_rows[i].data(), expected_dims);
-            float nrm = cached_embeddings.row(i).norm();
-            if (nrm > 1e-12f) cached_embeddings.row(i) /= nrm;
-        }
-
-        cache_valid = true;
+        pack_embeddings(summary_cache_, emb_rows, expected_dims);
+        summary_cache_.valid = true;
     }
 
 
@@ -191,12 +200,12 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
     // (documents_fts) at query time. Metadata carries source="document" plus
     // the title so search() consumers can distinguish documents from summaries.
     void Backend::Impl::ensure_doc_cache() {
-        if (doc_cache_valid) return;
+        if (doc_cache_.valid) return;
 
-        doc_ids.clear();
-        doc_texts.clear();
-        doc_metadata.clear();
-        doc_timestamps.clear();
+        doc_cache_.ids.clear();
+        doc_cache_.texts.clear();
+        doc_cache_.metadata.clear();
+        doc_cache_.timestamps.clear();
 
         Stmt s(db,
             "SELECT d.document_id, d.text, d.embedding, "
@@ -212,14 +221,14 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
 
         while (s.step()) {
             auto col_text = [&](int i) -> std::string { return s.column_text(i); };
-            doc_ids.push_back(s.column_int(0));
-            doc_texts.push_back(col_text(1));
+            doc_cache_.ids.push_back(s.column_int(0));
+            doc_cache_.texts.push_back(col_text(1));
 
             const void* blob = s.column_blob(2);
             int blob_bytes   = s.column_bytes(2);
             std::vector<float> emb = decode_embedding_blob(
                 blob, blob_bytes, expected_dims, "documents",
-                doc_ids.back(), blob_warned);
+                doc_cache_.ids.back(), blob_warned);
             emb_rows.push_back(std::move(emb));
 
             json meta = json::object();
@@ -227,21 +236,13 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
             meta["title"]  = col_text(3);
             std::string tags = col_text(4);
             if (!tags.empty()) meta["tags"] = tags;
-            doc_metadata.push_back(std::move(meta));
+            doc_cache_.metadata.push_back(std::move(meta));
 
-            doc_timestamps.push_back(col_text(5));
+            doc_cache_.timestamps.push_back(col_text(5));
         }
 
-        int n = static_cast<int>(emb_rows.size());
-        doc_embeddings.resize(n, expected_dims);
-        for (int i = 0; i < n; ++i) {
-            doc_embeddings.row(i) =
-                Eigen::Map<Eigen::RowVectorXf>(emb_rows[i].data(), expected_dims);
-            float nrm = doc_embeddings.row(i).norm();
-            if (nrm > 1e-12f) doc_embeddings.row(i) /= nrm;
-        }
-
-        doc_cache_valid = true;
+        pack_embeddings(doc_cache_, emb_rows, expected_dims);
+        doc_cache_.valid = true;
     }
 
 
@@ -251,12 +252,12 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
     // the status so search() consumers can distinguish decisions from the
     // other corpora.
     void Backend::Impl::ensure_dec_cache() {
-        if (dec_cache_valid) return;
+        if (dec_cache_.valid) return;
 
-        dec_ids.clear();
-        dec_texts.clear();
-        dec_metadata.clear();
-        dec_timestamps.clear();
+        dec_cache_.ids.clear();
+        dec_cache_.texts.clear();
+        dec_cache_.metadata.clear();
+        dec_cache_.timestamps.clear();
 
         Stmt s(db,
             "SELECT decision_id, text, embedding, status, tags, "
@@ -276,14 +277,14 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
 
         while (s.step()) {
             auto col_text = [&](int i) -> std::string { return s.column_text(i); };
-            dec_ids.push_back(s.column_int(0));
-            dec_texts.push_back(col_text(1));
+            dec_cache_.ids.push_back(s.column_int(0));
+            dec_cache_.texts.push_back(col_text(1));
 
             const void* blob = s.column_blob(2);
             int blob_bytes   = s.column_bytes(2);
             std::vector<float> emb = decode_embedding_blob(
                 blob, blob_bytes, expected_dims, "decisions",
-                dec_ids.back(), blob_warned);
+                dec_cache_.ids.back(), blob_warned);
             emb_rows.push_back(std::move(emb));
 
             json meta = json::object();
@@ -293,21 +294,13 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
             if (!tags.empty()) meta["tags"] = tags;
             std::string trig = col_text(6);
             if (!trig.empty()) meta["trigger"] = trig;
-            dec_metadata.push_back(std::move(meta));
+            dec_cache_.metadata.push_back(std::move(meta));
 
-            dec_timestamps.push_back(col_text(5));
+            dec_cache_.timestamps.push_back(col_text(5));
         }
 
-        int n = static_cast<int>(emb_rows.size());
-        dec_embeddings.resize(n, expected_dims);
-        for (int i = 0; i < n; ++i) {
-            dec_embeddings.row(i) =
-                Eigen::Map<Eigen::RowVectorXf>(emb_rows[i].data(), expected_dims);
-            float nrm = dec_embeddings.row(i).norm();
-            if (nrm > 1e-12f) dec_embeddings.row(i) /= nrm;
-        }
-
-        dec_cache_valid = true;
+        pack_embeddings(dec_cache_, emb_rows, expected_dims);
+        dec_cache_.valid = true;
     }
 
 
@@ -318,12 +311,12 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
     // status/trigger so search() consumers can distinguish insights from the
     // other corpora.
     void Backend::Impl::ensure_ins_cache() {
-        if (ins_cache_valid) return;
+        if (ins_cache_.valid) return;
 
-        ins_ids.clear();
-        ins_texts.clear();
-        ins_metadata.clear();
-        ins_timestamps.clear();
+        ins_cache_.ids.clear();
+        ins_cache_.texts.clear();
+        ins_cache_.metadata.clear();
+        ins_cache_.timestamps.clear();
 
         Stmt s(db,
             "SELECT insight_id, text, embedding, status, tags, "
@@ -338,14 +331,14 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
 
         while (s.step()) {
             auto col_text = [&](int i) -> std::string { return s.column_text(i); };
-            ins_ids.push_back(s.column_int(0));
-            ins_texts.push_back(col_text(1));
+            ins_cache_.ids.push_back(s.column_int(0));
+            ins_cache_.texts.push_back(col_text(1));
 
             const void* blob = s.column_blob(2);
             int blob_bytes   = s.column_bytes(2);
             std::vector<float> emb = decode_embedding_blob(
                 blob, blob_bytes, expected_dims, "insights",
-                ins_ids.back(), blob_warned);
+                ins_cache_.ids.back(), blob_warned);
             emb_rows.push_back(std::move(emb));
 
             json meta = json::object();
@@ -355,21 +348,13 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
             if (!tags.empty()) meta["tags"] = tags;
             std::string trig = col_text(6);
             if (!trig.empty()) meta["trigger"] = trig;
-            ins_metadata.push_back(std::move(meta));
+            ins_cache_.metadata.push_back(std::move(meta));
 
-            ins_timestamps.push_back(col_text(5));
+            ins_cache_.timestamps.push_back(col_text(5));
         }
 
-        int n = static_cast<int>(emb_rows.size());
-        ins_embeddings.resize(n, expected_dims);
-        for (int i = 0; i < n; ++i) {
-            ins_embeddings.row(i) =
-                Eigen::Map<Eigen::RowVectorXf>(emb_rows[i].data(), expected_dims);
-            float nrm = ins_embeddings.row(i).norm();
-            if (nrm > 1e-12f) ins_embeddings.row(i) /= nrm;
-        }
-
-        ins_cache_valid = true;
+        pack_embeddings(ins_cache_, emb_rows, expected_dims);
+        ins_cache_.valid = true;
     }
 
 
@@ -381,12 +366,12 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
     // similarity matrix. Metadata carries source="turn_summary" plus
     // turn_id/session_id (turn_summaries has no tags/status/level columns).
     void Backend::Impl::ensure_turn_cache() {
-        if (turn_cache_valid) return;
+        if (turn_cache_.valid) return;
 
-        turn_ids.clear();
-        turn_texts.clear();
-        turn_metadata.clear();
-        turn_timestamps.clear();
+        turn_cache_.ids.clear();
+        turn_cache_.texts.clear();
+        turn_cache_.metadata.clear();
+        turn_cache_.timestamps.clear();
 
         Stmt s(db,
             "SELECT turn_summary_id, text, embedding, turn_id, session_id, "
@@ -399,14 +384,14 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
 
         while (s.step()) {
             auto col_text = [&](int i) -> std::string { return s.column_text(i); };
-            turn_ids.push_back(s.column_int(0));
-            turn_texts.push_back(col_text(1));
+            turn_cache_.ids.push_back(s.column_int(0));
+            turn_cache_.texts.push_back(col_text(1));
 
             const void* blob = s.column_blob(2);
             int blob_bytes   = s.column_bytes(2);
             std::vector<float> emb = decode_embedding_blob(
                 blob, blob_bytes, expected_dims, "turn_summaries",
-                turn_ids.back(), blob_warned);
+                turn_cache_.ids.back(), blob_warned);
             emb_rows.push_back(std::move(emb));
 
             json meta = json::object();
@@ -417,21 +402,13 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
             // ordering; kept alongside turn_id (raw-turn lookup key).
             std::string ts = col_text(5);
             if (!ts.empty()) meta["datetime"] = ts;
-            turn_metadata.push_back(std::move(meta));
+            turn_cache_.metadata.push_back(std::move(meta));
 
-            turn_timestamps.push_back(std::move(ts));
+            turn_cache_.timestamps.push_back(std::move(ts));
         }
 
-        int n = static_cast<int>(emb_rows.size());
-        turn_embeddings.resize(n, expected_dims);
-        for (int i = 0; i < n; ++i) {
-            turn_embeddings.row(i) =
-                Eigen::Map<Eigen::RowVectorXf>(emb_rows[i].data(), expected_dims);
-            float nrm = turn_embeddings.row(i).norm();
-            if (nrm > 1e-12f) turn_embeddings.row(i) /= nrm;
-        }
-
-        turn_cache_valid = true;
+        pack_embeddings(turn_cache_, emb_rows, expected_dims);
+        turn_cache_.valid = true;
     }
 
 

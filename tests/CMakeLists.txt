@@ -33,6 +33,10 @@ add_executable(test_memory test_memory.cpp)
 target_link_libraries(test_memory PRIVATE ragger_core)
 add_test(NAME test_memory COMMAND test_memory)
 
+add_executable(test_agent_parse test_agent_parse.cpp)
+target_link_libraries(test_agent_parse PRIVATE ragger_core)
+add_test(NAME test_agent_parse COMMAND test_agent_parse)
+
 
 add_executable(test_path_normalization test_path_normalization.cpp)
 target_link_libraries(test_path_normalization PRIVATE ragger_core)

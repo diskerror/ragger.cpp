@@ -67,11 +67,11 @@ namespace fs = std::filesystem;
         ensure_dec_cache();
         ensure_ins_cache();
         ensure_turn_cache();
-        int n_sum = static_cast<int>(cached_ids.size());
-        int n_doc = static_cast<int>(doc_ids.size());
-        int n_dec = static_cast<int>(dec_ids.size());
-        int n_ins = static_cast<int>(ins_ids.size());
-        int n_turn = static_cast<int>(turn_ids.size());
+        int n_sum = static_cast<int>(summary_cache_.ids.size());
+        int n_doc = static_cast<int>(doc_cache_.ids.size());
+        int n_dec = static_cast<int>(dec_cache_.ids.size());
+        int n_ins = static_cast<int>(ins_cache_.ids.size());
+        int n_turn = static_cast<int>(turn_cache_.ids.size());
         if (n_sum == 0 && n_doc == 0 && n_dec == 0 && n_ins == 0 && n_turn == 0) return {{}, {{"corpus_size", 0}}};
 
         // Push the current tunable weights into the engine once per search
@@ -103,12 +103,13 @@ namespace fs = std::filesystem;
         // Shared by the summaries/documents/decisions/turns passes so the
         // blend logic lives in exactly one place.
         auto score_corpus =
-            [&](const std::vector<int>& ids,
-                const std::vector<std::string>& texts,
-                const Eigen::MatrixXf& cache_emb,
-                const std::vector<json>& meta,
-                const std::vector<std::string>& ts,
+            [&](const EmbeddingCache& c,
                 const std::unordered_map<int, float>& kw) {
+            const auto& ids = c.ids;
+            const auto& texts = c.texts;
+            const auto& cache_emb = c.embeddings;
+            const auto& meta = c.metadata;
+            const auto& ts = c.timestamps;
             int n = static_cast<int>(ids.size());
             if (n == 0) return;
 
@@ -173,20 +174,15 @@ namespace fs = std::filesystem;
         };
         auto no_scores = std::unordered_map<int, float>{};
         bool bm25_on = config().bm25_enabled;
-        score_corpus(cached_ids, cached_texts, cached_embeddings,
-                     cached_metadata, cached_timestamps,
+        score_corpus(summary_cache_,
                      bm25_on ? to_map(text_index_->score_query("summaries", query)) : no_scores);
-        score_corpus(doc_ids, doc_texts, doc_embeddings,
-                     doc_metadata, doc_timestamps,
+        score_corpus(doc_cache_,
                      bm25_on ? to_map(text_index_->score_query("documents", query)) : no_scores);
-        score_corpus(dec_ids, dec_texts, dec_embeddings,
-                     dec_metadata, dec_timestamps,
+        score_corpus(dec_cache_,
                      bm25_on ? to_map(text_index_->score_query("decisions", query)) : no_scores);
-        score_corpus(ins_ids, ins_texts, ins_embeddings,
-                     ins_metadata, ins_timestamps,
+        score_corpus(ins_cache_,
                      bm25_on ? to_map(text_index_->score_query("insights", query)) : no_scores);
-        score_corpus(turn_ids, turn_texts, turn_embeddings,
-                     turn_metadata, turn_timestamps,
+        score_corpus(turn_cache_,
                      bm25_on ? to_map(text_index_->score_query("turn_summaries", query)) : no_scores);
         auto t_search_end = clock::now();
 

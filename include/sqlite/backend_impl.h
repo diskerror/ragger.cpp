@@ -76,64 +76,25 @@ struct Backend::Impl {
         sqlite3_bind_int(s, idx, static_cast<int>(embedding_version_));
     }
 
-    // Embedding cache for the summaries table — invalidated on writes.
-    // Vector scores come from here; keyword scores come from FTS5
-    // (summaries_fts) at query time. The two are blended in search().
-    bool                           cache_valid = false;
-    std::vector<int>               cached_ids;
-    std::vector<std::string>       cached_texts;
-    Eigen::MatrixXf                cached_embeddings;   // rows × 384
-    std::vector<json>              cached_metadata;
-    std::vector<std::string>       cached_timestamps;
+    // Embedding caches (review 2C): one struct, five instances — the five
+    // tables (summaries, documents, decisions, insights, turn_summaries) each
+    // hold the same six members. Vector scores come from the caches; keyword
+    // scores come from the custom text index at query time, blended in
+    // search(). Each cache is invalidated on writes to its table.
+    struct EmbeddingCache {
+        bool                        valid = false;
+        std::vector<int>            ids;
+        std::vector<std::string>    texts;
+        Eigen::MatrixXf             embeddings;   // rows × dims, L2-normalized
+        std::vector<json>           metadata;
+        std::vector<std::string>    timestamps;
+    };
 
-    // Parallel embedding cache for the documents (L5) table — invalidated on
-    // document writes. Mirrors the summaries cache above; vector scores come
-    // from here, keyword scores from FTS5 (documents_fts) at query time. Both
-    // corpora are merged into a single ranked top-k by search().
-    bool                           doc_cache_valid = false;
-    std::vector<int>               doc_ids;
-    std::vector<std::string>       doc_texts;
-    Eigen::MatrixXf                doc_embeddings;      // rows × dims
-    std::vector<json>              doc_metadata;
-    std::vector<std::string>       doc_timestamps;
-
-    // Parallel embedding cache for the decisions (L6) table — invalidated on
-    // decision writes. Mirrors the caches above; vector scores come from here,
-    // keyword scores from FTS5 (decisions_fts) at query time. All three corpora
-    // (summaries + documents + decisions) are merged into one ranked top-k by
-    // search().
-    bool                           dec_cache_valid = false;
-    std::vector<int>               dec_ids;
-    std::vector<std::string>       dec_texts;
-    Eigen::MatrixXf                dec_embeddings;      // rows × dims
-    std::vector<json>              dec_metadata;
-    std::vector<std::string>       dec_timestamps;
-
-    // Parallel embedding cache for the insights table (db 0.17) — invalidated
-    // on insight writes. Mirrors the decisions cache; metadata carries
-    // source="insight" plus the status. Same status allow-list as
-    // ensure_dec_cache(): superseded/retired/pending rows stay hidden.
-    bool                           ins_cache_valid = false;
-    std::vector<int>               ins_ids;
-    std::vector<std::string>       ins_texts;
-    Eigen::MatrixXf                ins_embeddings;      // rows × dims
-    std::vector<json>              ins_metadata;
-    std::vector<std::string>       ins_timestamps;
-
-    // Parallel embedding cache for the turn_summaries (L2) table — invalidated
-    // on turn-summary writes. Mirrors the caches above; vector scores come
-    // from here, keyword scores from FTS5 (turn_summaries_fts) at query time.
-    // Rows with NULL text (unsummarized placeholders) are excluded — they
-    // must never appear in search results or feed embedding similarity.
-    // Metadata carries source="turn_summary" plus turn_id/session_id so
-    // search() consumers can distinguish turn-level results from the other
-    // three corpora.
-    bool                           turn_cache_valid = false;
-    std::vector<int>               turn_ids;
-    std::vector<std::string>       turn_texts;
-    Eigen::MatrixXf                turn_embeddings;     // rows × dims
-    std::vector<json>              turn_metadata;
-    std::vector<std::string>       turn_timestamps;
+    EmbeddingCache summary_cache_;   // summaries (L2/L3)
+    EmbeddingCache doc_cache_;       // documents (L5)
+    EmbeddingCache dec_cache_;       // decisions (L6)
+    EmbeddingCache ins_cache_;       // insights (db 0.17)
+    EmbeddingCache turn_cache_;      // turn_summaries (L2)
 
     // Serializes all public-API access (H1): two httplib thread pools, the
     // housekeeping timer, and the SummarizerService worker share one backend.

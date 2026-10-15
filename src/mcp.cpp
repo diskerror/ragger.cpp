@@ -17,6 +17,7 @@
 #include "lang.h"
 #include "Logger.h"
 #include "memory.h"
+#include "agent_parse.h"
 #include "sqlite/backend.h"
 #include "util/fs.h"
 #include "nlohmann_json.hpp"
@@ -470,35 +471,16 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         return text_result(nlohmann::json({{"id", id}, {"status", "stored"}}).dump());
 
     } else if (tool_name == "memory_decision") {
-        DecisionInput in;
-        in.text         = arguments.value("text", "");
-        in.trigger      = arguments.value("trigger", "");
-        in.rationale    = arguments.value("rationale", "");
-        in.scope        = arguments.value("scope", "");
-        in.status       = arguments.value("status", "current");
-        in.session_guid = arguments.value("session", "");
-        for (const auto& t : arguments.value("tags", std::vector<std::string>{})) {
-            if (!in.tags.empty()) in.tags += ',';
-            in.tags += t;
-        }
-        if (arguments.contains("supersedes") && !arguments["supersedes"].is_null())
-            in.supersedes = arguments["supersedes"].get<int>();
-        in.evidence = arguments.value("evidence", std::vector<int>{});
-        // Project (Phase 3): explicit name/path wins; else infer from cwd.
-        in.project = arguments.value("project", "");
-        if (in.project.empty() && arguments.contains("cwd") && arguments["cwd"].is_string())
-            if (auto pid = memory.resolve_project(arguments["cwd"].get<std::string>()); pid)
-                in.project = arguments["cwd"].get<std::string>();
+        // Shared with HTTP POST /decision via parse_decision_input (tags
+        // accept array or string form, cwd inference included).
+        DecisionInput in = parse_decision_input(arguments, memory);
         try {
             const auto r = memory.store_structured_decision(in);
-            nlohmann::json ps = nlohmann::json::array();
-            for (const auto& [pid, score] : r.possible_supersedes)
-                ps.push_back({{"id", pid}, {"score", score}});
             return text_result(nlohmann::json({
                 {"id", r.id}, {"status", "stored"},
                 {"superseded", r.superseded ? nlohmann::json(*r.superseded)
                                             : nlohmann::json(nullptr)},
-                {"possible_supersedes", std::move(ps)}}).dump());
+                {"possible_supersedes", supersedes_json(r.possible_supersedes)}}).dump());
         } catch (const std::invalid_argument& e) {
             return error_result(e.what());
         }
@@ -507,24 +489,8 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         const auto query = arguments.value("query", "");
         if (query.empty())
             return error_result(ragger::lang::ERR_MCP_QUERY_REQUIRED);
-        AgentSearchQuery q;
-        q.query           = query;
-        q.since           = arguments.value("since", "");
-        q.until           = arguments.value("until", "");
-        q.status          = arguments.value("status", "active");
-        q.session         = arguments.value("session", "");
-        q.exclude_session = arguments.value("exclude_session", "");
-        q.limit           = arguments.value("limit", 10);
-        q.max_tokens      = arguments.value("max_tokens", 0);
-        if (arguments.contains("layers"))
-            q.layers = arguments["layers"].get<std::vector<std::string>>();
-        // Project filter (Phase 3): explicit first, else cwd inference; a
-        // non-matching cwd leaves the filter empty. An explicit unknown
-        // project throws below -> error_result.
-        q.project = arguments.value("project", "");
-        if (q.project.empty() && arguments.contains("cwd") && arguments["cwd"].is_string())
-            if (auto pid = memory.resolve_project(arguments["cwd"].get<std::string>()); pid)
-                q.project = arguments["cwd"].get<std::string>();
+        // Shared with HTTP POST /memory/search via parse_agent_search_query.
+        AgentSearchQuery q = parse_agent_search_query(arguments, memory);
         try {
             const auto hits = memory.agent_search(q);
             nlohmann::json arr = nlohmann::json::array();
@@ -540,14 +506,7 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         }
 
     } else if (tool_name == "memory_get") {
-        AgentGetQuery q;
-        q.expand      = arguments.value("expand", "none");
-        q.session     = arguments.value("session", "");
-        q.after_turn  = arguments.value("after_turn", 0);
-        q.before_turn = arguments.value("before_turn", 0);
-        q.limit       = arguments.value("limit", 20);
-        if (arguments.contains("ids"))
-            q.ids = arguments["ids"].get<std::vector<std::string>>();
+        AgentGetQuery q = parse_agent_get_query(arguments);
         try {
             return text_result(memory.agent_get(q).dump());
         } catch (const std::invalid_argument& e) {
@@ -566,44 +525,23 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         metadata["source"] = "mcp";
         if (arguments.contains("tags"))
             metadata["tags"] = arguments["tags"];
-        std::string project = arguments.value("project", "");
-        if (project.empty() && arguments.contains("cwd") && arguments["cwd"].is_string())
-            if (auto pid = memory.resolve_project(arguments["cwd"].get<std::string>()); pid)
-                project = arguments["cwd"].get<std::string>();
+        std::string project = infer_project(memory, arguments,
+                                            arguments.value("project", ""));
         if (!project.empty())
             metadata["project"] = project;
         try {
             if (arguments.contains("evidence") && arguments["evidence"].is_array()) {
-                DecisionInput in;
-                in.text     = text;
-                in.project  = project;
-                in.evidence = arguments["evidence"].get<std::vector<int>>();
-                if (arguments.contains("tags")) {
-                    const auto& t = arguments["tags"];
-                    if (t.is_array()) {
-                        for (const auto& x : t) {
-                            if (!in.tags.empty()) in.tags += ',';
-                            in.tags += x.get<std::string>();
-                        }
-                    } else if (t.is_string()) {
-                        in.tags = t.get<std::string>();
-                    }
-                }
+                DecisionInput in = parse_note_insight(arguments, text, project);
                 const auto r = memory.store_insight(in);
-                json ps = json::array();
-                for (const auto& [iid, score] : r.possible_supersedes)
-                    ps.push_back({{"id", iid}, {"score", score}});
                 return text_result(json({{"id", r.id}, {"table", "insights"},
                                          {"status", "stored"},
                                          {"superseded", r.superseded ? json(*r.superseded) : json(nullptr)},
-                                         {"possible_supersedes", std::move(ps)}}).dump());
+                                         {"possible_supersedes", supersedes_json(r.possible_supersedes)}}).dump());
             }
             const auto id = memory.store(text, metadata);
-            json ps = json::array();
-            for (const auto& [did, score] : memory.possible_supersedes_for_text(text))
-                ps.push_back({{"id", did}, {"score", score}});
             return text_result(json({{"id", id}, {"status", "stored"},
-                                     {"possible_supersedes", std::move(ps)}}).dump());
+                                     {"possible_supersedes",
+                                      supersedes_json(memory.possible_supersedes_for_text(text))}}).dump());
         } catch (const std::invalid_argument& e) {
             return error_result(e.what());
         }
@@ -638,17 +576,7 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         }
 
     } else if (tool_name == "memory_timeline") {
-        TimelineQuery q;
-        q.session     = arguments.value("session", "");
-        q.since       = arguments.value("since", "");
-        q.until       = arguments.value("until", "");
-        q.granularity = arguments.value("granularity", "episode");
-        q.limit       = arguments.value("limit", 20);
-        q.cursor      = arguments.value("cursor", "");
-        q.project     = arguments.value("project", "");
-        if (q.project.empty() && arguments.contains("cwd") && arguments["cwd"].is_string())
-            if (auto pid = memory.resolve_project(arguments["cwd"].get<std::string>()); pid)
-                q.project = arguments["cwd"].get<std::string>();
+        TimelineQuery q = parse_timeline_query(arguments, memory);
         try {
             return text_result(memory.agent_timeline(q).dump());
         } catch (const std::invalid_argument& e) {
@@ -656,16 +584,10 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         }
 
     } else if (tool_name == "memory_update") {
-        UpdateRequest req;
-        req.id = arguments.value("id", "");
-        if (arguments.contains("status") && !arguments["status"].is_null())
-            req.status = arguments["status"].get<std::string>();
-        if (arguments.contains("tags") && !arguments["tags"].is_null())
-            req.tags = arguments["tags"].get<std::string>();
-        if (arguments.contains("project") && !arguments["project"].is_null())
-            req.project = arguments["project"].get<std::string>();
-        // text intentionally not forwarded: agent_update rejects it with the
-        // canonical message; the schema doesn't even offer it.
+        // Shared with HTTP POST /memory/update. `text` is now forwarded and
+        // rejected with the canonical message (it used to be dropped
+        // silently, letting a caller's text pass without effect).
+        UpdateRequest req = parse_update_request(arguments);
         try {
             return text_result(memory.agent_update(req).dump());
         } catch (const std::invalid_argument& e) {

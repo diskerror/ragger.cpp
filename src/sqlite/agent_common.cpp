@@ -75,64 +75,50 @@ bool parse_agent_handle(const std::string& handle, std::string& layer, int& rowi
     return true;
 }
 
-// Row fetchers. Each returns the full row as JSON, or json(nullptr) when the
-// row does not exist. Shapes follow PHASE2-STEPS step 4: id/layer/text/created
-// plus the layer's own columns.
+// Shared fetch for the two structured layers (decisions, insights): identical
+// columns, identical evidence-join pattern, differing only in table/pk/
+// evidence-table/layer names (review 2A; mirrors store_structured_row's
+// StructuredRowSpec decomposition). The evidence table's FK column is always
+// the same pk name as its base table's.
+json fetch_structured_row(sqlite3* db, const char* table, const char* pk,
+                          const char* evidence_table, const char* layer,
+                          int rowid) {
+    Stmt s(db, std::format("SELECT text, status, tags, trigger, rationale, scope, supersedes, "
+                           "datetime(created_at,'unixepoch','localtime') "
+                           "FROM {} WHERE {} = ?", table, pk));
+    s.bind(1, rowid);
+    if (!s.step()) return json(nullptr);
+    json item = {
+        {"id",      std::format("{}:{}", layer, rowid)},
+        {"layer",   layer},
+        {"text",    s.column_text(0)},
+        {"status",  s.column_text(1)},
+        {"tags",    s.column_text(2)},
+        {"trigger", s.is_null(3) ? json(nullptr) : json(s.column_text(3))},
+        {"rationale", s.is_null(4) ? json(nullptr) : json(s.column_text(4))},
+        {"scope",   s.is_null(5) ? json(nullptr) : json(s.column_text(5))},
+        {"supersedes", s.is_null(6) ? json(nullptr) : json(s.column_int(6))},
+        {"created", s.column_text(7)},
+    };
+    json ev = json::array();
+    Stmt e(db, std::format("SELECT turn_summary_id FROM {} WHERE {} = ? "
+                           "ORDER BY turn_summary_id", evidence_table, pk));
+    e.bind(1, rowid);
+    while (e.step()) ev.push_back(e.column_int(0));
+    item["evidence"] = std::move(ev);
+    return item;
+}
 
+// Row fetcher. Returns the full row as JSON, or json(nullptr) when the row
+// does not exist. Shapes follow PHASE2-STEPS step 4: id/layer/text/created
+// plus the layer's own columns.
 json fetch_agent_row(sqlite3* db, const std::string& layer, int rowid) {
-    if (layer == "decision") {
-        Stmt s(db, "SELECT text, status, tags, trigger, rationale, scope, supersedes, "
-                   "datetime(created_at,'unixepoch','localtime') "
-                   "FROM decisions WHERE decision_id = ?");
-        s.bind(1, rowid);
-        if (!s.step()) return json(nullptr);
-        json item = {
-            {"id",      std::format("decision:{}", rowid)},
-            {"layer",   "decision"},
-            {"text",    s.column_text(0)},
-            {"status",  s.column_text(1)},
-            {"tags",    s.column_text(2)},
-            {"trigger", s.is_null(3) ? json(nullptr) : json(s.column_text(3))},
-            {"rationale", s.is_null(4) ? json(nullptr) : json(s.column_text(4))},
-            {"scope",   s.is_null(5) ? json(nullptr) : json(s.column_text(5))},
-            {"supersedes", s.is_null(6) ? json(nullptr) : json(s.column_int(6))},
-            {"created", s.column_text(7)},
-        };
-        json ev = json::array();
-        Stmt e(db, "SELECT turn_summary_id FROM decision_evidence WHERE decision_id = ? "
-                   "ORDER BY turn_summary_id");
-        e.bind(1, rowid);
-        while (e.step()) ev.push_back(e.column_int(0));
-        item["evidence"] = std::move(ev);
-        return item;
-    }
-    if (layer == "insight") {
-        // Same shape as a decision row (Phase 5: shared vocabulary).
-        Stmt s(db, "SELECT text, status, tags, trigger, rationale, scope, supersedes, "
-                   "datetime(created_at,'unixepoch','localtime') "
-                   "FROM insights WHERE insight_id = ?");
-        s.bind(1, rowid);
-        if (!s.step()) return json(nullptr);
-        json item = {
-            {"id",      std::format("insight:{}", rowid)},
-            {"layer",   "insight"},
-            {"text",    s.column_text(0)},
-            {"status",  s.column_text(1)},
-            {"tags",    s.column_text(2)},
-            {"trigger", s.is_null(3) ? json(nullptr) : json(s.column_text(3))},
-            {"rationale", s.is_null(4) ? json(nullptr) : json(s.column_text(4))},
-            {"scope",   s.is_null(5) ? json(nullptr) : json(s.column_text(5))},
-            {"supersedes", s.is_null(6) ? json(nullptr) : json(s.column_int(6))},
-            {"created", s.column_text(7)},
-        };
-        json ev = json::array();
-        Stmt e(db, "SELECT turn_summary_id FROM insight_evidence WHERE insight_id = ? "
-                   "ORDER BY turn_summary_id");
-        e.bind(1, rowid);
-        while (e.step()) ev.push_back(e.column_int(0));
-        item["evidence"] = std::move(ev);
-        return item;
-    }
+    if (layer == "decision")
+        return fetch_structured_row(db, "decisions", "decision_id",
+                                    "decision_evidence", "decision", rowid);
+    if (layer == "insight")
+        return fetch_structured_row(db, "insights", "insight_id",
+                                    "insight_evidence", "insight", rowid);
     if (layer == "turn") {
         Stmt s(db, "SELECT user_text, assistant_text, "
                    "datetime(created_at,'unixepoch','localtime'), "

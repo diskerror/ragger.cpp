@@ -5,6 +5,7 @@
 #include "build_info.h"
 #include "server.h"
 #include "memory.h"
+#include "agent_parse.h"
 #include "user_store.h"
 #include "sqlite/backend.h"
 #include "lang.h"
@@ -528,50 +529,20 @@ struct Server::Impl {
     void handle_decision(const UserInfo& user, const httplib::Request& req,
                          httplib::Response& res) {
         auto body = json::parse(req.body);
-        DecisionInput in;
-        in.text      = body.value("text", "");
-        in.trigger   = body.value("trigger", "");
-        in.rationale = body.value("rationale", "");
-        in.scope     = body.value("scope", "");
-        in.status    = body.value("status", "current");
-        in.session_guid = body.value("session", "");
-        if (body.contains("tags")) {
-            const auto& t = body["tags"];
-            if (t.is_array()) {
-                for (const auto& x : t) {
-                    if (!in.tags.empty()) in.tags += ',';
-                    in.tags += x.get<std::string>();
-                }
-            } else if (t.is_string()) {
-                in.tags = t.get<std::string>();
-            }
-        }
-        if (body.contains("supersedes") && !body["supersedes"].is_null())
-            in.supersedes = body["supersedes"].get<int>();
-        if (body.contains("evidence"))
-            in.evidence = body["evidence"].get<std::vector<int>>();
-
-        // Project (Phase 3): explicit name/path wins; otherwise infer from
-        // cwd (longest-prefix match). No match leaves it empty — not an error.
-        auto& mem0 = _get_memory(user.username);
-        in.project = body.value("project", "");
-        if (in.project.empty() && body.contains("cwd") && body["cwd"].is_string())
-            if (auto pid = mem0.resolve_project(body["cwd"].get<std::string>()); pid)
-                in.project = body["cwd"].get<std::string>();
-
         auto& mem = _get_memory(user.username);
+        // Project (Phase 3): explicit name/path wins; otherwise infer from
+        // cwd (longest-prefix match). No match leaves it empty — not an
+        // error. Shared with the MCP surface via parse_decision_input.
+        DecisionInput in = parse_decision_input(body, mem);
         try {
             auto r = mem.store_structured_decision(in);
-            json ps = json::array();
-            for (const auto& [pid, score] : r.possible_supersedes)
-                ps.push_back({{"id", pid}, {"score", score}});
             Diskerror::Logger::debug("POST /decision 200");
             respond_json(res, json{
                 {"id", r.id},
                 {"table", "decisions"},
                 {"status", "stored"},
                 {"superseded", r.superseded ? json(*r.superseded) : json(nullptr)},
-                {"possible_supersedes", std::move(ps)}});
+                {"possible_supersedes", supersedes_json(r.possible_supersedes)}});
         } catch (const std::invalid_argument& e) {
             Diskerror::Logger::debug("POST /decision 400");
             res.status = 400;
@@ -608,44 +579,23 @@ struct Server::Impl {
 
         // Project (Phase 3): explicit name/path wins; otherwise infer from
         // cwd. store() resolves it and throws on an unknown explicit project.
-        std::string project = body.value("project", "");
-        if (project.empty() && body.contains("cwd") && body["cwd"].is_string())
-            if (auto pid = _get_memory(user.username).resolve_project(body["cwd"].get<std::string>()); pid)
-                project = body["cwd"].get<std::string>();
+        auto& mem = _get_memory(user.username);
+        std::string project = infer_project(mem, body, body.value("project", ""));
         if (!project.empty())
             metadata["project"] = project;
 
-        auto& mem = _get_memory(user.username);
-
         // ---- insight routing (Phase 5) ----------------------------------
         if (body.contains("evidence") && body["evidence"].is_array()) {
-            DecisionInput in;
-            in.text     = text;
-            in.project  = project;
-            in.evidence = body["evidence"].get<std::vector<int>>();
-            if (body.contains("tags")) {
-                const auto& t = body["tags"];
-                if (t.is_array()) {
-                    for (const auto& x : t) {
-                        if (!in.tags.empty()) in.tags += ',';
-                        in.tags += x.get<std::string>();
-                    }
-                } else if (t.is_string()) {
-                    in.tags = t.get<std::string>();
-                }
-            }
+            DecisionInput in = parse_note_insight(body, text, project);
             try {
                 auto r = mem.store_insight(in);
-                json ps = json::array();
-                for (const auto& [iid, score] : r.possible_supersedes)
-                    ps.push_back({{"id", iid}, {"score", score}});
                 Diskerror::Logger::debug("POST /memory/note 200 (insight)");
                 respond_json(res, json{
                     {"id", r.id},
                     {"table", "insights"},
                     {"status", "stored"},
                     {"superseded", r.superseded ? json(*r.superseded) : json(nullptr)},
-                    {"possible_supersedes", std::move(ps)}});
+                    {"possible_supersedes", supersedes_json(r.possible_supersedes)}});
             } catch (const std::invalid_argument& e) {
                 Diskerror::Logger::debug("POST /memory/note 400 (insight)");
                 res.status = 400;
@@ -656,14 +606,11 @@ struct Server::Impl {
 
         try {
             std::string id = mem.store(text, metadata);
-            json ps = json::array();
-            for (const auto& [did, score] : mem.possible_supersedes_for_text(text))
-                ps.push_back({{"id", did}, {"score", score}});
             Diskerror::Logger::debug("POST /memory/note 200");
             respond_json(res, json{
                 {"id", id},
                 {"status", "stored"},
-                {"possible_supersedes", std::move(ps)}});
+                {"possible_supersedes", supersedes_json(mem.possible_supersedes_for_text(text))}});
         } catch (const std::invalid_argument& e) {
             Diskerror::Logger::debug("POST /memory/note 400");
             res.status = 400;
@@ -722,20 +669,8 @@ struct Server::Impl {
     void handle_memory_timeline(const UserInfo& user, const httplib::Request& req,
                                 httplib::Response& res) {
         auto body = json::parse(req.body);
-        TimelineQuery q;
-        q.session     = body.value("session", "");
-        q.since       = body.value("since", "");
-        q.until       = body.value("until", "");
-        q.granularity = body.value("granularity", "episode");
-        q.limit       = body.value("limit", 20);
-        q.cursor      = body.value("cursor", "");
-
         auto& mem = _get_memory(user.username);
-        q.project = body.value("project", "");
-        if (q.project.empty() && body.contains("cwd") && body["cwd"].is_string())
-            if (auto pid = mem.resolve_project(body["cwd"].get<std::string>()); pid)
-                q.project = body["cwd"].get<std::string>();
-
+        TimelineQuery q = parse_timeline_query(body, mem);
         try {
             Diskerror::Logger::debug("POST /memory/timeline 200");
             respond_json(res, mem.agent_timeline(q));
@@ -752,17 +687,7 @@ struct Server::Impl {
     void handle_memory_update(const UserInfo& user, const httplib::Request& req,
                               httplib::Response& res) {
         auto body = json::parse(req.body);
-        UpdateRequest u;
-        u.id = body.value("id", "");
-        if (body.contains("status") && !body["status"].is_null())
-            u.status = body["status"].get<std::string>();
-        if (body.contains("tags") && !body["tags"].is_null())
-            u.tags = body["tags"].get<std::string>();
-        if (body.contains("project") && !body["project"].is_null())
-            u.project = body["project"].get<std::string>();
-        if (body.contains("text") && !body["text"].is_null())
-            u.text = body["text"].get<std::string>();
-
+        UpdateRequest u = parse_update_request(body);
         auto& mem = _get_memory(user.username);
         try {
             Diskerror::Logger::debug("POST /memory/update 200");
@@ -802,28 +727,11 @@ struct Server::Impl {
     void handle_memory_search(const UserInfo& user, const httplib::Request& req,
                               httplib::Response& res) {
         auto body = json::parse(req.body);
-        AgentSearchQuery q;
-        q.query           = body.value("query", "");
-        q.since           = body.value("since", "");
-        q.until           = body.value("until", "");
-        q.status          = body.value("status", "active");
-        q.session         = body.value("session", "");
-        q.exclude_session = body.value("exclude_session", "");
-        q.limit           = body.value("limit", 10);
-        q.max_tokens      = body.value("max_tokens", 0);
-        if (body.contains("layers"))
-            q.layers = body["layers"].get<std::vector<std::string>>();
-
         // Project filter (Phase 3): explicit first, else cwd inference; a
         // non-matching cwd simply leaves the filter empty. An explicit
-        // unknown project throws below -> 400.
-        auto& mem0 = _get_memory(user.username);
-        q.project = body.value("project", "");
-        if (q.project.empty() && body.contains("cwd") && body["cwd"].is_string())
-            if (auto pid = mem0.resolve_project(body["cwd"].get<std::string>()); pid)
-                q.project = body["cwd"].get<std::string>();
-
+        // unknown project throws below -> 400. Shared with the MCP surface.
         auto& mem = _get_memory(user.username);
+        AgentSearchQuery q = parse_agent_search_query(body, mem);
         try {
             auto hits = mem.agent_search(q);
             json arr = json::array();
@@ -848,15 +756,7 @@ struct Server::Impl {
     void handle_memory_get(const UserInfo& user, const httplib::Request& req,
                            httplib::Response& res) {
         auto body = json::parse(req.body);
-        AgentGetQuery q;
-        q.expand      = body.value("expand", "none");
-        q.session     = body.value("session", "");
-        q.after_turn  = body.value("after_turn", 0);
-        q.before_turn = body.value("before_turn", 0);
-        q.limit       = body.value("limit", 20);
-        if (body.contains("ids"))
-            q.ids = body["ids"].get<std::vector<std::string>>();
-
+        AgentGetQuery q = parse_agent_get_query(body);
         auto& mem = _get_memory(user.username);
         try {
             Diskerror::Logger::debug("POST /memory/get 200");
