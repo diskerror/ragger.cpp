@@ -3,6 +3,11 @@
 // Declarations only -- method bodies live in schema.cpp, admin.cpp,
 // cache.cpp, write.cpp, search.cpp, maintenance.cpp (see backend.cpp
 // for the free helpers and public Backend:: wrapper methods).
+//
+// Purely-internal schema-migration helpers (pre-migration backup, reopen,
+// PRAGMA reads, table rebuild, FK guard) are NOT declared here at all:
+// they are file-local free functions taking Impl& in schema.cpp, so the
+// module boundary is enforced by the compiler rather than convention.
 #include "sqlite/backend.h"
 #include "sqlite/text_index.h"
 #include "vector_codec.h"
@@ -192,49 +197,10 @@ struct Backend::Impl {
     // shape: one BEGIN/try/COMMIT/ROLLBACK transaction, Logger progress,
     // and post-migration verification that aborts (rolls back) on any
     // inconsistency rather than silently shipping a corrupt index.
-
-    /// True iff a pre-migration backup/reopen (and, later, a post-migration
-    /// VACUUM) should happen for `current_version`. Mirrors the guard
-    /// conditions maybe_backup_before_migration() has always used: shared
-    /// by that function and by the post-migration VACUUM decision so both
-    /// stay in lockstep.
-    static bool migration_pending(const std::string& current_version);
-
-    /// Archive the raw DB file(s) as "<db>_BACKUP_<timestamp>.tar.gz" (or
-    /// .zip / .db, see fallback chain below) before the first structural
-    /// change of a migration run. Only fires when an in-binary migration is
-    /// actually pending (see migration_pending()). One snapshot covers a
-    /// whole chain (0.12 -> 0.15 -> ...).
-    ///
-    /// Preferred path: WAL-checkpoint in TRUNCATE mode WITHOUT closing the
-    /// connection, then archive the now-fully-checkpointed main .db file
-    /// while the connection stays open. A TRUNCATE checkpoint that reports
-    /// zero "busy" frames means every WAL frame was folded back into the
-    /// main file and the -wal file was truncated to empty -- at that point
-    /// the main .db file alone is a complete, consistent point-in-time
-    /// snapshot, and it's safe to read/archive it while `db` stays open,
-    /// PROVIDED no other writer is concurrently active (true here: this is
-    /// single-threaded startup code, before any other work on this
-    /// connection begins). This avoids ever closing/reopening `db`, so
-    /// text_index_'s non-owning pointer never goes stale.
-    ///
-    /// Falls back to a full close -> archive -> reopen (re-pointing
-    /// text_index_ at the new handle) only if the checkpoint could NOT
-    /// fully complete without closing (checkpoint reports busy frames,
-    /// meaning some other connection/transaction is holding the WAL open --
-    /// in that case the main .db file alone would not be a safe snapshot).
-    ///
-    /// Unlike the old VACUUM INTO approach (which snapshotted the live WAL
-    /// database via a separate materialized copy query), this archives the
-    /// raw file(s) directly using the existing timestamped naming
-    /// convention (tar.gz -> zip -> plain copy fallback chain).
-    void maybe_backup_before_migration(const std::string& current_version);
-
-    /// Reopen `db` (after maybe_backup_before_migration's checkpoint+close)
-    /// with the exact same open flags/pragmas used in the constructor, and
-    /// re-point the non-owning text_index_ at the new handle -- sqlite3_open
-    /// is not guaranteed to reuse the same pointer value.
-    void reopen_db();
+    //
+    // The legs below are called ONLY from within schema.cpp (constructors,
+    // create_schema(), run_pending_migrations()); their supporting helpers
+    // (backup/reopen/pragma/table-rebuild) are file-local there.
 
     /// Chain the in-binary migration legs until the DB reaches
     /// kExpectedDbVersion (or a leg we don't know about is hit -> leave it for
@@ -280,39 +246,6 @@ struct Backend::Impl {
     /// then drops the four extracted columns. Whole thing runs in one
     /// transaction. Caller gates on column_exists("documents","path").
     void migrate_documents_normalize();
-
-    /// Read a boolean PRAGMA's current value (e.g. "foreign_keys").
-    bool pragma_bool(const char* name);
-    void require_foreign_keys();
-
-    /// Rebuild one table so its PHYSICAL column order matches the fresh-install
-    /// CREATE TABLE in create_schema(). `ALTER TABLE ... ADD COLUMN` can only
-    /// APPEND, so a DB that reached its current shape via migration ends up with
-    /// (e.g.) unigram_count/bigram_count sitting after the embedding BLOB, while
-    /// a fresh DB has them before it. That divergence is not just cosmetic: rows
-    /// are wide, and a trailing multi-KB embedding pushes the small, human-
-    /// meaningful columns off-screen in any ad-hoc `SELECT *` / `.dump` /
-    /// sqlite3 CLI inspection. Keeping the narrow, readable columns to the LEFT
-    /// of the blobs is the whole point of the fixed order.
-    ///
-    /// Standard SQLite table-rebuild dance (see "Making Other Kinds Of Table
-    /// Schema Changes" in the SQLite docs):
-    ///   1. snapshot this table's index DDL (DROP TABLE takes its indexes with it)
-    ///   2. CREATE <t>_rebuild with the canonical column order
-    ///   3. INSERT ... SELECT the named columns (order-independent, by name)
-    ///   4. DROP old, RENAME new into place
-    ///   5. replay the saved index DDL
-    ///
-    /// CALLER CONTRACT: foreign_keys MUST already be OFF and any dependent views
-    /// already dropped. `PRAGMA foreign_keys` is a NO-OP inside a transaction, so
-    /// it has to be set before BEGIN -- see migrate_0_15_to_0_16().
-    ///
-    /// `cols` is the shared column list present in BOTH old and new tables. The
-    /// count columns are deliberately NOT carried over (they are 0 on a
-    /// just-ALTERed DB anyway); reindex_table() populates them right after.
-    void rebuild_table_column_order(const std::string& table,
-                                    const std::string& new_ddl,
-                                    const std::string& cols);
 
     /// 0.15 -> 0.16 migration (FTS5 teardown + custom index backfill).
     ///
@@ -939,26 +872,9 @@ struct Backend::Impl {
     //             not a per-row blob decode.
     // When `progress` is set, prints a running "n/total" line to stdout
     // (interactive CLI). Returns the number of rows (re-)embedded.
-    // documents' embed/phon input is `text + '\n' + title` (title from the
-    // joined document_sources row), matching store_document so housekeeping
-    // rebuilds carry the same title signal the write path bakes in. Used as a
-    // SELECT column expression in embed_tables()/rebuild_phon(); empty/absent
-    // title -> body only. char(10) == '\n'.
-    // decisions' embed/index input: `trigger + '\n' + text` when a trigger
-    // is present, else text alone (pre-0.17 rows). Trigger first on purpose:
-    // it is phrased in the future query's vocabulary (design doc §5.3a).
-    // Shared by store_structured_decision (C++ side builds the same string),
-    // embed_tables() and TextIndex::text_select_of().
-    static constexpr const char* kDecisionEmbedTextSQL =
-        "CASE WHEN ifnull(trigger,'') = '' THEN text "
-        "ELSE trigger || char(10) || text END";
-
-    static constexpr const char* kDocEmbedTextSQL =
-        "text || CASE WHEN (SELECT ifnull(title,'') FROM document_sources ds "
-        "WHERE ds.document_source_id = documents.document_source_id) = '' "
-        "THEN '' ELSE char(10) || (SELECT title FROM document_sources ds "
-        "WHERE ds.document_source_id = documents.document_source_id) END";
-
+    // The embed/index text formulas (documents' title suffix, decisions'
+    // trigger prefix) live in sqlite/text_index.h -- the single source
+    // shared with TextIndex::text_select_of() and the store paths.
     int embed_tables(Embedder& emb_ref, bool only_missing, bool progress,
                       const std::string& table_filter = "all");
 

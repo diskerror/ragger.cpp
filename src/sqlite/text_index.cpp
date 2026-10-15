@@ -12,20 +12,9 @@
 
 namespace ragger::sqlite {
 
-// Doc embed text formula (title appended when present) — mirrors the constant
-// Backend uses for embeddings so the index sees the same document text.
-namespace {
-constexpr const char* kDocEmbedTextSQL =
-    "text || CASE WHEN (SELECT ifnull(title,'') FROM document_sources ds "
-    "WHERE ds.document_source_id = documents.document_source_id) = '' "
-    "THEN '' ELSE char(10) || (SELECT title FROM document_sources ds "
-    "WHERE ds.document_source_id = documents.document_source_id) END";
-// Decision embed/index text (db 0.17): trigger first when present. MUST stay
-// identical to Backend::Impl::kDecisionEmbedTextSQL.
-constexpr const char* kDecisionEmbedTextSQL =
-    "CASE WHEN ifnull(trigger,'') = '' THEN text "
-    "ELSE trigger || char(10) || text END";
-}  // namespace
+// The embed/index text formulas (kDocEmbedTextSQL / kDecisionEmbedTextSQL)
+// are declared in sqlite/text_index.h -- one shared definition for the
+// index, the embedding input, and the store paths.
 
 void TextIndex::validate_table(const std::string& table) {
     static const std::unordered_set<std::string> valid = {

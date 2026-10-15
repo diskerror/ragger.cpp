@@ -41,6 +41,59 @@ namespace ragger::sqlite {
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
+namespace {
+
+// Internal schema-migration helpers (review 4A): file-local free functions
+// taking the Impl by reference. These are implementation details of
+// schema.cpp's open/migrate path -- no other Impl translation unit should
+// call them, and the anonymous namespace makes that a compile error rather
+// than a convention. (Impl itself is pimpl, so its members were already
+// invisible outside the sqlite module; this tightens the boundary one level
+// further.)
+//
+// Templated on the Impl type ONLY because Backend::Impl is a private nested
+// class: a namespace-scope function cannot NAME the type, but template
+// argument deduction from *this inside a member function can. Every call
+// site passes Backend::Impl; nothing else can reach these.
+
+/// True iff a pre-migration backup/reopen (and, later, a post-migration
+/// VACUUM) should happen for `current_version`. Mirrors the guard
+/// conditions maybe_backup_before_migration() has always used: shared
+/// by that function and by the post-migration VACUUM decision so both
+/// stay in lockstep.
+template <class Impl>
+bool migration_pending(Impl& self, const std::string& current_version);
+
+/// Archive the raw DB file(s) before the first structural change of a
+/// migration run (see the definition for the checkpoint/close/fallback
+/// strategy).
+template <class Impl>
+void maybe_backup_before_migration(Impl& self,
+                                   const std::string& current_version);
+
+/// Reopen `self.db` with the exact same open flags/pragmas used in the
+/// constructor, and re-point the non-owning text_index_ at the new handle.
+template <class Impl>
+void reopen_db(Impl& self);
+
+/// Integrity guard: refuse to run if FK enforcement is not actually on.
+template <class Impl>
+void require_foreign_keys(Impl& self);
+
+/// Read a boolean PRAGMA's current value (e.g. "foreign_keys").
+template <class Impl>
+bool pragma_bool(Impl& self, const char* name);
+
+/// Rebuild one table so its PHYSICAL column order matches the fresh-install
+/// CREATE TABLE (see the definition for the caller contract).
+template <class Impl>
+void rebuild_table_column_order(Impl& self,
+                                const std::string& table,
+                                const std::string& new_ddl,
+                                const std::string& cols);
+
+} // anonymous namespace
+
 
     Backend::Impl::Impl(Embedder& emb, const std::string& path)
         : embedder(&emb)
@@ -63,7 +116,7 @@ namespace fs = std::filesystem;
 
         exec("PRAGMA journal_mode=WAL");
         exec("PRAGMA foreign_keys = ON");
-        require_foreign_keys();
+        require_foreign_keys(*this);
         // Wait up to 10s on a locked DB instead of failing instantly —
         // WAL allows concurrent readers, but two writers (daemon +
         // import CLI) still serialize; without this any collision is an
@@ -116,7 +169,7 @@ namespace fs = std::filesystem;
         if (!readonly) {
             exec("PRAGMA journal_mode=WAL");
             exec("PRAGMA foreign_keys = ON");
-            require_foreign_keys();
+            require_foreign_keys(*this);
         }
         sqlite3_busy_timeout(db, 10000);
         text_index_.emplace(db);
@@ -186,7 +239,7 @@ namespace fs = std::filesystem;
         // ...): it is taken here, once, before the first structural change.
         const std::string pre_migration_version =
             db_preexisted ? db_version() : std::string();
-        maybe_backup_before_migration(pre_migration_version);
+        maybe_backup_before_migration(*this, pre_migration_version);
 
         // Users, settings, and session tables — credentials (for read-only
         // document access) plus web/chat session persistence. These are a
@@ -520,7 +573,7 @@ namespace fs = std::filesystem;
         // columns, etc). Reclaim that space with a plain in-place VACUUM
         // now that the DB is confirmed at kExpectedDbVersion. Skipped on a
         // fresh install or a DB that was already current (no migration).
-        if (migration_pending(pre_migration_version)) {
+        if (migration_pending(*this, pre_migration_version)) {
             Diskerror::Logger::info(
                 "Post-migration VACUUM starting (reclaiming space from dropped "
                 "schema) -- this may take a while on a large DB.");
@@ -647,15 +700,18 @@ namespace fs = std::filesystem;
     /// conditions maybe_backup_before_migration() has always used: shared
     /// by that function and by the post-migration VACUUM decision so both
     /// stay in lockstep.
-    bool Backend::Impl::migration_pending(const std::string& current_version) {
+    namespace {
+    template <class Impl>
+    bool migration_pending(Impl& self, const std::string& current_version) {
         if (current_version.empty()) return false;               // fresh/pre-version DB
-        if (current_version == kExpectedDbVersion) return false;  // already current
+        if (current_version == self.kExpectedDbVersion) return false;  // already current
         // Only for versions we actually migrate FROM in-binary. An unknown
         // version is rejected by the gate without mutation.
         if (current_version != "0.12" && current_version != "0.15" &&
             current_version != "0.16") return false;
         return true;
     }
+    } // anonymous namespace
 
 
     /// Archive the raw DB file(s) as "<db>_BACKUP_<timestamp>.tar.gz" (or
@@ -686,12 +742,14 @@ namespace fs = std::filesystem;
     /// database via a separate materialized copy query), this archives the
     /// raw file(s) directly using the existing timestamped naming
     /// convention (tar.gz -> zip -> plain copy fallback chain).
-    void Backend::Impl::maybe_backup_before_migration(const std::string& current_version) {
-        if (!migration_pending(current_version)) return;
+    namespace {
+    template <class Impl>
+    void maybe_backup_before_migration(Impl& self, const std::string& current_version) {
+        if (!migration_pending(self, current_version)) return;
 
         Diskerror::Logger::info(std::format(
             "DB schema {} predates {} -- taking pre-migration backup",
-            current_version, std::string(kExpectedDbVersion)));
+            current_version, std::string(self.kExpectedDbVersion)));
 
         // ---- 1. WAL-checkpoint (TRUNCATE) -- try without closing first ---
         // "PRAGMA wal_checkpoint(TRUNCATE);" returns one row: (busy, log,
@@ -702,7 +760,7 @@ namespace fs = std::filesystem;
         // truncated to empty: safe to archive while staying open.
         bool checkpoint_complete = false;
         {
-            Stmt s(db, "PRAGMA wal_checkpoint(TRUNCATE)");
+            Stmt s(self.db, "PRAGMA wal_checkpoint(TRUNCATE)");
             if (s.step()) {
                 int busy = s.column_int(0);
                 checkpoint_complete = (busy == 0);
@@ -720,13 +778,13 @@ namespace fs = std::filesystem;
                 "wal_checkpoint(TRUNCATE) could not fully complete while open "
                 "-- falling back to close+archive+reopen for the pre-migration "
                 "backup.");
-            int rc = sqlite3_close(db);
+            int rc = sqlite3_close(self.db);
             if (rc != SQLITE_OK) {
                 throw std::runtime_error(std::format(
                     "pre-migration backup: sqlite3_close failed ({}); refusing to "
                     "archive a DB with abandoned open state", sqlite3_errstr(rc)));
             }
-            db = nullptr;
+            self.db = nullptr;
             closed_for_backup = true;
         }
 
@@ -741,12 +799,12 @@ namespace fs = std::filesystem;
         std::string archive_path;
         try {
             archive_path = archive_db_files(
-                db_path, {config().resolved_stats_db_path()});
+                self.db_path, {config().resolved_stats_db_path()});
         } catch (const std::exception& e) {
             // If we closed for the backup, reopen before throwing so we
             // don't leave the backend in a permanently-closed state, then
             // surface the failure.
-            if (closed_for_backup) reopen_db();
+            if (closed_for_backup) reopen_db(self);
             throw std::runtime_error(
                 std::string("pre-migration backup failed: ") + e.what());
         }
@@ -756,35 +814,39 @@ namespace fs = std::filesystem;
 
         // ---- 3. Reopen the connection (only if we closed it) --------------
         if (closed_for_backup) {
-            reopen_db();
+            reopen_db(self);
             Diskerror::Logger::info(
                 "Reconnected to DB after close+archive pre-migration backup.");
         }
     }
+    } // anonymous namespace
 
 
     /// Reopen `db` (after maybe_backup_before_migration's checkpoint+close)
     /// with the exact same open flags/pragmas used in the constructor, and
     /// re-point the non-owning text_index_ at the new handle -- sqlite3_open
     /// is not guaranteed to reuse the same pointer value.
-    void Backend::Impl::reopen_db() {
-        int rc = sqlite3_open(db_path.c_str(), &db);
+    namespace {
+    template <class Impl>
+    void reopen_db(Impl& self) {
+        int rc = sqlite3_open(self.db_path.c_str(), &self.db);
         if (rc != SQLITE_OK) {
-            std::string err = db ? sqlite3_errmsg(db) : sqlite3_errstr(rc);
-            if (db) { sqlite3_close(db); db = nullptr; }
+            std::string err = self.db ? sqlite3_errmsg(self.db) : sqlite3_errstr(rc);
+            if (self.db) { sqlite3_close(self.db); self.db = nullptr; }
             throw std::runtime_error(std::format(lang::ERR_SQLITE_OPEN, err));
         }
-        exec("PRAGMA journal_mode=WAL");
-        exec("PRAGMA foreign_keys = ON");
-        require_foreign_keys();
-        sqlite3_busy_timeout(db, 10000);
+        self.exec("PRAGMA journal_mode=WAL");
+        self.exec("PRAGMA foreign_keys = ON");
+        require_foreign_keys(self);
+        sqlite3_busy_timeout(self.db, 10000);
 
         // text_index_ holds a NON-OWNING sqlite3* captured at construction;
         // re-emplace it against the new handle. Cheap (no allocation, just a
         // pointer member) and safe (no other state in TextIndex).
-        text_index_.reset();
-        text_index_.emplace(db);
+        self.text_index_.reset();
+        self.text_index_.emplace(self.db);
     }
+    } // anonymous namespace
 
 
     /// Chain the in-binary migration legs until the DB reaches
@@ -1182,17 +1244,20 @@ namespace fs = std::filesystem;
     /// ON and we also set it per connection; this catches a build linked
     /// against a library that silently ignores the PRAGMA (e.g. compiled
     /// with SQLITE_OMIT_FOREIGN_KEY) instead of running unprotected.
-    void Backend::Impl::require_foreign_keys() {
-        if (!pragma_bool("foreign_keys"))
+    namespace {
+    template <class Impl>
+    void require_foreign_keys(Impl& self) {
+        if (!pragma_bool(self, "foreign_keys"))
             throw std::runtime_error(lang::ERR_FOREIGN_KEYS_OFF);
     }
 
 
-    /// Read a boolean PRAGMA's current value (e.g. "foreign_keys").
-    bool Backend::Impl::pragma_bool(const char* name) {
-        Stmt s(db, std::format("PRAGMA {}", name));
+    template <class Impl>
+    bool pragma_bool(Impl& self, const char* name) {
+        Stmt s(self.db, std::format("PRAGMA {}", name));
         return s.step() && s.column_int(0) != 0;
     }
+    } // anonymous namespace
 
 
     /// Rebuild one table so its PHYSICAL column order matches the fresh-install
@@ -1220,7 +1285,10 @@ namespace fs = std::filesystem;
     /// `cols` is the shared column list present in BOTH old and new tables. The
     /// count columns are deliberately NOT carried over (they are 0 on a
     /// just-ALTERed DB anyway); reindex_table() populates them right after.
-    void Backend::Impl::rebuild_table_column_order(const std::string& table,
+    namespace {
+    template <class Impl>
+    void rebuild_table_column_order(Impl& self,
+                                    const std::string& table,
                                     const std::string& new_ddl,
                                     const std::string& cols) {
         // 1. Snapshot index DDL. Skip sql IS NULL rows: those are the implicit
@@ -1228,25 +1296,26 @@ namespace fs = std::filesystem;
         //    which the new CREATE TABLE already re-declares for itself.
         std::vector<std::string> index_ddl;
         {
-            Stmt s(db, "SELECT sql FROM sqlite_master WHERE type='index' "
+            Stmt s(self.db, "SELECT sql FROM sqlite_master WHERE type='index' "
                        "AND tbl_name=? AND sql IS NOT NULL");
             s.bind(1, table);
             while (s.step()) index_ddl.push_back(s.column_text(0));
         }
 
         const std::string tmp = table + "_rebuild";
-        exec(std::format("DROP TABLE IF EXISTS {}", tmp));
-        exec(new_ddl);
-        exec(std::format("INSERT INTO {} ({}) SELECT {} FROM {}",
+        self.exec(std::format("DROP TABLE IF EXISTS {}", tmp));
+        self.exec(new_ddl);
+        self.exec(std::format("INSERT INTO {} ({}) SELECT {} FROM {}",
                          tmp, cols, cols, table));
-        exec(std::format("DROP TABLE {}", table));
-        exec(std::format("ALTER TABLE {} RENAME TO {}", tmp, table));
+        self.exec(std::format("DROP TABLE {}", table));
+        self.exec(std::format("ALTER TABLE {} RENAME TO {}", tmp, table));
 
-        for (const auto& ddl : index_ddl) exec(ddl);
+        for (const auto& ddl : index_ddl) self.exec(ddl);
 
         Diskerror::Logger::info(
             std::format("  {}: rebuilt with canonical column order", table));
     }
+    } // anonymous namespace
 
 
     /// 0.15 -> 0.16 migration (FTS5 teardown + custom index backfill).
@@ -1276,7 +1345,7 @@ namespace fs = std::filesystem;
         // OTHER tables that point at the renamed table -- which would silently
         // repoint every junction table's FK at the transient "<t>_rebuild" name.
         // ON keeps RENAME purely local, which is what the rebuild dance needs.
-        const bool fk_was_on = pragma_bool("foreign_keys");
+        const bool fk_was_on = pragma_bool(*this, "foreign_keys");
         exec("PRAGMA foreign_keys = OFF");
         exec("PRAGMA legacy_alter_table = ON");
 
@@ -1366,7 +1435,7 @@ namespace fs = std::filesystem;
             // The DDL below MUST stay in lockstep with create_schema()'s CREATE
             // TABLE statements for these five tables.
             Diskerror::Logger::info("Rebuilding text tables in canonical column order...");
-            rebuild_table_column_order("turns", R"(
+            rebuild_table_column_order(*this, "turns", R"(
                 CREATE TABLE turns_rebuild (
                     turn_id        INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_text      TEXT NOT NULL,
@@ -1382,7 +1451,7 @@ namespace fs = std::filesystem;
                 "turn_id, user_text, assistant_text, model_id, session_id, "
                 "created_at, embedding_version, embedding");
 
-            rebuild_table_column_order("summaries", R"(
+            rebuild_table_column_order(*this, "summaries", R"(
                 CREATE TABLE summaries_rebuild (
                     summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     text       TEXT NOT NULL,
@@ -1400,7 +1469,7 @@ namespace fs = std::filesystem;
                 "summary_id, text, level, tags, session_id, model_id, "
                 "created_at, updated_at, embedding_version, embedding");
 
-            rebuild_table_column_order("turn_summaries", R"(
+            rebuild_table_column_order(*this, "turn_summaries", R"(
                 CREATE TABLE turn_summaries_rebuild (
                     turn_summary_id  INTEGER PRIMARY KEY AUTOINCREMENT,
                     text             TEXT,
@@ -1419,7 +1488,7 @@ namespace fs = std::filesystem;
                 "summary_model_id, turn_datetime, summarized_on, "
                 "embedding_version, embedding");
 
-            rebuild_table_column_order("decisions", R"(
+            rebuild_table_column_order(*this, "decisions", R"(
                 CREATE TABLE decisions_rebuild (
                     decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     text        TEXT NOT NULL,
@@ -1434,7 +1503,7 @@ namespace fs = std::filesystem;
                 "decision_id, text, status, tags, created_at, "
                 "embedding_version, embedding");
 
-            rebuild_table_column_order("documents", R"(
+            rebuild_table_column_order(*this, "documents", R"(
                 CREATE TABLE documents_rebuild (
                     document_id        INTEGER PRIMARY KEY AUTOINCREMENT,
                     text               TEXT NOT NULL,
@@ -1517,7 +1586,7 @@ namespace fs = std::filesystem;
     void Backend::Impl::migrate_0_16_to_0_17() {
         Diskerror::Logger::info("Migrating DB 0.16 -> 0.17 (agent API: decisions, projects, insights)...");
 
-        const bool fk_was_on = pragma_bool("foreign_keys");
+        const bool fk_was_on = pragma_bool(*this, "foreign_keys");
         exec("PRAGMA foreign_keys = OFF");
         exec("PRAGMA legacy_alter_table = ON");
 
@@ -1596,7 +1665,7 @@ namespace fs = std::filesystem;
             // BLOB, matching create_schema()'s fresh-install order. The column
             // list names only columns present in BOTH old and new tables
             // (project_id is deliberately absent; it starts NULL).
-            rebuild_table_column_order("summaries", R"(
+            rebuild_table_column_order(*this, "summaries", R"(
                 CREATE TABLE summaries_rebuild (
                     summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     text       TEXT NOT NULL,
@@ -1618,7 +1687,7 @@ namespace fs = std::filesystem;
             // Counts ARE carried over (unlike 0.16): they are valid, and
             // decisions_terms rows still point at the same decision_ids, so no
             // reindex is needed. New columns start NULL.
-            rebuild_table_column_order("decisions", R"(
+            rebuild_table_column_order(*this, "decisions", R"(
                 CREATE TABLE decisions_rebuild (
                     decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     text        TEXT NOT NULL,

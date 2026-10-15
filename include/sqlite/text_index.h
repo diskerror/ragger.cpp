@@ -30,6 +30,32 @@
 
 namespace ragger::sqlite {
 
+// ---- shared embed/index text formulas ---------------------------------------
+// Single source of truth for the SQL column expressions that build the
+// embedded/indexed text of the structured tables. Shared by
+// TextIndex::text_select_of(), Backend::Impl::embed_tables() (maintenance),
+// and the store paths that build the same string in C++: the text index, the
+// embedding input, and the stored rows MUST agree, so these live here next
+// to TextIndex and nowhere else (review 4B: they used to be public static
+// members of Backend::Impl with a duplicated copy in text_index.cpp).
+
+// decisions/insights embed/index text (db 0.17): `trigger + '\n' + text`
+// when a trigger is present, else text alone (pre-0.17 rows). Trigger first
+// on purpose: it is phrased in the future query's vocabulary (design doc
+// §5.3a).
+inline constexpr const char* kDecisionEmbedTextSQL =
+    "CASE WHEN ifnull(trigger,'') = '' THEN text "
+    "ELSE trigger || char(10) || text END";
+
+// documents embed/index text: `text + '\n' + title` (title from the joined
+// document_sources row), matching store_document so housekeeping rebuilds
+// carry the same title signal the write path bakes in. char(10) == '\n'.
+inline constexpr const char* kDocEmbedTextSQL =
+    "text || CASE WHEN (SELECT ifnull(title,'') FROM document_sources ds "
+    "WHERE ds.document_source_id = documents.document_source_id) = '' "
+    "THEN '' ELSE char(10) || (SELECT title FROM document_sources ds "
+    "WHERE ds.document_source_id = documents.document_source_id) END";
+
 class TextIndex final : public ragger::TextIndex {
 public:
     explicit TextIndex(sqlite3* db) : db_(db) {}
