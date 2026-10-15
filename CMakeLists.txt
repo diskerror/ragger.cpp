@@ -260,6 +260,13 @@ target_include_directories(ragger_core PRIVATE
     "${RAGGER_GENERATED_DIR}"
 )
 add_dependencies(ragger_core generate_default_config)
+
+# Development fallback for the API formats dir: the source tree this binary
+# was built from (used by src/api_formats.cpp behind an fs::exists guard, so
+# installed builds skip it). Replaces a hardcoded "~/CLionProjects/Ragger"
+# guess in the binary.
+target_compile_definitions(ragger_core PRIVATE
+    RAGGER_DEV_FORMATS_DIR="${CMAKE_SOURCE_DIR}/formats")
 add_dependencies(ragger_core generate_dashboard_html)
 # Build info: regenerated on every build, rewritten only when the
 # version/commit changes (then only build_info.cpp recompiles).

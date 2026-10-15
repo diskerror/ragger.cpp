@@ -95,6 +95,29 @@ static std::string tags_from_metadata(const json& metadata) {
     // Markdown emphasis markers ("**"/"*") wrapping the label are also
     // consumed. No-op if the text doesn't start with this pattern.
     std::string Backend::Impl::strip_decision_number_prefix(const std::string& text) {
+        // Fast reject (review 3C): the pattern is anchored, so a match
+        // requires the first non-whitespace token (after at most two '*')
+        // to begin with "Decision" or "Design" (case-insensitive). Most
+        // stored texts don't — skip the regex engine for them.
+        {
+            size_t i = 0;
+            while (i < text.size() && (text[i] == ' ' || text[i] == '\t' ||
+                                       text[i] == '\n' || text[i] == '\r'))
+                ++i;
+            for (size_t stars = 0; i < text.size() && text[i] == '*' && stars < 2;
+                 ++i, ++stars) {}
+            auto ci_at = [&text](size_t at, const char* word) {
+                for (const char* w = word; *w; ++w, ++at) {
+                    if (at >= text.size()) return false;
+                    char c = text[at];
+                    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+                    if (c != *w) return false;
+                }
+                return true;
+            };
+            if (!ci_at(i, "decision") && !ci_at(i, "design"))
+                return text;
+        }
         static const std::regex prefix_re(
             R"(^\s*\*{0,2}(?:Design\s+)?Decision(?:\s+Log)?\s*#\d+\s*)"
             R"((?:Logged)?\s*(?:\([^)]*\))?\s*\*{0,2}\s*:\s*\*{0,2}\s*)",

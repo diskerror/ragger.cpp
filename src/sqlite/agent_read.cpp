@@ -19,11 +19,12 @@
 
 #include <algorithm>
 #include <ctime>
+#include <limits>
 #include <map>
 #include <optional>
-#include <regex>
 #include <set>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace ragger::sqlite {
@@ -32,6 +33,11 @@ using json = nlohmann::json;
 
 namespace {
 
+// The six searchable layers, shared by agent_search's validation and the
+// typed-handle parser below.
+const std::set<std::string> kKnownLayers = {
+    "turn", "turn_summary", "summary", "document", "decision", "insight"};
+
 // ---- since/until resolution -------------------------------------------
 // Accepted formats (PHASE2-STEPS step 3): "YYYY-MM-DD",
 // "YYYY-MM-DD HH:MM:SS", or relative "<N>d" / "<N>h" (ago). Returns a local
@@ -39,33 +45,58 @@ namespace {
 // datetime() columns is a plain lexicographic compare (same format, same
 // local timezone). A bare date for `until` expands to end-of-day so the
 // day itself is inclusive. Anything else -> invalid_argument.
+// Hand-rolled parse (review 3B): runs on every agent_search call, and
+// libstdc++'s std::regex is slow; the grammar is fixed-width enough that
+// direct character checks are exact.
 std::string resolve_agent_time_bound(const std::string& s, bool end_of_day) {
     auto fail = [&s]() -> std::string {
         throw std::invalid_argument("bad since/until value: '" + s + "'");
     };
-    static const std::regex re_date(R"(^(\d{4})-(\d{2})-(\d{2})$)");
-    static const std::regex re_dt(R"(^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$)");
-    static const std::regex re_rel(R"(^(\d+)([dh])$)");
-
+    auto digits_at = [&s](size_t at, size_t n) {
+        for (size_t i = at; i < at + n; ++i)
+            if (s[i] < '0' || s[i] > '9') return false;
+        return true;
+    };
+    auto num_at = [&s](size_t at, size_t n) {
+        int x = 0;
+        for (size_t i = at; i < at + n; ++i) x = x * 10 + (s[i] - '0');
+        return x;
+    };
     auto valid_date = [](int mo, int d) { return mo >= 1 && mo <= 12 && d >= 1 && d <= 31; };
     auto valid_time = [](int h, int mi, int se) { return h <= 23 && mi <= 59 && se <= 59; };
 
-    std::smatch m;
-    if (std::regex_match(s, m, re_date)) {
-        if (!valid_date(std::stoi(m[2]), std::stoi(m[3]))) fail();
-        return s + (end_of_day ? " 23:59:59" : " 00:00:00");
-    }
-    if (std::regex_match(s, m, re_dt)) {
-        if (!valid_date(std::stoi(m[2]), std::stoi(m[3]))) fail();
-        if (!valid_time(std::stoi(m[4]), std::stoi(m[5]), std::stoi(m[6]))) fail();
-        return s;
-    }
-    if (std::regex_match(s, m, re_rel)) {
-        long n = std::stol(m[1].str());
-        if (n > 100000000L) fail();   // absurd offset; reject rather than overflow
-        long long secs = (m[2].str() == "d") ? n * 86400LL : n * 3600LL;
+    // "<N>d" / "<N>h" (ago). Checked before the date shapes: a date never
+    // ends in 'd'/'h', but a 9-digit relative value ("100000000d") is 10
+    // chars long and would otherwise be misrouted into the date branch.
+    // Capped during accumulation so absurd digit counts reject as
+    // invalid_argument — the regex version let them reach std::stol and
+    // throw out_of_range.
+    if (s.size() >= 2 && (s.back() == 'd' || s.back() == 'h')) {
+        const size_t nlen = s.size() - 1;
+        if (!digits_at(0, nlen)) fail();
+        long long n = 0;
+        for (size_t i = 0; i < nlen; ++i) {
+            n = n * 10 + (s[i] - '0');
+            if (n > 100000000LL) fail();   // absurd offset; reject rather than overflow
+        }
+        long long secs = (s.back() == 'd') ? n * 86400LL : n * 3600LL;
         std::time_t tt = static_cast<std::time_t>(db_epoch() - secs);
         return db_timestamp(tt);
+    }
+    // "YYYY-MM-DD" / "YYYY-MM-DD HH:MM:SS"
+    if (s.size() == 10 || s.size() == 19) {
+        if (!(digits_at(0, 4) && s[4] == '-' && digits_at(5, 2) &&
+              s[7] == '-' && digits_at(8, 2)))
+            fail();
+        if (!valid_date(num_at(5, 2), num_at(8, 2))) fail();
+        if (s.size() == 19) {
+            if (!(s[10] == ' ' && digits_at(11, 2) && s[13] == ':' &&
+                  digits_at(14, 2) && s[16] == ':' && digits_at(17, 2)))
+                fail();
+            if (!valid_time(num_at(11, 2), num_at(14, 2), num_at(17, 2))) fail();
+            return s;
+        }
+        return s + (end_of_day ? " 23:59:59" : " 00:00:00");
     }
     return fail();
 }
@@ -91,13 +122,26 @@ std::string agent_snippet(const std::string& text) {
 
 // ---- typed handle ------------------------------------------------------
 // "<layer>:<rowid>" (API format only, never stored). Strict parse: exactly
-// one colon, known layer, all-digits positive rowid.
+// one colon, known layer, all-digits positive rowid without leading zeros.
+// Hand-rolled (review 3B): runs on every agent_get/update call. Overflowing
+// ids reject as false — the regex version let 10+ digit ids reach std::stoi
+// and throw out_of_range.
 bool parse_agent_handle(const std::string& handle, std::string& layer, int& rowid) {
-    static const std::regex re(R"(^(turn|turn_summary|summary|document|decision|insight):([1-9][0-9]*)$)");
-    std::smatch m;
-    if (!std::regex_match(handle, m, re)) return false;
-    layer = m[1].str();
-    rowid = std::stoi(m[2].str());
+    const size_t colon = handle.find(':');
+    if (colon == std::string::npos ||
+        handle.find(':', colon + 1) != std::string::npos)
+        return false;                       // not exactly one colon
+    layer = handle.substr(0, colon);
+    if (!kKnownLayers.count(layer)) return false;
+    if (colon + 1 >= handle.size() || handle[colon + 1] == '0') return false;
+    long long v = 0;
+    for (size_t i = colon + 1; i < handle.size(); ++i) {
+        const char c = handle[i];
+        if (c < '0' || c > '9') return false;
+        v = v * 10 + (c - '0');
+        if (v > std::numeric_limits<int>::max()) return false;
+    }
+    rowid = static_cast<int>(v);
     return true;
 }
 
@@ -111,8 +155,6 @@ bool parse_agent_handle(const std::string& handle, std::string& layer, int& rowi
 // =======================================================================
 std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
     // ---- 1. validate ----------------------------------------------------
-    static const std::set<std::string> kKnownLayers = {
-        "turn", "turn_summary", "summary", "document", "decision", "insight"};
     for (const auto& l : q.layers)
         if (!kKnownLayers.count(l))
             throw std::invalid_argument("unknown layer: '" + l + "'");
@@ -130,16 +172,10 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
     else
         cands = search_text_only(q.query, pool).results;
 
-    // Decision/insight status comes from the row, never from cache metadata:
-    // the hybrid cache only holds active rows and the text-only path carries
-    // no status at all, so one authoritative lookup per hit keeps every path
-    // consistent. (Pool is <= 50 hits; the extra queries are trivial.)
-    auto status_of = [this](const char* table, const char* pk,
-                            int id) -> std::string {
-        Stmt s(db, std::format("SELECT status FROM {} WHERE {} = ?", table, pk));
-        s.bind(1, id);
-        return s.step() ? s.column_text(0) : std::string();
-    };
+    // Decision/insight status comes from the rows, never from cache
+    // metadata: the hybrid cache only holds active rows and the text-only
+    // path carries no status at all, so one authoritative batched read per
+    // structured layer keeps every path consistent (see below).
 
     // 'active' / exact-status needs rows the hybrid cache deliberately hides
     // (superseded/retired/pending). SEPARATE query path — ensure_dec_cache()
@@ -187,25 +223,6 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
         if (!s.step()) return std::nullopt;
         return s.column_int(0);
     };
-    // Owning session id per layer (documents have none; turn layer is never
-    // produced by the search corpora).
-    auto owning_session = [this](const std::string& layer, int id) -> std::optional<int> {
-        const char* sql = nullptr;
-        if (layer == "turn_summary")
-            sql = "SELECT session_id FROM turn_summaries WHERE turn_summary_id = ?";
-        else if (layer == "summary")
-            sql = "SELECT session_id FROM summaries WHERE summary_id = ?";
-        else if (layer == "decision")
-            sql = "SELECT session_id FROM decisions WHERE decision_id = ?";
-        else if (layer == "insight")
-            sql = "SELECT session_id FROM insights WHERE insight_id = ?";
-        else
-            return std::nullopt;
-        Stmt s(db, sql);
-        s.bind(1, id);
-        if (!s.step() || s.is_null(0)) return std::nullopt;
-        return s.column_int(0);
-    };
     std::optional<int> sess_id, excl_id;
     if (!q.session.empty())         sess_id = guid_to_id(q.session);
     if (!q.exclude_session.empty()) excl_id = guid_to_id(q.exclude_session);
@@ -221,35 +238,94 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
             throw std::invalid_argument(std::format(
                 "project '{}' does not exist", q.project));
     }
-    // Owning project id per layer: decisions/summaries carry it directly;
-    // turn_summaries reach it through their session. Documents belong to no
-    // project (shared reference material), so they have no owning project and
-    // never match an explicit project filter.
-    auto project_id_of = [this](const std::string& layer, int id) -> std::optional<int> {
-        const char* sql = nullptr;
-        if (layer == "decision")
-            sql = "SELECT project_id FROM decisions WHERE decision_id = ?";
-        else if (layer == "insight")
-            sql = "SELECT project_id FROM insights WHERE insight_id = ?";
-        else if (layer == "summary")
-            sql = "SELECT project_id FROM summaries WHERE summary_id = ?";
-        else if (layer == "turn_summary")
-            sql = "SELECT s.project_id FROM turn_summaries ts "
-                  "JOIN sessions s ON s.session_id = ts.session_id "
-                  "WHERE ts.turn_summary_id = ?";
-        else
-            return std::nullopt;   // document: no project
-        Stmt s(db, sql);
-        s.bind(1, id);
-        if (!s.step() || s.is_null(0)) return std::nullopt;
-        return s.column_int(0);
+    // ---- batched per-layer lookups (review 3A) ----------------------------
+    // One "WHERE <pk> IN (...)" query per layer per lookup instead of one
+    // prepared query per candidate hit (pool is up to 250 ids). Ids are
+    // DB-internal integers, so inlining them into the IN-list adds no
+    // injection surface and avoids bind-count limits. Rows that vanished
+    // mid-search simply stay absent from the maps.
+    std::map<std::string, std::vector<int>> ids_by_layer;
+    for (const auto& r : cands)
+        ids_by_layer[r.metadata.value("source", "")].push_back(r.id);
+
+    auto in_clause = [](const std::vector<int>& ids) {
+        std::string out;
+        for (int id : ids) {
+            if (!out.empty()) out += ',';
+            out += std::to_string(id);
+        }
+        return out;
     };
 
-    auto session_id_of = [this](int sid) -> std::string {
-        Stmt s(db, "SELECT guid FROM sessions WHERE session_id = ?");
-        s.bind(1, sid);
-        return s.step() ? s.column_text(0) : std::string();
+    // status + trigger for the structured layers (the trigger read was the
+    // same N+1 pattern as the status read).
+    std::unordered_map<int, std::string> dec_status, dec_trigger, ins_status, ins_trigger;
+    auto fill_structured = [&](const char* layer, const char* table, const char* pk,
+                               std::unordered_map<int, std::string>& status,
+                               std::unordered_map<int, std::string>& trigger) {
+        auto it = ids_by_layer.find(layer);
+        if (it == ids_by_layer.end() || it->second.empty()) return;
+        Stmt s(db, std::format(
+            "SELECT {}, status, ifnull(trigger,'') FROM {} WHERE {} IN ({})",
+            pk, table, pk, in_clause(it->second)));
+        while (s.step()) {
+            status[s.column_int(0)]  = s.column_text(1);
+            trigger[s.column_int(0)] = s.column_text(2);
+        }
     };
+    fill_structured("decision", "decisions", "decision_id", dec_status, dec_trigger);
+    fill_structured("insight",  "insights",  "insight_id",  ins_status, ins_trigger);
+
+    // Owning session / project per layer (documents have neither; the turn
+    // layer is never produced by the search corpora). Only fetched when the
+    // corresponding filter is active.
+    std::map<std::string, std::unordered_map<int, int>> session_of, project_of;
+    auto fill_owning = [&](std::map<std::string, std::unordered_map<int, int>>& out,
+                           const char* layer, const char* sql_prefix) {
+        auto it = ids_by_layer.find(layer);
+        if (it == ids_by_layer.end() || it->second.empty()) return;
+        Stmt s(db, std::format("{} IN ({})", sql_prefix, in_clause(it->second)));
+        while (s.step())
+            if (!s.is_null(1)) out[layer][s.column_int(0)] = s.column_int(1);
+    };
+    if (sess_id || excl_id) {
+        fill_owning(session_of, "turn_summary",
+                    "SELECT turn_summary_id, session_id FROM turn_summaries WHERE turn_summary_id");
+        fill_owning(session_of, "summary",
+                    "SELECT summary_id, session_id FROM summaries WHERE summary_id");
+        fill_owning(session_of, "decision",
+                    "SELECT decision_id, session_id FROM decisions WHERE decision_id");
+        fill_owning(session_of, "insight",
+                    "SELECT insight_id, session_id FROM insights WHERE insight_id");
+    }
+    if (proj_id) {
+        fill_owning(project_of, "decision",
+                    "SELECT decision_id, project_id FROM decisions WHERE decision_id");
+        fill_owning(project_of, "insight",
+                    "SELECT insight_id, project_id FROM insights WHERE insight_id");
+        fill_owning(project_of, "summary",
+                    "SELECT summary_id, project_id FROM summaries WHERE summary_id");
+        fill_owning(project_of, "turn_summary",
+                    "SELECT ts.turn_summary_id, s.project_id FROM turn_summaries ts "
+                    "JOIN sessions s ON s.session_id = ts.session_id "
+                    "WHERE ts.turn_summary_id");
+    }
+
+    // Session GUIDs for turn_summary extras — one query for the whole pool.
+    std::unordered_map<int, std::string> guid_of_session;
+    {
+        std::vector<int> sids;
+        for (const auto& r : cands)
+            if (r.metadata.value("source", "") == "turn_summary" &&
+                r.metadata.contains("session_id"))
+                sids.push_back(r.metadata["session_id"].get<int>());
+        if (!sids.empty()) {
+            Stmt s(db, std::format(
+                "SELECT session_id, guid FROM sessions WHERE session_id IN ({})",
+                in_clause(sids)));
+            while (s.step()) guid_of_session[s.column_int(0)] = s.column_text(1);
+        }
+    }
 
     // ---- 3. post-filter + shape ------------------------------------------
     std::vector<AgentHit> hits;
@@ -261,10 +337,11 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
 
         std::string row_status;
         if (layer == "decision" || layer == "insight") {
-            const bool is_dec = layer == "decision";
-            row_status = status_of(is_dec ? "decisions" : "insights",
-                                   is_dec ? "decision_id" : "insight_id", r.id);
-            if (row_status.empty()) continue;   // row vanished mid-search
+            auto& smap = layer == "decision" ? dec_status : ins_status;
+            auto it = smap.find(r.id);
+            if (it == smap.end() || it->second.empty())
+                continue;                   // row vanished mid-search
+            row_status = it->second;
             if (q.status == "active") {
                 // NOTE: deliberately narrower than the search cache's
                 // allow-list: 'roadmap' is planned work, not an active ruling.
@@ -278,13 +355,23 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
         if (!until_b.empty() && r.timestamp >  until_b) continue;
 
         if (sess_id || excl_id) {
-            auto sid = owning_session(layer, r.id);
+            std::optional<int> sid;
+            auto lit = session_of.find(layer);
+            if (lit != session_of.end()) {
+                auto it = lit->second.find(r.id);
+                if (it != lit->second.end()) sid = it->second;
+            }
             if (sess_id && (!sid || *sid != *sess_id)) continue;
             if (excl_id && sid && *sid == *excl_id) continue;
         }
 
         if (proj_id) {
-            auto pid = project_id_of(layer, r.id);
+            std::optional<int> pid;
+            auto lit = project_of.find(layer);
+            if (lit != project_of.end()) {
+                auto it = lit->second.find(r.id);
+                if (it != lit->second.end()) pid = it->second;
+            }
             if (!pid || *pid != *proj_id) continue;
         }
 
@@ -298,22 +385,22 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
         h.created = r.timestamp;
         h.snippet = agent_snippet(r.text);
         if (layer == "decision" || layer == "insight") {
-            const bool is_dec = layer == "decision";
-            Stmt s(db, std::format("SELECT ifnull(trigger,'') FROM {} WHERE {} = ?",
-                                   is_dec ? "decisions" : "insights",
-                                   is_dec ? "decision_id" : "insight_id"));
-            s.bind(1, r.id);
+            auto& tmap = layer == "decision" ? dec_trigger : ins_trigger;
             h.extra = json{{"status", row_status}};
-            if (s.step() && !s.column_text(0).empty())
-                h.extra["trigger"] = s.column_text(0);
+            auto it = tmap.find(r.id);
+            if (it != tmap.end() && !it->second.empty())
+                h.extra["trigger"] = it->second;
         } else if (layer == "summary") {
             h.extra = json{{"level", r.metadata.value("level", "")}};
         } else if (layer == "turn_summary") {
             h.extra = json::object();
             if (r.metadata.contains("turn_id"))
                 h.extra["turn_id"] = r.metadata["turn_id"];
-            if (r.metadata.contains("session_id"))
-                h.extra["session"] = session_id_of(r.metadata["session_id"].get<int>());
+            if (r.metadata.contains("session_id")) {
+                auto it = guid_of_session.find(r.metadata["session_id"].get<int>());
+                h.extra["session"] = it != guid_of_session.end()
+                    ? it->second : std::string();
+            }
         } else if (layer == "document") {
             h.extra = json{{"title", r.metadata.value("title", "")}};
         }
