@@ -220,8 +220,83 @@ static std::string tags_from_metadata(const json& metadata) {
 
     // ---- store_document: write Level 5 RAG chunk ----------------------
 
-    // Resolve a (path, title) document to its document_sources row, inserting
-    // one on first sighting. Returns {document_source_id, imported_at_epoch}.
+    // Imported documents with chunk counts, by primary key. Gaps left by
+    // deletions are shown as they are (the key is never renumbered).
+    json Backend::Impl::list_document_sources() {
+        Stmt s(db,
+            "SELECT ds.document_source_id, ds.title, ds.path, ds.year, ds.tags, "
+            "       datetime(ds.imported_at,'unixepoch','localtime'), "
+            "       (SELECT COUNT(*) FROM documents d "
+            "        WHERE d.document_source_id = ds.document_source_id) "
+            "FROM document_sources ds ORDER BY ds.document_source_id");
+        json out = json::array();
+        while (s.step()) {
+            out.push_back({
+                {"id",          s.column_int64(0)},
+                {"title",       s.is_null(1) ? json(nullptr) : json(s.column_text(1))},
+                {"path",        s.is_null(2) ? json(nullptr) : json(s.column_text(2))},
+                {"year",        s.is_null(3) ? json(nullptr) : json(s.column_int(3))},
+                {"tags",        s.column_text(4)},
+                {"imported_at", s.column_text(5)},
+                {"chunks",      s.column_int64(6)},
+            });
+        }
+        return out;
+    }
+
+    // Delete a document: every chunk (documents_terms rows go with them via
+    // ON DELETE CASCADE; shared `terms` entries stay by design) and then the
+    // source row, in ONE transaction so a failure leaves nothing half-removed.
+    json Backend::Impl::delete_document_source(int document_source_id) {
+        json info;
+        {
+            Stmt s(db,
+                "SELECT title, path, "
+                "  (SELECT COUNT(*) FROM documents WHERE document_source_id = ?1) "
+                "FROM document_sources WHERE document_source_id = ?1");
+            s.bind(1, document_source_id);
+            if (!s.step())
+                throw std::invalid_argument(std::format(
+                    "no document with id {}", document_source_id));
+            info = {{"id", document_source_id},
+                    {"title", s.is_null(0) ? json(nullptr) : json(s.column_text(0))},
+                    {"path",  s.is_null(1) ? json(nullptr) : json(s.column_text(1))},
+                    {"chunks", s.column_int64(2)}};
+        }
+        Stmt(db, "BEGIN").exec();
+        try {
+            Stmt dc(db, "DELETE FROM documents WHERE document_source_id = ?");
+            dc.bind(1, document_source_id);
+            if (!dc.exec())
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            Stmt ds(db, "DELETE FROM document_sources WHERE document_source_id = ?");
+            ds.bind(1, document_source_id);
+            if (!ds.exec())
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            Stmt(db, "COMMIT").exec();
+        } catch (...) {
+            Stmt(db, "ROLLBACK").exec();
+            throw;
+        }
+        invalidate_doc_cache();
+        return info;
+    }
+
+    // Document source by its unique path (0.17: path alone identifies a
+    // document; title is label metadata). Null json when absent.
+    json Backend::Impl::find_document_source(const std::string& path) {
+        Stmt s(db,
+            "SELECT document_source_id, ifnull(title,''), "
+            "       datetime(imported_at,'unixepoch','localtime') "
+            "FROM document_sources WHERE path = ?");
+        s.bind(1, path);
+        if (!s.step()) return json(nullptr);
+        return json{{"id", s.column_int64(0)}, {"title", s.column_text(1)},
+                    {"imported_at", s.column_text(2)}};
+    }
+
+    // Resolve a document (by its unique path) to its document_sources row,
+    // inserting one on first sighting. Returns {document_source_id, imported_at_epoch}.
     // imported_at_text is the caller's timestamp (TEXT 'YYYY-MM-DD HH:MM:SS'
     // or 'YYYYMMDD', interpreted LOCAL); empty -> now. On an existing source
     // the stored epoch is returned (the first import's time wins), so every
@@ -233,10 +308,8 @@ static std::string tags_from_metadata(const json& metadata) {
         {
             Stmt s(db,
                 "SELECT document_source_id, imported_at FROM document_sources "
-                "WHERE ifnull(path,'') = ifnull(?,'') "
-                "  AND ifnull(title,'') = ifnull(?,'')");
-            if (path.empty()) s.bind_null(1); else s.bind(1, path);
-            if (title.empty()) s.bind_null(2); else s.bind(2, title);
+                "WHERE path = ?");
+            s.bind(1, path);
             if (s.step())
                 return { s.column_int64(0), s.column_int64(1) };
         }
@@ -252,7 +325,7 @@ static std::string tags_from_metadata(const json& metadata) {
             "INSERT INTO document_sources(title, path, year, tags, imported_at) "
             "VALUES (?,?,?,?,?)");
         if (title.empty()) ins.bind_null(1); else ins.bind(1, title);
-        if (path.empty())  ins.bind_null(2); else ins.bind(2, path);
+        ins.bind(2, path);
         if (year <= 0) ins.bind_null(3); else ins.bind(3, year);
         ins.bind(4, tags);
         ins.bind(5, epoch);
@@ -263,6 +336,10 @@ static std::string tags_from_metadata(const json& metadata) {
 
 
     int Backend::Impl::store_document(const DocumentChunk& chunk, bool defer_embedding) {
+        // documents index real files: path is the unique identity (0.17).
+        if (chunk.path.empty())
+            throw std::invalid_argument("document path is required");
+
         // Path-normalise the body text for consistency with store().
         std::string text = normalize_path(chunk.text);
 
@@ -444,9 +521,9 @@ static std::string tags_from_metadata(const json& metadata) {
                     up.bind(6, new_ts);
                     up.bind(7, prev_id);
                     if (!up.exec())
-                        if (!up.exec()) throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-                        text_index_->index_record("turns", prev_id, u + "\n" + a);
-                        return prev_id;
+                        throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+                    text_index_->index_record("turns", prev_id, u + "\n" + a);
+                    return prev_id;
                 }
             }
         }
@@ -629,15 +706,21 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // ---- store_structured_decision: agent API Phase 1 (db 0.17) ---------
+    // ---- store_structured_decision / store_insight: shared write path ----
+    // Phase 1 built this for decisions; Phase 5 step 3 factored the body into
+    // store_structured_row so insights reuse it (doc: "one templated or
+    // parameterized helper, not two copies"). The only behavioral differences
+    // live in the spec: table/pk/evidence-table names, the error noun, and
+    // which of trigger/evidence is required.
     // Order matters (EXACTLY as written):
     //   1. validate everything that can be checked without writing,
     //   2. embed OUTSIDE the transaction (the embedder can take 100+ ms and
     //      we must not hold a write lock across it),
     //   3. BEGIN; insert; flip the superseded row; link evidence; index; COMMIT.
     // Any throw inside step 3 rolls back, so a failed evidence link never
-    // leaves a half-written decision or an orphaned 'superseded' flip.
-    StructuredDecisionResult Backend::Impl::store_structured_decision(const DecisionInput& in) {
+    // leaves a half-written row or an orphaned 'superseded' flip.
+    StructuredDecisionResult Backend::Impl::store_structured_row(
+            const DecisionInput& in, const StructuredRowSpec& spec) {
         auto trim = [](const std::string& s) {
             size_t a = s.find_first_not_of(" \t\r\n");
             if (a == std::string::npos) return std::string();
@@ -650,9 +733,12 @@ static std::string tags_from_metadata(const json& metadata) {
 
         // ---- 1. validate ----------------------------------------------
         if (text.empty())
-            throw std::invalid_argument("decision text is required");
-        if (trigger.empty())
-            throw std::invalid_argument("decision trigger is required");
+            throw std::invalid_argument(std::format("{} text is required", spec.noun));
+        if (spec.trigger_required && trigger.empty())
+            throw std::invalid_argument(std::format("{} trigger is required", spec.noun));
+        if (spec.evidence_required && in.evidence.empty())
+            throw std::invalid_argument(std::format(
+                "{} requires at least one evidence turn_summary_id", spec.noun));
         // Statuses a NEW row may start in. 'superseded' and 'retired' are
         // reached only by curation, never on create.
         if (status != "current" && status != "provisional" && status != "pending")
@@ -660,15 +746,16 @@ static std::string tags_from_metadata(const json& metadata) {
                 "status must be one of: current, provisional, pending");
 
         if (in.supersedes) {
-            Stmt s(db, "SELECT status FROM decisions WHERE decision_id = ?");
+            Stmt s(db, std::format("SELECT status FROM {} WHERE {} = ?",
+                                   spec.table, spec.pk));
             s.bind(1, *in.supersedes);
             if (!s.step())
                 throw std::invalid_argument(std::format(
-                    "supersedes: decision {} does not exist", *in.supersedes));
+                    "supersedes: {} {} does not exist", spec.noun, *in.supersedes));
             const std::string old_status = s.column_text(0);
             if (old_status == "superseded" || old_status == "retired")
                 throw std::invalid_argument(std::format(
-                    "supersedes: decision {} is already {}", *in.supersedes, old_status));
+                    "supersedes: {} {} is already {}", spec.noun, *in.supersedes, old_status));
         }
 
         for (int ts_id : in.evidence) {
@@ -691,7 +778,7 @@ static std::string tags_from_metadata(const json& metadata) {
 
         // Project (Phase 3): name or path, resolved the same way every other
         // caller resolves it. Unlike session provenance, an explicitly named
-        // project that doesn't exist IS an error -- silently filing a decision
+        // project that doesn't exist IS an error -- silently filing a row
         // unfiled is worse than failing the call.
         std::optional<int> project_id;
         if (!in.project.empty()) {
@@ -703,22 +790,25 @@ static std::string tags_from_metadata(const json& metadata) {
 
         // ---- 2. embed (outside the transaction) ------------------------
         // MUST equal kDecisionEmbedTextSQL's result for this row, so a
-        // housekeeping re-embed produces the same vector.
-        const std::string embed_text = trigger + "\n" + text;
+        // housekeeping re-embed produces the same vector. (The SQL CASE
+        // collapses to bare `text` when trigger is NULL/empty — insights
+        // allow that; decisions never reach the empty branch.)
+        const std::string embed_text =
+            trigger.empty() ? text : trigger + "\n" + text;
         auto emb = embedder->encode(embed_text);
 
         // ---- 3. write ---------------------------------------------------
         StructuredDecisionResult out;
         Stmt(db, "BEGIN").exec();
         try {
-            Stmt ins(db,
-                "INSERT INTO decisions (text, status, tags, trigger, rationale, scope, "
-                "supersedes, source_session_id, project_id, created_at, embedding_version, embedding) "
-                "VALUES (?,?,?,?,?,?,?,?,?,unixepoch(),?,?)");
+            Stmt ins(db, std::format(
+                "INSERT INTO {} (text, status, tags, trigger, rationale, scope, "
+                "supersedes, session_id, project_id, created_at, embedding_version, embedding) "
+                "VALUES (?,?,?,?,?,?,?,?,?,unixepoch(),?,?)", spec.table));
             ins.bind(1, text);
             ins.bind(2, status);
             ins.bind(3, in.tags);
-            ins.bind(4, trigger);
+            if (trigger.empty()) ins.bind_null(4); else ins.bind(4, trigger);
             const std::string rationale = trim(in.rationale);
             const std::string scope     = trim(in.scope);
             if (rationale.empty()) ins.bind_null(5); else ins.bind(5, rationale);
@@ -733,7 +823,9 @@ static std::string tags_from_metadata(const json& metadata) {
             out.id = static_cast<int>(sqlite3_last_insert_rowid(db));
 
             if (in.supersedes) {
-                Stmt up(db, "UPDATE decisions SET status = 'superseded' WHERE decision_id = ?");
+                Stmt up(db, std::format(
+                    "UPDATE {} SET status = 'superseded' WHERE {} = ?",
+                    spec.table, spec.pk));
                 up.bind(1, *in.supersedes);
                 if (!up.exec())
                     throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
@@ -742,45 +834,66 @@ static std::string tags_from_metadata(const json& metadata) {
 
             for (int ts_id : in.evidence) {
                 // OR IGNORE: a caller listing the same id twice is harmless.
-                Stmt ev(db, "INSERT OR IGNORE INTO decision_evidence "
-                            "(decision_id, turn_summary_id) VALUES (?,?)");
+                Stmt ev(db, std::format(
+                    "INSERT OR IGNORE INTO {} ({}, turn_summary_id) VALUES (?,?)",
+                    spec.evidence_table, spec.pk));
                 ev.bind(1, out.id);
                 ev.bind(2, ts_id);
                 if (!ev.exec())
                     throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
             }
 
-            text_index_->index_record("decisions", out.id, embed_text);
+            text_index_->index_record(spec.table, out.id, embed_text);
             Stmt(db, "COMMIT").exec();
         } catch (...) {
             Stmt(db, "ROLLBACK").exec();
             throw;
         }
-        invalidate_dec_cache();
+        if (spec.decisions_cache) invalidate_dec_cache();
+        else                      invalidate_ins_cache();
 
         // ---- possible_supersedes hint (Phase 2 step 5) -------------------
-        // Flag only: up to 3 OTHER active decisions whose embedding cosine
-        // with the new row reaches decision_supersede_threshold. The row the
-        // call already superseded is skipped (it's in out.superseded). NO row
-        // is ever changed here — the caller decides what to do with the hint.
+        // Flag only: up to 3 OTHER active rows of the SAME table whose
+        // embedding cosine with the new row reaches
+        // decision_supersede_threshold. The row the call already superseded
+        // is skipped (it's in out.superseded). NO row is ever changed here —
+        // the caller decides what to do with the hint.
         {
             std::vector<int> exclude{out.id};
             if (out.superseded) exclude.push_back(*out.superseded);
-            out.possible_supersedes = supersede_hints(emb, exclude);
+            out.possible_supersedes =
+                supersede_hints(emb, exclude, spec.table, spec.pk);
         }
         return out;
     }
 
 
-    // Cosine near-duplicate scan over active decisions (Phase 2 step 5,
-    // reused by Phase 3 notes). Purely vector-based on purpose: a
-    // near-duplicate ruling is exactly what this looks like in embedding
-    // space, and lexical overlap is already guaranteed by the shared trigger
-    // vocabulary. Returns up to 3 (decision_id, cosine) pairs at or above
-    // decision_supersede_threshold, highest first. Never changes a row.
+    StructuredDecisionResult Backend::Impl::store_structured_decision(const DecisionInput& in) {
+        return store_structured_row(in, {
+            "decisions", "decision_id", "decision_evidence", "decision",
+            /*trigger_required=*/true, /*evidence_required=*/false,
+            /*decisions_cache=*/true });
+    }
+
+
+    StructuredDecisionResult Backend::Impl::store_insight(const DecisionInput& in) {
+        return store_structured_row(in, {
+            "insights", "insight_id", "insight_evidence", "insight",
+            /*trigger_required=*/false, /*evidence_required=*/true,
+            /*decisions_cache=*/false });
+    }
+
+
+    // Cosine near-duplicate scan over active rows of one structured table
+    // (Phase 2 step 5, reused by Phase 3 notes and Phase 5 insights). Purely
+    // vector-based on purpose: a near-duplicate ruling is exactly what this
+    // looks like in embedding space, and lexical overlap is already guaranteed
+    // by the shared trigger vocabulary. Returns up to 3 (id, cosine) pairs at
+    // or above decision_supersede_threshold, highest first. Never changes a row.
     std::vector<std::pair<int,float>> Backend::Impl::supersede_hints(
             const std::vector<float>& emb,
-            const std::vector<int>& exclude_ids) {
+            const std::vector<int>& exclude_ids,
+            const char* table, const char* pk) {
         std::vector<std::pair<int,float>> scored;
         if (emb.empty()) return scored;
         Eigen::Map<const Eigen::VectorXf> v(emb.data(), static_cast<int>(emb.size()));
@@ -790,10 +903,10 @@ static std::string tags_from_metadata(const json& metadata) {
         const int expected_dims = config().embedding_dimensions;
         bool blob_warned = false;
         std::string sql =
-            "SELECT decision_id, embedding FROM decisions "
-            "WHERE status IN ('current','provisional') ";
+            std::format("SELECT {}, embedding FROM {} "
+                        "WHERE status IN ('current','provisional') ", pk, table);
         for (size_t i = 0; i < exclude_ids.size(); ++i)
-            sql += "  AND decision_id != ? ";
+            sql += std::format("  AND {} != ? ", pk);
         sql += "  AND embedding IS NOT NULL";
         Stmt s(db, sql);
         for (size_t i = 0; i < exclude_ids.size(); ++i)
@@ -801,7 +914,7 @@ static std::string tags_from_metadata(const json& metadata) {
         while (s.step()) {
             std::vector<float> other = decode_embedding_blob(
                 s.column_blob(1), s.column_bytes(1), expected_dims,
-                "decisions", s.column_int(0), blob_warned);
+                table, s.column_int(0), blob_warned);
             if (static_cast<int>(other.size()) != expected_dims) continue;
             Eigen::Map<Eigen::VectorXf> o(other.data(), expected_dims);
             float onorm = o.norm();

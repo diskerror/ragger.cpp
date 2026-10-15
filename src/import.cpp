@@ -935,6 +935,18 @@ void do_import(RaggerMemory &memory,
         throw std::runtime_error(std::format(ragger::lang::ERR_FILE_NOT_FOUND, filepath));
     }
 
+    // A document is identified by its path: refuse the same file twice,
+    // before reading or chunking anything. Re-importing means deleting the
+    // old document first.
+    const std::string doc_path = ragger::collapse_home(filepath);
+    if (auto existing = memory.find_document_source(doc_path); !existing.is_null()) {
+        std::println(ragger::lang::MSG_DOC_ALREADY_IMPORTED, doc_path,
+                     existing["id"].get<long long>(),
+                     existing["title"].get<std::string>(),
+                     existing["imported_at"].get<std::string>());
+        return;
+    }
+
     std::string text = ragger::read_file_to_string(filepath);
 
     auto chunks = ragger::chunk_markdown(text, min_chunk_size);
@@ -968,7 +980,7 @@ void do_import(RaggerMemory &memory,
         doc.title       = doc_title;
         doc.tags        = tags;
         doc.year        = year;
-        doc.path        = ragger::collapse_home(filepath);
+        doc.path        = doc_path;
         doc.chunk_index = i + 1;
         doc.imported_at = import_ts;
 

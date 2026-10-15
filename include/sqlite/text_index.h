@@ -3,7 +3,7 @@
  *
  * Holds a NON-OWNING sqlite3* (the sqlite::Backend owns the handle). Implements
  * the TextIndex storage hooks with ragger::Stmt, and provides create_schema()
- * (terms + 5 junction tables) and a batched full-table reindex_table().
+ * (terms + 6 junction tables) and a batched full-table reindex_table().
  *
  * Hot-path statement caching: the handful of queries hit per-term/per-record
  * during indexing and search are cached as std::optional<Stmt> instance
@@ -43,7 +43,7 @@ public:
     int reindex_table(const std::string& table, bool progress = false);
 
     // Truncate the shared `terms` table and reset its AUTOINCREMENT counter,
-    // starting term_ids fresh from 1. Only safe when reindexing ALL five
+    // starting term_ids fresh from 1. Only safe when reindexing ALL six
     // text tables in the same run: every junction table's term_id column is
     // `REFERENCES terms(term_id) ON DELETE CASCADE`, so this one DELETE
     // cascades and empties every junction table too (foreign_keys must be ON,
@@ -84,49 +84,55 @@ private:
     Stmt& select_term_id();
     Stmt& insert_term();
 
-    // Per-table accessors (fixed 5-table set: turns, turn_summaries,
-    // summaries, documents, decisions). Named verb_noun_table so related
-    // statements alphabetize/group together.
+    // Per-table accessors (fixed 6-table set: turns, turn_summaries,
+    // summaries, documents, decisions, insights). Named verb_noun_table so
+    // related statements alphabetize/group together.
     Stmt& doc_freq_turns();
     Stmt& doc_freq_turn_summaries();
     Stmt& doc_freq_summaries();
     Stmt& doc_freq_documents();
     Stmt& doc_freq_decisions();
+    Stmt& doc_freq_insights();
 
     Stmt& count_turns();
     Stmt& count_turn_summaries();
     Stmt& count_summaries();
     Stmt& count_documents();
     Stmt& count_decisions();
+    Stmt& count_insights();
 
     Stmt& postings_turns();
     Stmt& postings_turn_summaries();
     Stmt& postings_summaries();
     Stmt& postings_documents();
     Stmt& postings_decisions();
+    Stmt& postings_insights();
 
     Stmt& delete_terms_turns();
     Stmt& delete_terms_turn_summaries();
     Stmt& delete_terms_summaries();
     Stmt& delete_terms_documents();
     Stmt& delete_terms_decisions();
+    Stmt& delete_terms_insights();
 
     Stmt& insert_terms_turns();
     Stmt& insert_terms_turn_summaries();
     Stmt& insert_terms_summaries();
     Stmt& insert_terms_documents();
     Stmt& insert_terms_decisions();
+    Stmt& insert_terms_insights();
 
     Stmt& update_counts_turns();
     Stmt& update_counts_turn_summaries();
     Stmt& update_counts_summaries();
     Stmt& update_counts_documents();
     Stmt& update_counts_decisions();
+    Stmt& update_counts_insights();
 
     // Runtime dispatch to the per-table accessor above, for the callers
     // (corpus_size/doc_freq/postings/replace_record_terms/set_counts) that
     // only know `table` as a validated string at call time. Plain if/else
-    // over the fixed 5-table set -- no map, no format-string SQL.
+    // over the fixed 6-table set -- no map, no format-string SQL.
     Stmt& doc_freq_stmt(const std::string& table);
     Stmt& count_stmt(const std::string& table);
     Stmt& postings_stmt(const std::string& table);
@@ -145,26 +151,26 @@ private:
 
     std::optional<Stmt> doc_freq_turns_, doc_freq_turn_summaries_,
                          doc_freq_summaries_, doc_freq_documents_,
-                         doc_freq_decisions_;
+                         doc_freq_decisions_, doc_freq_insights_;
 
     std::optional<Stmt> count_turns_, count_turn_summaries_, count_summaries_,
-                         count_documents_, count_decisions_;
+                         count_documents_, count_decisions_, count_insights_;
 
     std::optional<Stmt> postings_turns_, postings_turn_summaries_,
                          postings_summaries_, postings_documents_,
-                         postings_decisions_;
+                         postings_decisions_, postings_insights_;
 
     std::optional<Stmt> delete_terms_turns_, delete_terms_turn_summaries_,
                          delete_terms_summaries_, delete_terms_documents_,
-                         delete_terms_decisions_;
+                         delete_terms_decisions_, delete_terms_insights_;
 
     std::optional<Stmt> insert_terms_turns_, insert_terms_turn_summaries_,
                          insert_terms_summaries_, insert_terms_documents_,
-                         insert_terms_decisions_;
+                         insert_terms_decisions_, insert_terms_insights_;
 
     std::optional<Stmt> update_counts_turns_, update_counts_turn_summaries_,
                          update_counts_summaries_, update_counts_documents_,
-                         update_counts_decisions_;
+                         update_counts_decisions_, update_counts_insights_;
 };
 
 }  // namespace ragger::sqlite

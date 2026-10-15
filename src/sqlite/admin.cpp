@@ -297,15 +297,24 @@ namespace fs = std::filesystem;
         )");
         view("decisions_view", R"(
             SELECT decision_id, text, status, tags,
-                   trigger, rationale, scope, supersedes, source_session_id, project_id,
+                   trigger, rationale, scope, supersedes, session_id, project_id,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
                    unigram_count, bigram_count,
                    embedding_version,
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM decisions
         )");
+        view("insights_view", R"(
+            SELECT insight_id, text, status, tags,
+                   trigger, rationale, scope, supersedes, session_id, project_id,
+                   datetime(created_at, 'unixepoch', 'localtime') AS created_at,
+                   unigram_count, bigram_count,
+                   embedding_version,
+                   CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
+            FROM insights
+        )");
         view("document_sources_view", R"(
-            SELECT document_source_id, title, path, year, tags, project_id,
+            SELECT document_source_id, title, path, year, tags,
                    datetime(imported_at, 'unixepoch', 'localtime') AS imported_at
             FROM document_sources
         )");
@@ -332,6 +341,7 @@ namespace fs = std::filesystem;
                  J{"summaries_terms_view",      "summaries_terms",      "summary_id"},
                  J{"documents_terms_view",      "documents_terms",      "document_id"},
                  J{"decisions_terms_view",      "decisions_terms",      "decision_id"},
+                 J{"insights_terms_view",       "insights_terms",       "insight_id"},
              }) {
             view(j.view, std::format(
                 "SELECT j.{} AS {}, t.term, j.count "

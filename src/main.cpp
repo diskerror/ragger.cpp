@@ -65,6 +65,46 @@ namespace fs = std::filesystem;
 // -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
+// PID of a live ragger daemon (from /tmp/ragger/server-*.pid), or 0.
+static pid_t find_live_daemon_pid() {
+    namespace fs = std::filesystem;
+    try {
+        for (const auto &entry: fs::directory_iterator("/tmp/ragger")) {
+            auto name = entry.path().filename().string();
+            if (name.rfind("server-", 0) == 0 &&
+                name.size() > 4 && name.substr(name.size() - 4) == ".pid") {
+                std::ifstream pf(entry.path());
+                pid_t pid = 0;
+                if (pf >> pid && pid > 0 && kill(pid, 0) == 0) return pid;
+            }
+        }
+    } catch (...) {}
+    return 0;
+}
+
+// Tell the running daemon (if any) to drop its in-memory search caches:
+// the DB file may have just been changed by this process. Silent when no
+// daemon is running -- there is nothing stale to refresh. Uses SIGHUP (reload:
+// config + caches), which every daemon version already handles.
+static void notify_daemon_db_changed() noexcept {
+    if (pid_t pid = find_live_daemon_pid(); pid > 0) kill(pid, SIGHUP);
+}
+
+// Runs notify_daemon_db_changed() when the command scope ends, on every
+// path (success, error return, exception): a command that MIGHT have
+// changed the DB may have done so before it failed.
+struct DbChangeNotifier {
+    bool armed;
+    explicit DbChangeNotifier(const std::string& command) {
+        static const char* const kMayWrite[] = {
+            "store", "decision", "project", "import-docs", "delete-doc",
+            "import-conversations", "import", "re-embed", "reindex"};
+        armed = false;
+        for (auto c : kMayWrite) if (command == c) armed = true;
+    }
+    ~DbChangeNotifier() { if (armed) notify_daemon_db_changed(); }
+};
+
 int main(int argc, char **argv) {
     // Record our own path so embedding can be spawned as `ragger embed`.
     if (argc > 0) ragger::set_executable_path(argv[0]);
@@ -182,6 +222,8 @@ int main(int argc, char **argv) {
     int min_chunk_size = opts.count("min-chunk-size")
                              ? opts["min-chunk-size"].as<int>()
                              : cfg.minimum_chunk_size;
+
+    DbChangeNotifier db_change_notifier(command);
 
     try {
         if (command == "start" || command == "stop" ||
@@ -679,6 +721,47 @@ int main(int argc, char **argv) {
             for (auto &filepath: args) {
                 do_import(memory, filepath, min_chunk_size,
                           imp_title, imp_year, imp_tags);
+            }
+        }
+        else if (command == "list-docs") {
+            ragger::RaggerMemory memory(db_path);
+            auto docs = memory.list_document_sources();
+            if (docs.empty()) {
+                std::println("No documents imported.");
+            } else {
+                std::println("{:>5}  {:>6}  {:>4}  {}", "id", "chunks", "year", "title  <path>");
+                for (const auto& d : docs) {
+                    std::println("{:>5}  {:>6}  {:>4}  {}  <{}>",
+                        d["id"].get<long long>(), d["chunks"].get<long long>(),
+                        d["year"].is_null() ? std::string("-") : std::to_string(d["year"].get<int>()),
+                        d["title"].is_null() ? std::string("(untitled)") : d["title"].get<std::string>(),
+                        d["path"].is_null() ? std::string("") : d["path"].get<std::string>());
+                }
+            }
+        }
+        else if (command == "delete-doc") {
+            auto args = opts.getParams("args");
+            // Exactly one argument, and it must be all digits: the document's
+            // primary key (document_source_id) as shown by `ragger list-docs`.
+            int id = 0;
+            if (args.size() == 1 && !args[0].empty() && args[0].size() <= 9 &&
+                std::all_of(args[0].begin(), args[0].end(),
+                            [](unsigned char c) { return std::isdigit(c); }))
+                id = std::stoi(args[0]);
+            if (id <= 0) {
+                Diskerror::Logger::error(ragger::lang::CLI_USAGE_DELETE_DOC);
+                return 1;
+            }
+            ragger::RaggerMemory memory(db_path);
+            try {
+                auto info = memory.delete_document_source(id);
+                std::println("Deleted document {} ({}): {} chunk(s) removed.",
+                    id,
+                    info["title"].is_null() ? std::string("(untitled)") : info["title"].get<std::string>(),
+                    info["chunks"].get<long long>());
+            } catch (const std::invalid_argument& e) {
+                Diskerror::Logger::error(e.what());
+                return 1;
             }
         }
         else if (command == "import-conversations") {
@@ -1222,10 +1305,11 @@ int main(int argc, char **argv) {
             return ragger::run_recipe_cli(recipe_args, db_path);
         }
         else if (command == "re-embed") {
-            // Re-encode embeddings for one table, or all five (default).
+            // Re-encode embeddings for one table, or all six (default).
             // Mirrors `reindex`'s <table|all> argument handling.
-            static constexpr std::array<const char*, 5> kAllTables = {
-                "turns", "turn_summaries", "summaries", "decisions", "documents"
+            static constexpr std::array<const char*, 6> kAllTables = {
+                "turns", "turn_summaries", "summaries", "decisions", "documents",
+                "insights"
             };
             auto args = opts.getParams("args");
             std::string target = args.empty() ? "all" : args[0];
@@ -1235,7 +1319,7 @@ int main(int argc, char **argv) {
                 if (!found) {
                     Diskerror::Logger::error(std::format(
                         "Unknown table '{}'. Expected one of: turns, turn_summaries, "
-                        "summaries, decisions, documents, or \"all\"", target));
+                        "summaries, decisions, documents, insights, or \"all\"", target));
                     return 1;
                 }
             }
@@ -1323,15 +1407,16 @@ int main(int argc, char **argv) {
             // so safe to re-run any time — e.g. after a tokenizer/stopword
             // change, or to recover from a suspected inconsistency. Backs up
             // the DB first — cheap rollback, no drift guard needed.
-            static constexpr std::array<const char*, 5> kAllTables = {
-                "turns", "turn_summaries", "summaries", "decisions", "documents"
+            static constexpr std::array<const char*, 6> kAllTables = {
+                "turns", "turn_summaries", "summaries", "decisions", "documents",
+                "insights"
             };
 
             auto args = opts.getParams("args");
             if (args.empty()) {
                 Diskerror::Logger::error(
                     "Usage: ragger reindex <table|all>  "
-                    "(tables: turns, turn_summaries, summaries, decisions, documents)");
+                    "(tables: turns, turn_summaries, summaries, decisions, documents, insights)");
                 return 1;
             }
             std::string target = args[0];
@@ -1341,7 +1426,7 @@ int main(int argc, char **argv) {
                 if (!found) {
                     Diskerror::Logger::error(std::format(
                         "Unknown table '{}'. Expected one of: turns, turn_summaries, "
-                        "summaries, decisions, documents, or \"all\"", target));
+                        "summaries, decisions, documents, insights, or \"all\"", target));
                     return 1;
                 }
             }
@@ -1467,6 +1552,18 @@ int main(int argc, char **argv) {
             }
             Diskerror::Logger::info(std::format(ragger::lang::MSG_HOUSEKEEPING_TRIGGERED, daemon_pid));
 
+        }
+        else if (command == "reload-cache") {
+            pid_t daemon_pid = find_live_daemon_pid();
+            if (daemon_pid <= 0) {
+                Diskerror::Logger::error(ragger::lang::ERR_DAEMON_NOT_FOUND);
+                return 1;
+            }
+            if (kill(daemon_pid, SIGHUP) != 0) {
+                std::cerr << std::format(ragger::lang::ERR_SIGNAL_FAILED, strerror(errno)) << "\n";
+                return 1;
+            }
+            std::println(ragger::lang::MSG_CACHE_RELOAD_OK, daemon_pid);
         }
         else if (command == "reload") {
             // Send SIGHUP to running daemon to reload config

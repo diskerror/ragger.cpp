@@ -65,12 +65,14 @@ namespace fs = std::filesystem;
         ensure_cache();
         ensure_doc_cache();
         ensure_dec_cache();
+        ensure_ins_cache();
         ensure_turn_cache();
         int n_sum = static_cast<int>(cached_ids.size());
         int n_doc = static_cast<int>(doc_ids.size());
         int n_dec = static_cast<int>(dec_ids.size());
+        int n_ins = static_cast<int>(ins_ids.size());
         int n_turn = static_cast<int>(turn_ids.size());
-        if (n_sum == 0 && n_doc == 0 && n_dec == 0 && n_turn == 0) return {{}, {{"corpus_size", 0}}};
+        if (n_sum == 0 && n_doc == 0 && n_dec == 0 && n_ins == 0 && n_turn == 0) return {{}, {{"corpus_size", 0}}};
 
         // Push the current tunable weights into the engine once per search
         // call (config-agnostic engine; only this backend reads config()).
@@ -93,7 +95,7 @@ namespace fs = std::filesystem;
             SearchResult result;
         };
         std::vector<Candidate> candidates;
-        candidates.reserve(static_cast<size_t>(n_sum + n_doc + n_dec + n_turn));
+        candidates.reserve(static_cast<size_t>(n_sum + n_doc + n_dec + n_ins + n_turn));
 
         // Score one corpus: vector cosine blended with the custom text-index
         // TF-IDF signal (literal + metaphone folded together by score_query()).
@@ -180,6 +182,9 @@ namespace fs = std::filesystem;
         score_corpus(dec_ids, dec_texts, dec_embeddings,
                      dec_metadata, dec_timestamps,
                      bm25_on ? to_map(text_index_->score_query("decisions", query)) : no_scores);
+        score_corpus(ins_ids, ins_texts, ins_embeddings,
+                     ins_metadata, ins_timestamps,
+                     bm25_on ? to_map(text_index_->score_query("insights", query)) : no_scores);
         score_corpus(turn_ids, turn_texts, turn_embeddings,
                      turn_metadata, turn_timestamps,
                      bm25_on ? to_map(text_index_->score_query("turn_summaries", query)) : no_scores);
@@ -217,7 +222,7 @@ namespace fs = std::filesystem;
             {"embedding_ms", ms(t_embed_start, t_embed_end)},
             {"search_ms",    ms(t_search_start, t_search_end)},
             {"total_ms",     ms(t_start, clock::now())},
-            {"corpus_size",  n_sum + n_doc + n_dec + n_turn}
+            {"corpus_size",  n_sum + n_doc + n_dec + n_ins + n_turn}
         };
         return {std::move(results), std::move(timing)};
     }
@@ -306,6 +311,10 @@ namespace fs = std::filesystem;
         // stay hidden here too, or degraded (text-only) search leaks them while
         // normal search hides them.
         score_text_corpus("decisions", "decision_id", "text", "decision",
+                          "datetime(created_at,'unixepoch','localtime')",
+                          " AND status IN ('current','provisional','roadmap')");
+        // Insights (db 0.17). Same allow-list as the decisions corpus above.
+        score_text_corpus("insights", "insight_id", "text", "insight",
                           "datetime(created_at,'unixepoch','localtime')",
                           " AND status IN ('current','provisional','roadmap')");
         // Turn summaries. NOTE: this table has no created_at — an L2 summary

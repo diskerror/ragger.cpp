@@ -328,7 +328,9 @@ MEMORY_NOTE_SCHEMA = {
         "server infers the project from `cwd` (the plugin fills os.getcwd() "
         "automatically). The result may carry `possible_supersedes`: current "
         "decisions this note may contradict (hint only -- nothing was changed; "
-        "review them and use memory_decision for a real ruling)."
+        "review them and use memory_decision for a real ruling). Pass evidence "
+        "(turn_summary ids from search) when you are recording a synthesized "
+        "insight; it is stored as an insight linked to those sources."
     ),
     "parameters": {
         "type": "object",
@@ -340,6 +342,8 @@ MEMORY_NOTE_SCHEMA = {
                      "description": "Optional tags."},
             "cwd": {"type": "string",
                     "description": "Working directory for project inference (auto-filled when project is omitted)."},
+            "evidence": {"type": "array", "items": {"type": "integer"},
+                         "description": "turn_summary ids this note synthesizes. When present the note is stored as an insight (response carries \"table\":\"insights\") instead of a plain note."},
         },
         "required": ["text"],
     },
@@ -374,11 +378,89 @@ MEMORY_PROJECT_SCHEMA = {
 }
 
 
+MEMORY_TIMELINE_SCHEMA = {
+    "name": "memory_timeline",
+    "description": (
+        "What happened recently, as a deterministic newest-first list (no "
+        "search ranking). granularity 'turn' = per-exchange summaries "
+        "(falling back to raw user text), 'episode' = episode summaries "
+        "(default), 'session' = per session its session summary or newest "
+        "episode. Filters: project (name/path; cwd inference applies), "
+        "session GUID ('current' = this conversation), since/until "
+        "('YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or relative '30d'/'12h'). "
+        "Page through with the returned next_cursor; null means the end."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project": {"type": "string", "description": "Project name or path (optional)."},
+            "cwd": {"type": "string",
+                    "description": "Working directory for project inference (auto-filled when project is omitted)."},
+            "session": {"type": "string", "description": "Only this session GUID ('current' = this one)."},
+            "since": {"type": "string", "description": "Lower time bound."},
+            "until": {"type": "string", "description": "Upper time bound (bare date = end of day)."},
+            "granularity": {"type": "string", "enum": ["turn", "episode", "session"],
+                            "description": "turn | episode | session (default episode)."},
+            "limit": {"type": "integer", "description": "Page size (default 20, max 100)."},
+            "cursor": {"type": "string", "description": "Opaque next_cursor from the previous page."},
+        },
+    },
+}
+
+
+MEMORY_UPDATE_SCHEMA = {
+    "name": "memory_update",
+    "description": (
+        "Curate one row's METADATA by typed handle: decision status (legal "
+        "transitions only; 'superseded' is set only by storing a superseding "
+        "decision), tags (replaces the whole set), project (name/path; empty "
+        "string clears). Agent notes accept tags/project; summarizer rollups "
+        "and turn / turn_summary / document rows are not editable. Text is "
+        "NEVER edited in place -- to change what something says, store a new "
+        "decision (memory_decision with supersedes) or note. Returns the "
+        "updated row."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "Typed handle '<layer>:<rowid>'."},
+            "status": {"type": "string",
+                       "description": "Decision status: current | provisional | pending | roadmap | retired."},
+            "tags": {"type": "string", "description": "Replacement tag string (comma-separated)."},
+            "project": {"type": "string", "description": "Project name/path; empty string clears it."},
+        },
+        "required": ["id"],
+    },
+}
+
+
+MEMORY_REVIEW_SCHEMA = {
+    "name": "memory_review",
+    "description": (
+        "The pending queue. action 'list' returns pending decisions and "
+        "insights oldest first (handle + trigger + snippet); 'approve' moves each id "
+        "pending->current; 'reject' moves each id pending->retired. ids accept "
+        "'decision:<id>' / 'insight:<id>' handles or bare integers (decision); "
+        "a non-pending id fails only that entry."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["list", "approve", "reject"],
+                       "description": "list | approve | reject."},
+            "ids": {"type": "array", "items": {"type": "string"},
+                    "description": "Decision handles for approve/reject."},
+        },
+        "required": ["action"],
+    },
+}
+
+
 MEMORY_SEARCH_SCHEMA = {
     "name": "memory_search",
     "description": (
         "Layered search across all memory corpora (turns, turn summaries, "
-        "session/episode summaries, documents, decisions). Returns typed handles "
+        "session/episode summaries, documents, decisions, insights). Returns typed handles "
         "+ snippets only -- call memory_get with chosen handles for full text. "
         "`layers` narrows by kind; omit for all. Pass session='current' to search "
         "only this conversation, or exclude_session='current' to skip it. "
@@ -391,7 +473,7 @@ MEMORY_SEARCH_SCHEMA = {
         "properties": {
             "query": {"type": "string", "description": "What to search for."},
             "layers": {"type": "array", "items": {"type": "string"},
-                       "description": "Subset of: turn, turn_summary, summary, document, decision."},
+                       "description": "Subset of: turn, turn_summary, summary, document, decision, insight."},
             "since": {"type": "string", "description": "Only results at/after this time."},
             "until": {"type": "string", "description": "Only results at/before this time."},
             "status": {"type": "string",
@@ -419,9 +501,9 @@ MEMORY_GET_SCHEMA = {
         "Read full memory rows by typed handles (from memory_search), or page "
         "through one session's conversation history. Exactly one mode per call: "
         "ids, or session (+optional after_turn/before_turn/limit). expand: none | "
-        "context (neighbouring turns/chunks) | sources (a decision's evidence, a "
-        "summary's constituent turn summaries) | chain (a decision's full supersede "
-        "lineage, oldest to newest). Pass session='current' for this conversation."
+        "context (neighbouring turns/chunks) | sources (a decision's or "
+        "insight's evidence, a summary's constituent turn summaries) | chain "
+        "(a decision's or insight's full supersede lineage, oldest to newest). Pass session='current' for this conversation."
     ),
     "parameters": {
         "type": "object",
@@ -804,7 +886,9 @@ class RaggerMemoryProvider(MemoryProvider):
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [SEARCH_SCHEMA, STORE_SCHEMA, DECISION_SCHEMA,
                 MEMORY_SEARCH_SCHEMA, MEMORY_GET_SCHEMA,
-                MEMORY_NOTE_SCHEMA, MEMORY_PROJECT_SCHEMA]
+                MEMORY_NOTE_SCHEMA, MEMORY_PROJECT_SCHEMA,
+                MEMORY_TIMELINE_SCHEMA, MEMORY_UPDATE_SCHEMA,
+                MEMORY_REVIEW_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._breaker_open():
@@ -930,6 +1014,9 @@ class RaggerMemoryProvider(MemoryProvider):
                 payload["project"] = str(args["project"])
             else:
                 payload["cwd"] = str(args.get("cwd") or os.getcwd())
+            if args.get("evidence"):
+                # Phase 5: evidence routes the write to store_insight server-side.
+                payload["evidence"] = [int(e) for e in args["evidence"]]
             got = self._post_status("/memory/note", payload)
             return self._agent_tool_result(got)
 
@@ -942,6 +1029,45 @@ class RaggerMemoryProvider(MemoryProvider):
                 if args.get(key) is not None:
                     payload[key] = str(args[key])
             got = self._post_status("/memory/project", payload)
+            return self._agent_tool_result(got)
+
+        elif tool_name == "memory_timeline":
+            payload: dict = {}
+            for key in ("since", "until", "granularity", "cursor"):
+                if args.get(key):
+                    payload[key] = str(args[key])
+            for key in ("limit",):
+                if args.get(key) is not None:
+                    payload[key] = int(args[key])
+            if args.get("session"):
+                s = str(args["session"])
+                payload["session"] = self._session_id if s == "current" else s
+            if args.get("project"):
+                payload["project"] = str(args["project"])
+            else:
+                payload["cwd"] = str(args.get("cwd") or os.getcwd())
+            got = self._post_status("/memory/timeline", payload)
+            return self._agent_tool_result(got)
+
+        elif tool_name == "memory_update":
+            rid = str(args.get("id", "")).strip()
+            if not rid:
+                return json.dumps({"error": "Missing required parameter: id"})
+            payload = {"id": rid}
+            for key in ("status", "tags", "project"):
+                if args.get(key) is not None:
+                    payload[key] = str(args[key])
+            got = self._post_status("/memory/update", payload)
+            return self._agent_tool_result(got)
+
+        elif tool_name == "memory_review":
+            action = str(args.get("action", "")).strip()
+            if action not in ("list", "approve", "reject"):
+                return json.dumps({"error": "memory_review action must be list|approve|reject"})
+            payload = {"action": action}
+            if args.get("ids"):
+                payload["ids"] = [str(x) for x in args["ids"]]
+            got = self._post_status("/memory/review", payload)
             return self._agent_tool_result(got)
 
         elif tool_name == "memory_get":

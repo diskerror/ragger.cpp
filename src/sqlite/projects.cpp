@@ -1,7 +1,7 @@
 // Agent API Phase 3: project primitives.
 //
-// projects = named bodies of work. sessions/summaries/decisions/document_
-// sources carry a project_id; this file owns the projects table itself:
+// projects = named bodies of work. sessions/summaries/decisions/
+// carry a project_id; this file owns the projects table itself:
 // create/list/update, cwd/path -> project inference (resolve_project), and
 // the briefing packet (project_briefing). Design contract: PHASE3-STEPS.md.
 #include "sqlite/backend_impl.h"
@@ -240,6 +240,25 @@ bool has_tag(const std::string& tags, const std::string& want) {
                 });
             }
             out["decisions_current"] = std::move(arr);
+        }
+
+        // insights_current: active synthesized insights, newest first, cap 20
+        // (P5 step 4). Same shape as decisions_current.
+        {
+            Stmt s(db,
+                "SELECT insight_id, trigger, text FROM insights "
+                "WHERE project_id = ? AND status IN ('current','provisional') "
+                "ORDER BY created_at DESC, insight_id DESC LIMIT 20");
+            s.bind(1, pid);
+            json arr = json::array();
+            while (s.step()) {
+                arr.push_back({
+                    {"id", "insight:" + std::to_string(s.column_int(0))},
+                    {"trigger", s.is_null(1) ? json(nullptr) : json(s.column_text(1))},
+                    {"text", s.column_text(2)},
+                });
+            }
+            out["insights_current"] = std::move(arr);
         }
 
         // latest_summary: newest level='project' summary for this project.

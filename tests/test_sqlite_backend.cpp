@@ -1424,6 +1424,7 @@ void test_search_merges_three_corpora(ragger::Embedder& emb) {
         ragger::DocumentChunk doc;
         doc.text  = "Photosynthesis converts sunlight into chemical energy in plants.";
         doc.title = "Botany Notes";
+        doc.path  = "/tmp/botany.md";
         db.store_document(doc);
 
         // (3) Decision inserted directly into the L6 table with NO embedding,
@@ -1794,54 +1795,6 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
                 ('first ruling', 'current', '', 2),
                 ('a fact',       'fact',    '', 2),
                 ('a lesson',     'lesson',  'x', 2);
-        )";
-        CHECK(sqlite3_exec(raw, ddl, nullptr, nullptr, nullptr) == SQLITE_OK);
-        sqlite3_close(raw);
-    }
-    {
-        ragger::sqlite::Backend db(emb, TEMP_DB);   // runs the migration
-        db.close();
-    }
-    sqlite3* raw = p1_open_raw();
-    CHECK(p1_scalar_text(raw, "SELECT value FROM settings WHERE key='db_version'") == "0.18");
-    // The 0.17->0.18 leg chains automatically and rebuilds decisions once
-    // more (adds project_id before created_at), so created_at lands at cid
-    // 10, not the 0.17 position 9. trigger is still cid 4.
-    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('decisions') WHERE cid = 4") == "trigger");
-    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('decisions') WHERE cid = 10") == "created_at");
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM decisions") == 3);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM decisions WHERE status != 'current'") == 0);
-    CHECK(p1_scalar_text(raw, "SELECT tags FROM decisions WHERE text = 'a fact'") == "fact");
-    CHECK(p1_scalar_text(raw, "SELECT tags FROM decisions WHERE text = 'a lesson'") == "x,lesson");
-    CHECK(p1_scalar_int(raw, "SELECT unigram_count FROM decisions WHERE text = 'first ruling'") == 2);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'decision_evidence'") == 1);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'protect_orphan_turn_summaries'") == 1);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_foreign_key_check") == 0);
-    sqlite3_close(raw);
-
-    // The pre-migration backup archive lands next to the DB; remove it.
-    for (const auto& e : fs::directory_iterator(fs::path(TEMP_DB).parent_path()))
-        if (e.path().filename().string().starts_with("ragger_test_backend_BACKUP_"))
-            fs::remove(e.path());
-    cleanup();
-}
-
-// Phase 3 Step 2: hand-built 0.17 DB migrates to 0.18 (projects).
-void test_migrate_0_17_to_0_18(ragger::Embedder& emb) {
-    cleanup();
-    {
-        sqlite3* raw = nullptr;
-        CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
-        const char* ddl = R"(
-            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            INSERT INTO settings VALUES ('db_version', '0.17');
-            CREATE TABLE turns (
-                turn_id INTEGER PRIMARY KEY AUTOINCREMENT, user_text TEXT NOT NULL,
-                assistant_text TEXT, model_id INTEGER, session_id INTEGER,
-                created_at INTEGER NOT NULL,
-                unigram_count INTEGER NOT NULL DEFAULT 0,
-                bigram_count INTEGER NOT NULL DEFAULT 0,
-                embedding_version INTEGER, embedding BLOB);
             CREATE TABLE sessions (
                 session_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guid TEXT NOT NULL UNIQUE, name TEXT, name_source TEXT,
@@ -1861,26 +1814,15 @@ void test_migrate_0_17_to_0_18(ragger::Embedder& emb) {
             INSERT INTO summaries (text, level, tags, session_id, unigram_count) VALUES
                 ('episode one', 'episode', '', 1, 7),
                 ('note two',    'session', 'x', 2, 3);
-            CREATE TABLE decisions (
-                decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                text TEXT NOT NULL, status TEXT NOT NULL,
-                tags TEXT NOT NULL DEFAULT '',
-                trigger TEXT, rationale TEXT, scope TEXT,
-                supersedes INTEGER, source_session_id INTEGER,
-                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                unigram_count INTEGER NOT NULL DEFAULT 0,
-                bigram_count INTEGER NOT NULL DEFAULT 0,
-                embedding_version INTEGER, embedding BLOB);
-            INSERT INTO decisions (text, status, tags, trigger, unigram_count) VALUES
-                ('ruling one', 'current', 'a,b', 'Use when testing', 5),
-                ('ruling two', 'provisional', '', NULL, 4);
             CREATE TABLE document_sources (
                 document_source_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT, path TEXT, year INTEGER,
                 tags TEXT NOT NULL DEFAULT '',
                 imported_at INTEGER NOT NULL);
             INSERT INTO document_sources (title, path, year, tags, imported_at)
-                VALUES ('Doc', '~/doc.md', 2026, 'd', 1760000000);
+                VALUES ('Doc', '~/doc.md', 2026, 'd', 1760000000),
+                       ('Pathless', NULL, NULL, '', 1760000001),
+                       ('Empty',    '',   NULL, '', 1760000002);
         )";
         CHECK(sqlite3_exec(raw, ddl, nullptr, nullptr, nullptr) == SQLITE_OK);
         sqlite3_close(raw);
@@ -1890,32 +1832,428 @@ void test_migrate_0_17_to_0_18(ragger::Embedder& emb) {
         db.close();
     }
     sqlite3* raw = p1_open_raw();
-    CHECK(p1_scalar_text(raw, "SELECT value FROM settings WHERE key='db_version'") == "0.18");
-    // Canonical order: project_id BEFORE created_at in both rebuilt tables.
-    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('summaries') WHERE cid = 6") == "project_id");
-    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('summaries') WHERE cid = 7") == "created_at");
+    CHECK(p1_scalar_text(raw, "SELECT value FROM settings WHERE key='db_version'") == "0.17");
+    // Canonical (fresh-install) column order: project_id BEFORE created_at.
+    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('decisions') WHERE cid = 4") == "trigger");
     CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('decisions') WHERE cid = 9") == "project_id");
     CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('decisions') WHERE cid = 10") == "created_at");
-    // Row counts and carried values unchanged; new column starts NULL.
+    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('summaries') WHERE cid = 6") == "project_id");
+    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('summaries') WHERE cid = 7") == "created_at");
+    // Projects, insights and their links all exist; new columns start NULL.
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('projects','insights','insight_evidence','insights_terms')") == 4);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='insights_view'") == 1);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_insights_status'") == 1);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM summaries") == 2);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM decisions") == 2);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sessions") == 2);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM document_sources") == 1);
     CHECK(p1_scalar_int(raw, "SELECT unigram_count FROM summaries WHERE text = 'episode one'") == 7);
-    CHECK(p1_scalar_int(raw, "SELECT unigram_count FROM decisions WHERE text = 'ruling one'") == 5);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM decisions WHERE project_id IS NULL") == 2);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM summaries WHERE project_id IS NULL") == 2);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sessions WHERE project_id IS NULL") == 2);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM document_sources WHERE project_id IS NULL") == 1);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects'") == 1);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_foreign_key_check") == 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM decisions WHERE project_id IS NULL") == 3);
     // No stray rebuild tables / repointed REFERENCES (legacy_alter_table trap).
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%_rebuild%'") == 0);
+    // document_sources.path is unique: pathless/empty sources got their own
+    // document_source_id as a placeholder; real paths are untouched.
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_document_sources_path'") == 1);
+    CHECK(p1_scalar_text(raw, "SELECT path FROM document_sources WHERE title = 'Doc'") == "~/doc.md");
+    CHECK(p1_scalar_text(raw, "SELECT path FROM document_sources WHERE title = 'Pathless'") == "2");
+    CHECK(p1_scalar_text(raw, "SELECT path FROM document_sources WHERE title = 'Empty'") == "3");
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM decisions") == 3);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM decisions WHERE status != 'current'") == 0);
+    CHECK(p1_scalar_text(raw, "SELECT tags FROM decisions WHERE text = 'a fact'") == "fact");
+    CHECK(p1_scalar_text(raw, "SELECT tags FROM decisions WHERE text = 'a lesson'") == "x,lesson");
+    CHECK(p1_scalar_int(raw, "SELECT unigram_count FROM decisions WHERE text = 'first ruling'") == 2);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'decision_evidence'") == 1);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'protect_orphan_turn_summaries'") == 1);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_foreign_key_check") == 0);
     sqlite3_close(raw);
 
+    // The pre-migration backup archive lands next to the DB; remove it.
     for (const auto& e : fs::directory_iterator(fs::path(TEMP_DB).parent_path()))
         if (e.path().filename().string().starts_with("ragger_test_backend_BACKUP_"))
             fs::remove(e.path());
+    cleanup();
+}
+
+// Documents are identified by path (0.17): one source per path regardless of
+// title; no path -> invalid_argument; find_document_source reports it.
+void test_document_path_unique(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    CHECK(db.find_document_source("/tmp/u.md").is_null());
+
+    ragger::DocumentChunk a;
+    a.text = "First chunk."; a.title = "Original Title"; a.path = "/tmp/u.md"; a.chunk_index = 1;
+    db.store_document(a);
+    ragger::DocumentChunk b = a;
+    b.text = "Second chunk."; b.title = "A Different Title"; b.chunk_index = 2;
+    db.store_document(b);                       // same path -> same source
+
+    sqlite3* raw = p1_open_raw();
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM document_sources") == 1);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM documents") == 2);
+    CHECK(p1_scalar_text(raw, "SELECT title FROM document_sources") == "Original Title");
+    // The schema itself refuses a second source with the same path.
+    CHECK(sqlite3_exec(raw, "INSERT INTO document_sources (title, path, imported_at) "
+                            "VALUES ('x', '/tmp/u.md', 1)", nullptr, nullptr, nullptr)
+          == SQLITE_CONSTRAINT);
+    sqlite3_close(raw);
+
+    auto found = db.find_document_source("/tmp/u.md");
+    CHECK(!found.is_null());
+    CHECK(found["title"] == "Original Title");
+
+    ragger::DocumentChunk c;
+    c.text = "No path."; c.title = "Pathless";
+    bool threw = false;
+    try { db.store_document(c); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+
+    db.close();
+    cleanup();
+}
+
+// list_document_sources / delete_document_source: ids are the primary key
+// (gaps after a delete are kept), delete removes chunks + term rows + the
+// source in one go, and the path can then be imported again.
+void test_document_list_and_delete(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    auto add = [&](const char* path, const char* title, const char* text, int chunk) {
+        ragger::DocumentChunk d;
+        d.text = text; d.title = title; d.path = path; d.chunk_index = chunk; d.year = 2026;
+        return db.store_document(d);
+    };
+    add("/tmp/a.md", "Doc A", "Alpine zebra crossings are unusual.", 1);
+    add("/tmp/a.md", "Doc A", "Zebra stripes confuse flies.", 2);
+    add("/tmp/b.md", "Doc B", "Barometric pressure and weather.", 1);
+    add("/tmp/c.md", "Doc C", "Cobblestone streets of old towns.", 1);
+
+    auto docs = db.list_document_sources();
+    CHECK(docs.size() == 3);
+    CHECK(docs[0]["chunks"] == 2);
+    CHECK(docs[0]["path"] == "/tmp/a.md");
+    const int a_id = docs[0]["id"].get<int>();
+    const int b_id = docs[1]["id"].get<int>();
+    const int c_id = docs[2]["id"].get<int>();
+
+    auto info = db.delete_document_source(b_id);       // middle one -> a gap
+    CHECK(info["chunks"] == 1);
+    CHECK(info["title"] == "Doc B");
+
+    docs = db.list_document_sources();
+    CHECK(docs.size() == 2);
+    CHECK(docs[0]["id"].get<int>() == a_id);
+    CHECK(docs[1]["id"].get<int>() == c_id);           // key not renumbered
+
+    sqlite3* raw = p1_open_raw();
+    CHECK(p1_scalar_int(raw, std::format(
+        "SELECT COUNT(*) FROM documents WHERE document_source_id = {}", b_id)) == 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM documents") == 3);
+    // No orphaned term rows for the deleted chunk (CASCADE).
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM documents_terms "
+                             "WHERE document_id NOT IN (SELECT document_id FROM documents)") == 0);
+    sqlite3_close(raw);
+
+    CHECK(db.find_document_source("/tmp/b.md").is_null());
+    add("/tmp/b.md", "Doc B again", "Barometric pressure revisited.", 1);   // re-import is now allowed
+
+    bool threw = false;
+    try { db.delete_document_source(9999); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+
+    db.close();
+    cleanup();
+}
+
+// invalidate_all_caches(): a backend with warm caches does not see rows
+// written by ANOTHER connection (CLI/hand edit) until its caches are dropped.
+void test_invalidate_all_caches(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend daemon(emb, TEMP_DB);
+    {
+        ragger::DocumentChunk d;
+        d.text = "Original zebra chunk."; d.title = "T"; d.path = "/tmp/z.md"; d.chunk_index = 1;
+        daemon.store_document(d);
+    }
+    auto has = [&](const char* q, const char* needle) {
+        ragger::AgentSearchQuery aq;
+        aq.query = q; aq.layers = {"document"}; aq.limit = 10;
+        for (auto& h : daemon.agent_search(aq))
+            if (h.snippet.find(needle) != std::string::npos) return true;
+        return false;
+    };
+    CHECK(has("zebra", "zebra"));                      // warms the document cache
+    {
+        ragger::sqlite::Backend cli(emb, TEMP_DB);     // second connection = the CLI
+        ragger::DocumentChunk d;
+        d.text = "Newly imported quokka chunk."; d.title = "Q"; d.path = "/tmp/q.md"; d.chunk_index = 1;
+        cli.store_document(d);
+        cli.close();
+    }
+    CHECK(!has("quokka", "quokka"));                   // stale: cache predates the write
+    daemon.invalidate_all_caches();
+    CHECK(has("quokka", "quokka"));                    // rebuilt from the DB
+    daemon.close();
+    cleanup();
+}
+
+// ---- Phase 5 steps 2+3: insights write path + search integration --------
+static bool p5_throws_invalid_insight(ragger::sqlite::Backend& db,
+                                      const ragger::DecisionInput& in) {
+    try { db.store_insight(in); }
+    catch (const std::invalid_argument&) { return true; }
+    return false;
+}
+
+// Happy path: trigger optional, evidence required and linked, row embedded
+// and indexed, search surfaces it with source="insight".
+void test_p5_insight_basic(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    int ts1 = p1_make_turn_summary(db, "insight evidence one");
+    int ts2 = p1_make_turn_summary(db, "insight evidence two");
+
+    ragger::DecisionInput in;
+    in.text      = "The embed-table lists must stay in sync by hand.";
+    in.rationale = "Nothing enforces kAllTables vs count_embeddable_rows.";
+    in.tags      = "maintenance";
+    in.evidence  = {ts1, ts2, ts1};   // duplicate is ignored
+    int id = db.store_insight(in).id;
+    CHECK(id > 0);
+
+    sqlite3* raw = p1_open_raw();
+    const std::string w = std::format(" FROM insights WHERE insight_id = {}", id);
+    CHECK(p1_scalar_text(raw, "SELECT text" + w) == "The embed-table lists must stay in sync by hand.");
+    CHECK(p1_scalar_text(raw, "SELECT trigger" + w) == "<NULL>");   // optional -> NULL
+    CHECK(p1_scalar_text(raw, "SELECT status" + w) == "current");
+    CHECK(p1_scalar_text(raw, "SELECT tags" + w) == "maintenance");
+    CHECK(p1_scalar_int(raw, "SELECT embedding IS NOT NULL" + w) == 1);
+    CHECK(p1_scalar_int(raw, "SELECT unigram_count > 0" + w) == 1);
+    CHECK(p1_scalar_int(raw, std::format(
+        "SELECT COUNT(*) FROM insight_evidence WHERE insight_id = {}", id)) == 2);
+    sqlite3_close(raw);
+
+    // Search finds it tagged as an insight.
+    auto resp = db.search("embed table lists sync by hand", 10, 0.0f);
+    bool found = false;
+    for (const auto& h : resp.results)
+        if (h.metadata.value("source", "") == "insight" && h.id == id) found = true;
+    CHECK(found);
+
+    // RESTRICT (same semantics as decision_evidence): evidence summaries
+    // can't vanish from under the insight.
+    raw = p1_open_raw();
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(raw, "DELETE FROM turn_summaries WHERE turn_summary_id = ?", -1, &st, nullptr);
+    sqlite3_bind_int(st, 1, ts1);
+    CHECK(sqlite3_step(st) == SQLITE_CONSTRAINT);
+    sqlite3_finalize(st);
+    sqlite3_close(raw);
+
+    db.close();
+    cleanup();
+}
+
+// Validation: evidence REQUIRED (empty or unknown ids throw), text required,
+// status allow-list, supersedes flips the old row and hides it from search.
+void test_p5_insight_validation(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    int ts = p1_make_turn_summary(db, "validation evidence");
+
+    ragger::DecisionInput ok;
+    ok.text = "Insights always cite their sources.";
+    ok.evidence = {ts};
+
+    auto bad = ok; bad.text = "   ";
+    CHECK(p5_throws_invalid_insight(db, bad));
+    bad = ok; bad.evidence = {};               // a note, not an insight
+    CHECK(p5_throws_invalid_insight(db, bad));
+    bad = ok; bad.evidence = {9999};
+    CHECK(p5_throws_invalid_insight(db, bad));
+    bad = ok; bad.status = "superseded";
+    CHECK(p5_throws_invalid_insight(db, bad));
+    bad = ok; bad.supersedes = 9999;
+    CHECK(p5_throws_invalid_insight(db, bad));
+
+    sqlite3* raw = p1_open_raw();
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM insights") == 0);   // nothing written
+    sqlite3_close(raw);
+
+    // supersedes: old row flips to 'superseded', keeps its text (honest
+    // history), and disappears from search.
+    int a_id = db.store_insight(ok).id;
+    ragger::DecisionInput b = ok;
+    b.text = "Insights cite turn summaries, never raw turns.";
+    b.supersedes = a_id;
+    auto rb = db.store_insight(b);
+    CHECK(rb.superseded.has_value() && *rb.superseded == a_id);
+
+    raw = p1_open_raw();
+    CHECK(p1_scalar_text(raw, std::format(
+        "SELECT status FROM insights WHERE insight_id = {}", a_id)) == "superseded");
+    CHECK(p1_scalar_int(raw, std::format(
+        "SELECT supersedes FROM insights WHERE insight_id = {}", rb.id)) == a_id);
+    sqlite3_close(raw);
+
+    auto resp = db.search("Insights always cite their sources", 10, 0.0f);
+    bool saw_old = false, saw_new = false;
+    for (const auto& h : resp.results) {
+        if (h.metadata.value("source", "") != "insight") continue;
+        if (h.id == a_id)  saw_old = true;
+        if (h.id == rb.id) saw_new = true;
+    }
+    CHECK(!saw_old);
+    CHECK(saw_new);
+
+    // A superseded insight can't be superseded again.
+    b.supersedes = a_id;
+    CHECK(p5_throws_invalid_insight(db, b));
+
+    db.close();
+    cleanup();
+}
+
+// Phase 5 Step 2: the C++ embed/index string for insights (trigger+"\\n"+text,
+// or bare text when trigger is NULL) MUST equal kDecisionEmbedTextSQL, or a
+// housekeeping rebuild silently changes vectors/counts. Mirrors
+// test_structured_decision_rebuild_is_stable; covers both trigger branches.
+void test_p5_insight_rebuild_is_stable(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    int ts = p1_make_turn_summary(db, "rebuild evidence");
+
+    ragger::DecisionInput a;
+    a.text = "Supersede rather than rewrite when the old wording mattered.";
+    a.trigger = "Use when retiring an insight";
+    a.evidence = {ts};
+    int a_id = db.store_insight(a).id;
+
+    ragger::DecisionInput b;
+    b.text = "Migration legs are defensive CREATEs; no rebuild needed.";
+    b.evidence = {ts};                       // no trigger
+    int b_id = db.store_insight(b).id;
+
+    sqlite3* raw = p1_open_raw();
+    const std::string wa = std::format(" FROM insights WHERE insight_id = {}", a_id);
+    const std::string wb = std::format(" FROM insights WHERE insight_id = {}", b_id);
+    const std::string blob_a = p1_scalar_text(raw, "SELECT hex(embedding)" + wa);
+    const std::string blob_b = p1_scalar_text(raw, "SELECT hex(embedding)" + wb);
+    const long long uni_a = p1_scalar_int(raw, "SELECT unigram_count" + wa);
+    const long long bi_a  = p1_scalar_int(raw, "SELECT bigram_count" + wa);
+    const long long uni_b = p1_scalar_int(raw, "SELECT unigram_count" + wb);
+    const long long bi_b  = p1_scalar_int(raw, "SELECT bigram_count" + wb);
+    sqlite3_close(raw);
+
+    db.rebuild_embeddings(emb, false, "insights");
+    db.reindex_table("insights", false);
+
+    raw = p1_open_raw();
+    CHECK(p1_scalar_text(raw, "SELECT hex(embedding)" + wa) == blob_a);
+    CHECK(p1_scalar_text(raw, "SELECT hex(embedding)" + wb) == blob_b);
+    CHECK(p1_scalar_int(raw, "SELECT unigram_count" + wa) == uni_a);
+    CHECK(p1_scalar_int(raw, "SELECT bigram_count" + wa) == bi_a);
+    CHECK(p1_scalar_int(raw, "SELECT unigram_count" + wb) == uni_b);
+    CHECK(p1_scalar_int(raw, "SELECT bigram_count" + wb) == bi_b);
+    sqlite3_close(raw);
+
+    db.close();
+    cleanup();
+}
+
+// Phase 5 Step 4: the insight layer in agent_search (handles, status,
+// trigger), agent_get expand=sources/chain, agent_update transition table,
+// agent_review queue, and project_briefing insights_current.
+void test_p5_insight_layer(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    int pid = db.create_project("P5gizmo", "~/p5gizmo", "insight layer target");
+    CHECK(pid > 0);
+    int ts = p1_make_turn_summary(db, "layer evidence");
+
+    ragger::DecisionInput a;
+    a.text     = "P5gizmo flange insight: casting follows machining.";
+    a.trigger  = "Use when inspecting gizmo flanges";
+    a.evidence = {ts};
+    a.project  = "P5gizmo";
+    int a_id = db.store_insight(a).id;
+
+    // ---- agent_search with layers=["insight"]
+    ragger::AgentSearchQuery q;
+    q.query = "gizmo flange casting";
+    q.layers = {"insight"};
+    bool found = false;
+    for (const auto& h : db.agent_search(q)) {
+        CHECK(h.layer == "insight");
+        if (h.id == "insight:" + std::to_string(a_id)) {
+            found = true;
+            CHECK(h.extra.value("status", "") == "current");
+            CHECK(h.extra.value("trigger", "") == a.trigger);
+        }
+    }
+    CHECK(found);
+
+    // ---- agent_get expand=sources -> the evidence turn_summary
+    ragger::AgentGetQuery g;
+    g.ids = {"insight:" + std::to_string(a_id)};
+    g.expand = "sources";
+    auto got = db.agent_get(g);
+    CHECK(!got["items"][0]["expanded"].empty());
+    CHECK(got["items"][0]["expanded"][0]["layer"] == "turn_summary");
+
+    // ---- agent_get expand=chain -> supersede lineage oldest -> newest
+    ragger::DecisionInput b = a;
+    b.text = "P5gizmo flange insight two: machining follows casting.";
+    b.supersedes = a_id;
+    int b_id = db.store_insight(b).id;
+    g.ids = {"insight:" + std::to_string(b_id)};
+    g.expand = "chain";
+    got = db.agent_get(g);
+    const auto& exp = got["items"][0]["expanded"];
+    CHECK(exp.size() == 2);
+    CHECK(exp[0]["id"] == "insight:" + std::to_string(a_id));
+    CHECK(exp[1]["id"] == "insight:" + std::to_string(b_id));
+
+    // ---- agent_update: tags free; illegal transition rejected
+    ragger::UpdateRequest u;
+    u.id = "insight:" + std::to_string(b_id);
+    u.tags = "flange";
+    auto row = db.agent_update(u);
+    CHECK(row["tags"] == "flange");
+    u.tags.reset();
+    u.status = "pending";   // current -> pending is not a listed transition
+    bool threw = false;
+    try { db.agent_update(u); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+
+    // ---- review: pending insights listed, approvable through the handle
+    ragger::DecisionInput p;
+    p.text = "P5 pending insight: torque to spec.";
+    p.evidence = {ts};
+    p.status = "pending";
+    int p_id = db.store_insight(p).id;
+    auto listed = db.agent_review("list", {});
+    bool saw_ins = false;
+    for (const auto& item : listed["pending"])
+        if (item["id"] == "insight:" + std::to_string(p_id)) saw_ins = true;
+    CHECK(saw_ins);
+    auto done = db.agent_review("approve", {"insight:" + std::to_string(p_id)});
+    CHECK(done["done"].size() == 1);
+    CHECK(done["failed"].empty());
+
+    // ---- project_briefing insights_current (superseded 'a' excluded)
+    auto brief = db.project_briefing("P5gizmo");
+    CHECK(brief.contains("insights_current"));
+    bool in_brief = false;
+    for (const auto& item : brief["insights_current"]) {
+        CHECK(item["id"] != "insight:" + std::to_string(a_id));
+        if (item["id"] == "insight:" + std::to_string(b_id)) in_brief = true;
+    }
+    CHECK(in_brief);
+
+    db.close();
     cleanup();
 }
 
@@ -2567,6 +2905,431 @@ void test_p2_possible_supersedes(ragger::Embedder& emb) {
     cleanup();
 }
 
+// =======================================================================
+// Agent API Phase 4: agent_timeline / agent_update / agent_review
+// =======================================================================
+
+// Set sessions.project_id directly (no API writes it yet; the summarizer
+// only reads it).
+static void p4_set_session_project(sqlite3* raw, const std::string& guid, int project_id) {
+    sqlite3_stmt* st = nullptr;
+    CHECK(sqlite3_prepare_v2(raw, "UPDATE sessions SET project_id = ? WHERE guid = ?",
+                             -1, &st, nullptr) == SQLITE_OK);
+    sqlite3_bind_int(st, 1, project_id);
+    sqlite3_bind_text(st, 2, guid.c_str(), -1, SQLITE_TRANSIENT);
+    CHECK(sqlite3_step(st) == SQLITE_DONE);
+    sqlite3_finalize(st);
+}
+
+// Step 1: three sessions with episodes at known created_at -> newest first;
+// paging limit 2 over 5 rows -> 2, 2, 1 with next_cursor null at the end.
+void test_p4_timeline_order_and_paging(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    // Five episodes, one per "session", spaced a day apart. store_summary's
+    // source_timestamp override sets created_at exactly.
+    const std::vector<std::string> days = {
+        "2026-04-01 10:00:00", "2026-04-02 10:00:00", "2026-04-03 10:00:00",
+        "2026-04-04 10:00:00", "2026-04-05 10:00:00"};
+    std::vector<int> ids;
+    for (size_t i = 0; i < days.size(); ++i) {
+        const std::string guid = "p4tl-" + std::to_string(i);
+        ids.push_back(db.store_summary("Timeline episode " + std::to_string(i),
+                                       "episode", "summarizer-model", guid, days[i]));
+    }
+
+    ragger::TimelineQuery q;
+    q.granularity = "episode";
+    q.limit = 100;
+    auto page = db.agent_timeline(q);
+    CHECK(page["items"].size() == 5);
+    // Newest first: created strings strictly descending.
+    for (size_t i = 1; i < page["items"].size(); ++i)
+        CHECK(page["items"][i - 1]["created"].get<std::string>() >
+              page["items"][i]["created"].get<std::string>());
+    CHECK(page["items"][0]["text"].get<std::string>() == "Timeline episode 4");
+    CHECK(page["next_cursor"].is_null());
+
+    // Paging: 2, 2, 1; cursor null only on the last page.
+    ragger::TimelineQuery p;
+    p.granularity = "episode";
+    p.limit = 2;
+    int seen = 0;
+    for (int guard = 0; guard < 5; ++guard) {
+        auto pg = db.agent_timeline(p);
+        const size_t want = (guard == 0 || guard == 1) ? 2 : 1;
+        CHECK(pg["items"].size() == want);
+        seen += static_cast<int>(pg["items"].size());
+        if (pg["next_cursor"].is_null()) break;
+        p.cursor = pg["next_cursor"].get<std::string>();
+        if (guard == 0) CHECK(!pg["next_cursor"].is_null());
+    }
+    CHECK(seen == 5);
+
+    // since/until window: only the middle three days.
+    ragger::TimelineQuery w;
+    w.granularity = "episode";
+    w.since = "2026-04-02";
+    w.until = "2026-04-04";
+    auto win = db.agent_timeline(w);
+    CHECK(win["items"].size() == 3);
+
+    // Bad granularity / bad cursor -> invalid_argument.
+    bool threw = false;
+    try {
+        ragger::TimelineQuery bad; bad.granularity = "week"; db.agent_timeline(bad);
+    } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+    threw = false;
+    try {
+        ragger::TimelineQuery bad; bad.cursor = "not-a-cursor"; db.agent_timeline(bad);
+    } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+
+    db.close();
+    cleanup();
+}
+
+// Step 1: granularity=session returns the session summary when present, and
+// the newest episode when not (never requires session summaries).
+void test_p4_timeline_session_fallback(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    // Session A: two episodes + a session summary.
+    const std::string ga = "p4sf-a";
+    db.store_summary("A episode one", "episode", "summarizer-model", ga, "2026-04-01 08:00:00");
+    db.store_summary("A episode two", "episode", "summarizer-model", ga, "2026-04-02 08:00:00");
+    db.store_summary("A session wrap", "session", "summarizer-model", ga, "2026-04-02 12:00:00");
+    // Session B: episodes only.
+    const std::string gb = "p4sf-b";
+    db.store_summary("B episode one", "episode", "summarizer-model", gb, "2026-04-03 08:00:00");
+    db.store_summary("B episode two", "episode", "summarizer-model", gb, "2026-04-04 08:00:00");
+    // Session C: nothing at all -> contributes no entry.
+    {
+        sqlite3* raw = p1_open_raw();
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(raw, "INSERT INTO sessions (guid) VALUES ('p4sf-c')",
+                                 -1, &st, nullptr) == SQLITE_OK);
+        CHECK(sqlite3_step(st) == SQLITE_DONE);
+        sqlite3_finalize(st);
+        sqlite3_close(raw);
+    }
+
+    ragger::TimelineQuery q;
+    q.granularity = "session";
+    auto page = db.agent_timeline(q);
+    CHECK(page["items"].size() == 2);   // A and B only
+    // Newest first: B (its newest episode, 04-04) then A (session summary 04-02).
+    CHECK(page["items"][0]["text"].get<std::string>() == "B episode two");
+    CHECK(page["items"][0]["session"].get<std::string>() == gb);
+    CHECK(page["items"][1]["text"].get<std::string>() == "A session wrap");
+    CHECK(page["items"][1]["session"].get<std::string>() == ga);
+
+    db.close();
+    cleanup();
+}
+
+// Step 1: turn granularity — summarized turns show the summary, an
+// unsummarized turn falls back to raw user text.
+void test_p4_timeline_turn_fallback(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    const std::string guid = "p4tf-1";
+    int t1 = db.store_turn("Raw question one", "Answer one", "test-model", false, guid);
+    int t2 = db.store_turn("Raw question two", "Answer two", "test-model", false, guid);
+    CHECK(db.finalize_turn_summary(t1, "Summarized turn one", "summarizer-model"));
+
+    ragger::TimelineQuery q;
+    q.granularity = "turn";
+    auto page = db.agent_timeline(q);
+    CHECK(page["items"].size() == 2);
+    // Handles are turn:<id> (resolvable by agent_get either way).
+    bool saw_summarized = false, saw_raw = false;
+    for (const auto& item : page["items"]) {
+        if (item["id"].get<std::string>() == "turn:" + std::to_string(t1)) {
+            CHECK(item["text"].get<std::string>() == "Summarized turn one");
+            saw_summarized = true;
+        }
+        if (item["id"].get<std::string>() == "turn:" + std::to_string(t2)) {
+            CHECK(item["text"].get<std::string>() == "Raw question two");
+            saw_raw = true;
+        }
+    }
+    CHECK(saw_summarized);
+    CHECK(saw_raw);
+
+    db.close();
+    cleanup();
+}
+
+// Step 1: the project filter works through sessions.project_id.
+void test_p4_timeline_project(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    db.create_project("P4Scope", "~/p4scope", "");
+    const int pid = *db.resolve_project("P4Scope");
+    const std::string ga = "p4tp-a", gb = "p4tp-b";
+    db.store_summary("Scoped episode", "episode", "summarizer-model", ga, "2026-04-01 08:00:00");
+    db.store_summary("Unscoped episode", "episode", "summarizer-model", gb, "2026-04-02 08:00:00");
+    {
+        sqlite3* raw = p1_open_raw();
+        p4_set_session_project(raw, ga, pid);
+        sqlite3_close(raw);
+    }
+
+    ragger::TimelineQuery q;
+    q.granularity = "episode";
+    q.project = "P4Scope";
+    auto page = db.agent_timeline(q);
+    CHECK(page["items"].size() == 1);
+    CHECK(page["items"][0]["text"].get<std::string>() == "Scoped episode");
+
+    // Unknown project -> invalid_argument.
+    bool threw = false;
+    try {
+        ragger::TimelineQuery bad; bad.project = "NoSuch"; db.agent_timeline(bad);
+    } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+
+    db.close();
+    cleanup();
+}
+
+// Step 2: update rules — text rejected, non-editable layers rejected,
+// notes editable (tags/project), rollups rejected, transitions enforced.
+void test_p4_update_rules(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    auto throws_invalid = [&db](const ragger::UpdateRequest& req) {
+        try { db.agent_update(req); }
+        catch (const std::invalid_argument&) { return true; }
+        return false;
+    };
+
+    // Rule 1: text present -> rejected with the exact message.
+    {
+        ragger::UpdateRequest r;
+        r.id = "decision:1";
+        r.text = "anything";
+        bool threw = false;
+        try { db.agent_update(r); }
+        catch (const std::invalid_argument& e) {
+            threw = true;
+            CHECK(std::string(e.what()) ==
+                  "text cannot be edited in place; store a new decision/note with supersedes");
+        }
+        CHECK(threw);
+    }
+
+    // Rule 2: turn / turn_summary handles rejected.
+    int ts_id = p1_make_turn_summary(db, "p4u");   // returns the turn_summary_id
+    {
+        ragger::UpdateRequest r; r.id = "turn_summary:" + std::to_string(ts_id); r.tags = "x";
+        CHECK(throws_invalid(r));
+    }
+
+    // Rule 3: agent note (model_id NULL) editable; rollup rejected.
+    db.create_project("P4Note", "~/p4note", "");
+    const std::string note_id = db.store("A note to curate.", {{"level", "session"}});
+    {
+        ragger::UpdateRequest r;
+        r.id = "summary:" + note_id;
+        r.tags = "curated,keep2";
+        r.project = "P4Note";
+        auto row = db.agent_update(r);
+        CHECK(row["tags"].get<std::string>() == "curated,keep2");
+    }
+    {
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_text(raw, "SELECT tags FROM summaries WHERE summary_id = " + note_id)
+              == "curated,keep2");
+        CHECK(p1_scalar_int(raw, "SELECT project_id FROM summaries WHERE summary_id = " + note_id)
+              == *db.resolve_project("P4Note"));
+        sqlite3_close(raw);
+    }
+    {   // clear project
+        ragger::UpdateRequest r; r.id = "summary:" + note_id; r.project = "";
+        db.agent_update(r);
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_text(raw, "SELECT ifnull(project_id,'NULL') FROM summaries WHERE summary_id = "
+                                  + note_id) == "NULL");
+        sqlite3_close(raw);
+    }
+    {   // rollup (model_id set) rejected
+        int rollup = db.store_summary("Rollup text", "episode", "summarizer-model",
+                                      "p4u-roll", "2026-04-01 08:00:00");
+        ragger::UpdateRequest r; r.id = "summary:" + std::to_string(rollup); r.tags = "nope";
+        CHECK(throws_invalid(r));
+    }
+    {   // summaries have no status
+        ragger::UpdateRequest r; r.id = "summary:" + note_id; r.status = "current";
+        CHECK(throws_invalid(r));
+    }
+
+    // Rule 4: transition table.
+    ragger::DecisionInput in;
+    in.text = "P4 transition target ruling.";
+    in.trigger = "Use when testing transitions";
+    in.status = "pending";
+    int pending_id = db.store_structured_decision(in).id;
+    auto dec_status = [&db](int id) {
+        sqlite3* raw = p1_open_raw();
+        std::string s = p1_scalar_text(raw, "SELECT status FROM decisions WHERE decision_id = "
+                                  + std::to_string(id));
+        sqlite3_close(raw);
+        return s;
+    };
+    {   // pending -> superseded rejected
+        ragger::UpdateRequest r; r.id = "decision:" + std::to_string(pending_id);
+        r.status = "superseded";
+        CHECK(throws_invalid(r));
+    }
+    {   // pending -> current allowed
+        ragger::UpdateRequest r; r.id = "decision:" + std::to_string(pending_id);
+        r.status = "current";
+        auto row = db.agent_update(r);
+        CHECK(row["status"].get<std::string>() == "current");
+        CHECK(dec_status(pending_id) == "current");
+    }
+    {   // current -> pending NOT allowed (table says no)
+        ragger::UpdateRequest r; r.id = "decision:" + std::to_string(pending_id);
+        r.status = "pending";
+        CHECK(throws_invalid(r));
+    }
+    {   // current -> current not a listed transition either
+        ragger::UpdateRequest r; r.id = "decision:" + std::to_string(pending_id);
+        r.status = "current";
+        CHECK(throws_invalid(r));
+    }
+    {   // current -> provisional -> retired allowed; retired -> anything rejected
+        ragger::UpdateRequest r; r.id = "decision:" + std::to_string(pending_id);
+        r.status = "provisional";
+        db.agent_update(r);
+        r.status = "retired";
+        db.agent_update(r);
+        CHECK(dec_status(pending_id) == "retired");
+        r.status = "current";
+        CHECK(throws_invalid(r));
+    }
+
+    db.close();
+    cleanup();
+}
+
+// Step 2/5: a decision change is visible to normal search immediately
+// (decision cache invalidated).
+void test_p4_update_cache_invalidation(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    ragger::DecisionInput in;
+    in.text = "Kestrel migrations run only on Wednesdays.";
+    in.trigger = "Use when scheduling kestrel migrations";
+    in.status = "pending";
+    int id = db.store_structured_decision(in).id;
+
+    // Pending is hidden from active search.
+    ragger::AgentSearchQuery q;
+    q.query = "kestrel migrations Wednesdays";
+    q.layers = {"decision"};
+    auto hits = db.agent_search(q);
+    for (const auto& h : hits) CHECK(h.id != "decision:" + std::to_string(id));
+
+    ragger::UpdateRequest r; r.id = "decision:" + std::to_string(id); r.status = "current";
+    db.agent_update(r);
+
+    hits = db.agent_search(q);
+    bool found = false;
+    for (const auto& h : hits)
+        if (h.id == "decision:" + std::to_string(id)) found = true;
+    CHECK(found);
+
+    db.close();
+    cleanup();
+}
+
+// Step 3: review queue — list, approve, reject, per-id failure.
+void test_p4_review(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    ragger::DecisionInput a;
+    a.text = "Review candidate alpha: wagons ship at dawn.";
+    a.trigger = "Use when shipping wagons";
+    a.status = "pending";
+    int a_id = db.store_structured_decision(a).id;
+
+    ragger::DecisionInput b;
+    b.text = "Review candidate beta: kayaks ship at dusk.";
+    b.trigger = "Use when shipping kayaks";
+    b.status = "pending";
+    int b_id = db.store_structured_decision(b).id;
+
+    auto listed = db.agent_review("list", {});
+    CHECK(listed["pending"].size() == 2);
+    CHECK(listed["pending"][0]["id"].get<std::string>() == "decision:" + std::to_string(a_id));
+    CHECK(!listed["pending"][0]["trigger"].get<std::string>().empty());
+
+    // Approve alpha (bare integer accepted too).
+    auto done = db.agent_review("approve", {std::to_string(a_id)});
+    CHECK(done["done"].size() == 1);
+    CHECK(done["failed"].empty());
+    {
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_text(raw, "SELECT status FROM decisions WHERE decision_id = "
+                                  + std::to_string(a_id)) == "current");
+        sqlite3_close(raw);
+    }
+    // Approved decision is now visible in normal search.
+    ragger::AgentSearchQuery q;
+    q.query = "wagons ship dawn";
+    q.layers = {"decision"};
+    bool found = false;
+    for (const auto& h : db.agent_search(q))
+        if (h.id == "decision:" + std::to_string(a_id)) found = true;
+    CHECK(found);
+
+    // Approving an already-current decision fails THAT id only.
+    auto again = db.agent_review("approve", {
+        "decision:" + std::to_string(a_id),
+        "decision:" + std::to_string(b_id)});
+    CHECK(again["done"].size() == 1);
+    CHECK(again["failed"].size() == 1);
+    CHECK(again["failed"][0]["id"].get<std::string>() == "decision:" + std::to_string(a_id));
+
+    // Reject beta -> retired, invisible in search, row still present.
+    auto rej = db.agent_review("reject", {"decision:" + std::to_string(b_id)});
+    CHECK(rej["done"].size() == 1);
+    {
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_text(raw, "SELECT status FROM decisions WHERE decision_id = "
+                                  + std::to_string(b_id)) == "retired");
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM decisions WHERE decision_id = "
+                                  + std::to_string(b_id)) == 1);
+        sqlite3_close(raw);
+    }
+    q.query = "kayaks ship dusk";
+    for (const auto& h : db.agent_search(q))
+        CHECK(h.id != "decision:" + std::to_string(b_id));
+
+    // Queue is empty now.
+    CHECK(db.agent_review("list", {})["pending"].empty());
+
+    // Bad action -> invalid_argument.
+    bool threw = false;
+    try { db.agent_review("zap", {}); }
+    catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+
+    db.close();
+    cleanup();
+}
+
 int main() {
     // Need config for model dir
     ragger::init_config();
@@ -2624,7 +3387,13 @@ int main() {
     test_structured_decision_evidence(emb);
     test_orphan_turn_summary_protected(emb);
     test_migrate_0_16_to_0_17(emb);
-    test_migrate_0_17_to_0_18(emb);
+    test_document_path_unique(emb);
+    test_document_list_and_delete(emb);
+    test_invalidate_all_caches(emb);
+    test_p5_insight_basic(emb);
+    test_p5_insight_validation(emb);
+    test_p5_insight_rebuild_is_stable(emb);
+    test_p5_insight_layer(emb);
     test_p3_project_create_unique(emb);
     test_p3_project_resolve(emb);
     test_p3_project_update(emb);
@@ -2632,6 +3401,13 @@ int main() {
     test_p3_decision_project(emb);
     test_p3_note_project(emb);
     test_p3_search_project(emb);
+    test_p4_timeline_order_and_paging(emb);
+    test_p4_timeline_session_fallback(emb);
+    test_p4_timeline_turn_fallback(emb);
+    test_p4_timeline_project(emb);
+    test_p4_update_rules(emb);
+    test_p4_update_cache_invalidation(emb);
+    test_p4_review(emb);
     test_p2_text_only_hides_superseded(emb);
     test_p2_search_layers(emb);
     test_p2_search_status(emb);

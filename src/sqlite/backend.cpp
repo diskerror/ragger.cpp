@@ -358,6 +358,35 @@ StructuredDecisionResult Backend::store_structured_decision(const DecisionInput&
     return pImpl->store_structured_decision(in);
 }
 
+void Backend::invalidate_all_caches() {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    pImpl->invalidate_cache();
+    pImpl->invalidate_doc_cache();
+    pImpl->invalidate_dec_cache();
+    pImpl->invalidate_ins_cache();
+    pImpl->invalidate_turn_cache();
+}
+
+json Backend::list_document_sources() {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->list_document_sources();
+}
+
+json Backend::delete_document_source(int document_source_id) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->delete_document_source(document_source_id);
+}
+
+json Backend::find_document_source(const std::string& path) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->find_document_source(path);
+}
+
+StructuredDecisionResult Backend::store_insight(const DecisionInput& in) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->store_insight(in);
+}
+
 std::vector<AgentHit> Backend::agent_search(const AgentSearchQuery& q) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->agent_search(q);
@@ -366,6 +395,22 @@ std::vector<AgentHit> Backend::agent_search(const AgentSearchQuery& q) {
 json Backend::agent_get(const AgentGetQuery& q) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->agent_get(q);
+}
+
+json Backend::agent_timeline(const TimelineQuery& q) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->agent_timeline(q);
+}
+
+json Backend::agent_update(const UpdateRequest& req) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->agent_update(req);
+}
+
+json Backend::agent_review(const std::string& action,
+                           const std::vector<std::string>& ids) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->agent_review(action, ids);
 }
 
 int Backend::create_project(const std::string& name, const std::string& path,

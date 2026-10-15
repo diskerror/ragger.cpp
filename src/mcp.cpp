@@ -158,7 +158,7 @@ static nlohmann::json tools_list() {
             {"description",
              "Layered search across all memory corpora. Returns handles + snippets only — "
              "call memory_get with chosen handles for full text. `layers` narrows by kind "
-             "(turn, turn_summary, summary, document, decision); empty = all. "
+             "(turn, turn_summary, summary, document, decision, insight); empty = all. "
              "status: 'active' (default) hides superseded/retired decisions, 'any' includes them. "
              "since/until: 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or relative ('30d', '12h'). "
              "For conversation history use memory_get(session=..., after_turn=...)."},
@@ -198,7 +198,7 @@ static nlohmann::json tools_list() {
              "through one session's conversation history. Exactly one mode per call: ids, or "
              "session (+optional after_turn/before_turn/limit). expand: none | context "
              "(neighbouring turns/chunks) | sources (evidence / constituent summaries) | chain "
-             "(decision supersede lineage, oldest to newest)."},
+             "(decision/insight supersede lineage, oldest to newest)."},
             {"inputSchema", {
                 {"type", "object"},
                 {"properties", {
@@ -225,7 +225,9 @@ static nlohmann::json tools_list() {
              "the working directory when `cwd` is given. The result may carry "
              "`possible_supersedes`: current decisions this note may contradict "
              "(hint only — nothing was changed; review them, and record a real "
-             "ruling with memory_decision instead)."},
+             "ruling with memory_decision instead). Pass evidence (turn_summary "
+             "ids from search) when you are recording a synthesized insight; it "
+             "is stored as an insight linked to those sources."},
             {"inputSchema", {
                 {"type", "object"},
                 {"properties", {
@@ -236,7 +238,9 @@ static nlohmann::json tools_list() {
                     {"tags",    {{"type", "array"}, {"items", {{"type", "string"}}},
                                  {"description", "Optional tags."}}},
                     {"cwd",     {{"type", "string"},
-                                 {"description", "Working directory, for project inference when project is omitted."}}}
+                                 {"description", "Working directory, for project inference when project is omitted."}}},
+                    {"evidence",{{"type", "array"}, {"items", {{"type", "integer"}}},
+                                 {"description", "turn_summary ids this note synthesizes. When present the note is stored as an insight (response carries \"table\":\"insights\") instead of a plain note."}}}
                 }},
                 {"required", nlohmann::json::array({"text"})}
             }}
@@ -264,6 +268,88 @@ static nlohmann::json tools_list() {
                                      {"description", "What this project is."}}},
                     {"path",        {{"type", "string"},
                                      {"description", "Project root path (absolute or ~/...), used for cwd inference."}}}
+                }},
+                {"required", nlohmann::json::array({"action"})}
+            }}
+        },
+        {
+            {"name", "memory_timeline"},
+            {"description",
+             "What happened recently, as a deterministic newest-first list (no "
+             "search ranking). granularity 'turn' = per-exchange summaries "
+             "(falling back to raw user text), 'episode' = episode summaries "
+             "(default), 'session' = per session its session summary or newest "
+             "episode. Filters: project (name/path; cwd inference applies), "
+             "session GUID, since/until ('YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', "
+             "or relative '30d'/'12h'). Page through with the returned "
+             "next_cursor; null means the end."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"project",     {{"type", "string"},
+                                     {"description", "Project name or path (optional)."}}},
+                    {"cwd",         {{"type", "string"},
+                                     {"description", "Working directory, for project inference when project is omitted."}}},
+                    {"session",     {{"type", "string"},
+                                     {"description", "Only this session GUID."}}},
+                    {"since",       {{"type", "string"},
+                                     {"description", "Lower time bound."}}},
+                    {"until",       {{"type", "string"},
+                                     {"description", "Upper time bound (bare date = end of day)."}}},
+                    {"granularity", {{"type", "string"},
+                                     {"enum", nlohmann::json::array({"turn", "episode", "session"})},
+                                     {"description", "turn | episode | session (default episode)."}}},
+                    {"limit",       {{"type", "integer"},
+                                     {"description", "Page size (default 20, max 100)."}}},
+                    {"cursor",      {{"type", "string"},
+                                     {"description", "Opaque next_cursor from the previous page."}}}
+                }}
+            }}
+        },
+        {
+            {"name", "memory_update"},
+            {"description",
+             "Curate one row's METADATA by typed handle: decision status "
+             "(legal transitions only; 'superseded' is set only by storing a "
+             "superseding decision), tags (replaces the whole set), project "
+             "(name/path; empty string clears). Agent notes (summaries without "
+             "a model) accept tags/project; summarizer rollups and turn / "
+             "turn_summary / document rows are not editable. Text is NEVER "
+             "edited in place — to change what something says, store a new "
+             "decision (memory_decision with supersedes) or note; passing "
+             "`text` here is always rejected. Returns the updated row."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"id",     {{"type", "string"},
+                                {"description", "Typed handle '<layer>:<rowid>'."}}},
+                    {"status", {{"type", "string"},
+                                {"description", "Decision status: current | provisional | pending | roadmap | retired."}}},
+                    {"tags",   {{"type", "string"},
+                                {"description", "Replacement tag string (comma-separated)."}}},
+                    {"project",{{"type", "string"},
+                                {"description", "Project name/path; empty string clears it."}}}
+                }},
+                {"required", nlohmann::json::array({"id"})}
+            }}
+        },
+        {
+            {"name", "memory_review"},
+            {"description",
+             "The pending queue. action 'list' returns pending decisions and "
+             "insights oldest first (handle + trigger + snippet); 'approve' "
+             "moves each id pending→current; 'reject' moves each id "
+             "pending→retired. ids accept 'decision:<id>' / 'insight:<id>' "
+             "handles or bare integers (decision); a non-pending id fails only "
+             "that entry."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"action", {{"type", "string"},
+                                {"enum", nlohmann::json::array({"list", "approve", "reject"})},
+                                {"description", "list | approve | reject."}}},
+                    {"ids",    {{"type", "array"}, {"items", {{"type", "string"}}},
+                                {"description", "Decision handles for approve/reject."}}}
                 }},
                 {"required", nlohmann::json::array({"action"})}
             }}
@@ -470,7 +556,9 @@ static nlohmann::json tool_call(RaggerMemory& memory,
 
     } else if (tool_name == "memory_note") {
         // Phase 3: today's ragger_store plus project/tags. Lands where notes
-        // land today (summaries via store()), plus project_id.
+        // land today (summaries via store()), plus project_id. Phase 5:
+        // evidence present => stored as an insight instead (see HTTP
+        // /memory/note for the shared contract).
         const auto text = arguments.value("text", "");
         if (text.empty())
             return error_result(ragger::lang::ERR_MCP_TEXT_REQUIRED);
@@ -485,6 +573,31 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         if (!project.empty())
             metadata["project"] = project;
         try {
+            if (arguments.contains("evidence") && arguments["evidence"].is_array()) {
+                DecisionInput in;
+                in.text     = text;
+                in.project  = project;
+                in.evidence = arguments["evidence"].get<std::vector<int>>();
+                if (arguments.contains("tags")) {
+                    const auto& t = arguments["tags"];
+                    if (t.is_array()) {
+                        for (const auto& x : t) {
+                            if (!in.tags.empty()) in.tags += ',';
+                            in.tags += x.get<std::string>();
+                        }
+                    } else if (t.is_string()) {
+                        in.tags = t.get<std::string>();
+                    }
+                }
+                const auto r = memory.store_insight(in);
+                json ps = json::array();
+                for (const auto& [iid, score] : r.possible_supersedes)
+                    ps.push_back({{"id", iid}, {"score", score}});
+                return text_result(json({{"id", r.id}, {"table", "insights"},
+                                         {"status", "stored"},
+                                         {"superseded", r.superseded ? json(*r.superseded) : json(nullptr)},
+                                         {"possible_supersedes", std::move(ps)}}).dump());
+            }
             const auto id = memory.store(text, metadata);
             json ps = json::array();
             for (const auto& [did, score] : memory.possible_supersedes_for_text(text))
@@ -520,6 +633,52 @@ static nlohmann::json tool_call(RaggerMemory& memory,
                 return text_result(json({{"status", "ok"}}).dump());
             }
             return error_result("action must be one of: list, create, get, update");
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
+
+    } else if (tool_name == "memory_timeline") {
+        TimelineQuery q;
+        q.session     = arguments.value("session", "");
+        q.since       = arguments.value("since", "");
+        q.until       = arguments.value("until", "");
+        q.granularity = arguments.value("granularity", "episode");
+        q.limit       = arguments.value("limit", 20);
+        q.cursor      = arguments.value("cursor", "");
+        q.project     = arguments.value("project", "");
+        if (q.project.empty() && arguments.contains("cwd") && arguments["cwd"].is_string())
+            if (auto pid = memory.resolve_project(arguments["cwd"].get<std::string>()); pid)
+                q.project = arguments["cwd"].get<std::string>();
+        try {
+            return text_result(memory.agent_timeline(q).dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
+
+    } else if (tool_name == "memory_update") {
+        UpdateRequest req;
+        req.id = arguments.value("id", "");
+        if (arguments.contains("status") && !arguments["status"].is_null())
+            req.status = arguments["status"].get<std::string>();
+        if (arguments.contains("tags") && !arguments["tags"].is_null())
+            req.tags = arguments["tags"].get<std::string>();
+        if (arguments.contains("project") && !arguments["project"].is_null())
+            req.project = arguments["project"].get<std::string>();
+        // text intentionally not forwarded: agent_update rejects it with the
+        // canonical message; the schema doesn't even offer it.
+        try {
+            return text_result(memory.agent_update(req).dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
+
+    } else if (tool_name == "memory_review") {
+        const auto action = arguments.value("action", "");
+        std::vector<std::string> ids;
+        if (arguments.contains("ids"))
+            ids = arguments["ids"].get<std::vector<std::string>>();
+        try {
+            return text_result(memory.agent_review(action, ids).dump());
         } catch (const std::invalid_argument& e) {
             return error_result(e.what());
         }

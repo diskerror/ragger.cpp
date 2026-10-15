@@ -69,10 +69,21 @@ public:
                        bool defer_embedding = false) override;
 
     StructuredDecisionResult store_structured_decision(const DecisionInput& in) override;
+    StructuredDecisionResult store_insight(const DecisionInput& in) override;
+    json find_document_source(const std::string& path) override;
+    json list_document_sources() override;
+    void invalidate_all_caches() override;
+    json delete_document_source(int document_source_id) override;
 
     /// Agent API Phase 2 reads (see StorageBackend docs).
     std::vector<AgentHit> agent_search(const AgentSearchQuery& q) override;
     json agent_get(const AgentGetQuery& q) override;
+
+    /// Agent API Phase 4: timeline / curation / review (see StorageBackend docs).
+    json agent_timeline(const TimelineQuery& q) override;
+    json agent_update(const UpdateRequest& req) override;
+    json agent_review(const std::string& action,
+                      const std::vector<std::string>& ids) override;
 
     /// Agent API Phase 3: projects (see StorageBackend docs).
     int create_project(const std::string& name, const std::string& path,

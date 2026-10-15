@@ -77,11 +77,30 @@ public:
     /// std::invalid_argument on validation failure.
     StructuredDecisionResult store_structured_decision(const DecisionInput& in);
 
+    /// Store an insight (agent API Phase 5). Trigger optional, evidence
+    /// required. Throws std::invalid_argument on validation failure.
+    StructuredDecisionResult store_insight(const DecisionInput& in);
+
+    /// Document source for `path`, or null json if that path was never imported.
+    json find_document_source(const std::string& path);
+
+    /// Imported documents ({id,title,path,year,tags,imported_at,chunks}), by id.
+    json list_document_sources();
+
+    /// Delete a document (chunks + source row). Throws invalid_argument if absent.
+    json delete_document_source(int document_source_id);
+
     /// Layered agent search (agent API Phase 2) — handles + snippets only.
     std::vector<AgentHit> agent_search(const AgentSearchQuery& q);
 
     /// Agent row reads (agent API Phase 2) — full rows / expansion / history.
     json agent_get(const AgentGetQuery& q);
+
+    /// Timeline / curation / review (agent API Phase 4) — see StorageBackend docs.
+    json agent_timeline(const TimelineQuery& q);
+    json agent_update(const UpdateRequest& req);
+    json agent_review(const std::string& action,
+                      const std::vector<std::string>& ids);
 
     /// Projects (agent API Phase 3) — see StorageBackend docs.
     int create_project(const std::string& name, const std::string& path,

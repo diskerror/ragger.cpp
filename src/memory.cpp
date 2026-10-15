@@ -215,12 +215,41 @@ StructuredDecisionResult RaggerMemory::store_structured_decision(const DecisionI
     return backend_->store_structured_decision(in);
 }
 
+json RaggerMemory::list_document_sources() {
+    return backend_->list_document_sources();
+}
+
+json RaggerMemory::delete_document_source(int document_source_id) {
+    return backend_->delete_document_source(document_source_id);
+}
+
+json RaggerMemory::find_document_source(const std::string& path) {
+    return backend_->find_document_source(path);
+}
+
+StructuredDecisionResult RaggerMemory::store_insight(const DecisionInput& in) {
+    return backend_->store_insight(in);
+}
+
 std::vector<AgentHit> RaggerMemory::agent_search(const AgentSearchQuery& q) {
     return backend_->agent_search(q);
 }
 
 json RaggerMemory::agent_get(const AgentGetQuery& q) {
     return backend_->agent_get(q);
+}
+
+json RaggerMemory::agent_timeline(const TimelineQuery& q) {
+    return backend_->agent_timeline(q);
+}
+
+json RaggerMemory::agent_update(const UpdateRequest& req) {
+    return backend_->agent_update(req);
+}
+
+json RaggerMemory::agent_review(const std::string& action,
+                                const std::vector<std::string>& ids) {
+    return backend_->agent_review(action, ids);
 }
 
 int RaggerMemory::create_project(const std::string& name, const std::string& path,

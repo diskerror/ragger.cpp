@@ -123,6 +123,9 @@ constexpr const char* CLI_USAGE_DECISION      =
     "  ragger decision set-status <decision_id> <status>\n"
     "      Change a decision's status (e.g. promote a roadmap item to\n"
     "      \"current\" once it's done, or mark one \"superseded\"/\"deprecated\").";
+constexpr const char* CLI_USAGE_DELETE_DOC    =
+    "Usage: ragger delete-doc <id>\n"
+    "  <id> is the document's index (primary key) number; find it with `ragger list-docs`.";
 constexpr const char* CLI_USAGE_USERADD       = "Usage: ragger useradd <username>";
 constexpr const char* CLI_USAGE_USERMOD       = "Usage: ragger usermod <username>";
 constexpr const char* CLI_USAGE_USERDEL       = "Usage: ragger userdel <username>";
@@ -212,6 +215,7 @@ constexpr const char* ERR_PORT_IN_USE         = "Error: port {} is already in us
 
 // --- Import ---
 constexpr const char* MSG_IMPORTING_CHUNKS    = "Importing {} chunks from {}...";
+constexpr const char* MSG_DOC_ALREADY_IMPORTED = "{} was already imported as document {} (\"{}\", {}) — skipped. To re-import it, delete the old document first.";
 constexpr const char* MSG_IMPORT_CHUNK        = "  Chunk {}/{}: {}";
 constexpr const char* MSG_IMPORT_DONE         = "✓ Imported {} chunks";
 
@@ -387,6 +391,9 @@ Commands:
   import-docs <file...>
                      Import markdown/text files (paragraph-aware chunking) → L5 documents
                        --title <T>  --year <YYYY>  --tags a,b,c
+  list-docs          List imported documents (id, chunks, year, title, path)
+  delete-doc <id>    Delete an imported document and all its chunks. <id> is the
+                     document index number, discoverable with `ragger list-docs`
   import-conversations <PATH> [--all]
                      Import Claude web/Claude Code/Telegram conversation history
                      (format auto-detected) into turns, session summaries, and
@@ -405,7 +412,9 @@ Commands:
   passwd <name>      Set (or clear) a user's web-UI login password
   add-self           Bootstrap ~/.ragger/token for the current user
   housekeeping       Trigger housekeeping on running daemon
-  reload             Reload config on running daemon (SIGHUP)
+  reload-cache       Make the running daemon re-read its search caches from the DB
+                     (done automatically after commands that may change the DB)
+  reload             Reload config and search caches on running daemon (SIGHUP)
                      options: --user <name>, --dry-run
   re-embed <table|all> Re-encode embeddings for one table or all memories
                      (progress per table; tables: turns, turn_summaries,
@@ -427,6 +436,8 @@ constexpr const char* VERSION_FORMAT          = "ragger {}\ncommit {}\nbuilt  {}
 constexpr const char* ERR_DAEMON_NOT_FOUND    = "Error: no running ragger daemon found";
 constexpr const char* ERR_SIGNAL_FAILED       = "Error: failed to signal process: {}";
 constexpr const char* MSG_CONFIG_RELOAD_OK    = "✓ Config reload triggered (pid {})";
+constexpr const char* MSG_CACHE_RELOAD_OK     = "✓ Cache reload triggered (pid {})";
+constexpr const char* MSG_CACHE_RELOADED      = "Reload: search caches dropped; they reload from the DB on next use";
 
 // --- Config reload warnings ---
 constexpr const char* WARN_CONFIG_RESTART     = " [WARN] Config reload: '{}' changed but requires restart";

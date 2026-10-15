@@ -124,6 +124,27 @@ struct AgentGetQuery {
     int limit = 20;                 ///< mode 2 page size, clamped [1,100]
 };
 
+/// memory_timeline request (agent API Phase 4): deterministic range scan,
+/// newest first, key-paginated. No embeddings involved.
+struct TimelineQuery {
+    std::string project;           ///< name or path; "" = all
+    std::string session;           ///< GUID; "" = all
+    std::string since, until;      ///< same formats as AgentSearchQuery
+    std::string granularity = "episode";   ///< turn | episode | session
+    int limit = 20;                ///< clamp [1,100]
+    std::string cursor;            ///< opaque "<created_epoch>:<rowid>"; "" = newest first page
+};
+
+/// memory_update request (agent API Phase 4): metadata-only curation.
+/// Text never changes in place — a text change is a new row with supersedes.
+struct UpdateRequest {
+    std::string id;                          ///< typed handle
+    std::optional<std::string> status;
+    std::optional<std::string> tags;         ///< replaces the whole tag string
+    std::optional<std::string> project;      ///< name/path; "" = clear
+    std::optional<std::string> text;         ///< present => always rejected
+};
+
 /// User information (extracted from sqlite::Backend for modularity)
 struct UserInfo {
     int         id;

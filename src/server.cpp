@@ -344,8 +344,13 @@ struct Server::Impl {
                         Diskerror::Logger::info(lang::MSG_HOUSEKEEPING_SIGNAL);
                         run_housekeeping();
                     }
-                    // Check for config reload (SIGHUP)
+                    // Reload (SIGHUP): config, plus the search caches -- the
+                    // DB file may have been changed by another process (CLI
+                    // import/delete, a hand edit). SIGHUP, not a new signal,
+                    // so a newer CLI can never kill an older daemon.
                     if (g_config_reload_requested.exchange(false)) {
+                        memory.backend()->invalidate_all_caches();
+                        Diskerror::Logger::info(lang::MSG_CACHE_RELOADED);
                         int n = reload_config();
                         if (n > 0) {
                             Diskerror::Logger::info(std::format(ragger::lang::MSG_CONFIG_RELOADED_N, n));
@@ -575,12 +580,16 @@ struct Server::Impl {
     }
 
     // POST /memory/note — agent note (agent API Phase 3).
-    // Body: {text, project?, tags?, cwd?}. Stores via store(), so the row
-    // lands where ragger_store notes land today (summaries), plus
+    // Body: {text, project?, tags?, cwd?, evidence?}. Stores via store(), so
+    // the row lands where ragger_store notes land today (summaries), plus
     // project_id. The response carries possible_supersedes exactly like
     // /decision — compared against current decisions, hint only, nothing
     // is changed. Explicit unknown project -> 400; a cwd that matches
     // nothing simply leaves the note unfiled (not an error).
+    // Phase 5 step 6: `evidence: [turn_summary_id]` routes the write to
+    // store_insight instead — a synthesized insight linked to its sources,
+    // and the response says "table":"insights". Without evidence nothing
+    // changes.
     void handle_memory_note(const UserInfo& user, const httplib::Request& req,
                             httplib::Response& res) {
         auto body = json::parse(req.body);
@@ -607,6 +616,44 @@ struct Server::Impl {
             metadata["project"] = project;
 
         auto& mem = _get_memory(user.username);
+
+        // ---- insight routing (Phase 5) ----------------------------------
+        if (body.contains("evidence") && body["evidence"].is_array()) {
+            DecisionInput in;
+            in.text     = text;
+            in.project  = project;
+            in.evidence = body["evidence"].get<std::vector<int>>();
+            if (body.contains("tags")) {
+                const auto& t = body["tags"];
+                if (t.is_array()) {
+                    for (const auto& x : t) {
+                        if (!in.tags.empty()) in.tags += ',';
+                        in.tags += x.get<std::string>();
+                    }
+                } else if (t.is_string()) {
+                    in.tags = t.get<std::string>();
+                }
+            }
+            try {
+                auto r = mem.store_insight(in);
+                json ps = json::array();
+                for (const auto& [iid, score] : r.possible_supersedes)
+                    ps.push_back({{"id", iid}, {"score", score}});
+                Diskerror::Logger::debug("POST /memory/note 200 (insight)");
+                respond_json(res, json{
+                    {"id", r.id},
+                    {"table", "insights"},
+                    {"status", "stored"},
+                    {"superseded", r.superseded ? json(*r.superseded) : json(nullptr)},
+                    {"possible_supersedes", std::move(ps)}});
+            } catch (const std::invalid_argument& e) {
+                Diskerror::Logger::debug("POST /memory/note 400 (insight)");
+                res.status = 400;
+                res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
+            }
+            return;
+        }
+
         try {
             std::string id = mem.store(text, metadata);
             json ps = json::array();
@@ -664,6 +711,85 @@ struct Server::Impl {
             Diskerror::Logger::debug("POST /memory/project 200");
         } catch (const std::invalid_argument& e) {
             Diskerror::Logger::debug("POST /memory/project 400");
+            res.status = 400;
+            res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
+        }
+    }
+
+    // POST /memory/timeline — deterministic newest-first range scan
+    // (agent API Phase 4). Body: {project?, session?, since?, until?,
+    // granularity?, limit?, cursor?}. Returns {items, next_cursor}.
+    void handle_memory_timeline(const UserInfo& user, const httplib::Request& req,
+                                httplib::Response& res) {
+        auto body = json::parse(req.body);
+        TimelineQuery q;
+        q.session     = body.value("session", "");
+        q.since       = body.value("since", "");
+        q.until       = body.value("until", "");
+        q.granularity = body.value("granularity", "episode");
+        q.limit       = body.value("limit", 20);
+        q.cursor      = body.value("cursor", "");
+
+        auto& mem = _get_memory(user.username);
+        q.project = body.value("project", "");
+        if (q.project.empty() && body.contains("cwd") && body["cwd"].is_string())
+            if (auto pid = mem.resolve_project(body["cwd"].get<std::string>()); pid)
+                q.project = body["cwd"].get<std::string>();
+
+        try {
+            Diskerror::Logger::debug("POST /memory/timeline 200");
+            respond_json(res, mem.agent_timeline(q));
+        } catch (const std::invalid_argument& e) {
+            Diskerror::Logger::debug("POST /memory/timeline 400");
+            res.status = 400;
+            res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
+        }
+    }
+
+    // POST /memory/update — metadata-only curation (agent API Phase 4).
+    // Body: {id, status?, tags?, project?, text?}. `text` present is always
+    // rejected: text changes go through a new decision/note with supersedes.
+    void handle_memory_update(const UserInfo& user, const httplib::Request& req,
+                              httplib::Response& res) {
+        auto body = json::parse(req.body);
+        UpdateRequest u;
+        u.id = body.value("id", "");
+        if (body.contains("status") && !body["status"].is_null())
+            u.status = body["status"].get<std::string>();
+        if (body.contains("tags") && !body["tags"].is_null())
+            u.tags = body["tags"].get<std::string>();
+        if (body.contains("project") && !body["project"].is_null())
+            u.project = body["project"].get<std::string>();
+        if (body.contains("text") && !body["text"].is_null())
+            u.text = body["text"].get<std::string>();
+
+        auto& mem = _get_memory(user.username);
+        try {
+            Diskerror::Logger::debug("POST /memory/update 200");
+            respond_json(res, mem.agent_update(u));
+        } catch (const std::invalid_argument& e) {
+            Diskerror::Logger::debug("POST /memory/update 400");
+            res.status = 400;
+            res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
+        }
+    }
+
+    // POST /memory/review — pending-decision queue (agent API Phase 4).
+    // Body: {action: list|approve|reject, ids?: [handles]}.
+    void handle_memory_review(const UserInfo& user, const httplib::Request& req,
+                              httplib::Response& res) {
+        auto body = json::parse(req.body);
+        const std::string action = body.value("action", "");
+        std::vector<std::string> ids;
+        if (body.contains("ids"))
+            ids = body["ids"].get<std::vector<std::string>>();
+
+        auto& mem = _get_memory(user.username);
+        try {
+            Diskerror::Logger::debug("POST /memory/review 200");
+            respond_json(res, mem.agent_review(action, ids));
+        } catch (const std::invalid_argument& e) {
+            Diskerror::Logger::debug("POST /memory/review 400");
             res.status = 400;
             res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
         }
@@ -909,6 +1035,9 @@ struct Server::Impl {
         svr.Post("/memory/get",         guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_get(u, req, res); }));
         svr.Post("/memory/note",        guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_note(u, req, res); }));
         svr.Post("/memory/project",     guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_project(u, req, res); }));
+        svr.Post("/memory/timeline",    guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_timeline(u, req, res); }));
+        svr.Post("/memory/update",      guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_update(u, req, res); }));
+        svr.Post("/memory/review",      guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_review(u, req, res); }));
         svr.Post("/turn",               guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_turn(u, req, res); }));
         svr.Get(R"(/session/([^/]+))",  guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_session(u, req, res); }));
         svr.Delete(R"(/memory/(\d+))",  guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_delete_memory(u, req, res); }));
@@ -1687,6 +1816,7 @@ bool Server::run() {
 
     sa.sa_handler = sighup_handler;
     sigaction(SIGHUP, &sa, nullptr);
+
 
     sa.sa_handler = sigterm_handler;
     sigaction(SIGTERM, &sa, nullptr);

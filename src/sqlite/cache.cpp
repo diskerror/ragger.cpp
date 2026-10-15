@@ -123,6 +123,8 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
 
     void Backend::Impl::invalidate_dec_cache() { dec_cache_valid = false; }
 
+    void Backend::Impl::invalidate_ins_cache() { ins_cache_valid = false; }
+
     void Backend::Impl::invalidate_turn_cache() { turn_cache_valid = false; }
 
 
@@ -306,6 +308,68 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
         }
 
         dec_cache_valid = true;
+    }
+
+
+    // Loads the insights table into the parallel vector cache. Mirrors
+    // ensure_dec_cache() exactly — same status allow-list (superseded /
+    // retired / pending rows are history or unreviewed drafts: kept in the
+    // table, hidden from search). Metadata carries source="insight" plus the
+    // status/trigger so search() consumers can distinguish insights from the
+    // other corpora.
+    void Backend::Impl::ensure_ins_cache() {
+        if (ins_cache_valid) return;
+
+        ins_ids.clear();
+        ins_texts.clear();
+        ins_metadata.clear();
+        ins_timestamps.clear();
+
+        Stmt s(db,
+            "SELECT insight_id, text, embedding, status, tags, "
+            "       datetime(created_at,'unixepoch','localtime'), "
+            "       ifnull(trigger,'') "
+            "FROM insights "
+            "WHERE status IN ('current','provisional','roadmap')");
+
+        std::vector<std::vector<float>> emb_rows;
+        const int expected_dims = config().embedding_dimensions;
+        bool blob_warned = false;
+
+        while (s.step()) {
+            auto col_text = [&](int i) -> std::string { return s.column_text(i); };
+            ins_ids.push_back(s.column_int(0));
+            ins_texts.push_back(col_text(1));
+
+            const void* blob = s.column_blob(2);
+            int blob_bytes   = s.column_bytes(2);
+            std::vector<float> emb = decode_embedding_blob(
+                blob, blob_bytes, expected_dims, "insights",
+                ins_ids.back(), blob_warned);
+            emb_rows.push_back(std::move(emb));
+
+            json meta = json::object();
+            meta["source"] = "insight";
+            meta["status"] = col_text(3);
+            std::string tags = col_text(4);
+            if (!tags.empty()) meta["tags"] = tags;
+            std::string trig = col_text(6);
+            if (!trig.empty()) meta["trigger"] = trig;
+            ins_metadata.push_back(std::move(meta));
+
+            ins_timestamps.push_back(col_text(5));
+        }
+
+        int n = static_cast<int>(emb_rows.size());
+        ins_embeddings.resize(n, expected_dims);
+        for (int i = 0; i < n; ++i) {
+            ins_embeddings.row(i) =
+                Eigen::Map<Eigen::RowVectorXf>(emb_rows[i].data(), expected_dims);
+            float nrm = ins_embeddings.row(i).norm();
+            if (nrm > 1e-12f) ins_embeddings.row(i) /= nrm;
+        }
+
+        ins_cache_valid = true;
     }
 
 

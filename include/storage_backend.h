@@ -155,6 +155,33 @@ public:
     /// bad status, unknown or inactive supersedes target, unknown evidence id).
     virtual StructuredDecisionResult store_structured_decision(const DecisionInput& in) = 0;
 
+    /// Look up a document source by its (unique) path. Returns null when no
+    /// document has that path, else {"id","title","imported_at"}. Used by the
+    /// importer to refuse importing the same file twice.
+    virtual json find_document_source(const std::string& path) = 0;
+
+    /// Drop every in-memory search cache (summaries, documents, decisions,
+    /// insights, turns). They are rebuilt lazily from the DB on the next
+    /// lookup. Called when something outside this process may have changed
+    /// the DB file (CLI import/delete, hand edits).
+    virtual void invalidate_all_caches() = 0;
+
+    /// All imported documents, ordered by document_source_id (gaps from
+    /// deletions are shown as-is). Each item: {id, title, path, year, tags,
+    /// imported_at, chunks}. title/path/year may be null.
+    virtual json list_document_sources() = 0;
+
+    /// Delete one imported document: all its chunks (and their term-index
+    /// rows) and its document_sources row, in one transaction. Returns
+    /// {id, title, path, chunks}. std::invalid_argument if no such id.
+    virtual json delete_document_source(int document_source_id) = 0;
+
+    /// Store an insight (agent API Phase 5, db 0.17). Same shape as a
+    /// structured decision; trigger is optional and evidence is REQUIRED
+    /// (an insight with no sources is just a note). Throws
+    /// std::invalid_argument on validation failure.
+    virtual StructuredDecisionResult store_insight(const DecisionInput& in) = 0;
+
     /// Layered agent search (agent API Phase 2). Returns handles + snippets
     /// only (full text via agent_get). Throws std::invalid_argument on an
     /// unknown layer name or a malformed since/until bound.
@@ -166,7 +193,7 @@ public:
     /// throws std::invalid_argument.
     virtual json agent_get(const AgentGetQuery& q) = 0;
 
-    /// Projects (agent API Phase 3, db 0.18). create_project: name must be
+    /// Projects (agent API Phase 3, db 0.17). create_project: name must be
     /// non-empty and unique (duplicate -> std::invalid_argument); path is
     /// stored ~-collapsed. list_projects: "" status = all. update_project:
     /// only supplied fields change; unknown name -> std::invalid_argument.
@@ -190,6 +217,32 @@ public:
     /// note surface so a note can flag a ruling it may contradict.
     virtual std::vector<std::pair<int,float>> possible_supersedes_for_text(
         const std::string& text) = 0;
+
+    /// Timeline (agent API Phase 4): deterministic range scan, newest first,
+    /// key-paginated by "<created_epoch>:<rowid>" cursors. No embeddings.
+    /// Returns {"items":[{id,created,session,text}...], "next_cursor":...|null}.
+    /// Bad granularity or malformed cursor -> std::invalid_argument; an
+    /// explicitly named project that doesn't resolve -> std::invalid_argument.
+    virtual json agent_timeline(const TimelineQuery& q) = 0;
+
+    /// Curation (agent API Phase 4): metadata-only update of one typed
+    /// handle. Text present -> always rejected (a text change is a new row
+    /// with supersedes). turn/turn_summary/document rows are not agent-
+    /// editable. summaries: only agent-written notes (model_id NULL); tags
+    /// and project only. decisions: status must be a legal transition (see
+    /// the Phase 4 table; 'superseded' is reached only via supersedes).
+    /// Returns the updated row as agent_get would. std::invalid_argument on
+    /// any rule violation.
+    virtual json agent_update(const UpdateRequest& req) = 0;
+
+    /// Review queue (agent API Phase 4): action "list" returns pending
+    /// decisions oldest first; "approve"/"reject" move each id
+    /// pending->current / pending->retired through the agent_update
+    /// transition code. ids are decision handles (bare integers also
+    /// accepted). A non-pending id fails only that id.
+    /// Returns {"done":[ids],"failed":[{"id":...,"error":...}]}.
+    virtual json agent_review(const std::string& action,
+                              const std::vector<std::string>& ids) = 0;
 
     /// Write back a single row's embedding for the remaining context tables
     /// (documents already covered above). Returns true if a row was updated.

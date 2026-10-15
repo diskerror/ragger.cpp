@@ -104,6 +104,17 @@ struct Backend::Impl {
     std::vector<json>              dec_metadata;
     std::vector<std::string>       dec_timestamps;
 
+    // Parallel embedding cache for the insights table (db 0.17) — invalidated
+    // on insight writes. Mirrors the decisions cache; metadata carries
+    // source="insight" plus the status. Same status allow-list as
+    // ensure_dec_cache(): superseded/retired/pending rows stay hidden.
+    bool                           ins_cache_valid = false;
+    std::vector<int>               ins_ids;
+    std::vector<std::string>       ins_texts;
+    Eigen::MatrixXf                ins_embeddings;      // rows × dims
+    std::vector<json>              ins_metadata;
+    std::vector<std::string>       ins_timestamps;
+
     // Parallel embedding cache for the turn_summaries (L2) table — invalidated
     // on turn-summary writes. Mirrors the caches above; vector scores come
     // from here, keyword scores from FTS5 (turn_summaries_fts) at query time.
@@ -157,7 +168,7 @@ struct Backend::Impl {
     // (e.g. "0.12"). Absent means pre-versioning (legacy v3/v4 DB from
     // before this key existed) -- returns "" in that case. Startup hard-gates
     // on this via kExpectedDbVersion below; there is no in-binary migration.
-    static constexpr std::string_view kExpectedDbVersion = "0.18";
+    static constexpr std::string_view kExpectedDbVersion = "0.17";
 
     // Watermark keys for the boundary-detection housekeeping scans (see
     // sessions_needing_close_boundary()/projects_needing_close_boundary()
@@ -316,19 +327,15 @@ struct Backend::Impl {
     /// BEFORE this runs, and reindex_table() (Step 6) populates them.
     void migrate_0_15_to_0_16();
 
-    /// 0.16 -> 0.17 migration (agent API Phase 1: structured decisions).
-    /// Rebuilds `decisions` in the new canonical column order (adds trigger,
-    /// rationale, scope, supersedes, source_session_id) and moves stray
+    /// 0.16 -> 0.17 migration: the whole agent-API schema in one step.
+    /// Rebuilds `decisions` (adds trigger, rationale, scope, supersedes,
+    /// session_id, project_id) and `summaries` (project_id) in the
+    /// canonical column order, adds project_id to sessions,
+    /// creates projects, insights and insight_evidence, and moves stray
     /// category words that leaked into decisions.status ('fact', 'lesson')
     /// into tags, setting status 'current'. decision_evidence and the
     /// orphan-protection trigger are created after migration in create_schema().
     void migrate_0_16_to_0_17();
-
-    /// 0.17 -> 0.18 migration (agent API Phase 3: projects). Creates the
-    /// project_id FK on sessions/document_sources via ALTER (append is fine
-    /// there — no BLOB columns) and rebuilds summaries/decisions so the new
-    /// column sits BEFORE the embedding BLOB, matching fresh installs.
-    void migrate_0_17_to_0_18();
 
     /// Custom terms index (v0.16) — replaces both FTS5 layers with a single
     /// flat term table + per-content-type junction tables. See
@@ -417,6 +424,7 @@ struct Backend::Impl {
     void invalidate_cache();
     void invalidate_doc_cache();
     void invalidate_dec_cache();
+    void invalidate_ins_cache();
     void invalidate_turn_cache();
 
     // Loads the summaries table into the vector cache. Keyword scores come
@@ -436,6 +444,11 @@ struct Backend::Impl {
     // other corpora.
     void ensure_dec_cache();
 
+    // Loads the insights table into the parallel vector cache. Mirrors
+    // ensure_dec_cache() (same status allow-list); metadata carries
+    // source="insight" plus the status/trigger.
+    void ensure_ins_cache();
+
     // Loads the turn_summaries (L2) table into the parallel vector cache.
     // Mirrors ensure_dec_cache(): vector scores come from here, keyword
     // scores from FTS5 (turn_summaries_fts) at query time. WHERE text IS NOT
@@ -454,6 +467,20 @@ struct Backend::Impl {
     // Full-row reads / hierarchy expansion / history paging; see
     // StorageBackend::agent_get for the contract.
     json agent_get(const AgentGetQuery& q);
+
+    // --- agent API Phase 4 timeline/curation/review (src/sqlite/agent_read.cpp) ---
+
+    // Deterministic newest-first range scan, key-paginated; see
+    // StorageBackend::agent_timeline for the contract.
+    json agent_timeline(const TimelineQuery& q);
+
+    // Metadata-only curation with the Phase 4 transition table; see
+    // StorageBackend::agent_update for the contract.
+    json agent_update(const UpdateRequest& req);
+
+    // Pending-decision queue; reuses agent_update's transition code.
+    json agent_review(const std::string& action,
+                      const std::vector<std::string>& ids);
 
     // --- agent API Phase 3 projects (src/sqlite/projects.cpp) ---
 
@@ -588,10 +615,39 @@ struct Backend::Impl {
     // evidence turn_summaries. Throws std::invalid_argument on bad input.
     StructuredDecisionResult store_structured_decision(const DecisionInput& in);
 
-    // Cosine near-duplicate scan over active decisions (possible_supersedes
-    // hint; Phase 2 step 5). Shared with the Phase 3 note path.
+    // ---- store_insight: agent API Phase 5 (db 0.17) ----------------------
+    // decisions and insights share ONE write path (store_structured_row);
+    // only the table names, the error-message noun, and which field is
+    // required differ:
+    //   decisions: trigger REQUIRED, evidence optional.
+    //   insights:  trigger optional, evidence REQUIRED — an insight with no
+    //              sources is just a note (Phase 5 step 3).
+    // Reuses DecisionInput / StructuredDecisionResult verbatim (P5 doc:
+    // "Reuse the struct; it already has every field").
+    struct StructuredRowSpec {
+        const char* table;           // "decisions" | "insights"
+        const char* pk;              // "decision_id" | "insight_id"
+        const char* evidence_table;  // "decision_evidence" | "insight_evidence"
+        const char* noun;            // word used in validation errors
+        bool trigger_required;
+        bool evidence_required;
+        bool decisions_cache;        // invalidate_dec_cache() vs _ins_cache()
+    };
+    StructuredDecisionResult store_structured_row(const DecisionInput& in,
+                                                  const StructuredRowSpec& spec);
+    StructuredDecisionResult store_insight(const DecisionInput& in);
+
+    // Document source by unique path (null json when absent).
+    json find_document_source(const std::string& path);
+    json list_document_sources();
+    json delete_document_source(int document_source_id);
+
+    // Cosine near-duplicate scan over active rows of one structured table
+    // (possible_supersedes hint; Phase 2 step 5). Shared with the Phase 3
+    // note path and, since Phase 5, the insights table.
     std::vector<std::pair<int,float>> supersede_hints(
-        const std::vector<float>& emb, const std::vector<int>& exclude_ids);
+        const std::vector<float>& emb, const std::vector<int>& exclude_ids,
+        const char* table = "decisions", const char* pk = "decision_id");
 
     // Embed `text` (when the embedder is usable) and run supersede_hints
     // over it. Used by the Phase 3 note surface, where the stored row is a

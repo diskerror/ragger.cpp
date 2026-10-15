@@ -209,7 +209,7 @@ namespace fs = std::filesystem;
             )
         )");
 
-        // projects (db 0.18) -- what a body of work is. path is the absolute
+        // projects (db 0.17) -- what a body of work is. path is the absolute
         // (or ~/-collapsed) root used for cwd -> project inference, and to
         // disambiguate overloaded names. status: active|paused|done|abandoned
         // (no CHECK, vocabulary may grow).
@@ -330,7 +330,7 @@ namespace fs = std::filesystem;
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_session ON summaries(session_id)");
 
         // decisions (L6). Column order: keys/data, created_at, counts, embedding.
-        // trigger..source_session_id added at db 0.17 (agent API Phase 1). The
+        // trigger..session_id added at db 0.17 (agent API Phase 1). The
         // DDL in migrate_0_16_to_0_17() MUST stay in lockstep with this one.
         // status is deliberately NOT CHECK-constrained: the vocabulary grows
         // (current|provisional|pending|superseded|retired, + legacy roadmap/
@@ -345,7 +345,7 @@ namespace fs = std::filesystem;
                 rationale   TEXT,
                 scope       TEXT,
                 supersedes  INTEGER REFERENCES decisions(decision_id),
-                source_session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
+                session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                 project_id  INTEGER REFERENCES projects(project_id) ON DELETE SET NULL,
                 created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
                 unigram_count  INTEGER NOT NULL DEFAULT 0,
@@ -355,6 +355,32 @@ namespace fs = std::filesystem;
             )
         )");
         exec("CREATE INDEX IF NOT EXISTS idx_decisions_status ON decisions(status)");
+
+        // insights (db 0.17, agent API Phase 5) — synthesized knowledge
+        // ("these things relate"), distinct from decisions ("always do Y").
+        // Same shape as decisions; trigger is OPTIONAL here (a note with
+        // evidence becomes an insight even without one). Created BEFORE
+        // create_terms_schema() so the insights_terms junction can reference
+        // it. status vocabulary mirrors decisions; no CHECK (it must grow).
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS insights (
+                insight_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+                text        TEXT NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'current',
+                tags        TEXT NOT NULL DEFAULT '',
+                trigger     TEXT,
+                rationale   TEXT,
+                scope       TEXT,
+                supersedes  INTEGER REFERENCES insights(insight_id),
+                session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
+                project_id  INTEGER REFERENCES projects(project_id) ON DELETE SET NULL,
+                created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                unigram_count  INTEGER NOT NULL DEFAULT 0,
+                bigram_count   INTEGER NOT NULL DEFAULT 0,
+                embedding_version INTEGER,
+                embedding   BLOB
+            )
+        )");
 
         // document_sources (L5 metadata) — one row per curated document.
         // Holds title/path/year/tags/imported_at once, instead of repeating
@@ -368,7 +394,6 @@ namespace fs = std::filesystem;
                 path        TEXT,
                 year        INTEGER,
                 tags        TEXT NOT NULL DEFAULT '',
-                project_id INTEGER REFERENCES projects(project_id) ON DELETE SET NULL,
                 imported_at INTEGER NOT NULL
             )
         )");
@@ -515,10 +540,16 @@ namespace fs = std::filesystem;
         exec("CREATE INDEX IF NOT EXISTS idx_decisions_status      ON decisions(status)");
         exec("CREATE INDEX IF NOT EXISTS idx_decisions_supersedes  ON decisions(supersedes)");
         exec("CREATE INDEX IF NOT EXISTS idx_projects_status        ON projects(status)");
+        // A document is identified by its path (0.17): the same file cannot
+        // be imported twice. NULL/empty paths from old DBs are given a unique
+        // value by migrate_0_16_to_0_17() before this index is built.
+        exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_document_sources_path ON document_sources(path)");
         exec("CREATE INDEX IF NOT EXISTS idx_sessions_project       ON sessions(project_id)");
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_project      ON summaries(project_id)");
         exec("CREATE INDEX IF NOT EXISTS idx_decisions_project      ON decisions(project_id)");
-        exec("CREATE INDEX IF NOT EXISTS idx_document_sources_project ON document_sources(project_id)");
+        exec("CREATE INDEX IF NOT EXISTS idx_insights_status        ON insights(status)");
+        exec("CREATE INDEX IF NOT EXISTS idx_insights_supersedes    ON insights(supersedes)");
+        exec("CREATE INDEX IF NOT EXISTS idx_insights_project       ON insights(project_id)");
 
         // decision_evidence (db 0.17) -- many-to-many: which turn_summaries a
         // decision rests on. Real FKs (design §10.4: integrity lives in the
@@ -537,6 +568,22 @@ namespace fs = std::filesystem;
         )");
         exec("CREATE INDEX IF NOT EXISTS idx_decision_evidence_ts "
              "ON decision_evidence(turn_summary_id)");
+
+        // insight_evidence (db 0.17) -- same shape/semantics as
+        // decision_evidence: which turn_summaries an insight rests on. An
+        // insight without evidence is just a note, so store_insight requires
+        // at least one link; the schema only enforces referential integrity.
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS insight_evidence (
+                insight_id      INTEGER NOT NULL
+                    REFERENCES insights(insight_id) ON DELETE CASCADE,
+                turn_summary_id INTEGER NOT NULL
+                    REFERENCES turn_summaries(turn_summary_id) ON DELETE RESTRICT,
+                PRIMARY KEY (insight_id, turn_summary_id)
+            )
+        )");
+        exec("CREATE INDEX IF NOT EXISTS idx_insight_evidence_ts "
+             "ON insight_evidence(turn_summary_id)");
 
         // An orphaned turn summary (its turn culled) is the only surviving
         // record of that exchange. Code never deletes one; this makes the
@@ -606,7 +653,7 @@ namespace fs = std::filesystem;
         // Only for versions we actually migrate FROM in-binary. An unknown
         // version is rejected by the gate without mutation.
         if (current_version != "0.12" && current_version != "0.15" &&
-            current_version != "0.16" && current_version != "0.17") return false;
+            current_version != "0.16") return false;
         return true;
     }
 
@@ -764,11 +811,6 @@ namespace fs = std::filesystem;
             }
             if (v == "0.16") {
                 migrate_0_16_to_0_17();
-                v = db_version();
-                continue;
-            }
-            if (v == "0.17") {
-                migrate_0_17_to_0_18();
                 v = db_version();
                 continue;
             }
@@ -1461,14 +1503,19 @@ namespace fs = std::filesystem;
     }
 
 
-    /// 0.16 -> 0.17 migration (agent API Phase 1: structured decisions).
+    /// 0.16 -> 0.17 migration (the whole agent API schema in one step):
+    ///   - decisions rebuilt with trigger/rationale/scope/supersedes/
+    ///     session_id/project_id, plus decision_evidence,
+    ///   - projects table; project_id on sessions/summaries,
+    ///   - insights + insight_evidence.
+    /// (Developed as three internal steps; released as one schema version.)
     /// Same pragma dance as migrate_0_15_to_0_16() and for the same reasons:
     /// foreign_keys OFF (decisions_terms has ON DELETE CASCADE into decisions;
     /// DROP TABLE would wipe the index) and legacy_alter_table ON (keeps the
     /// RENAME from repointing other tables' REFERENCES at "decisions_rebuild").
     /// Both must be set OUTSIDE the transaction.
     void Backend::Impl::migrate_0_16_to_0_17() {
-        Diskerror::Logger::info("Migrating DB 0.16 -> 0.17 (structured decisions)...");
+        Diskerror::Logger::info("Migrating DB 0.16 -> 0.17 (agent API: decisions, projects, insights)...");
 
         const bool fk_was_on = pragma_bool("foreign_keys");
         exec("PRAGMA foreign_keys = OFF");
@@ -1477,9 +1524,96 @@ namespace fs = std::filesystem;
         try {
             Stmt(db, "BEGIN").exec();
 
-            // decisions_view SELECTs decisions' columns; rebuild_table_column_order
-            // requires dependent views dropped. create_views() recreates it.
+            auto fk_violations = [this]() {
+                std::multiset<std::string> out;
+                Stmt s(db, "PRAGMA foreign_key_check");
+                while (s.step()) {
+                    out.insert(std::format("{}|{}|{}", s.column_text(0),
+                                           s.column_int64(1), s.column_text(2)));
+                }
+                return out;
+            };
+            // Baseline BEFORE any change: pre-existing violations (e.g. a
+            // summary whose session was deleted while FKs were off) must not
+            // be blamed on this leg (same lesson as migrate_0_15_to_0_16).
+            const std::multiset<std::string> fk_before = fk_violations();
+
+            // projects is created by create_schema()'s CREATE TABLE IF NOT
+            // EXISTS before migrations run, and decisions' rebuilt DDL below
+            // references it; be defensive anyway.
+            exec(R"(
+                CREATE TABLE IF NOT EXISTS projects (
+                    project_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name        TEXT NOT NULL UNIQUE,
+                    status      TEXT NOT NULL DEFAULT 'active',
+                    description TEXT,
+                    path        TEXT,
+                    created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                    updated_at  INTEGER NOT NULL DEFAULT (unixepoch())
+                )
+            )");
+
+            // Views naming a rebuilt/altered table must go first (SQLite
+            // refuses a table DROP while a view names it); create_views()
+            // recreates them after migrations.
+            exec("DROP VIEW IF EXISTS sessions_view");
+            exec("DROP VIEW IF EXISTS summaries_view");
             exec("DROP VIEW IF EXISTS decisions_view");
+            exec("DROP VIEW IF EXISTS document_sources_view");
+            exec("DROP VIEW IF EXISTS documents_view");   // joins document_sources
+
+            // sessions has no BLOB columns, so a plain ALTER TABLE ADD COLUMN
+            // (append at the end) is fine.
+            if (!column_exists("sessions", "project_id"))
+                exec("ALTER TABLE sessions ADD COLUMN project_id "
+                     "INTEGER REFERENCES projects(project_id) ON DELETE SET NULL");
+
+            // document_sources.path becomes UNIQUE (0.17: a document is
+            // identified by its path). Old DBs may hold sources with no path;
+            // give each its own document_source_id as text so the unique
+            // index can be built (the value is a placeholder, not a file).
+            exec("UPDATE document_sources SET path = CAST(document_source_id AS TEXT) "
+                 "WHERE path IS NULL OR path = ''");
+            if (int n = sqlite3_changes(db); n > 0)
+                Diskerror::Logger::info(std::format(
+                    "  document_sources: gave {} pathless source(s) a placeholder path "
+                    "(their document_source_id)", n));
+            {
+                // Two sources with the same path cannot be merged safely
+                // here (different titles/tags); refuse with a clear message
+                // so the operator decides which to keep.
+                Stmt d(db, "SELECT path, COUNT(*) FROM document_sources "
+                           "GROUP BY path HAVING COUNT(*) > 1 LIMIT 1");
+                if (d.step())
+                    throw std::runtime_error(std::format(
+                        "0.16 -> 0.17 migration: {} document_sources rows share the "
+                        "path '{}' (paths must now be unique). Delete or fix the "
+                        "duplicates, then restart; nothing was changed.",
+                        d.column_int(1), d.column_text(0)));
+            }
+
+            // summaries is rebuilt so project_id sits BEFORE the embedding
+            // BLOB, matching create_schema()'s fresh-install order. The column
+            // list names only columns present in BOTH old and new tables
+            // (project_id is deliberately absent; it starts NULL).
+            rebuild_table_column_order("summaries", R"(
+                CREATE TABLE summaries_rebuild (
+                    summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text       TEXT NOT NULL,
+                    level      TEXT NOT NULL,
+                    tags       TEXT NOT NULL DEFAULT '',
+                    session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
+                    model_id   INTEGER REFERENCES models(model_id),
+                    project_id INTEGER REFERENCES projects(project_id) ON DELETE SET NULL,
+                    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                    unigram_count  INTEGER NOT NULL DEFAULT 0,
+                    bigram_count   INTEGER NOT NULL DEFAULT 0,
+                    embedding_version INTEGER,
+                    embedding  BLOB
+                ))",
+                "summary_id, text, level, tags, session_id, model_id, created_at, "
+                "updated_at, unigram_count, bigram_count, embedding_version, embedding");
 
             // Counts ARE carried over (unlike 0.16): they are valid, and
             // decisions_terms rows still point at the same decision_ids, so no
@@ -1494,7 +1628,7 @@ namespace fs = std::filesystem;
                     rationale   TEXT,
                     scope       TEXT,
                     supersedes  INTEGER REFERENCES decisions(decision_id),
-                    source_session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
+                    session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                     project_id  INTEGER REFERENCES projects(project_id) ON DELETE SET NULL,
                     created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
                     unigram_count  INTEGER NOT NULL DEFAULT 0,
@@ -1519,146 +1653,39 @@ namespace fs = std::filesystem;
                 Diskerror::Logger::info(std::format(
                     "  decisions: moved {} non-status value(s) from status into tags", n));
 
-            set_db_version("0.17");
-
-            {
-                Stmt s(db, "PRAGMA foreign_key_check(decisions)");
-                if (s.step())
-                    throw std::runtime_error(
-                        "0.16 -> 0.17 migration: foreign_key_check(decisions) "
-                        "failed; rolling back");
-            }
-
-            Stmt(db, "COMMIT").exec();
-            exec("PRAGMA legacy_alter_table = OFF");
-            if (fk_was_on) exec("PRAGMA foreign_keys = ON");
-            Diskerror::Logger::info("DB migration 0.16 -> 0.17 complete.");
-        } catch (...) {
-            try { Stmt(db, "ROLLBACK").exec(); } catch (...) {}
-            try {
-                exec("PRAGMA legacy_alter_table = OFF");
-                if (fk_was_on) exec("PRAGMA foreign_keys = ON");
-            } catch (...) {}
-            throw;
-        }
-    }
-
-
-    /// 0.17 -> 0.18 migration (agent API Phase 3: projects).
-    /// sessions and document_sources have no BLOB columns, so a plain
-    /// ALTER TABLE ADD COLUMN is fine there (append at the end is accepted).
-    /// summaries and decisions are rebuilt so project_id sits BEFORE the
-    /// embedding BLOB, matching create_schema()'s fresh-install order.
-    /// Same pragma dance as the other legs: foreign_keys OFF (junction tables
-    /// cascade on DROP TABLE) and legacy_alter_table ON (keeps RENAME from
-    /// repointing other tables' REFERENCES at "<t>_rebuild"), both set OUTSIDE
-    /// the transaction.
-    void Backend::Impl::migrate_0_17_to_0_18() {
-        Diskerror::Logger::info("Migrating DB 0.17 -> 0.18 (projects)...");
-
-        const bool fk_was_on = pragma_bool("foreign_keys");
-        exec("PRAGMA foreign_keys = OFF");
-        exec("PRAGMA legacy_alter_table = ON");
-
-        try {
-            Stmt(db, "BEGIN").exec();
-
-            auto fk_violations = [this]() {
-                std::multiset<std::string> out;
-                Stmt s(db, "PRAGMA foreign_key_check");
-                while (s.step()) {
-                    out.insert(std::format("{}|{}|{}", s.column_text(0),
-                                           s.column_int64(1), s.column_text(2)));
-                }
-                return out;
-            };
-            // Baseline BEFORE any change: pre-existing violations (e.g. a
-            // summary whose session was deleted while FKs were off) must not
-            // be blamed on this leg (same lesson as migrate_0_15_to_0_16).
-            const std::multiset<std::string> fk_before = fk_violations();
-
-            // The projects table itself is created by create_schema()'s CREATE
-            // TABLE IF NOT EXISTS before migrations run; be defensive anyway.
+            // insights + insight_evidence: brand-new tables. create_schema()
+            // already ran the same CREATE ... IF NOT EXISTS before this leg,
+            // so this is defensive-only; no rebuild, no data step.
             exec(R"(
-                CREATE TABLE IF NOT EXISTS projects (
-                    project_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name        TEXT NOT NULL UNIQUE,
-                    status      TEXT NOT NULL DEFAULT 'active',
-                    description TEXT,
-                    path        TEXT,
-                    created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
-                    updated_at  INTEGER NOT NULL DEFAULT (unixepoch())
-                )
-            )");
-
-            // Views referencing the rebuilt tables must go first (SQLite
-            // refuses table DROP while a view names it); create_views()
-            // recreates them after migrations.
-            exec("DROP VIEW IF EXISTS sessions_view");
-            exec("DROP VIEW IF EXISTS summaries_view");
-            exec("DROP VIEW IF EXISTS decisions_view");
-            exec("DROP VIEW IF EXISTS document_sources_view");
-            exec("DROP VIEW IF EXISTS documents_view");   // joins document_sources
-
-            if (!column_exists("sessions", "project_id"))
-                exec("ALTER TABLE sessions ADD COLUMN project_id "
-                     "INTEGER REFERENCES projects(project_id) ON DELETE SET NULL");
-            if (!column_exists("document_sources", "project_id"))
-                exec("ALTER TABLE document_sources ADD COLUMN project_id "
-                     "INTEGER REFERENCES projects(project_id) ON DELETE SET NULL");
-
-            // TRAP 1: the column list passed to rebuild_table_column_order
-            // must name only columns present in BOTH the old and the new
-            // table -- project_id is deliberately absent (it starts NULL).
-            rebuild_table_column_order("summaries", R"(
-                CREATE TABLE summaries_rebuild (
-                    summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    text       TEXT NOT NULL,
-                    level      TEXT NOT NULL,
-                    tags       TEXT NOT NULL DEFAULT '',
-                    session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
-                    model_id   INTEGER REFERENCES models(model_id),
-                    project_id INTEGER REFERENCES projects(project_id) ON DELETE SET NULL,
-                    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                    unigram_count  INTEGER NOT NULL DEFAULT 0,
-                    bigram_count   INTEGER NOT NULL DEFAULT 0,
-                    embedding_version INTEGER,
-                    embedding  BLOB
-                ))",
-                "summary_id, text, level, tags, session_id, model_id, created_at, "
-                "updated_at, unigram_count, bigram_count, embedding_version, embedding");
-
-            rebuild_table_column_order("decisions", R"(
-                CREATE TABLE decisions_rebuild (
-                    decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                CREATE TABLE IF NOT EXISTS insights (
+                    insight_id  INTEGER PRIMARY KEY AUTOINCREMENT,
                     text        TEXT NOT NULL,
-                    status      TEXT NOT NULL,
+                    status      TEXT NOT NULL DEFAULT 'current',
                     tags        TEXT NOT NULL DEFAULT '',
                     trigger     TEXT,
                     rationale   TEXT,
                     scope       TEXT,
-                    supersedes  INTEGER REFERENCES decisions(decision_id),
-                    source_session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
+                    supersedes  INTEGER REFERENCES insights(insight_id),
+                    session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                     project_id  INTEGER REFERENCES projects(project_id) ON DELETE SET NULL,
                     created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
                     unigram_count  INTEGER NOT NULL DEFAULT 0,
                     bigram_count   INTEGER NOT NULL DEFAULT 0,
                     embedding_version INTEGER,
                     embedding   BLOB
-                ))",
-                "decision_id, text, status, tags, trigger, rationale, scope, supersedes, "
-                "source_session_id, created_at, unigram_count, bigram_count, "
-                "embedding_version, embedding");
+                )
+            )");
+            exec(R"(
+                CREATE TABLE IF NOT EXISTS insight_evidence (
+                    insight_id      INTEGER NOT NULL
+                        REFERENCES insights(insight_id) ON DELETE CASCADE,
+                    turn_summary_id INTEGER NOT NULL
+                        REFERENCES turn_summaries(turn_summary_id) ON DELETE RESTRICT,
+                    PRIMARY KEY (insight_id, turn_summary_id)
+                )
+            )");
 
-            // TRAP 2: a DB coming from 0.16 whose 0.16->0.17 DDL already
-            // included decisions.project_id still needs the rebuild above --
-            // do NOT skip it based on column_exists(). The column list not
-            // naming project_id makes the rebuild correct either way, and
-            // skipping would leave a migrated DB's physical order diverging
-            // from a fresh install's (the whole point of the rebuild).
-
-            set_db_version("0.18");
+            set_db_version("0.17");
 
             // Only NEW violations abort; pre-existing ones are carried
             // through and warned about (fk_before baseline above).
@@ -1670,14 +1697,14 @@ namespace fs = std::filesystem;
                                     std::back_inserter(introduced));
                 if (!introduced.empty()) {
                     throw std::runtime_error(std::format(
-                        "0.17 -> 0.18 migration introduced {} orphaned foreign key "
+                        "0.16 -> 0.17 migration introduced {} orphaned foreign key "
                         "row(s) (first: {}); rolling back",
                         introduced.size(), introduced.front()));
                 }
                 if (!fk_before.empty()) {
                     Diskerror::Logger::warn(std::format(
                         "{} pre-existing foreign-key violation(s) carried through "
-                        "the 0.18 migration unchanged (first: {}). Not caused by "
+                        "the 0.17 migration unchanged (first: {}). Not caused by "
                         "the migration; worth investigating separately.",
                         fk_before.size(), *fk_before.begin()));
                 }
@@ -1686,7 +1713,7 @@ namespace fs = std::filesystem;
             Stmt(db, "COMMIT").exec();
             exec("PRAGMA legacy_alter_table = OFF");
             if (fk_was_on) exec("PRAGMA foreign_keys = ON");
-            Diskerror::Logger::info("DB migration 0.17 -> 0.18 complete.");
+            Diskerror::Logger::info("DB migration 0.16 -> 0.17 complete.");
         } catch (...) {
             try { Stmt(db, "ROLLBACK").exec(); } catch (...) {}
             try {

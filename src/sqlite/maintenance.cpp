@@ -55,7 +55,7 @@ namespace fs = std::filesystem;
         // User-facing tables for the dashboard status pane, in display order.
         static const char* kTables[] = {
             "turns", "summaries", "turn_summaries", "sessions",
-            "documents", "decisions", "statements", "models",
+            "documents", "decisions", "insights", "statements", "models",
         };
         std::vector<std::pair<std::string, int64_t>> out;
         for (const char* t : kTables) {
@@ -71,13 +71,15 @@ namespace fs = std::filesystem;
     }
 
 
-    // Total rows across the five embedded tables (turns, turn_summaries,
-    // summaries, decisions, documents) — i.e. how many rows
+    // Total rows across the six embedded tables (turns, turn_summaries,
+    // summaries, decisions, documents, insights) — i.e. how many rows
     // `rebuild_embeddings()` will re-encode. (count() alone is just
     // summaries, which understates the rebuild scope.)
+    // NOTE: must stay in sync with embed_tables()'s kAllTables below —
+    // nothing enforces it (see ragger-memory-pipeline notes).
     int Backend::Impl::count_embeddable_rows(const std::string& table) const {
         int total = 0;
-        for (const char* tbl : {"turns", "turn_summaries", "summaries", "decisions", "documents"}) {
+        for (const char* tbl : {"turns", "turn_summaries", "summaries", "decisions", "documents", "insights"}) {
             if (table != "all" && table != tbl) continue;
             Stmt s(db, std::format("SELECT COUNT(*) FROM {}", tbl));
             if (s.step()) total += s.column_int(0);
@@ -96,6 +98,7 @@ namespace fs = std::filesystem;
             "  UNION ALL SELECT 1 FROM turns     WHERE embedding IS NOT NULL "
             "  UNION ALL SELECT 1 FROM documents WHERE embedding IS NOT NULL "
             "  UNION ALL SELECT 1 FROM decisions WHERE embedding IS NOT NULL "
+            "  UNION ALL SELECT 1 FROM insights  WHERE embedding IS NOT NULL "
             "  LIMIT 1)");
         return s.step() && s.column_int(0) != 0;
     }
@@ -140,6 +143,7 @@ namespace fs = std::filesystem;
             { "decisions",       "decision_id",     kDecisionEmbedTextSQL, nullptr },
             { "documents",       "document_id",     kDocEmbedTextSQL, nullptr       },
             { "turn_summaries",  "turn_summary_id", "text",      nullptr          },
+            { "insights",        "insight_id",      kDecisionEmbedTextSQL, nullptr },
         };
 
         // Filter to one table, or run the full fixed set when "all"/empty.
