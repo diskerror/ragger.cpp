@@ -410,6 +410,12 @@ void parse_timeline_cursor(const std::string& cursor, long long& epoch, long lon
     };
     if (!all_digits(a) || !all_digits(b))
         throw fail();
+    // Cap digit counts before stoll: an absurd value must reject as
+    // invalid_argument (caller error, HTTP 400), not escape as
+    // std::out_of_range (HTTP 500) -- same rule as the 3B parsers.
+    // 18 digits max stays below LLONG_MAX (~9.22e18).
+    if (a.size() > 18 || b.size() > 18)
+        throw fail();
     epoch = std::stoll(a);
     rowid = std::stoll(b);
 }

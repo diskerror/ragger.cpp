@@ -1379,8 +1379,15 @@ void rebuild_table_column_order(Impl& self,
                 std::multiset<std::string> out;
                 Stmt s(db, "PRAGMA foreign_key_check");
                 while (s.step()) {
-                    out.insert(std::format("{}|{}|{}", s.column_text(0),
-                                           s.column_int64(1), s.column_text(2)));
+                    // Full violation identity (table, rowid, parent, fkid):
+                    // two FK constraints on one table may point at the SAME
+                    // parent table (e.g. turn_summaries.turn_model_id and
+                    // summary_model_id -> models), so the 3-part form could
+                    // collide and misattribute a NEW violation as one of the
+                    // identical pre-existing ones in the multiset diff.
+                    out.insert(std::format("{}|{}|{}|{}", s.column_text(0),
+                                           s.column_int64(1), s.column_text(2),
+                                           s.column_int64(3)));
                 }
                 return out;
             };
@@ -1597,8 +1604,15 @@ void rebuild_table_column_order(Impl& self,
                 std::multiset<std::string> out;
                 Stmt s(db, "PRAGMA foreign_key_check");
                 while (s.step()) {
-                    out.insert(std::format("{}|{}|{}", s.column_text(0),
-                                           s.column_int64(1), s.column_text(2)));
+                    // Full violation identity (table, rowid, parent, fkid):
+                    // two FK constraints on one table may point at the SAME
+                    // parent table (e.g. turn_summaries.turn_model_id and
+                    // summary_model_id -> models), so the 3-part form could
+                    // collide and misattribute a NEW violation as one of the
+                    // identical pre-existing ones in the multiset diff.
+                    out.insert(std::format("{}|{}|{}|{}", s.column_text(0),
+                                           s.column_int64(1), s.column_text(2),
+                                           s.column_int64(3)));
                 }
                 return out;
             };

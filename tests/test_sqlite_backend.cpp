@@ -2320,6 +2320,27 @@ void test_p5_insight_layer(ragger::Embedder& emb) {
     CHECK(done["done"].size() == 1);
     CHECK(done["failed"].empty());
 
+    // ---- reject through an insight handle (review 7): pending -> retired,
+    // and the queue no longer lists it.
+    ragger::DecisionInput rj;
+    rj.text = "P5 pending insight to reject.";
+    rj.evidence = {ts};
+    rj.status = "pending";
+    int rj_id = db.store_insight(rj).id;
+    auto rej = db.agent_review("reject", {"insight:" + std::to_string(rj_id)});
+    CHECK(rej["done"].size() == 1);
+    CHECK(rej["failed"].empty());
+    {
+        ragger::AgentGetQuery g;
+        g.ids = {"insight:" + std::to_string(rj_id)};
+        auto got = db.agent_get(g);
+        CHECK(got["items"][0]["status"] == "retired");
+    }
+    bool still_listed = false;
+    for (const auto& item : db.agent_review("list", {})["pending"])
+        if (item["id"] == "insight:" + std::to_string(rj_id)) still_listed = true;
+    CHECK(!still_listed);
+
     // ---- project_briefing insights_current (superseded 'a' excluded)
     auto brief = db.project_briefing("P5gizmo");
     CHECK(brief.contains("insights_current"));
@@ -3063,6 +3084,28 @@ void test_p4_timeline_order_and_paging(ragger::Embedder& emb) {
         ragger::TimelineQuery bad; bad.cursor = "not-a-cursor"; db.agent_timeline(bad);
     } catch (const std::invalid_argument&) { threw = true; }
     CHECK(threw);
+
+    // Negative cursor forms (review 7): every malformed shape must reject as
+    // invalid_argument -- including overflowing digit runs, which must not
+    // escape as std::out_of_range (HTTP 500 instead of 400).
+    for (const char* bad_cursor : {
+            "123",                        // no colon
+            "123:",                       // empty rowid part
+            ":5",                         // empty epoch part
+            "a:b",                        // non-digits
+            "-1:5",                       // negative epoch ('-' is not a digit)
+            "1:-5",                       // negative rowid
+            "1:2:3",                      // extra colon
+            " 1:5",                       // leading space
+            "99999999999999999999:1",     // epoch overflow (>18 digits)
+            "1:99999999999999999999",     // rowid overflow
+            "99999999999999999999999999999999:1" /* absurd length */}) {
+        bool rejected = false;
+        try {
+            ragger::TimelineQuery bad; bad.cursor = bad_cursor; db.agent_timeline(bad);
+        } catch (const std::invalid_argument&) { rejected = true; }
+        CHECK(rejected);
+    }
 
     db.close();
     cleanup();
