@@ -83,6 +83,14 @@ struct ClosedRun {
  * This interface defines all methods that client code expects from a backend.
  * Concrete implementations (like sqlite::Backend) inherit from this and
  * implement the actual storage logic.
+ *
+ * One interface, deliberately (review 5B): splitting into narrower interfaces
+ * (UserBackend / SchemaIntrospectable / EmbeddingManageable + multiple
+ * inheritance) is deferred until a second implementation or a test-only
+ * consumer actually needs a narrower type. Today every consumer talks to
+ * RaggerMemory or the concrete sqlite::Backend, so a split would be pure
+ * ceremony across ~80 methods. The section banners below are the navigability
+ * aid; add new methods under the matching section, not at the end.
  */
 class StorageBackend {
 public:
@@ -90,6 +98,8 @@ public:
 
     /// Path to the database file.
     virtual std::string db_path() const = 0;
+
+    // --- Core writes & document-source management -----------------------
 
     /// Store text with metadata. Returns memory ID.
     /// `defer_embedding`: write the row with embedding=NULL, skipping the
@@ -182,6 +192,8 @@ public:
     /// std::invalid_argument on validation failure.
     virtual StructuredDecisionResult store_insight(const DecisionInput& in) = 0;
 
+    // --- Agent API (typed handles; see PHASE2/3/4/5-STEPS.md) -----------
+
     /// Layered agent search (agent API Phase 2). Returns handles + snippets
     /// only (full text via agent_get). Throws std::invalid_argument on an
     /// unknown layer name or a malformed since/until bound.
@@ -243,6 +255,8 @@ public:
     /// Returns {"done":[ids],"failed":[{"id":...,"error":...}]}.
     virtual json agent_review(const std::string& action,
                               const std::vector<std::string>& ids) = 0;
+
+    // --- Embedding write-back (deferred-embedding path) ------------------
 
     /// Write back a single row's embedding for the remaining context tables
     /// (documents already covered above). Returns true if a row was updated.

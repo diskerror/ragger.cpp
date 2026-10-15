@@ -239,6 +239,8 @@ add_library(ragger_core STATIC
     src/sqlite/write.cpp
     src/sqlite/search.cpp
     src/sqlite/agent_read.cpp
+    src/sqlite/agent_write.cpp
+    src/sqlite/agent_common.cpp
     src/sqlite/projects.cpp
     src/sqlite/maintenance.cpp
     src/user_store.cpp

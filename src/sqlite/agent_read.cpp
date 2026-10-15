@@ -1,11 +1,15 @@
-// Agent API Phase 2 reads: layered search (memory_search) and full-row reads
-// with hierarchy expansion / conversation-history paging (memory_get).
+// Agent API reads: layered search (memory_search), full-row reads with
+// hierarchy expansion / conversation-history paging (memory_get), and the
+// deterministic timeline (Phase 4). The write surface (agent_update /
+// agent_review) lives in agent_write.cpp; helpers shared by both surfaces
+// (agent_snippet / parse_agent_handle / fetch_agent_row) live in
+// agent_common.cpp.
 //
-// Design contract lives in StorageBackend's docs and PHASE2-STEPS.md; this
-// file implements Backend::Impl::agent_search / agent_get only. The hybrid
-// scoring itself is reused untouched (Impl::search); everything here is
-// post-filtering, handle formatting, and row fetches.
+// Design contract lives in StorageBackend's docs and PHASE2-STEPS.md; the
+// hybrid scoring itself is reused untouched (Impl::search); everything here
+// is post-filtering, handle formatting, and row fetches.
 #include "sqlite/backend_impl.h"
+#include "sqlite/agent_common.h"
 #include "embedder.h"
 #include "config.h"
 #include "util/time.h"
@@ -26,17 +30,11 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
-
 namespace ragger::sqlite {
 
 using json = nlohmann::json;
 
 namespace {
-
-// The six searchable layers, shared by agent_search's validation and the
-// typed-handle parser below.
-const std::set<std::string> kKnownLayers = {
-    "turn", "turn_summary", "summary", "document", "decision", "insight"};
 
 // ---- since/until resolution -------------------------------------------
 // Accepted formats (PHASE2-STEPS step 3): "YYYY-MM-DD",
@@ -100,51 +98,6 @@ std::string resolve_agent_time_bound(const std::string& s, bool end_of_day) {
     }
     return fail();
 }
-
-// ---- snippet -----------------------------------------------------------
-// First <=240 BYTES, cut at a whitespace boundary; "…" (3 bytes UTF-8) is
-// appended only when the text was actually cut. When no whitespace exists in
-// the window (one giant token), back off to a UTF-8 lead boundary so a
-// multi-byte character is never split.
-std::string agent_snippet(const std::string& text) {
-    constexpr size_t kMax = 240;
-    if (text.size() <= kMax) return text;
-    size_t cut = kMax;
-    size_t sp = text.find_last_of(" \t\n\r", kMax);
-    if (sp != std::string::npos && sp > 0) {
-        cut = sp;
-    } else {
-        while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80)
-            --cut;
-    }
-    return text.substr(0, cut) + "…";
-}
-
-// ---- typed handle ------------------------------------------------------
-// "<layer>:<rowid>" (API format only, never stored). Strict parse: exactly
-// one colon, known layer, all-digits positive rowid without leading zeros.
-// Hand-rolled (review 3B): runs on every agent_get/update call. Overflowing
-// ids reject as false — the regex version let 10+ digit ids reach std::stoi
-// and throw out_of_range.
-bool parse_agent_handle(const std::string& handle, std::string& layer, int& rowid) {
-    const size_t colon = handle.find(':');
-    if (colon == std::string::npos ||
-        handle.find(':', colon + 1) != std::string::npos)
-        return false;                       // not exactly one colon
-    layer = handle.substr(0, colon);
-    if (!kKnownLayers.count(layer)) return false;
-    if (colon + 1 >= handle.size() || handle[colon + 1] == '0') return false;
-    long long v = 0;
-    for (size_t i = colon + 1; i < handle.size(); ++i) {
-        const char c = handle[i];
-        if (c < '0' || c > '9') return false;
-        v = v * 10 + (c - '0');
-        if (v > std::numeric_limits<int>::max()) return false;
-    }
-    rowid = static_cast<int>(v);
-    return true;
-}
-
 } // anonymous namespace
 
 
@@ -156,7 +109,7 @@ bool parse_agent_handle(const std::string& handle, std::string& layer, int& rowi
 std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
     // ---- 1. validate ----------------------------------------------------
     for (const auto& l : q.layers)
-        if (!kKnownLayers.count(l))
+        if (!is_known_agent_layer(l))
             throw std::invalid_argument("unknown layer: '" + l + "'");
     const std::string since_b = q.since.empty() ? "" : resolve_agent_time_bound(q.since, false);
     const std::string until_b = q.until.empty() ? "" : resolve_agent_time_bound(q.until, true);
@@ -431,143 +384,6 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
 // agent_get — full rows by typed handle (mode 1) or paged session history
 // (mode 2). Exactly one mode per call.
 // =======================================================================
-namespace {
-
-// Row fetchers. Each returns the full row as JSON, or json(nullptr) when the
-// row does not exist. Shapes follow PHASE2-STEPS step 4: id/layer/text/created
-// plus the layer's own columns.
-json fetch_agent_row(sqlite3* db, const std::string& layer, int rowid) {
-    if (layer == "decision") {
-        Stmt s(db, "SELECT text, status, tags, trigger, rationale, scope, supersedes, "
-                   "datetime(created_at,'unixepoch','localtime') "
-                   "FROM decisions WHERE decision_id = ?");
-        s.bind(1, rowid);
-        if (!s.step()) return json(nullptr);
-        json item = {
-            {"id",      std::format("decision:{}", rowid)},
-            {"layer",   "decision"},
-            {"text",    s.column_text(0)},
-            {"status",  s.column_text(1)},
-            {"tags",    s.column_text(2)},
-            {"trigger", s.is_null(3) ? json(nullptr) : json(s.column_text(3))},
-            {"rationale", s.is_null(4) ? json(nullptr) : json(s.column_text(4))},
-            {"scope",   s.is_null(5) ? json(nullptr) : json(s.column_text(5))},
-            {"supersedes", s.is_null(6) ? json(nullptr) : json(s.column_int(6))},
-            {"created", s.column_text(7)},
-        };
-        json ev = json::array();
-        Stmt e(db, "SELECT turn_summary_id FROM decision_evidence WHERE decision_id = ? "
-                   "ORDER BY turn_summary_id");
-        e.bind(1, rowid);
-        while (e.step()) ev.push_back(e.column_int(0));
-        item["evidence"] = std::move(ev);
-        return item;
-    }
-    if (layer == "insight") {
-        // Same shape as a decision row (Phase 5: shared vocabulary).
-        Stmt s(db, "SELECT text, status, tags, trigger, rationale, scope, supersedes, "
-                   "datetime(created_at,'unixepoch','localtime') "
-                   "FROM insights WHERE insight_id = ?");
-        s.bind(1, rowid);
-        if (!s.step()) return json(nullptr);
-        json item = {
-            {"id",      std::format("insight:{}", rowid)},
-            {"layer",   "insight"},
-            {"text",    s.column_text(0)},
-            {"status",  s.column_text(1)},
-            {"tags",    s.column_text(2)},
-            {"trigger", s.is_null(3) ? json(nullptr) : json(s.column_text(3))},
-            {"rationale", s.is_null(4) ? json(nullptr) : json(s.column_text(4))},
-            {"scope",   s.is_null(5) ? json(nullptr) : json(s.column_text(5))},
-            {"supersedes", s.is_null(6) ? json(nullptr) : json(s.column_int(6))},
-            {"created", s.column_text(7)},
-        };
-        json ev = json::array();
-        Stmt e(db, "SELECT turn_summary_id FROM insight_evidence WHERE insight_id = ? "
-                   "ORDER BY turn_summary_id");
-        e.bind(1, rowid);
-        while (e.step()) ev.push_back(e.column_int(0));
-        item["evidence"] = std::move(ev);
-        return item;
-    }
-    if (layer == "turn") {
-        Stmt s(db, "SELECT user_text, assistant_text, "
-                   "datetime(created_at,'unixepoch','localtime'), "
-                   "COALESCE((SELECT guid FROM sessions WHERE session_id = turns.session_id), ''), "
-                   "COALESCE((SELECT name FROM models WHERE model_id = turns.model_id), '') "
-                   "FROM turns WHERE turn_id = ?");
-        s.bind(1, rowid);
-        if (!s.step()) return json(nullptr);
-        return {
-            {"id",            std::format("turn:{}", rowid)},
-            {"layer",         "turn"},
-            {"text",          s.column_text(0)},   // user_text is the turn's primary text
-            {"user_text",     s.column_text(0)},
-            {"assistant_text", s.is_null(1) ? json(nullptr) : json(s.column_text(1))},
-            {"created",       s.column_text(2)},
-            {"session",       s.column_text(3)},
-            {"model",         s.column_text(4)},
-        };
-    }
-    if (layer == "turn_summary") {
-        Stmt s(db, "SELECT text, turn_id, "
-                   "datetime(turn_datetime,'unixepoch','localtime'), "
-                   "COALESCE((SELECT guid FROM sessions WHERE session_id = turn_summaries.session_id), '') "
-                   "FROM turn_summaries WHERE turn_summary_id = ?");
-        s.bind(1, rowid);
-        if (!s.step()) return json(nullptr);
-        return {
-            {"id",      std::format("turn_summary:{}", rowid)},
-            {"layer",   "turn_summary"},
-            {"text",    s.column_text(0)},
-            {"turn_id", s.is_null(1) ? json(nullptr) : json(s.column_int(1))},
-            {"created", s.column_text(2)},
-            {"session", s.column_text(3)},
-        };
-    }
-    if (layer == "summary") {
-        Stmt s(db, "SELECT text, level, tags, "
-                   "datetime(created_at,'unixepoch','localtime'), "
-                   "datetime(updated_at,'unixepoch','localtime'), "
-                   "COALESCE((SELECT guid FROM sessions WHERE session_id = summaries.session_id), '') "
-                   "FROM summaries WHERE summary_id = ?");
-        s.bind(1, rowid);
-        if (!s.step()) return json(nullptr);
-        return {
-            {"id",      std::format("summary:{}", rowid)},
-            {"layer",   "summary"},
-            {"text",    s.column_text(0)},
-            {"level",   s.column_text(1)},
-            {"tags",    s.column_text(2)},
-            {"created", s.column_text(3)},
-            {"updated", s.column_text(4)},
-            {"session", s.column_text(5)},
-        };
-    }
-    if (layer == "document") {
-        Stmt s(db, "SELECT d.text, d.tags, d.chunk_index, d.document_source_id, "
-                   "COALESCE(ds.title, ''), "
-                   "datetime(COALESCE(d.modified_on, ds.imported_at, 0),'unixepoch','localtime') "
-                   "FROM documents d "
-                   "LEFT JOIN document_sources ds ON ds.document_source_id = d.document_source_id "
-                   "WHERE d.document_id = ?");
-        s.bind(1, rowid);
-        if (!s.step()) return json(nullptr);
-        return {
-            {"id",                 std::format("document:{}", rowid)},
-            {"layer",              "document"},
-            {"text",               s.column_text(0)},
-            {"tags",               s.column_text(1)},
-            {"chunk_index",        s.is_null(2) ? json(nullptr) : json(s.column_int(2))},
-            {"document_source_id", s.is_null(3) ? json(nullptr) : json(s.column_int(3))},
-            {"title",              s.column_text(4)},
-            {"created",            s.column_text(5)},
-        };
-    }
-    return json(nullptr);
-}
-
-} // anonymous namespace
 
 
 // =======================================================================
@@ -991,203 +807,5 @@ json Backend::Impl::agent_get(const AgentGetQuery& q) {
     };
 }
 
-
-// =======================================================================
-// agent_update — metadata-only curation (Phase 4).
-// Text never changes in place; a text change is a new row with supersedes.
-// =======================================================================
-namespace {
-
-// Decision status transition table (PHASE4-STEPS step 2). 'superseded' is
-// reachable only through `supersedes` on a new decision, never here.
-bool decision_transition_ok(const std::string& from, const std::string& to) {
-    static const std::map<std::string, std::set<std::string>> kAllowed = {
-        {"pending",     {"current", "provisional", "retired"}},
-        {"provisional", {"current", "retired"}},
-        {"current",     {"provisional", "retired"}},
-        {"roadmap",     {"current", "provisional", "retired"}},
-        {"superseded",  {}},
-        {"retired",     {}},
-    };
-    auto it = kAllowed.find(from);
-    if (it == kAllowed.end()) return false;
-    return it->second.count(to) > 0;
-}
-
-} // anonymous namespace
-
-json Backend::Impl::agent_update(const UpdateRequest& req) {
-    // Rule 1: text is never edited in place.
-    if (req.text.has_value())
-        throw std::invalid_argument(
-            "text cannot be edited in place; store a new decision/note with supersedes");
-
-    std::string layer;
-    int rowid = 0;
-    if (!parse_agent_handle(req.id, layer, rowid))
-        throw std::invalid_argument("bad handle: '" + req.id + "'");
-
-    // Rule 2: agents can't modify turn / turn_summary / document rows.
-    if (layer == "turn" || layer == "turn_summary" || layer == "document")
-        throw std::invalid_argument(
-            layer + " rows are not agent-editable");
-
-    if (layer == "summary") {
-        // Rule 3: only agent-written notes (no model_id) are editable;
-        // summarizer rollups carry the summarizer's model and are history.
-        Stmt f(db, "SELECT model_id FROM summaries WHERE summary_id = ?");
-        f.bind(1, rowid);
-        if (!f.step())
-            throw std::invalid_argument("summary " + std::to_string(rowid) + " not found");
-        if (!f.is_null(0))
-            throw std::invalid_argument(
-                "summary rows written by the summarizer are not editable; only agent notes are");
-        if (req.status.has_value())
-            throw std::invalid_argument("summaries have no status");
-
-        std::string set;
-        if (req.tags.has_value())
-            set += "tags = ?, ";
-        if (req.project.has_value()) {
-            if (!req.project->empty() && !resolve_project(*req.project))
-                throw std::invalid_argument(
-                    std::format("project '{}' does not exist", *req.project));
-            set += "project_id = ?, ";
-        }
-        if (set.empty())
-            throw std::invalid_argument("nothing to update");
-        set.erase(set.end() - 2, set.end());   // trailing ", "
-        Stmt u(db, "UPDATE summaries SET " + set +
-                   ", updated_at = unixepoch() WHERE summary_id = ?");
-        int b = 1;
-        if (req.tags.has_value()) u.bind(b++, *req.tags);
-        if (req.project.has_value()) {
-            if (req.project->empty()) u.bind_null(b++);
-            else u.bind(b++, *resolve_project(*req.project));
-        }
-        u.bind(b, rowid);
-        u.exec();
-        invalidate_cache();
-    } else if (layer == "decision" || layer == "insight") {
-        // Rule 4: status transitions per the table; tags/project free.
-        // Insights share the decision transition table verbatim (P5 step 4).
-        const bool is_dec = layer == "decision";
-        const char* table = is_dec ? "decisions" : "insights";
-        const char* pk    = is_dec ? "decision_id" : "insight_id";
-        Stmt f(db, std::format("SELECT status FROM {} WHERE {} = ?", table, pk));
-        f.bind(1, rowid);
-        if (!f.step())
-            throw std::invalid_argument(layer + " " + std::to_string(rowid) + " not found");
-        const std::string old_status = f.column_text(0);
-
-        std::string set;
-        int b = 1;
-        std::optional<int> pid_bind;      // tri-state: nullopt=absent, -1=NULL
-        bool clear_project = false;
-        if (req.status.has_value()) {
-            static const std::set<std::string> kStatuses = {
-                "current", "provisional", "pending", "roadmap", "retired"};
-            if (!kStatuses.count(*req.status))
-                throw std::invalid_argument("unknown " + layer + " status: '" + *req.status + "'");
-            if (*req.status == "superseded")
-                throw std::invalid_argument(std::format(
-                    "status 'superseded' is set only by storing a superseding {}", layer));
-            // Strict table: same-status is not a listed transition either
-            // (the review queue relies on re-approving failing).
-            if (!decision_transition_ok(old_status, *req.status))
-                throw std::invalid_argument(std::format(
-                    "illegal {} status transition: {} -> {}", layer, old_status, *req.status));
-            set += "status = ?, ";
-        }
-        if (req.tags.has_value()) set += "tags = ?, ";
-        if (req.project.has_value()) {
-            set += "project_id = ?, ";
-            if (req.project->empty()) clear_project = true;
-            else {
-                pid_bind = resolve_project(*req.project);
-                if (!pid_bind)
-                    throw std::invalid_argument(
-                        std::format("project '{}' does not exist", *req.project));
-            }
-        }
-        if (set.empty())
-            throw std::invalid_argument("nothing to update");
-        set.erase(set.end() - 2, set.end());   // trailing ", "
-        Stmt u(db, std::format("UPDATE {} SET {} WHERE {} = ?", table, set, pk));
-        if (req.status.has_value()) u.bind(b++, *req.status);
-        if (req.tags.has_value())   u.bind(b++, *req.tags);
-        if (req.project.has_value()) {
-            if (clear_project) u.bind_null(b++);
-            else u.bind(b++, *pid_bind);
-        }
-        u.bind(b, rowid);
-        u.exec();
-        // rule 5: any structured-row change refreshes its search cache
-        if (is_dec) invalidate_dec_cache();
-        else        invalidate_ins_cache();
-    } else {
-        throw std::invalid_argument("layer not updatable: " + layer);
-    }
-
-    return fetch_agent_row(db, layer, rowid);
-}
-
-
-// =======================================================================
-// agent_review — pending-decision queue (Phase 4). Reuses agent_update's
-// transition code; a non-pending id fails only that id.
-// =======================================================================
-json Backend::Impl::agent_review(const std::string& action,
-                                 const std::vector<std::string>& ids) {
-    if (action == "list") {
-        // Pending decisions AND pending insights (P5 step 4), oldest first
-        // across both queues.
-        std::vector<std::pair<long long, json>> rows;
-        auto collect = [&](const char* table, const char* pk, const char* source) {
-            Stmt s(db, std::format(
-                "SELECT {}, ifnull(trigger,''), text, created_at FROM {} "
-                "WHERE status = 'pending'", pk, table));
-            while (s.step()) {
-                rows.emplace_back(s.column_int64(3), json{
-                    {"id",      std::format("{}:{}", source, s.column_int(0))},
-                    {"trigger", s.column_text(1)},
-                    {"snippet", agent_snippet(s.column_text(2))},
-                });
-            }
-        };
-        collect("decisions", "decision_id", "decision");
-        collect("insights", "insight_id", "insight");
-        std::stable_sort(rows.begin(), rows.end(),
-                         [](const auto& a, const auto& b) { return a.first < b.first; });
-        json items = json::array();
-        for (auto& [created, item] : rows)
-            items.push_back(std::move(item));
-        return json{{"pending", std::move(items)}};
-    }
-    if (action != "approve" && action != "reject")
-        throw std::invalid_argument("action must be one of: list, approve, reject");
-    if (ids.empty())
-        throw std::invalid_argument("ids required for approve/reject");
-
-    const std::string to = (action == "approve") ? "current" : "retired";
-    json done = json::array();
-    json failed = json::array();
-    for (const auto& raw : ids) {
-        // Accept "decision:<id>" or a bare integer.
-        std::string handle = raw;
-        if (handle.find(':') == std::string::npos)
-            handle = "decision:" + handle;
-        try {
-            UpdateRequest req;
-            req.id = handle;
-            req.status = to;
-            agent_update(req);
-            done.push_back(raw);
-        } catch (const std::invalid_argument& e) {
-            failed.push_back({{"id", raw}, {"error", e.what()}});
-        }
-    }
-    return json{{"done", std::move(done)}, {"failed", std::move(failed)}};
-}
 
 } // namespace ragger::sqlite
