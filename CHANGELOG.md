@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+- Fetched dependencies are now pinned and cloned/downloaded at configure time instead of living in (or being silently missing from) the tree: `tokenizers-cpp` is fetched at the commit in `cmake/pins.cmake` (previously a git-ignored local copy, so a fresh clone could not build); c_lib's GitHub fallback is pinned the same way; ONNX Runtime archives are verified against pinned SHA-256 checksums
+- `-DDEPS_LATEST=ON` tracks each upstream's newest commit for development and records what it used in `build/deps-resolved.cmake`; `scripts/pin-deps.sh` writes those commits into `cmake/pins.cmake` before tagging; `update_deps` target refreshes on demand
+- README/getting-started corrected: tokenizers-cpp was documented as vendored in the repo
+
 ## v0.16.2.2
 - SQLite now comes from c_lib's vendored build (`diskerror_sqlite3`, SQLite 3.54.0) with `SQLITE_DEFAULT_FOREIGN_KEYS=1` — FK rules are enforced on every connection by default; `PRAGMA foreign_keys = OFF` still works for migrations. `-DRAGGER_SYSTEM_SQLITE=ON` links the system library instead
 - Startup integrity check: every DB open verifies `PRAGMA foreign_keys` is actually on and refuses to run otherwise (`ERR_FOREIGN_KEYS_OFF`)

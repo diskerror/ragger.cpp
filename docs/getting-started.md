@@ -63,10 +63,11 @@ sudo dnf install gcc-c++ cmake pkgconf-pkg-config \
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ```
 
-Vendored (already in the repo): cpp-httplib, tokenizers-cpp sources,
-nlohmann/json. ONNX Runtime is auto-downloaded at configure time for
-your platform; drop a `vendor/onnxruntime/` override in place for
-offline builds.
+Vendored (checked in): cpp-httplib, nlohmann/json. tokenizers-cpp (pinned
+commit) and ONNX Runtime (SHA-256 verified) are downloaded at configure time
+into the build dir, so the first configure needs network and `git`; a
+`vendor/onnxruntime/` override or `-DFETCHCONTENT_SOURCE_DIR_TOKENIZERS_CPP=/path`
+works for offline builds. Versions are pinned in `cmake/pins.cmake`.
 
 `scripts/install-bin.sh` downloads the all-MiniLM-L6-v2 embedding model on
 first run (~90 MB). Re-run the script to retry if the network was down.

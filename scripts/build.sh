@@ -115,7 +115,15 @@ esac
 
 # Each flag has its own build dir, so the cache never goes stale against a
 # different flag value. Re-run cmake only when unconfigured or CMakeLists changed.
-if [ ! -f Makefile ] || [ ../CMakeLists.txt -nt Makefile ]; then
+# Dev presets (local, git-ignored) may set DEPS_LATEST=ON to track upstream's
+# newest dependency commits; otherwise cmake/pins.cmake's pinned commits are used.
+DEPS_FLAG=""
+if [ -f ../CMakeUserPresets.json ]; then
+    DEPS_LATEST_VAL=$(python3 -c "import json; d=json.load(open('../CMakeUserPresets.json')); print(d['configurePresets'][0].get('cacheVariables',{}).get('DEPS_LATEST',''))" 2>/dev/null || true)
+    [ -n "$DEPS_LATEST_VAL" ] && DEPS_FLAG="-DDEPS_LATEST=$DEPS_LATEST_VAL"
+fi
+
+if [ ! -f Makefile ] || [ ../CMakeLists.txt -nt Makefile ] || [ ../cmake/pins.cmake -nt Makefile ]; then
     echo "[+] Configuring (RAGGER_STATS=$RAGGER_STATS_FLAG) in $BUILD_DIR/..."
 
     # Use dev preset (local c_lib) if CMakeUserPresets.json exists,
@@ -129,7 +137,7 @@ if [ ! -f Makefile ] || [ ../CMakeLists.txt -nt Makefile ]; then
         fi
     fi
 
-    cmake .. $CMAKE_FLAGS $LOCAL_C_LIB -DRAGGER_STATS="$RAGGER_STATS_FLAG"
+    cmake .. $CMAKE_FLAGS $LOCAL_C_LIB $DEPS_FLAG -DRAGGER_STATS="$RAGGER_STATS_FLAG"
 fi
 
 echo "[+] Building with $JOBS threads..."
