@@ -1,9 +1,17 @@
 #include "summarizer.h"
+#include "summarizer_service.h"
 #include "inference.h"
+#include "embedder.h"
+#include "sqlite/backend.h"
+#include "test_env.h"
 
 #include <cassert>
+#include <chrono>
+#include <memory>
 #include <print>
 #include <string>
+#include <thread>
+#include <sqlite3.h>
 
 using ragger::is_system_injected_turn;
 using ragger::summarize_transcript;
@@ -146,13 +154,90 @@ void test_strip_thinking() {
     std::println(" ok");
 }
 
+// PHASE1 Step 6: the summarizer resolves the inference client through a
+// provider ONCE PER JOB — a job enqueued after the provider starts handing
+// out a different client must observe the new one (C §1.3). Hermetic: the
+// clients have no endpoints, and the turns are trivial (<80 chars), so the
+// L2 path only marks them summarized with the client's memory_model — no
+// network, no model.
+void test_summarizer_provider_per_job(const std::string& base) {
+    std::println("  test_summarizer_provider_per_job...");
+
+    namespace fs = std::filesystem;
+    const std::string dir = base + "/sumprov";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const std::string db_path = dir + "/memories.db";
+
+    ragger::Embedder emb;  // default: disabled — no embedding needed here
+    ragger::sqlite::Backend backend(emb, db_path);
+
+    int calls = 0;
+    auto provider = [&calls]() -> std::shared_ptr<ragger::InferenceClient> {
+        ++calls;
+        auto c = std::make_shared<ragger::InferenceClient>(
+            std::vector<ragger::Endpoint>{}, "", 4096);  // no endpoints
+        c->memory_model = "prov-model-" + std::to_string(calls);
+        return c;
+    };
+
+    ragger::SummarizerService svc(backend, provider);
+    svc.start();
+
+    // Store turns AFTER start so the startup catch-up scan (empty DB)
+    // cannot race them; enqueue explicitly.
+    int t1 = backend.store_turn("ping one", "reply one is long enough ok");
+    int t2 = backend.store_turn("ping two", "reply two is long enough ok");
+    CHECK(t1 > 0 && t2 > 0);
+    svc.enqueue_turn(t1, "ping one", "reply one is long enough ok", "", "", "");
+    svc.enqueue_turn(t2, "ping two", "reply two is long enough ok", "", "", "");
+
+    auto wait_for = [&](int turn_id) {
+        for (int i = 0; i < 200 && !backend.turn_summary_exists(turn_id); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        CHECK(backend.turn_summary_exists(turn_id));
+    };
+    wait_for(t1);
+    wait_for(t2);
+    svc.stop();
+
+    // Read back the summary model names recorded per turn.
+    sqlite3* db = nullptr;
+    CHECK(sqlite3_open(db_path.c_str(), &db) == SQLITE_OK);
+    auto model_for = [&](int turn_id) -> std::string {
+        sqlite3_stmt* st = nullptr;
+        sqlite3_prepare_v2(db,
+            "SELECT m.name FROM turn_summaries ts "
+            "JOIN models m ON m.model_id = ts.summary_model_id "
+            "WHERE ts.turn_id = ?", -1, &st, nullptr);
+        sqlite3_bind_int(st, 1, turn_id);
+        std::string name;
+        if (sqlite3_step(st) == SQLITE_ROW)
+            name = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+        sqlite3_finalize(st);
+        return name;
+    };
+    const std::string m1 = model_for(t1);
+    const std::string m2 = model_for(t2);
+    sqlite3_close(db);
+
+    // Both jobs got a provider-issued client, and each job saw its own
+    // (distinct) client — a cached raw pointer could not do that.
+    CHECK(m1.rfind("prov-model-", 0) == 0);
+    CHECK(m2.rfind("prov-model-", 0) == 0);
+    CHECK(m1 != m2);
+    std::println(" OK (jobs saw {} and {})", m1, m2);
+}
+
 int main() {
+    TestEnv env("summarizer");
     std::println("test_summarizer:");
     test_detects_system_markers();
     test_ignores_human_turns();
     test_assistant_only_trivial();
     test_strip_system_prefix();
     test_strip_thinking();
+    test_summarizer_provider_per_job(env.base());
     std::println("All summarizer tests passed.");
     return 0;
 }

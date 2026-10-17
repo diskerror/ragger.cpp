@@ -120,4 +120,63 @@ private:
     sqlite3_stmt* stmt_ = nullptr;
 };
 
+/**
+ * Transaction — RAII wrapper for BEGIN IMMEDIATE / COMMIT / ROLLBACK.
+ *
+ * The constructor runs BEGIN IMMEDIATE and owns the transaction. commit()
+ * ends it; if the destructor runs with the transaction still open it issues
+ * ROLLBACK so an early return or a thrown exception can never leave a half-
+ * applied write or a dangling open transaction.
+ *
+ * Nesting rule: several store paths are called from callers that open their
+ * own transaction. A nested BEGIN would throw "cannot start a transaction
+ * within a transaction", so when the constructor finds autocommit already
+ * off it does NOTHING and does not own: commit() and the destructor are both
+ * no-ops and the outer owner decides. The inner scope thereby simply joins
+ * the outer transaction.
+ */
+class Transaction {
+public:
+    explicit Transaction(sqlite3* db) : db_(db) {
+        if (!sqlite3_get_autocommit(db)) {
+            // Already inside a transaction opened by an outer caller: join it,
+            // do not own it — the outer owner decides commit vs rollback.
+            owns_ = false;
+            return;
+        }
+        char* err = nullptr;
+        if (sqlite3_exec(db_, "BEGIN IMMEDIATE", nullptr, nullptr, &err) != SQLITE_OK) {
+            std::string msg = err ? err : "BEGIN IMMEDIATE failed";
+            sqlite3_free(err);
+            throw std::runtime_error("sqlite BEGIN failed: " + msg);
+        }
+        owns_ = true;
+    }
+    ~Transaction() noexcept {
+        if (owns_ && !committed_) {
+            // Errors ignored: nothing useful can be done from a destructor.
+            sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+        }
+    }
+
+    Transaction(const Transaction&) = delete;
+    Transaction& operator=(const Transaction&) = delete;
+
+    void commit() {
+        if (!owns_) return;  // joined an outer transaction: it decides
+        char* err = nullptr;
+        if (sqlite3_exec(db_, "COMMIT", nullptr, nullptr, &err) != SQLITE_OK) {
+            std::string msg = err ? err : "COMMIT failed";
+            sqlite3_free(err);
+            throw std::runtime_error("sqlite COMMIT failed: " + msg);
+        }
+        committed_ = true;
+    }
+
+private:
+    sqlite3* db_;
+    bool owns_ = false;
+    bool committed_ = false;
+};
+
 } // namespace ragger

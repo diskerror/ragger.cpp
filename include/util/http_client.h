@@ -13,7 +13,7 @@
  *   util::HttpClient http;
  *   auto r = http.post(url, body.dump(),
  *                       {"Content-Type: application/json",
- *                        "Authorization: *** " + api_key});
+ *                        util::bearer_header(api_key)});
  *   if (!r.ok()) throw std::runtime_error(r.error);
  *   if (r.status != 200) ...
  *   auto json = nlohmann::json::parse(r.body);
@@ -28,9 +28,18 @@
 #include <curl/curl.h>
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ragger::util {
+
+/// The one place the Bearer auth-header scheme literal is spelled. Commit
+/// 340ab92 committed a scrubbed three-asterisk marker where the scheme word
+/// belonged (a tool's output redaction pasted back as source), which made
+/// every keyed request 401. Build auth headers with this, never a pasted
+/// literal; scripts/check-source.sh fails the release gate on scrubbed
+/// markers in the tree.
+std::string bearer_header(std::string_view key);
 
 class HttpClient {
 public:

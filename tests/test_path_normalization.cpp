@@ -8,6 +8,7 @@
 #include "config.h"
 #include "embedder.h"
 #include "sqlite/backend.h"
+#include "test_env.h"
 #include <cassert>
 #include <cstdlib>
 #include <filesystem>
@@ -129,14 +130,14 @@ void test_normalize_embedded_in_longer_text(ragger::Embedder& emb) {
 }
 
 int main() {
+    TestEnv env("path_normalization");  // must be first: isolates from ~/.ragger
     std::println("Running path normalization tests:");
 
-    ragger::init_config();
     auto cfg = ragger::config();
     assert(cfg.normalize_home_path == true);
 
     // Embedder needed for sqlite::Backend store()
-    auto model_dir = cfg.resolved_model_dir();
+    auto model_dir = env.model_dir();
     if (!std::filesystem::exists(model_dir + "/model.onnx") && !std::filesystem::exists(model_dir + "/onnx/model.onnx")) {
         std::cerr << "Skipping path normalization tests: model not found at " << model_dir << "\n";
         return 0;

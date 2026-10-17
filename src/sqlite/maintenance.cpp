@@ -310,7 +310,16 @@ namespace fs = std::filesystem;
     // or one table when `table` != "all".
     int Backend::Impl::rebuild_embeddings(Embedder& emb_ref, bool progress, const std::string& table) {
         if (!embedder_usable(emb_ref)) return 0;
-        return embed_tables(emb_ref, /*only_missing=*/false, progress, table);
+        int n = embed_tables(emb_ref, /*only_missing=*/false, progress, table);
+        // embed_tables invalidates the summary/doc/decision caches only; a
+        // full rebuild touches every corpus (turns + insights included), and
+        // a dtype change makes every cached decoded vector stale — drop all.
+        invalidate_cache();
+        invalidate_doc_cache();
+        invalidate_dec_cache();
+        invalidate_ins_cache();
+        invalidate_turn_cache();
+        return n;
     }
 
 
@@ -485,10 +494,17 @@ namespace fs = std::filesystem;
         // Lean v2 summaries expose level / tags / timestamp. Filter
         // on those columns; any other requested key matches nothing (there is
         // no free-form metadata blob in the lean schema).
-        std::string sql = "SELECT summary_id, text, level, tags, created_at "
+        // created_at is an INTEGER epoch: after/before arrive as "%F %T"
+        // strings and must be resolved to ints (raw-string comparison never
+        // matched — same bug class as summary_exists_exact). The returned
+        // timestamp renders as a datetime string like every other read
+        // (intentional behavior change: this used to return the raw epoch).
+        std::string sql = "SELECT summary_id, text, level, tags, "
+                          "datetime(created_at,'unixepoch','localtime') "
                           "FROM summaries";
         std::string where;
         std::vector<std::string> binds;
+        std::vector<int64_t> epoch_binds;
 
         for (auto it = metadata_filter.begin(); it != metadata_filter.end(); ++it) {
             const std::string& k = it.key();
@@ -506,11 +522,11 @@ namespace fs = std::filesystem;
 
         if (!after.empty()) {
             where += (where.empty() ? " WHERE " : " AND ") + std::string("created_at >= ?");
-            binds.push_back(after);
+            epoch_binds.push_back(resolve_epoch(after));
         }
         if (!before.empty()) {
             where += (where.empty() ? " WHERE " : " AND ") + std::string("created_at < ?");
-            binds.push_back(before);
+            epoch_binds.push_back(resolve_epoch(before));
         }
 
         sql += where + " ORDER BY created_at DESC";
@@ -519,6 +535,11 @@ namespace fs = std::filesystem;
         Stmt stmt(db, sql);
         for (size_t i = 0; i < binds.size(); ++i) {
             stmt.bind(static_cast<int>(i + 1), binds[i]);
+        }
+        // after/before always trail the metadata binds (their WHERE fragments
+        // are appended last), so binding them after keeps positional order.
+        for (size_t i = 0; i < epoch_binds.size(); ++i) {
+            stmt.bind(static_cast<int>(binds.size() + i + 1), epoch_binds[i]);
         }
 
         while (stmt.step()) {

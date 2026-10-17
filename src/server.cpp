@@ -113,8 +113,20 @@ struct Server::Impl {
     int             port;
     std::string     server_token_;
     std::optional<UserInfo> default_user_;
-    std::unique_ptr<InferenceClient>    inference_;
+    std::shared_ptr<InferenceClient>    inference_;
+    mutable std::mutex                  inference_mu_;  // guards inference_ (C §1.3)
     std::unique_ptr<SummarizerService>  summarizer_;
+
+    /// Snapshot accessor: callers hold the returned shared_ptr for as long
+    /// as they need the client, independent of any concurrent reload.
+    std::shared_ptr<InferenceClient> inference() const {
+        std::lock_guard<std::mutex> lk(inference_mu_);
+        return inference_;
+    }
+    void set_inference(std::shared_ptr<InferenceClient> c) {
+        std::lock_guard<std::mutex> lk(inference_mu_);
+        inference_ = std::move(c);
+    }
 
     // Per-user memory cache (username → RaggerMemory)
     std::unordered_map<std::string, std::unique_ptr<RaggerMemory>> user_memories_;
@@ -200,23 +212,26 @@ struct Server::Impl {
             Diskerror::Logger::info(std::format(lang::MSG_WARMUP_ERROR, e.what()));
         }
         // Preload default model on local inference engines
-        if (inference_) {
-            preload_local_model(inference_->model);
+        if (auto inf = inference()) {
+            preload_local_model(inf, inf->model);
         }
     }
 
     /// Preload a model if its endpoint is local (non-commercial).
-    /// Runs in background thread to avoid blocking startup.
-    void preload_local_model(const std::string& model_name) {
-        if (model_name.empty() || !inference_) return;
+    /// Runs in background thread to avoid blocking startup. Takes the
+    /// client by shared_ptr copy — the detached thread must not capture
+    /// `this` and race a reload/teardown (C §1.3).
+    void preload_local_model(std::shared_ptr<InferenceClient> inf,
+                             const std::string& model_name) {
+        if (model_name.empty() || !inf) return;
         try {
-            auto& ep = inference_->resolve_endpoint(model_name);
+            auto& ep = inf->resolve_endpoint(model_name);
             if (!ep.is_local()) return;
         } catch (...) {
             return;
         }
-        std::thread([this, model_name]() {
-            auto err = inference_->ensure_model_loaded(model_name);
+        std::thread([inf, model_name]() {
+            auto err = inf->ensure_model_loaded(model_name);
             if (err.empty()) {
                 Diskerror::Logger::info(std::format(lang::MSG_PRELOADED_MODEL, model_name));
             } else {
@@ -357,8 +372,9 @@ struct Server::Impl {
                             Diskerror::Logger::info(std::format(ragger::lang::MSG_CONFIG_RELOADED_N, n));
                             // Re-initialize inference client if endpoints changed
                             try {
-                                inference_ = std::make_unique<InferenceClient>(
+                                auto fresh = std::make_shared<InferenceClient>(
                                     InferenceClient::from_config(config()));
+                                set_inference(std::move(fresh));
                                 Diskerror::Logger::info(lang::MSG_INFERENCE_CLIENT_OK);
                             } catch (const std::exception& e) {
                                 Diskerror::Logger::critical(std::format(lang::ERR_INFERENCE_CLIENT_FAIL, e.what()));
@@ -393,8 +409,9 @@ struct Server::Impl {
         const auto& cfg = config();
         auto client = InferenceClient::from_config(cfg);
         if (!client.endpoints.empty()) {
-            inference_ = std::make_unique<InferenceClient>(std::move(client));
-            Diskerror::Logger::info(std::format(lang::MSG_INFERENCE_ENABLED, inference_->endpoints.size()));
+            auto n = client.endpoints.size();
+            set_inference(std::make_shared<InferenceClient>(std::move(client)));
+            Diskerror::Logger::info(std::format(lang::MSG_INFERENCE_ENABLED, n));
         }
     }
 
@@ -1730,7 +1747,7 @@ bool Server::run() {
     // and catches up any turns that were captured via MCP while the daemon
     // was down. See SummarizerService doc for the timestamp-linkage rule.
     pImpl->summarizer_ = std::make_unique<SummarizerService>(
-        *pImpl->memory.backend(), pImpl->inference_.get());
+        *pImpl->memory.backend(), [impl = pImpl.get()] { return impl->inference(); });
     pImpl->summarizer_->start();
 
     // Launch each enabled listener on its own thread. listen() blocks until

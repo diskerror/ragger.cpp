@@ -212,6 +212,8 @@ public:
     /// Rebuild embeddings for all stored documents. Returns doc count.
     int rebuild_embeddings(Embedder& embedder, bool progress = true,
                            const std::string& table = "all") override;
+    void set_embedder(Embedder& embedder) override;
+    void set_vector_type(vector_codec::VectorType t) override;
     int backfill_embeddings(Embedder& embedder,
                             const std::string& table = "all") override;
     uint8_t embedding_version() const override;

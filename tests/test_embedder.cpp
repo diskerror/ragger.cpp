@@ -7,6 +7,7 @@
  */
 #include "config.h"
 #include "embedder.h"
+#include "test_env.h"
 #include <cassert>
 #include <cmath>
 #include <filesystem>
@@ -107,11 +108,11 @@ void test_semantic_similarity(ragger::Embedder& emb) {
 }
 
 int main() {
+    TestEnv env("embedder");  // must be first: isolates from ~/.ragger
     std::println("Running embedder tests:");
 
-    ragger::init_config();
     auto cfg = ragger::config();
-    auto model_dir = cfg.resolved_model_dir();
+    auto model_dir = env.model_dir();
     if (!std::filesystem::exists(model_dir + "/model.onnx") && !std::filesystem::exists(model_dir + "/onnx/model.onnx")) {
         std::cerr << "Skipping embedder tests: model not found at " << model_dir << "\n";
         return 0;

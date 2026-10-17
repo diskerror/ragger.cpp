@@ -8,6 +8,8 @@ export PATH="/usr/sbin:/usr/bin:/bin:/usr/local/bin:$PATH"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
+"$SCRIPT_DIR/check-source.sh"
+
 echo "=== Test pass 1/2: RAGGER_STATS=ON ==="
 "$SCRIPT_DIR/build.sh" clean --stats
 cd build

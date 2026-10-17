@@ -11,11 +11,14 @@
 #include "auth.h"
 #include "util/time.h"
 #include "util/fs.h"
+#include "util/sqlite.h"
+#include "test_env.h"
 #include <sqlite3.h>
 #include "check.h"
 #include <filesystem>
 #include <iostream>
 #include <print>
+#include <regex>
 #include <thread>
 #include <chrono>
 #include <ctime>
@@ -3450,10 +3453,245 @@ void test_p4_review(ragger::Embedder& emb) {
     cleanup();
 }
 
+// =======================================================================
+// PHASE1 Step 3a: Transaction RAII (raw sqlite; own scratch table).
+// =======================================================================
+static void p1r_exec_raw(sqlite3* raw, const char* sql) {
+    CHECK(sqlite3_exec(raw, sql, nullptr, nullptr, nullptr) == SQLITE_OK);
+}
+
+void p1r_test_transaction() {
+    std::println("  p1r_test_transaction...");
+    sqlite3* raw = p1_open_raw();
+    p1r_exec_raw(raw, "CREATE TABLE IF NOT EXISTS p1r_t (v INTEGER)");
+    p1r_exec_raw(raw, "DELETE FROM p1r_t");
+
+    // (i) commit persists.
+    {
+        ragger::Transaction tx(raw);
+        p1r_exec_raw(raw, "INSERT INTO p1r_t VALUES (1)");
+        tx.commit();
+    }
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM p1r_t") == 1);
+
+    // (ii) scope exit without commit rolls back.
+    {
+        ragger::Transaction tx(raw);
+        p1r_exec_raw(raw, "INSERT INTO p1r_t VALUES (2)");
+    }
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM p1r_t") == 1);
+
+    // (iii) a Transaction constructed inside another neither commits nor
+    // rolls back the outer: outer commit persists both rows...
+    {
+        ragger::Transaction outer(raw);
+        p1r_exec_raw(raw, "INSERT INTO p1r_t VALUES (3)");
+        {
+            ragger::Transaction inner(raw);   // joins the outer transaction
+            p1r_exec_raw(raw, "INSERT INTO p1r_t VALUES (4)");
+            inner.commit();                   // must be a no-op for the outer
+        }
+        // Still inside the outer transaction (same connection sees its own
+        // uncommitted rows; the open transaction is what proves inner did
+        // not commit).
+        CHECK(sqlite3_get_autocommit(raw) == 0);
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM p1r_t WHERE v IN (3,4)") == 2);
+        outer.commit();
+    }
+    CHECK(sqlite3_get_autocommit(raw) == 1);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM p1r_t") == 3);
+
+    // ...and outer rollback removes both (inner commit did not commit them).
+    {
+        ragger::Transaction outer(raw);
+        p1r_exec_raw(raw, "INSERT INTO p1r_t VALUES (5)");
+        {
+            ragger::Transaction inner(raw);
+            p1r_exec_raw(raw, "INSERT INTO p1r_t VALUES (6)");
+            inner.commit();
+        }
+    }  // outer dtor rolls back both rows
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM p1r_t") == 3);
+
+    p1r_exec_raw(raw, "DROP TABLE p1r_t");
+    sqlite3_close(raw);
+    std::println(" OK");
+}
+
+// =======================================================================
+// PHASE1 Step 3d: turn_summaries index keyed by turn_summary_id.
+// =======================================================================
+void p1_test_turn_summary_index_keying(ragger::Embedder& emb) {
+    std::println("  p1_test_turn_summary_index_keying...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    int a = db.store_turn("Question alpha one", "Answer alpha", "test-model");
+    int b = db.store_turn("Question beta two three", "Answer beta", "test-model");
+    int c = db.store_turn("Question gamma", "Answer gamma", "test-model");
+    CHECK(a > 0 && b > 0 && c > 0);
+
+    // Finalize in reverse order (C, B, A) so turn_summary_id and turn_id
+    // diverge — the order is the whole point of the test.
+    const std::string text_c = "Short gamma summary.";
+    const std::string text_b = "Medium beta summary with more words here.";
+    const std::string text_a = "Alpha summary is the longest one of the three summaries by far.";
+    CHECK(db.finalize_turn_summary(c, text_c, "summarizer-model"));
+    CHECK(db.finalize_turn_summary(b, text_b, "summarizer-model"));
+    CHECK(db.finalize_turn_summary(a, text_a, "summarizer-model"));
+
+    sqlite3* raw = p1_open_raw();
+    // Non-vacuity: if all ids coincide the test proves nothing — stop here.
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turn_summaries WHERE turn_summary_id != turn_id") >= 1);
+    // Every junction row joins a real summary row.
+    CHECK(p1_scalar_int(raw,
+        "SELECT COUNT(*) FROM turn_summaries_terms j LEFT JOIN turn_summaries t "
+        "ON t.turn_summary_id = j.turn_summary_id WHERE t.turn_summary_id IS NULL") == 0);
+    // Counts landed on the summary rows (not lost to a mis-keyed UPDATE).
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turn_summaries WHERE unigram_count = 0 AND text != ''") == 0);
+    // The longest summary text has the largest unigram_count.
+    CHECK(p1_scalar_text(raw,
+        "SELECT text FROM turn_summaries WHERE text != '' ORDER BY unigram_count DESC LIMIT 1") == text_a);
+    sqlite3_close(raw);
+
+    // mark_turn_summarized: marker row exists, indexes zero terms for it.
+    int d = db.store_turn("Question delta", "Answer delta", "test-model");
+    CHECK(d > 0);
+    CHECK(db.mark_turn_summarized(d, "trivial-model"));
+    raw = p1_open_raw();
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turn_summaries WHERE turn_id = "
+                             + std::to_string(d) + " AND text = ''") == 1);
+    CHECK(p1_scalar_int(raw,
+        "SELECT COUNT(*) FROM turn_summaries_terms j JOIN turn_summaries t "
+        "ON t.turn_summary_id = j.turn_summary_id WHERE t.turn_id = " + std::to_string(d)) == 0);
+    sqlite3_close(raw);
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+// =======================================================================
+// PHASE1 Step 4: import-idempotency probes compare INTEGER epochs.
+// Each probe gets a POSITIVE case — these were never tested.
+// =======================================================================
+void p1t_test_import_probes(ragger::Embedder& emb) {
+    std::println("  p1t_test_import_probes...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    // summary: store with explicit source_timestamp, probe must find it.
+    int sid = db.store_summary("Probe summary text.", "session", "model-x", "",
+                               "2026-04-15 09:30:00");
+    CHECK(sid > 0);
+    CHECK(db.summary_exists_exact("Probe summary text.", "2026-04-15 09:30:00"));
+    CHECK(!db.summary_exists_exact("Probe summary text.", "2026-04-15 09:30:01"));
+
+    // decision: same contract.
+    int did = db.store_decision("Probe decision text.", "current", "", "2026-04-15 09:30:00");
+    CHECK(did > 0);
+    CHECK(db.decision_exists_exact("Probe decision text.", "2026-04-15 09:30:00"));
+    CHECK(!db.decision_exists_exact("Probe decision text.", "2026-04-15 09:30:01"));
+
+    // turn fuzzy window: ±5s around the probe instant.
+    int t = db.store_turn("Fuzzy probe question", "Fuzzy probe answer", "test-model",
+                          false, "", "2026-04-15 09:30:00");
+    CHECK(t > 0);
+    CHECK(db.turn_exists_fuzzy("Fuzzy probe question", "2026-04-15 09:30:03", 5));
+    CHECK(!db.turn_exists_fuzzy("Fuzzy probe question", "2026-04-15 09:30:10", 5));
+    CHECK(!db.turn_exists_fuzzy("Different question text", "2026-04-15 09:30:00", 5));
+
+    // update_turn_meta must write an INTEGER epoch, agreeing with a store
+    // that used the same source_timestamp.
+    int t2 = db.store_turn("Meta probe question", "Meta probe answer", "test-model");
+    CHECK(t2 > 0);
+    CHECK(db.update_turn_meta(t2, "2026-04-16 10:00:00", ""));
+    int t3 = db.store_turn("Meta probe question two", "Meta probe answer two", "test-model",
+                           false, "", "2026-04-16 10:00:00");
+    CHECK(t3 > 0);
+    sqlite3* raw = p1_open_raw();
+    CHECK(p1_scalar_text(raw, "SELECT typeof(created_at) FROM turns WHERE turn_id = "
+                              + std::to_string(t2)) == "integer");
+    CHECK(p1_scalar_int(raw, "SELECT created_at FROM turns WHERE turn_id = " + std::to_string(t2))
+          == p1_scalar_int(raw, "SELECT created_at FROM turns WHERE turn_id = " + std::to_string(t3)));
+
+    // search_by_metadata: after/before bracket the stored row and the
+    // returned created_at renders datetime-shaped (intentional change from
+    // the raw epoch string).
+    auto results = db.search_by_metadata({{"level", "session"}}, 0,
+                                         "2026-04-15 09:00:00", "2026-04-15 10:00:00");
+    CHECK(results.size() == 1);
+    CHECK(results[0].text == "Probe summary text.");
+    const std::string& ts = results[0].timestamp;
+    std::regex dt_re(R"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)");
+    CHECK(std::regex_match(ts, dt_re));
+    // Outside the bracket → empty.
+    CHECK(db.search_by_metadata({{"level", "session"}}, 0,
+                                "2026-04-15 09:31:00", "2026-04-15 10:00:00").empty());
+    sqlite3_close(raw);
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+// =======================================================================
+// PHASE1 Step 5: embedder / vector-type swap must not dangle.
+// =======================================================================
+void p1_test_embedder_swap(ragger::Embedder& emb, const std::string& model_dir) {
+    std::println("  p1_test_embedder_swap...");
+    (void)emb;
+    cleanup();
+
+    // (a) dtype swap: blobs written after set_vector_type use the NEW dtype.
+    {
+        std::optional<ragger::Embedder> e(model_dir);
+        ragger::sqlite::Backend db(*e, TEMP_DB);
+        const int dims = ragger::config().embedding_dimensions;
+        db.store("F16 width probe.");
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT length(embedding) FROM summaries "
+                                  "WHERE text = 'F16 width probe.'") == 2 * dims);
+        sqlite3_close(raw);
+
+        db.set_vector_type(ragger::vector_codec::VectorType::F32);
+        db.store("F32 width probe.");
+        raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT length(embedding) FROM summaries "
+                                  "WHERE text = 'F32 width probe.'") == 4 * dims);
+        sqlite3_close(raw);
+        db.close();
+    }
+    cleanup();
+
+    // (b) embedder swap: destroy the original object after repointing;
+    // store/search must keep working (before the fix this was a UAF).
+    {
+        std::optional<ragger::Embedder> first(model_dir);
+        ragger::sqlite::Backend db(*first, TEMP_DB);
+        std::optional<ragger::Embedder> second(model_dir);
+        db.set_embedder(*second);
+        first.reset();  // frees the embedder the backend originally pointed at
+
+        db.store("After swap probe.");
+        auto resp = db.search("After swap probe", 5, 0.0f);
+        bool found = false;
+        for (const auto& r : resp.results)
+            if (r.text == "After swap probe.") found = true;
+        CHECK(found);
+        db.close();
+    }
+    cleanup();
+    std::println(" OK");
+}
+
 int main() {
+    TestEnv env("sqlite_backend");  // must be first: isolates from ~/.ragger
     // Need config for model dir
-    ragger::init_config();
-    auto model_dir = ragger::config().resolved_model_dir();
+    auto model_dir = env.model_dir();
+
+    // Model-free unit tests run even when the embedding model is absent.
+    p1r_test_transaction();
 
     if (!fs::exists(model_dir + "/model.onnx") && !fs::exists(model_dir + "/onnx/model.onnx")) {
         std::cerr << "Skipping backend tests: model not found at " << model_dir << "\n";
@@ -3541,6 +3779,10 @@ int main() {
     test_p2_get_history(emb);
     test_p2_get_mode_exclusive(emb);
     test_p2_possible_supersedes(emb);
+
+    p1_test_turn_summary_index_keying(emb);
+    p1t_test_import_probes(emb);
+    p1_test_embedder_swap(emb, model_dir);
 
     std::println("test_sqlite_backend: all passed");
     return 0;

@@ -5,6 +5,7 @@
  */
 #include "config.h"
 #include "memory.h"
+#include "test_env.h"
 #include <algorithm>
 #include <cassert>
 #include <filesystem>
@@ -123,8 +124,8 @@ void test_empty_db_path_throws() {
 }
 
 int main() {
-    ragger::init_config();
-    auto model_dir = ragger::config().resolved_model_dir();
+    TestEnv env("memory");  // must be first: isolates from ~/.ragger
+    auto model_dir = env.model_dir();
 
     if (!fs::exists(model_dir + "/model.onnx") && !fs::exists(model_dir + "/onnx/model.onnx")) {
         std::cerr << "Skipping memory tests: model not found at " << model_dir << "\n";

@@ -94,7 +94,9 @@ json Backend::Impl::agent_update(const UpdateRequest& req) {
             else u.bind(b++, *resolve_project(*req.project));
         }
         u.bind(b, rowid);
-        u.exec();
+        if (!u.exec())
+            throw std::runtime_error(std::format("agent_update summaries (id {}): {}",
+                                                 rowid, sqlite3_errmsg(db)));
         invalidate_cache();
     } else if (layer == "decision" || layer == "insight") {
         // Rule 4: status transitions per the table; tags/project free.
@@ -149,7 +151,9 @@ json Backend::Impl::agent_update(const UpdateRequest& req) {
             else u.bind(b++, *pid_bind);
         }
         u.bind(b, rowid);
-        u.exec();
+        if (!u.exec())
+            throw std::runtime_error(std::format("agent_update {} (id {}): {}",
+                                                 table, rowid, sqlite3_errmsg(db)));
         // rule 5: any structured-row change refreshes its search cache
         if (is_dec) invalidate_dec_cache();
         else        invalidate_ins_cache();

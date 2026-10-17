@@ -194,7 +194,7 @@ struct Embedder::Impl {
 
         std::vector<std::string> headers{"Content-Type: application/json"};
         if (!ext_api_key.empty()) {
-            headers.push_back("Authorization: *** " + ext_api_key);
+            headers.push_back(util::bearer_header(ext_api_key));
         }
 
         util::HttpClient http;
@@ -262,7 +262,7 @@ struct Embedder::Impl {
 
         std::vector<std::string> headers;
         if (!ext_api_key.empty()) {
-            headers.push_back("Authorization: *** " + ext_api_key);
+            headers.push_back(util::bearer_header(ext_api_key));
         }
 
         util::HttpClient http;

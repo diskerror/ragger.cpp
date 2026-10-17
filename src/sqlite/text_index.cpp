@@ -387,7 +387,11 @@ int TextIndex::upsert_term(const std::string& term) {
 
     Stmt& ins = insert_term();
     ins.bind(1, term);
-    ins.exec();
+    // A failed insert must not pass silently: last_insert_rowid would then
+    // return a stale id and every junction row built from it is wrong.
+    if (!ins.exec())
+        throw std::runtime_error(std::format("TextIndex insert_term (terms, term {}): {}",
+                                             term, sqlite3_errmsg(db_)));
     return static_cast<int>(sqlite3_last_insert_rowid(db_));
 }
 
@@ -398,12 +402,18 @@ void TextIndex::replace_record_terms(
     {
         Stmt& del = delete_terms_stmt(table);
         del.bind(1, id);
-        del.exec();
+        if (!del.exec())
+            throw std::runtime_error(std::format("TextIndex delete_terms ({}, id {}): {}",
+                                                 table, id, sqlite3_errmsg(db_)));
     }
     for (const auto& [term_id, count] : term_counts) {
         Stmt& ins = insert_terms_stmt(table);
         ins.bind(1, id).bind(2, term_id).bind(3, count);
-        ins.exec();
+        // FK failures (id/term_id not present) used to fail silently here —
+        // the exact mechanism that hid the turn_summaries mis-keying bug.
+        if (!ins.exec())
+            throw std::runtime_error(std::format("TextIndex insert_terms ({}, id {}): {}",
+                                                 table, id, sqlite3_errmsg(db_)));
     }
 }
 
@@ -412,7 +422,9 @@ void TextIndex::set_counts(const std::string& table, int id,
     validate_table(table);
     Stmt& upd = update_counts_stmt(table);
     upd.bind(1, unigram_count).bind(2, bigram_count).bind(3, id);
-    upd.exec();
+    if (!upd.exec())
+        throw std::runtime_error(std::format("TextIndex set_counts ({}, id {}): {}",
+                                             table, id, sqlite3_errmsg(db_)));
 }
 
 int TextIndex::corpus_size(const std::string& table) {

@@ -260,7 +260,7 @@ PYEOF
 curl -sS --max-time 5 \
      --unix-socket "$SOCKET" \
      -H "Content-Type: application/json" \
-     ${TOKEN:+-H "Authorization: Bearer *** \
+     ${TOKEN:+-H "Authorization: Bearer $TOKEN"} \
      -X POST "http://localhost/turn" \
      -d "$PAYLOAD" >/dev/null 2>&1 || true
 HOOKEOF

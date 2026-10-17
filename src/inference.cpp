@@ -244,7 +244,7 @@ bool Endpoint::is_reachable() const {
 
     std::vector<std::string> headers;
     if (!api_key.empty()) {
-        headers.push_back("Authorization: *** " + api_key);
+        headers.push_back(util::bearer_header(api_key));
     }
 
     util::HttpClient http;
@@ -273,7 +273,7 @@ std::vector<std::string> Endpoint::list_models() const {
 
     std::vector<std::string> headers;
     if (!api_key.empty()) {
-        headers.push_back("Authorization: *** " + api_key);
+        headers.push_back(util::bearer_header(api_key));
     }
 
     util::HttpClient http;
@@ -312,7 +312,7 @@ std::vector<Endpoint::TypedModel> Endpoint::list_models_lmstudio_typed() const {
 
     std::vector<std::string> headers;
     if (!api_key.empty()) {
-        headers.push_back("Authorization: *** " + api_key);
+        headers.push_back(util::bearer_header(api_key));
     }
 
     util::HttpClient http;

@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "storage_types.h"
+#include "vector_codec.h"
 #include "nlohmann_json.hpp"
 
 namespace ragger {
@@ -561,6 +562,17 @@ public:
     /// documents). Returns row count (re-)encoded.
     virtual int rebuild_embeddings(Embedder& embedder, bool progress = true,
                                     const std::string& table = "all") = 0;
+
+    /// Rebind the backend's embedder. RaggerMemory replaces its Embedder
+    /// object (recovery, model update); the backend keeps a raw pointer, so
+    /// every reassignment MUST be followed by this or the next store/search
+    /// dereferences freed memory.
+    virtual void set_embedder(Embedder& embedder) = 0;
+
+    /// Set the dtype used to encode embedding blobs. Must be updated in
+    /// lockstep with config().embedding_vector_type, BEFORE a rebuild —
+    /// otherwise rebuild writes blobs in the old dtype under the new name.
+    virtual void set_vector_type(vector_codec::VectorType t) = 0;
 
     /// Embed only rows whose embedding is NULL or has a stale version byte,
     /// scoped to one table when `table` != "all". Cheap; intended to run on

@@ -24,6 +24,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -37,7 +38,13 @@ class InferenceClient;
 
 class SummarizerService {
 public:
-    SummarizerService(StorageBackend& backend, InferenceClient* inference);
+    /// inference_provider is called ONCE per job (never cached across
+    /// jobs): the daemon may replace the inference client on SIGHUP, and
+    /// a job must hold the client it started with (shared_ptr) for its
+    /// whole duration so a mid-job reload cannot free it. A null return
+    /// means "no inference", same semantics as the old raw pointer.
+    SummarizerService(StorageBackend& backend,
+                      std::function<std::shared_ptr<InferenceClient>()> inference_provider);
     ~SummarizerService();
 
     /// Start worker + pause-timer threads. Enqueues the catch-up scan
@@ -97,7 +104,7 @@ private:
                                        const std::string& assistant_text);
 
     StorageBackend&  backend_;
-    InferenceClient* inference_;  // borrowed; lifetime owned by Server
+    std::function<std::shared_ptr<InferenceClient>()> inference_provider_;
 
     std::deque<Job>            queue_;
     std::mutex                 mutex_;

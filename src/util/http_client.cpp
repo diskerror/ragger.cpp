@@ -12,6 +12,10 @@ size_t write_to_string(char* ptr, size_t size, size_t nmemb, void* userdata) {
 }
 } // namespace
 
+// See header: single source of the Bearer scheme literal. One line so the
+// grep gate in PHASE1 Step 2 (no scheme prefix outside this function) holds.
+std::string bearer_header(std::string_view key) { return "Authorization: Bearer " + std::string(key); }
+
 HttpClient::HttpClient() {
     curl_ = curl_easy_init();
     if (!curl_) {

@@ -46,9 +46,10 @@ float cosine_similarity(const std::vector<float>& a, const std::vector<float>& b
 
 } // namespace
 
-SummarizerService::SummarizerService(StorageBackend& backend,
-                                     InferenceClient* inference)
-    : backend_(backend), inference_(inference) {}
+SummarizerService::SummarizerService(
+    StorageBackend& backend,
+    std::function<std::shared_ptr<InferenceClient>()> inference_provider)
+    : backend_(backend), inference_provider_(std::move(inference_provider)) {}
 
 SummarizerService::~SummarizerService() {
     stop();
@@ -270,6 +271,11 @@ void SummarizerService::pause_timer_loop() {
 bool SummarizerService::handle_l2(const Job& j) {
     if (j.assistant_text.empty()) return true;  // partial turn
 
+    // Resolve the inference client ONCE for the whole job (C §1.3): a
+    // SIGHUP reload mid-job replaces the daemon's shared_ptr but cannot
+    // free the object this job holds.
+    auto inf = inference_provider_ ? inference_provider_() : nullptr;
+
     // System-injected turns (model-switch notes, compaction handoffs,
     // interruption notices, background-process reports) carry no *user*
     // content — but the assistant side may still be a real, substantive
@@ -297,7 +303,7 @@ bool SummarizerService::handle_l2(const Job& j) {
             // Trivial turn: don't spend an inference call. Mark it done via
             // mark_turn_summarized so it leaves the unsummarized queue
             const std::string summarizer_model =
-                inference_ ? inference_->memory_model : "";
+                inf ? inf->memory_model : "";
             if (!summarizer_model.empty())
                 backend_.mark_turn_summarized(j.turn_id, summarizer_model);
             Diskerror::Logger::info(std::format(
@@ -320,12 +326,12 @@ bool SummarizerService::handle_l2(const Job& j) {
         return true;
 
     const std::string summarizer_model =
-        inference_ ? inference_->memory_model : "";
+        inf ? inf->memory_model : "";
 
     std::string summary;
-    if (inference_) {
+    if (inf) {
         summary = summarize_transcript(
-            *inference_,
+            *inf,
             {{ eff_user, j.assistant_text }});
     }
 
@@ -398,6 +404,8 @@ bool SummarizerService::handle_l2(const Job& j) {
 bool SummarizerService::handle_session_close(const Job& j) {
     if (j.session_guid.empty()) return true;  // shouldn't happen, defensive
 
+    auto inf = inference_provider_ ? inference_provider_() : nullptr;  // once per job
+
     auto texts = backend_.bounded_session_rollup_texts(j.session_guid, j.first_ts, j.last_ts);
     if (texts.empty()) {
         // Nothing to summarize (e.g. a run with only trivial/skipped turns) --
@@ -407,10 +415,10 @@ bool SummarizerService::handle_session_close(const Job& j) {
     }
 
     const std::string summarizer_model =
-        inference_ ? inference_->memory_model : "";
+        inf ? inf->memory_model : "";
 
     std::string summary;
-    if (inference_) summary = summarize_texts(*inference_, texts);
+    if (inf) summary = summarize_texts(*inf, texts);
     if (summary.empty()) return false;  // retry next housekeeping tick -- watermark NOT advanced
 
     int id = backend_.store_session_summary(summary, summarizer_model, j.session_guid,
@@ -437,6 +445,8 @@ bool SummarizerService::handle_session_close(const Job& j) {
 // as handle_session_close.
 // --------------------------------------------------------------------
 bool SummarizerService::handle_project_close(const Job& j) {
+    auto inf = inference_provider_ ? inference_provider_() : nullptr;  // once per job
+
     auto texts = backend_.bounded_project_rollup_texts(j.first_ts, j.last_ts);
     if (texts.empty()) {
         backend_.advance_project_boundary_watermark(j.turn_id /* = last_turn_id */);
@@ -444,10 +454,10 @@ bool SummarizerService::handle_project_close(const Job& j) {
     }
 
     const std::string summarizer_model =
-        inference_ ? inference_->memory_model : "";
+        inf ? inf->memory_model : "";
 
     std::string summary;
-    if (inference_) summary = summarize_texts(*inference_, texts);
+    if (inf) summary = summarize_texts(*inf, texts);
     if (summary.empty()) return false;  // retry next housekeeping tick -- watermark NOT advanced
 
     int id = backend_.store_project_summary(summary, summarizer_model, j.first_ts, j.last_ts);
@@ -486,6 +496,8 @@ bool SummarizerService::handle_project_close(const Job& j) {
 // --------------------------------------------------------------------
 bool SummarizerService::handle_episode_close(const Job& j) {
     if (j.session_guid.empty()) return true;
+
+    auto inf = inference_provider_ ? inference_provider_() : nullptr;  // once per job
 
     const std::string since = backend_.last_episode_end(j.session_guid);
     auto candidates = backend_.episode_candidate_turns(j.session_guid, since);
@@ -526,7 +538,7 @@ bool SummarizerService::handle_episode_close(const Job& j) {
 
     // Summarize each segment.
     const std::string summarizer_model =
-        inference_ ? inference_->memory_model : "";
+        inf ? inf->memory_model : "";
 
     struct EpisodeSegment {
         std::string summary;
@@ -551,8 +563,8 @@ bool SummarizerService::handle_episode_close(const Job& j) {
         if (texts.empty()) continue;
 
         std::string summary;
-        if (inference_)
-            summary = summarize_texts(*inference_, texts);
+        if (inf)
+            summary = summarize_texts(*inf, texts);
         if (summary.empty()) return false;  // inference down — retry ALL next pass
 
         segments.push_back({
@@ -592,7 +604,8 @@ bool SummarizerService::handle_episode_close(const Job& j) {
 // On failure, the draft row stays; next catch-up will pick it up again.
 // --------------------------------------------------------------------
 bool SummarizerService::handle_draft(const Job& j) {
-    if (j.summary_id <= 0 || !inference_) return false;
+    auto inf = inference_provider_ ? inference_provider_() : nullptr;  // once per job
+    if (j.summary_id <= 0 || !inf) return false;
     auto* backend = &backend_;
     if (!backend) return false;
 
@@ -607,7 +620,7 @@ bool SummarizerService::handle_draft(const Job& j) {
     std::string eff_user = is_system_injected_turn(it->user_text) ? std::string{} : it->user_text;
 
     auto fresh = summarize_transcript(
-        *inference_, {{ eff_user, it->assistant_text }});
+        *inf, {{ eff_user, it->assistant_text }});
     if (fresh.empty()) return false;
 
     // update_summary_text re-embeds + records the model. We then clear

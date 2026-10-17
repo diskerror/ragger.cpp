@@ -1044,7 +1044,9 @@ static std::string tags_from_metadata(const json& metadata) {
         Stmt d(db, "DELETE FROM turn_summaries WHERE turn_summary_id IN (" + placeholders + ")");
         for (size_t i = 0; i < ids.size(); ++i)
             d.bind(static_cast<int>(i + 1), ids[i]);
-        d.exec();
+        if (!d.exec())
+            throw std::runtime_error(std::format("reset_abandoned_turn_summaries delete: {}",
+                                                 sqlite3_errmsg(db)));
         invalidate_turn_cache();
         return static_cast<int>(ids.size());
     }
@@ -1087,10 +1089,18 @@ static std::string tags_from_metadata(const json& metadata) {
         if (turn_model_null) s.bind_null(6); else s.bind(6, turn_model_id);
         if (model_id) s.bind(7, model_id); else s.bind_null(7);
         s.bind(8, turn_dt);
+        // The index addresses turn_summaries by turn_summary_id, NOT turn_id
+        // (they diverge on any real DB). The INSERT+index pair must be atomic:
+        // a failed index rolls the summary row back instead of leaving an
+        // unindexed or mis-indexed row.
+        Transaction tx(db);
         bool ok = s.exec();
         if (ok) {
+            // Read the new rowid BEFORE any other statement runs on db.
+            const int ts_id = static_cast<int>(sqlite3_last_insert_rowid(db));
+            text_index_->index_record("turn_summaries", ts_id, t);
+            tx.commit();
             invalidate_turn_cache();
-            text_index_->index_record("turn_summaries", turn_id, t);
         }
         return ok;
     }
@@ -1127,10 +1137,16 @@ static std::string tags_from_metadata(const json& metadata) {
         if (turn_model_null) s.bind_null(3); else s.bind(3, turn_model_id);
         s.bind(4, model_id);
         s.bind(5, turn_dt);
+        // Keying + atomicity: see finalize_turn_summary above. The empty text
+        // indexes to zero terms but set_counts must still land on THIS row.
+        Transaction tx(db);
         bool ok = s.exec();
         if (ok) {
+            // Read the new rowid BEFORE any other statement runs on db.
+            const int ts_id = static_cast<int>(sqlite3_last_insert_rowid(db));
+            text_index_->index_record("turn_summaries", ts_id, "");
+            tx.commit();
             invalidate_turn_cache();
-            text_index_->index_record("turn_summaries", turn_id, "");
         }
         return ok;
     }
@@ -1713,9 +1729,13 @@ static std::string tags_from_metadata(const json& metadata) {
     // (already normalized to "~/...") and gets re-inserted on every run.
     bool Backend::Impl::summary_exists_exact(const std::string& text, const std::string& created_at) {
         std::string t = normalize_path(text);
+        // created_at is an INTEGER epoch; binding the "%F %T" string never
+        // matched (SQLite does no implicit conversion), so the probe was
+        // always false and every re-import duplicated rows. Use the same
+        // resolve_epoch the store path uses, so probe and insert agree.
         Stmt s(db, "SELECT 1 FROM summaries WHERE text = ? AND created_at = ? LIMIT 1");
         s.bind(1, t);
-        s.bind(2, created_at);
+        s.bind(2, resolve_epoch(created_at));
         return s.step();
     }
 
@@ -1728,7 +1748,7 @@ static std::string tags_from_metadata(const json& metadata) {
         std::string t = normalize_path(strip_decision_number_prefix(text));
         Stmt s(db, "SELECT 1 FROM decisions WHERE text = ? AND created_at = ? LIMIT 1");
         s.bind(1, t);
-        s.bind(2, created_at);
+        s.bind(2, resolve_epoch(created_at));  // INTEGER epoch, see summary_exists_exact
         return s.step();
     }
 
@@ -1739,14 +1759,16 @@ static std::string tags_from_metadata(const json& metadata) {
     // message send time vs. capture time, plus any tz-conversion rounding).
     bool Backend::Impl::turn_exists_fuzzy(const std::string& user_text, const std::string& ts,
                            int window_seconds) {
+        // created_at is an INTEGER epoch — compare against resolved integer
+        // bounds (the old datetime(?,?) form compared TEXT to INTEGER and
+        // never matched).
+        const int64_t ep = resolve_epoch(ts);
         Stmt s(db,
             "SELECT 1 FROM turns WHERE user_text = ? "
-            "AND created_at BETWEEN datetime(?, ?) AND datetime(?, ?) LIMIT 1");
-        std::string neg = "-" + std::to_string(window_seconds) + " seconds";
-        std::string pos = "+" + std::to_string(window_seconds) + " seconds";
+            "AND created_at BETWEEN ? AND ? LIMIT 1");
         s.bind(1, user_text);
-        s.bind(2, ts).bind(3, neg);
-        s.bind(4, ts).bind(5, pos);
+        s.bind(2, ep - window_seconds);
+        s.bind(3, ep + window_seconds);
         return s.step();
     }
 
@@ -1824,7 +1846,7 @@ static std::string tags_from_metadata(const json& metadata) {
         sql += " WHERE turn_id = ?";
         Stmt s(db, sql);
         int idx = 1;
-        if (!timestamp.empty()) s.bind(idx++, timestamp);
+        if (!timestamp.empty()) s.bind(idx++, resolve_epoch(timestamp));  // INTEGER epoch
         if (!session_guid.empty())
             s.bind(idx++, get_or_create_session(session_guid));
         s.bind(idx, turn_id);

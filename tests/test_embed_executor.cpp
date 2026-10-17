@@ -6,6 +6,7 @@
  */
 #include "config.h"
 #include "embed_executor.h"
+#include "test_env.h"
 
 #include <cassert>
 #include <filesystem>
@@ -19,8 +20,8 @@ namespace fs = std::filesystem;
 #endif
 
 int main() {
-    ragger::init_config();
-    auto model_dir = ragger::config().resolved_model_dir();
+    TestEnv env("embed_executor");  // must be first: isolates from ~/.ragger
+    auto model_dir = env.model_dir();
     if (!fs::exists(model_dir + "/model.onnx") && !fs::exists(model_dir + "/onnx/model.onnx")) {
         std::println("test_embed_executor: SKIPPED (no model)");
         return 0;

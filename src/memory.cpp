@@ -479,6 +479,9 @@ bool RaggerMemory::try_recover_embeddings() {
             } else {
                 embedder_ = std::make_unique<Embedder>(config().resolved_model_dir());
             }
+            // The old Embedder object is destroyed by the assignment above;
+            // the backend holds a raw pointer — repoint it NOW (C §1.2).
+            backend_->set_embedder(*embedder_);
             Diskerror::Logger::warn(std::format(
                 lang::MSG_EMBED_MODEL_RECOVERED, current_model));
         } catch (const std::exception& e) {
@@ -631,9 +634,16 @@ int RaggerMemory::update_embeddings() {
         // already the canonical form — just keep both sides symmetric.
         mutable_config().embedding_model = desired_model_name;
         mutable_config().embedding_vector_type = vtype;
+        // The backend's frozen dtype must follow the config BEFORE any
+        // rebuild, or rebuild writes old-dtype blobs under the new name.
+        backend_->set_vector_type(
+            vector_codec::parse(vtype).value_or(vector_codec::VectorType::F16));
         mutable_config().embedding_dimensions = dims;
         mutable_config().embedding_engine = desired_engine;
         previous_embedder = std::exchange(embedder_, std::move(desired_embedder));
+        // Repoint the backend at the new Embedder before the first re-encode
+        // (the previous one is held in previous_embedder, still alive).
+        backend_->set_embedder(*embedder_);
         promoted = true;
 
         // warn, not info: the daemon's default log_level is "warn", and an
@@ -671,7 +681,10 @@ int RaggerMemory::update_embeddings() {
         // new model IS the recorded identity and repair_pending stays set so
         // housekeeping finishes the remaining rows.
         if (!promoted) {
-            if (previous_embedder) embedder_ = std::move(previous_embedder);
+            if (previous_embedder) {
+                embedder_ = std::move(previous_embedder);
+                backend_->set_embedder(*embedder_);  // restore the binding too
+            }
             user_store_->set_setting("reembed_repair_pending", "false");
         }
         user_store_->set_setting("reembedding", "false");

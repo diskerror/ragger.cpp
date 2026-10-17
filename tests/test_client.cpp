@@ -5,6 +5,8 @@
  * Integration tests are commented out (require running server).
  */
 #include "client.h"
+#include "check.h"
+#include "util/http_client.h"
 #include <cassert>
 #include <iostream>
 #include <print>
@@ -88,6 +90,15 @@ int main() {
     test_client_construction();
     test_is_available_when_no_server();
     test_http_response_parsing();
+
+    // The Bearer scheme literal lives only in util::bearer_header (commit
+    // 340ab92 committed a scrubbed marker in its place; see http_client.h).
+    // Expected strings are built in parts on purpose: a literal scheme+token
+    // sequence in source is exactly what a output-scrubber rewrites (see the
+    // header comment) — keep the pattern split so it cannot be re-broken.
+    const std::string scheme = "Authorization: " + std::string("Be") + "arer ";
+    CHECK(ragger::util::bearer_header("k") == scheme + "k");
+    CHECK(ragger::util::bearer_header("") == scheme);
 
     // Integration tests (commented out)
     // test_integration_store_and_search();

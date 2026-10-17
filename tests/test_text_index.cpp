@@ -80,6 +80,46 @@ int main() {
     }
     CHECK(s1 > s2 && "row with rarer 'fox' term should rank higher");
 
+    // ---- PHASE1 Step 3b: index writes must fail loudly -------------------
+    // FKs must be ON for the junction-table constraint to fire (explicit here
+    // even though our linked SQLite defaults them ON — the test proves the
+    // throw regardless of the default).
+    CHECK(sqlite3_exec(db, "PRAGMA foreign_keys = ON", nullptr, nullptr, nullptr) == SQLITE_OK);
+    CHECK(sqlite3_exec(db,
+        "CREATE TABLE turn_summaries ("
+        "  turn_summary_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  text TEXT,"
+        "  unigram_count INTEGER NOT NULL DEFAULT 0,"
+        "  bigram_count  INTEGER NOT NULL DEFAULT 0);",
+        nullptr, nullptr, nullptr) == SQLITE_OK);
+
+    // A record id that does not exist in the base table must throw (the FK
+    // failure used to be swallowed — the exact mechanism that hid the
+    // turn_summaries mis-keying bug). replace_record_terms/set_counts are
+    // protected on a final class, so the path is exercised through the
+    // public index_record(), which calls both.
+    bool threw = false;
+    try {
+        idx.index_record("turn_summaries", 999999, "brown fox");
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    CHECK(threw && "indexing a nonexistent record id must throw");
+
+    // set_counts on an existing row still works (counts land on the row).
+    CHECK(sqlite3_exec(db, "INSERT INTO turn_summaries(turn_summary_id, text) VALUES (7, 'seven brown foxes')",
+                       nullptr, nullptr, nullptr) == SQLITE_OK);
+    idx.index_record("turn_summaries", 7, "seven brown foxes");
+    {
+        sqlite3_stmt* s = nullptr;
+        CHECK(sqlite3_prepare_v2(db,
+            "SELECT unigram_count FROM turn_summaries WHERE turn_summary_id = 7",
+            -1, &s, nullptr) == SQLITE_OK);
+        CHECK(sqlite3_step(s) == SQLITE_ROW);
+        CHECK(sqlite3_column_int(s, 0) > 0);
+        sqlite3_finalize(s);
+    }
+
     sqlite3_close(db);
     std::cout << "test_text_index: OK\n";
     return 0;

@@ -201,7 +201,7 @@ RaggerClient::HttpResponse RaggerClient::http_request(const std::string& method,
 
     std::vector<std::string> headers{"Content-Type: application/json"};
     if (!token_.empty()) {
-        headers.push_back("Authorization: *** " + token_);
+        headers.push_back(util::bearer_header(token_));
     }
 
     util::HttpClient http;

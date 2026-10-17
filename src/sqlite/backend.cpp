@@ -313,6 +313,18 @@ int Backend::rebuild_embeddings(Embedder& embedder, bool progress, const std::st
     return pImpl->rebuild_embeddings(embedder, progress, table);
 }
 
+// RaggerMemory swaps its Embedder object on recovery/update; the backend must
+// be repointed immediately or the next store/search is a use-after-free.
+void Backend::set_embedder(Embedder& e) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    pImpl->embedder = &e;
+}
+
+void Backend::set_vector_type(vector_codec::VectorType t) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    pImpl->vtype_ = t;
+}
+
 int Backend::backfill_embeddings(Embedder& embedder, const std::string& table) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->backfill_embeddings(embedder, table);

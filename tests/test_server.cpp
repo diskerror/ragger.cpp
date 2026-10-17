@@ -25,17 +25,18 @@
 #include "embedder.h"
 #include "memory.h"
 #include "server.h"
+#include "test_env.h"
 #include <cassert>
 #include <iostream>
 #include <print>
 
-void test_server_instantiation() {
+void test_server_instantiation(const std::string& model_dir) {
     std::println("  test_server_instantiation...");
 
     // Verify we can create a Server object without crashing
     // This tests the basic pImpl pattern and constructor
-    ragger::init_config();
-    auto model_dir = ragger::config().resolved_model_dir();
+    // (config is initialized by the TestEnv fixture in main; the model dir
+    // comes from the fixture so it survives the base override)
 
     // Skip if no model
     if (!std::filesystem::exists(model_dir + "/model.onnx") && !std::filesystem::exists(model_dir + "/onnx/model.onnx")) {
@@ -63,10 +64,11 @@ void test_server_instantiation() {
 // For now, the Python integration tests provide comprehensive coverage.
 
 int main() {
+    TestEnv env("server");  // must be first: isolates from ~/.ragger
     std::println("Running server tests:");
     std::println("NOTE: Full HTTP endpoint testing is in tests/python/test_http_api.py");
 
-    test_server_instantiation();
+    test_server_instantiation(env.model_dir());
 
     std::println("test_server: basic checks passed");
     std::println("For complete server testing, run: cd tests/python && python test_http_api.py");

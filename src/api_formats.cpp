@@ -393,7 +393,7 @@ std::map<std::string, std::string> build_headers(const ApiFormat& fmt, const std
     if (!api_key.empty()) {
         // Both auth modes build the header value identically (prefix + key);
         // they differ only in the format's own auth_header/auth_prefix data
-        // ("Authorization: Bearer …" vs "x-api-key: …"). One branch so a
+        // (Bearer-style Authorization vs a named header). One branch so a
         // future real difference must be a deliberate change here.
         if (fmt.auth == "bearer" || fmt.auth == "header")
             headers[fmt.auth_header] = fmt.auth_prefix + api_key;

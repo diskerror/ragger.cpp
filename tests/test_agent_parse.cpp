@@ -11,6 +11,7 @@
 #include "agent_parse.h"
 #include "check.h"
 #include "config.h"
+#include "test_env.h"
 #include "memory.h"
 
 #include <filesystem>
@@ -207,8 +208,8 @@ void test_decision_input_parsing(ragger::RaggerMemory& mem) {
 }
 
 int main() {
+    TestEnv env("agent_parse");  // must be first: isolates from ~/.ragger
     std::println("Running agent-parse tests:");
-    ragger::init_config();
     cleanup();
 
     test_tags_to_comma_string();

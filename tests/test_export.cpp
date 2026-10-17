@@ -4,6 +4,7 @@
  */
 #include "export.h"
 #include "config.h"
+#include "test_env.h"
 
 #include <sqlite3.h>
 
@@ -205,7 +206,7 @@ void test_export_roundtrip() {
 // -----------------------------------------------------------------------
 
 int main() {
-    ragger::init_config();
+    TestEnv env("export");  // must be first: isolates from ~/.ragger
 
     std::println("Running export tests:");
     test_export_all_no_embeddings();
