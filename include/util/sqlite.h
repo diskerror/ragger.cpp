@@ -53,6 +53,11 @@ public:
     }
     Stmt& bind(int i, int v)     { sqlite3_bind_int(stmt_, i, v); return *this; }
     Stmt& bind(int i, int64_t v) { sqlite3_bind_int64(stmt_, i, v); return *this; }
+    // int64_t is `long` on Linux but `long long` on macOS; accept the other
+    // spelling so `long long` args aren't ambiguous on Linux.
+    template<class T>
+        requires (std::is_same_v<T, long long> && !std::is_same_v<long long, int64_t>)
+    Stmt& bind(int i, T v) { sqlite3_bind_int64(stmt_, i, v); return *this; }
     Stmt& bind(int i, double v)  { sqlite3_bind_double(stmt_, i, v); return *this; }
     Stmt& bind_null(int i)       { sqlite3_bind_null(stmt_, i); return *this; }
     Stmt& bind_blob(int i, const void* data, int n) {

@@ -1,4 +1,21 @@
 cmake_minimum_required(VERSION 3.24)
+
+# Linux: prefer clang (c_lib's WAVE.h uses a clang-accepted layout GCC rejects).
+# Only when the user hasn't chosen a compiler (CC/CXX env or -DCMAKE_CXX_COMPILER)
+# and only when this is the top-level project.
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CXX_COMPILER AND NOT DEFINED ENV{CXX}
+   AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    foreach(_v "" -21 -20 -19 -18 -17 -16)
+        find_program(_clangxx_${_v} NAMES clang++${_v} NO_CACHE)
+        find_program(_clang_${_v}   NAMES clang${_v}   NO_CACHE)
+        if(_clangxx_${_v} AND _clang_${_v})
+            set(CMAKE_CXX_COMPILER "${_clangxx_${_v}}" CACHE FILEPATH "C++ compiler")
+            set(CMAKE_C_COMPILER   "${_clang_${_v}}"   CACHE FILEPATH "C compiler")
+            message(STATUS "Using clang${_v} (preferred on Linux)")
+            break()
+        endif()
+    endforeach()
+endif()
 if(APPLE)
     # Has compiled successfully with earlier versions of MacOS. Caveat emptor.
     set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0" CACHE STRING "Minimum macOS version")
