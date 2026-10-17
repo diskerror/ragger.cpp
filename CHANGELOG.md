@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.16.2.4
+- Linux builds now prefer clang: when neither `CC`/`CXX` nor `-DCMAKE_CXX_COMPILER` is set, CMake picks `clang++`/`clang` (unversioned, then 21 down to 16 — Debian installs it as e.g. `clang++-19`). This matches c_lib, whose `WAVE.h` relies on a clang-accepted layout that GCC rejects, and matches macOS, where `gcc` is already Apple clang. No effect on macOS
+- Fixed ambiguous `Stmt::bind(int, long long)` overload errors on Linux, where `int64_t` is `long` (macOS: `long long`); `util/sqlite.h` gains a `long long` overload enabled only where the two differ
+- Verified: full build + all 18 tests pass on Debian 13 (clang 19), both with c_lib fetched from GitHub and with a sibling `../c_lib`
+
+## v0.16.2.3
+- README: clone `master` for the stable release (`dev` is the default branch)
+
 ## v0.16.2.2
 - SQLite now comes from c_lib's vendored build (`diskerror_sqlite3`, SQLite 3.54.0) with `SQLITE_DEFAULT_FOREIGN_KEYS=1` — FK rules are enforced on every connection by default; `PRAGMA foreign_keys = OFF` still works for migrations. `-DRAGGER_SYSTEM_SQLITE=ON` links the system library instead
 - Startup integrity check: every DB open verifies `PRAGMA foreign_keys` is actually on and refuses to run otherwise (`ERR_FOREIGN_KEYS_OFF`)
