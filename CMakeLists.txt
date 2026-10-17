@@ -37,6 +37,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(RAGGER_BUILD_TESTS "Build test suite" ON)
 option(RAGGER_STATS "Log retrieval stats to a discardable stats.db (instrumentation; default OFF)" OFF)
 
+# Fetched dependencies (tokenizers-cpp, c_lib fallback, ONNX checksums): pinned
+# in cmake/pins.cmake; -DDEPS_LATEST=ON tracks upstream instead. See Deps.cmake.
+include(cmake/Deps.cmake)
+
 # ---------------------------------------------------------------------------
 # Boost (for ProgramOptions via c_lib)
 # ---------------------------------------------------------------------------
@@ -98,8 +102,14 @@ else()
     set(ORT_CACHE "${CMAKE_BINARY_DIR}/_deps/onnxruntime/${ORT_PKG}")
     if(NOT EXISTS "${ORT_CACHE}/lib/${ORT_LIB_NAME}")
         message(STATUS "ONNX Runtime: fetching ${ORT_URL}")
+        set(_ort_hash "")
+        if(DEFINED ORT_SHA256_${ORT_PKG})
+            set(_ort_hash EXPECTED_HASH SHA256=${ORT_SHA256_${ORT_PKG}})
+        else()
+            message(WARNING "ONNX Runtime: no pinned SHA-256 for ${ORT_PKG} (cmake/pins.cmake); download is unverified")
+        endif()
         file(DOWNLOAD "${ORT_URL}" "${CMAKE_BINARY_DIR}/_deps/${ORT_PKG}.tgz"
-             SHOW_PROGRESS STATUS _ort_dl)
+             SHOW_PROGRESS STATUS _ort_dl ${_ort_hash})
         list(GET _ort_dl 0 _ort_rc)
         if(NOT _ort_rc EQUAL 0)
             message(FATAL_ERROR "ONNX Runtime download failed: ${_ort_dl}")
@@ -136,7 +146,7 @@ if(APPLE)
         )
     endif()
 endif()
-add_subdirectory(vendor/tokenizers-cpp)
+deps_add(tokenizers_cpp main)
 
 # ---------------------------------------------------------------------------
 # Eigen3 (MacPorts)
@@ -170,12 +180,7 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/../c_lib/cmake/UseCLib.cmake")
     use_c_lib(0.2)
 else()
     message(STATUS "c_lib: fetching from GitHub (no local ../c_lib)")
-    include(FetchContent)
-    FetchContent_Declare(c_lib
-        GIT_REPOSITORY https://github.com/diskerror/c_lib.git
-        GIT_TAG        master
-    )
-    FetchContent_MakeAvailable(c_lib)
+    deps_add(c_lib master)
 endif()
 
 # c_lib targets provide their own include directories via

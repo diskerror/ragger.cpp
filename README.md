@@ -159,10 +159,15 @@ common to embedding models.
   vendored SQLite, foreign keys on by default): with a sibling checkout at `../c_lib`, Ragger links
   its prebuilt libraries from `../c_lib/build` and runs `../c_lib/build_libs.sh` (incremental) before
   each build; without one, it is fetched from GitHub and built as a subproject.
-- **Auto-fetched at configure time:** ONNX Runtime (downloaded into the build dir for your
-  platform). Drop a matching `vendor/onnxruntime/`
-  in place if you want an offline build.
-- **Vendored** (already in the repo): cpp-httplib, nlohmann/json, tokenizers-cpp source.
+- **Auto-fetched at configure time** (needs network + `git` on the first configure; cached in the
+  build dir): tokenizers-cpp (cloned at the commit pinned in `cmake/pins.cmake`) and ONNX Runtime
+  (release archive for your platform, SHA-256 verified). Drop a matching `vendor/onnxruntime/` in
+  place, or pass `-DFETCHCONTENT_SOURCE_DIR_TOKENIZERS_CPP=/path`, for an offline build.
+- **Vendored** (checked in): cpp-httplib, nlohmann/json.
+- **Dependency pinning:** configure with `-DDEPS_LATEST=ON` (or set it in your local
+  `CMakeUserPresets.json`) to track upstream's newest commits while developing; before tagging, run
+  `scripts/pin-deps.sh` and commit `cmake/pins.cmake`. `cmake --build build --target update_deps`
+  re-fetches on demand.
 
 ```bash
 # macOS — MacPorts

@@ -4,6 +4,9 @@
 - Linux builds now prefer clang: when neither `CC`/`CXX` nor `-DCMAKE_CXX_COMPILER` is set, CMake picks `clang++`/`clang` (unversioned, then 21 down to 16 — Debian installs it as e.g. `clang++-19`). This matches c_lib, whose `WAVE.h` relies on a clang-accepted layout that GCC rejects, and matches macOS, where `gcc` is already Apple clang. No effect on macOS
 - Fixed ambiguous `Stmt::bind(int, long long)` overload errors on Linux, where `int64_t` is `long` (macOS: `long long`); `util/sqlite.h` gains a `long long` overload enabled only where the two differ
 - Verified: full build + all 18 tests pass on Debian 13 (clang 19), both with c_lib fetched from GitHub and with a sibling `../c_lib`
+- Fetched dependencies are now pinned and cloned/downloaded at configure time instead of living in (or being silently missing from) the tree: `tokenizers-cpp` is fetched at the commit in `cmake/pins.cmake` (previously a git-ignored local copy, so a fresh clone could not build); c_lib's GitHub fallback is pinned the same way; ONNX Runtime archives are verified against pinned SHA-256 checksums
+- `-DDEPS_LATEST=ON` tracks each upstream's newest commit for development and records what it used in `build/deps-resolved.cmake`; `scripts/pin-deps.sh` writes those commits into `cmake/pins.cmake` before tagging; `update_deps` target refreshes on demand
+- README/getting-started corrected: tokenizers-cpp was documented as vendored in the repo
 
 ## v0.16.2.3
 - README: clone `master` for the stable release (`dev` is the default branch)
