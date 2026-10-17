@@ -206,24 +206,6 @@ public:
     /// throws std::invalid_argument.
     virtual json agent_get(const AgentGetQuery& q) = 0;
 
-    /// Projects (agent API Phase 3, db 0.17). create_project: name must be
-    /// non-empty and unique (duplicate -> std::invalid_argument); path is
-    /// stored ~-collapsed. list_projects: "" status = all. update_project:
-    /// only supplied fields change; unknown name -> std::invalid_argument.
-    /// resolve_project: exact name first, else longest-prefix path match on
-    /// a component boundary; nullopt when nothing matches. project_briefing:
-    /// the pre-work packet (current rulings, latest project summary, recent
-    /// episodes, open questions); unknown name -> std::invalid_argument.
-    virtual int create_project(const std::string& name, const std::string& path,
-                               const std::string& description) = 0;
-    virtual json list_projects(const std::string& status_filter) = 0;
-    virtual void update_project(const std::string& name,
-                                std::optional<std::string> status,
-                                std::optional<std::string> description,
-                                std::optional<std::string> path) = 0;
-    virtual std::optional<int> resolve_project(const std::string& name_or_path) = 0;
-    virtual json project_briefing(const std::string& name) = 0;
-
     /// Near-duplicate decision hints for free text: embeds the text and runs
     /// the same cosine scan as possible_supersedes (compares against current
     /// decisions). Empty when the embedder is degraded. Used by the Phase 3
@@ -234,15 +216,14 @@ public:
     /// Timeline (agent API Phase 4): deterministic range scan, newest first,
     /// key-paginated by "<created_epoch>:<rowid>" cursors. No embeddings.
     /// Returns {"items":[{id,created,session,text}...], "next_cursor":...|null}.
-    /// Bad granularity or malformed cursor -> std::invalid_argument; an
-    /// explicitly named project that doesn't resolve -> std::invalid_argument.
+    /// Bad granularity or malformed cursor -> std::invalid_argument.
     virtual json agent_timeline(const TimelineQuery& q) = 0;
 
     /// Curation (agent API Phase 4): metadata-only update of one typed
     /// handle. Text present -> always rejected (a text change is a new row
     /// with supersedes). turn/turn_summary/document rows are not agent-
     /// editable. summaries: only agent-written notes (model_id NULL); tags
-    /// and project only. decisions: status must be a legal transition (see
+    /// only. decisions: status must be a legal transition (see
     /// the Phase 4 table; 'superseded' is reached only via supersedes).
     /// Returns the updated row as agent_get would. std::invalid_argument on
     /// any rule violation.

@@ -197,25 +197,11 @@ static std::string tags_from_metadata(const json& metadata) {
         std::string model_name = metadata.value("model", std::string(""));
         int model_id = get_or_create_model(model_name);
 
-        // Project (Phase 3): metadata key "project", a name or path resolved
-        // via resolve_project. An explicitly named project that doesn't exist
-        // throws (parity with store_structured_decision).
-        std::optional<int> project_id;
-        if (metadata.contains("project") && metadata["project"].is_string()) {
-            const std::string p = metadata["project"].get<std::string>();
-            if (!p.empty()) {
-                project_id = resolve_project(p);
-                if (!project_id)
-                    throw std::invalid_argument(std::format(
-                        "project '{}' does not exist", p));
-            }
-        }
-
         // Custom text index (v0.16): index_record() below tokenizes text and
         // maintains terms/*_terms/count columns — no FTS5 triggers involved.
         Stmt s(db,
-            "INSERT INTO summaries (text, embedding_version, embedding, level, tags, created_at, model_id, updated_at, project_id) "
-            "VALUES (?,?,?,?,?,?,?,?,?)");
+            "INSERT INTO summaries (text, embedding_version, embedding, level, tags, created_at, model_id, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)");
 
         s.bind(1, text);
         if (defer_embedding) {
@@ -228,7 +214,6 @@ static std::string tags_from_metadata(const json& metadata) {
         s.bind(4, level).bind(5, tags_str).bind(6, ts);
         if (model_id) s.bind(7, model_id); else s.bind_null(7);
         s.bind(8, ts);  // updated_at == created_at on insert
-        if (project_id) s.bind(9, *project_id); else s.bind_null(9);
 
         if (!s.exec()) {
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
@@ -489,6 +474,23 @@ static std::string tags_from_metadata(const json& metadata) {
     // `source_timestamp` (non-empty, db format) overrides created_at for
     // historical imports; the regeneration-dedup window is skipped in that
     // case (it reasons about "now", which is meaningless for old turns).
+    void Backend::Impl::touch_session_span(int session_id, int64_t epoch) {
+        if (session_id <= 0) return;   // turn has no session
+        // NOTE: two-arg scalar MIN()/MAX() are NOT used — they return NULL
+        // when either side is NULL, which would pin a NULL bound forever.
+        Stmt s(db,
+            "UPDATE sessions SET "
+            "started_on = CASE WHEN started_on IS NULL OR ?1 < started_on THEN ?1 ELSE started_on END, "
+            "ended_on   = CASE WHEN ended_on IS NULL OR ?1 > ended_on   THEN ?1 ELSE ended_on END "
+            "WHERE session_id = ?2");
+        s.bind(1, epoch);
+        s.bind(2, session_id);
+        if (!s.exec())
+            throw std::runtime_error(std::format(
+                "touch_session_span (session {}): {}", session_id, sqlite3_errmsg(db)));
+    }
+
+
     int Backend::Impl::store_turn(const std::string& user_text, const std::string& assistant_text,
                    const std::string& model_name, bool defer_embedding,
                    const std::string& session_guid,
@@ -553,6 +555,9 @@ static std::string tags_from_metadata(const json& metadata) {
                     if (!up.exec())
                         throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
                     text_index_->index_record("turns", prev_id, u + "\n" + a);
+                    // Span follows the row's effective session (the UPDATE
+                    // keeps the old session when no new guid was given).
+                    touch_session_span(session_id ? session_id : p.column_int(3), new_ts);
                     tx.commit();
                     return prev_id;
                 }
@@ -581,7 +586,8 @@ static std::string tags_from_metadata(const json& metadata) {
             s.bind_null(5);
             s.bind_null(6);
         }
-        s.bind(7, resolve_epoch(source_timestamp));
+        const int64_t ts = resolve_epoch(source_timestamp);
+        s.bind(7, ts);
 
         int new_id = -1;
         {
@@ -590,6 +596,7 @@ static std::string tags_from_metadata(const json& metadata) {
                 throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
             new_id = static_cast<int>(sqlite3_last_insert_rowid(db));
             text_index_->index_record("turns", new_id, a.empty() ? u : (u + "\n" + a));
+            touch_session_span(session_id, ts);
             tx.commit();
         }
         return new_id;
@@ -818,18 +825,6 @@ static std::string tags_from_metadata(const json& metadata) {
             if (s.step()) session_id = s.column_int(0);
         }
 
-        // Project (Phase 3): name or path, resolved the same way every other
-        // caller resolves it. Unlike session provenance, an explicitly named
-        // project that doesn't exist IS an error -- silently filing a row
-        // unfiled is worse than failing the call.
-        std::optional<int> project_id;
-        if (!in.project.empty()) {
-            project_id = resolve_project(in.project);
-            if (!project_id)
-                throw std::invalid_argument(std::format(
-                    "project '{}' does not exist", in.project));
-        }
-
         // ---- 2. embed (outside the transaction) ------------------------
         // MUST equal kDecisionEmbedTextSQL's result for this row, so a
         // housekeeping re-embed produces the same vector. (The SQL CASE
@@ -845,8 +840,8 @@ static std::string tags_from_metadata(const json& metadata) {
         try {
             Stmt ins(db, std::format(
                 "INSERT INTO {} (text, status, tags, trigger, rationale, scope, "
-                "supersedes, session_id, project_id, created_at, embedding_version, embedding) "
-                "VALUES (?,?,?,?,?,?,?,?,?,unixepoch(),?,?)", spec.table));
+                "supersedes, session_id, created_at, embedding_version, embedding) "
+                "VALUES (?,?,?,?,?,?,?, ?,unixepoch(),?,?)", spec.table));
             ins.bind(1, text);
             ins.bind(2, status);
             ins.bind(3, in.tags);
@@ -857,9 +852,8 @@ static std::string tags_from_metadata(const json& metadata) {
             if (scope.empty())     ins.bind_null(6); else ins.bind(6, scope);
             if (in.supersedes)     ins.bind(7, *in.supersedes); else ins.bind_null(7);
             if (session_id)        ins.bind(8, *session_id);    else ins.bind_null(8);
-            if (project_id)        ins.bind(9, *project_id);    else ins.bind_null(9);
-            bind_embedding_version(ins.raw(), 10, emb);
-            bind_embedding(ins.raw(), 11, emb);
+            bind_embedding_version(ins.raw(), 9, emb);
+            bind_embedding(ins.raw(), 10, emb);
             if (!ins.exec())
                 throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
             out.id = static_cast<int>(sqlite3_last_insert_rowid(db));
@@ -1855,21 +1849,62 @@ static std::string tags_from_metadata(const json& metadata) {
     bool Backend::Impl::update_turn_meta(int turn_id, const std::string& timestamp,
                           const std::string& session_guid) {
         if (timestamp.empty() && session_guid.empty()) return true;
+
+        // Bounds are DERIVED here, not touched: a timestamp move can leave
+        // the old span stale in either direction, so both affected sessions
+        // get a full MIN/MAX recompute from their remaining turns. A session
+        // left with no turns goes back to NULL/NULL.
+        auto recompute_span = [&](int sid) {
+            if (sid <= 0) return;
+            Stmt q(db, "SELECT MIN(created_at), MAX(created_at) FROM turns WHERE session_id = ?");
+            q.bind(1, sid);
+            Stmt u(db, "UPDATE sessions SET started_on = ?, ended_on = ? WHERE session_id = ?");
+            if (q.step() && !q.is_null(0)) {
+                u.bind(1, q.column_int64(0));
+                u.bind(2, q.column_int64(1));
+            } else {
+                u.bind_null(1);
+                u.bind_null(2);
+            }
+            u.bind(3, sid);
+            if (!u.exec())
+                throw std::runtime_error(std::format(
+                    "update_turn_meta recompute (session {}): {}", sid, sqlite3_errmsg(db)));
+        };
+
+        int old_session_id = 0;
+        {
+            Stmt f(db, "SELECT session_id FROM turns WHERE turn_id = ?");
+            f.bind(1, turn_id);
+            if (f.step() && !f.is_null(0)) old_session_id = f.column_int(0);
+        }
+
         std::string sql = "UPDATE turns SET ";
         bool first = true;
+        int new_session_id = 0;
         if (!timestamp.empty()) { sql += "created_at = ?"; first = false; }
         if (!session_guid.empty()) {
             if (!first) sql += ", ";
             sql += "session_id = ?";
         }
         sql += " WHERE turn_id = ?";
+        Transaction tx(db);
         Stmt s(db, sql);
         int idx = 1;
         if (!timestamp.empty()) s.bind(idx++, resolve_epoch(timestamp));  // INTEGER epoch
-        if (!session_guid.empty())
-            s.bind(idx++, get_or_create_session(session_guid));
+        if (!session_guid.empty()) {
+            new_session_id = get_or_create_session(session_guid);
+            s.bind(idx++, new_session_id);
+        }
         s.bind(idx, turn_id);
-        return s.exec() && sqlite3_changes(db) > 0;
+        const bool changed = s.exec() && sqlite3_changes(db) > 0;
+        if (changed) {
+            recompute_span(old_session_id);
+            if (new_session_id && new_session_id != old_session_id)
+                recompute_span(new_session_id);
+        }
+        tx.commit();
+        return changed;
     }
 
 

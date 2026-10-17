@@ -255,18 +255,13 @@ namespace fs = std::filesystem;
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at
             FROM models
         )");
-        view("projects_view", R"(
-            SELECT project_id, name, status, description, path,
-                   datetime(created_at, 'unixepoch', 'localtime') AS created_at,
-                   datetime(updated_at, 'unixepoch', 'localtime') AS updated_at
-            FROM projects
-        )");
         view("sessions_view", R"(
-            SELECT session_id, guid, name, name_source, project_id,
+            SELECT session_id, guid, name, name_source,
+                   datetime(started_on, 'unixepoch', 'localtime') AS started_on,
+                   datetime(ended_on, 'unixepoch', 'localtime') AS ended_on,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at
             FROM sessions
         )");
-        exec("CREATE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name)");
         view("turns_view", R"(
             SELECT turn_id, user_text, assistant_text, model_id, session_id,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
@@ -287,7 +282,7 @@ namespace fs = std::filesystem;
             WHERE text != ''
         )");
         view("summaries_view", R"(
-            SELECT summary_id, text, level, tags, session_id, model_id, project_id,
+            SELECT summary_id, text, level, tags, session_id, model_id,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
                    datetime(updated_at, 'unixepoch', 'localtime') AS updated_at,
                    unigram_count, bigram_count,
@@ -297,7 +292,7 @@ namespace fs = std::filesystem;
         )");
         view("decisions_view", R"(
             SELECT decision_id, text, status, tags,
-                   trigger, rationale, scope, supersedes, session_id, project_id,
+                   trigger, rationale, scope, supersedes, session_id,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
                    unigram_count, bigram_count,
                    embedding_version,
@@ -306,7 +301,7 @@ namespace fs = std::filesystem;
         )");
         view("insights_view", R"(
             SELECT insight_id, text, status, tags,
-                   trigger, rationale, scope, supersedes, session_id, project_id,
+                   trigger, rationale, scope, supersedes, session_id,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
                    unigram_count, bigram_count,
                    embedding_version,

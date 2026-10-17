@@ -1,4 +1,5 @@
 #include "sqlite/backend_impl.h"
+#include "ddl.h"
 #include "embedder.h"
 #include "config.h"
 #include "lang.h"
@@ -262,35 +263,16 @@ void rebuild_table_column_order(Impl& self,
             )
         )");
 
-        // projects (db 0.17) -- what a body of work is. path is the absolute
-        // (or ~/-collapsed) root used for cwd -> project inference, and to
-        // disambiguate overloaded names. status: active|paused|done|abandoned
-        // (no CHECK, vocabulary may grow).
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS projects (
-                project_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-                name        TEXT NOT NULL UNIQUE,
-                status      TEXT NOT NULL DEFAULT 'active',
-                description TEXT,
-                path        TEXT,
-                created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
-                updated_at  INTEGER NOT NULL DEFAULT (unixepoch())
-            )
-        )");
-
         // sessions — lookup table; turns + summaries reference it. Normalizes
         // the long conversation GUID (from the agent turn hook) to a compact
-        // integer id, mirroring `models`. Grouping key for session summaries.
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS sessions (
-                session_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guid       TEXT NOT NULL UNIQUE,
-                name       TEXT,
-                name_source TEXT,
-                project_id INTEGER REFERENCES projects(project_id) ON DELETE SET NULL,
-                created_at INTEGER NOT NULL DEFAULT (unixepoch())
-            )
-        )");
+        // integer id, mirroring `models`. Grouping key only (PHASE4): guid +
+        // title + derived started_on/ended_on span; no project_id.
+        {
+            std::string ddl = ddl::sessions("sessions");
+            ddl = std::format("CREATE TABLE IF NOT EXISTS {}",
+                              ddl.substr(std::string_view("CREATE TABLE ").size()));
+            exec(ddl);
+        }
 
         // turns (L1) — raw verbatim exchanges. embedding nullable for the
         // deferred-embedding path (partial row written, backfilled later).
@@ -328,7 +310,6 @@ void rebuild_table_column_order(Impl& self,
                 tags       TEXT NOT NULL DEFAULT '',
                 session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                 model_id   INTEGER REFERENCES models(model_id),
-                project_id INTEGER REFERENCES projects(project_id) ON DELETE SET NULL,
                 created_at INTEGER NOT NULL DEFAULT (unixepoch()),
                 updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
                 unigram_count  INTEGER NOT NULL DEFAULT 0,
@@ -383,8 +364,8 @@ void rebuild_table_column_order(Impl& self,
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_session ON summaries(session_id)");
 
         // decisions (L6). Column order: keys/data, created_at, counts, embedding.
-        // trigger..session_id added at db 0.17 (agent API Phase 1). The
-        // DDL in migrate_0_16_to_0_17() MUST stay in lockstep with this one.
+        // trigger..session_id added at db 0.17 (agent API Phase 1). See
+        // Phase 9: one DDL function per table (shared with the migration leg).
         // status is deliberately NOT CHECK-constrained: the vocabulary grows
         // (current|provisional|pending|superseded|retired, + legacy roadmap/
         // deprecated) and a CHECK would need a table rebuild to extend.
@@ -399,7 +380,6 @@ void rebuild_table_column_order(Impl& self,
                 scope       TEXT,
                 supersedes  INTEGER REFERENCES decisions(decision_id),
                 session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
-                project_id  INTEGER REFERENCES projects(project_id) ON DELETE SET NULL,
                 created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
                 unigram_count  INTEGER NOT NULL DEFAULT 0,
                 bigram_count   INTEGER NOT NULL DEFAULT 0,
@@ -426,7 +406,6 @@ void rebuild_table_column_order(Impl& self,
                 scope       TEXT,
                 supersedes  INTEGER REFERENCES insights(insight_id),
                 session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
-                project_id  INTEGER REFERENCES projects(project_id) ON DELETE SET NULL,
                 created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
                 unigram_count  INTEGER NOT NULL DEFAULT 0,
                 bigram_count   INTEGER NOT NULL DEFAULT 0,
@@ -594,17 +573,13 @@ void rebuild_table_column_order(Impl& self,
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_session     ON summaries(session_id)");
         exec("CREATE INDEX IF NOT EXISTS idx_decisions_status      ON decisions(status)");
         exec("CREATE INDEX IF NOT EXISTS idx_decisions_supersedes  ON decisions(supersedes)");
-        exec("CREATE INDEX IF NOT EXISTS idx_projects_status        ON projects(status)");
         // A document is identified by its path (0.17): the same file cannot
         // be imported twice. NULL/empty paths from old DBs are given a unique
         // value by migrate_0_16_to_0_17() before this index is built.
         exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_document_sources_path ON document_sources(path)");
-        exec("CREATE INDEX IF NOT EXISTS idx_sessions_project       ON sessions(project_id)");
-        exec("CREATE INDEX IF NOT EXISTS idx_summaries_project      ON summaries(project_id)");
-        exec("CREATE INDEX IF NOT EXISTS idx_decisions_project      ON decisions(project_id)");
+        exec("CREATE INDEX IF NOT EXISTS idx_sessions_name          ON sessions(name)");
         exec("CREATE INDEX IF NOT EXISTS idx_insights_status        ON insights(status)");
         exec("CREATE INDEX IF NOT EXISTS idx_insights_supersedes    ON insights(supersedes)");
-        exec("CREATE INDEX IF NOT EXISTS idx_insights_project       ON insights(project_id)");
 
         // decision_evidence (db 0.17) -- many-to-many: which turn_summaries a
         // decision rests on. Real FKs (design §10.4: integrity lives in the
@@ -1583,8 +1558,9 @@ void rebuild_table_column_order(Impl& self,
 
     /// 0.16 -> 0.17 migration (the whole agent API schema in one step):
     ///   - decisions rebuilt with trigger/rationale/scope/supersedes/
-    ///     session_id/project_id, plus decision_evidence,
-    ///   - projects table; project_id on sessions/summaries,
+    ///     session_id, plus decision_evidence,
+    ///   - sessions rebuilt with started_on/ended_on (PHASE4; "project" is
+    ///     a tag now — no projects table, no project_id anywhere),
     ///   - insights + insight_evidence.
     /// (Developed as three internal steps; released as one schema version.)
     /// Same pragma dance as migrate_0_15_to_0_16() and for the same reasons:
@@ -1593,7 +1569,7 @@ void rebuild_table_column_order(Impl& self,
     /// RENAME from repointing other tables' REFERENCES at "decisions_rebuild").
     /// Both must be set OUTSIDE the transaction.
     void Backend::Impl::migrate_0_16_to_0_17() {
-        Diskerror::Logger::info("Migrating DB 0.16 -> 0.17 (agent API: decisions, projects, insights)...");
+        Diskerror::Logger::info("Migrating DB 0.16 -> 0.17 (agent API: decisions, sessions span, insights)...");
 
         const bool fk_was_on = pragma_bool(*this, "foreign_keys");
         exec("PRAGMA foreign_keys = OFF");
@@ -1623,35 +1599,16 @@ void rebuild_table_column_order(Impl& self,
             // be blamed on this leg (same lesson as migrate_0_15_to_0_16).
             const std::multiset<std::string> fk_before = fk_violations();
 
-            // projects is created by create_schema()'s CREATE TABLE IF NOT
-            // EXISTS before migrations run, and decisions' rebuilt DDL below
-            // references it; be defensive anyway.
-            exec(R"(
-                CREATE TABLE IF NOT EXISTS projects (
-                    project_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name        TEXT NOT NULL UNIQUE,
-                    status      TEXT NOT NULL DEFAULT 'active',
-                    description TEXT,
-                    path        TEXT,
-                    created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
-                    updated_at  INTEGER NOT NULL DEFAULT (unixepoch())
-                )
-            )");
-
-            // Views naming a rebuilt/altered table must go first (SQLite
-            // refuses a table DROP while a view names it); create_views()
-            // recreates them after migrations.
+            // Views naming a rebuilt table are dropped first. (It is
+            // RENAME / DROP COLUMN that SQLite refuses while a view names
+            // the table — not DROP TABLE — but dropping up front is needed
+            // for the rebuild dance regardless.) create_views() recreates
+            // them after migrations.
             exec("DROP VIEW IF EXISTS sessions_view");
             exec("DROP VIEW IF EXISTS summaries_view");
             exec("DROP VIEW IF EXISTS decisions_view");
             exec("DROP VIEW IF EXISTS document_sources_view");
             exec("DROP VIEW IF EXISTS documents_view");   // joins document_sources
-
-            // sessions has no BLOB columns, so a plain ALTER TABLE ADD COLUMN
-            // (append at the end) is fine.
-            if (!column_exists("sessions", "project_id"))
-                exec("ALTER TABLE sessions ADD COLUMN project_id "
-                     "INTEGER REFERENCES projects(project_id) ON DELETE SET NULL");
 
             // document_sources.path becomes UNIQUE (0.17: a document is
             // identified by its path). Old DBs may hold sources with no path;
@@ -1677,28 +1634,30 @@ void rebuild_table_column_order(Impl& self,
                         d.column_int(1), d.column_text(0)));
             }
 
-            // summaries is rebuilt so project_id sits BEFORE the embedding
-            // BLOB, matching create_schema()'s fresh-install order. The column
-            // list names only columns present in BOTH old and new tables
-            // (project_id is deliberately absent; it starts NULL).
-            rebuild_table_column_order(*this, "summaries", R"(
-                CREATE TABLE summaries_rebuild (
-                    summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    text       TEXT NOT NULL,
-                    level      TEXT NOT NULL,
-                    tags       TEXT NOT NULL DEFAULT '',
-                    session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
-                    model_id   INTEGER REFERENCES models(model_id),
-                    project_id INTEGER REFERENCES projects(project_id) ON DELETE SET NULL,
-                    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                    unigram_count  INTEGER NOT NULL DEFAULT 0,
-                    bigram_count   INTEGER NOT NULL DEFAULT 0,
-                    embedding_version INTEGER,
-                    embedding  BLOB
-                ))",
-                "summary_id, text, level, tags, session_id, model_id, created_at, "
-                "updated_at, unigram_count, bigram_count, embedding_version, embedding");
+            // ---- sessions rebuild (PHASE4; migrate-0.16-to-0.17.sql §1,
+            // transcribed here until Phase 9 executes the file) ------------
+            // §0: save the AUTOINCREMENT counter for sessions (Phase 5 adds
+            // turn_summaries to the same mechanism).
+            exec("CREATE TEMP TABLE IF NOT EXISTS seq_save ("
+                 "name TEXT PRIMARY KEY, seq INTEGER)");
+            exec("INSERT OR REPLACE INTO seq_save "
+                 "SELECT name, seq FROM sqlite_sequence WHERE name = 'sessions'");
+
+            // §1: rebuild with started_on/ended_on derived from the turns
+            // table (NULL for sessions without turns). No project_id.
+            exec(ddl::sessions("sessions_rebuild"));
+            exec(R"(
+                INSERT INTO sessions_rebuild
+                    (session_id, guid, name, name_source, started_on, ended_on, created_at)
+                SELECT s.session_id, s.guid, s.name, s.name_source,
+                       (SELECT MIN(created_at) FROM turns WHERE session_id = s.session_id),
+                       (SELECT MAX(created_at) FROM turns WHERE session_id = s.session_id),
+                       s.created_at
+                FROM sessions s ORDER BY s.session_id
+            )");
+            exec("DROP TABLE sessions");
+            exec("ALTER TABLE sessions_rebuild RENAME TO sessions");
+            exec("CREATE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name)");
 
             // Counts ARE carried over (unlike 0.16): they are valid, and
             // decisions_terms rows still point at the same decision_ids, so no
@@ -1714,7 +1673,6 @@ void rebuild_table_column_order(Impl& self,
                     scope       TEXT,
                     supersedes  INTEGER REFERENCES decisions(decision_id),
                     session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
-                    project_id  INTEGER REFERENCES projects(project_id) ON DELETE SET NULL,
                     created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
                     unigram_count  INTEGER NOT NULL DEFAULT 0,
                     bigram_count   INTEGER NOT NULL DEFAULT 0,
@@ -1750,7 +1708,6 @@ void rebuild_table_column_order(Impl& self,
                     scope       TEXT,
                     supersedes  INTEGER REFERENCES insights(insight_id),
                     session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
-                    project_id  INTEGER REFERENCES projects(project_id) ON DELETE SET NULL,
                     created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
                     unigram_count  INTEGER NOT NULL DEFAULT 0,
                     bigram_count   INTEGER NOT NULL DEFAULT 0,
@@ -1792,6 +1749,12 @@ void rebuild_table_column_order(Impl& self,
                         fk_before.size(), *fk_before.begin()));
                 }
             }
+
+            // Restore the saved AUTOINCREMENT counters (§0 restore; the
+            // rebuild reset sqlite_sequence). INSERT OR REPLACE: a DB whose
+            // sessions table was empty has no row to UPDATE.
+            exec("INSERT OR REPLACE INTO sqlite_sequence (name, seq) "
+                 "SELECT 'sessions', seq FROM seq_save WHERE name = 'sessions'");
 
             Stmt(db, "COMMIT").exec();
             exec("PRAGMA legacy_alter_table = OFF");

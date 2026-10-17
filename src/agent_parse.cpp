@@ -4,8 +4,6 @@
 // in mcp.cpp and the endpoint docs in server.cpp handler comments.
 #include "agent_parse.h"
 
-#include "memory.h"
-
 #include <string>
 #include <utility>
 #include <vector>
@@ -13,16 +11,6 @@
 namespace ragger {
 
 using json = nlohmann::json;
-
-std::string infer_project(RaggerMemory& mem, const json& a,
-                          const std::string& explicit_project) {
-    if (!explicit_project.empty()) return explicit_project;
-    if (a.contains("cwd") && a["cwd"].is_string()) {
-        const std::string cwd = a["cwd"].get<std::string>();
-        if (mem.resolve_project(cwd)) return cwd;   // no match -> leave empty
-    }
-    return "";
-}
 
 std::string tags_to_comma_string(const json& a, const char* key) {
     if (!a.contains(key)) return "";
@@ -39,7 +27,7 @@ std::string tags_to_comma_string(const json& a, const char* key) {
     return "";
 }
 
-AgentSearchQuery parse_agent_search_query(const json& a, RaggerMemory& mem) {
+AgentSearchQuery parse_agent_search_query(const json& a) {
     AgentSearchQuery q;
     q.query           = a.value("query", "");
     q.since           = a.value("since", "");
@@ -51,9 +39,6 @@ AgentSearchQuery parse_agent_search_query(const json& a, RaggerMemory& mem) {
     q.max_tokens      = a.value("max_tokens", 0);
     if (a.contains("layers"))
         q.layers = a["layers"].get<std::vector<std::string>>();
-    // An explicit unknown project throws in the backend -> 400/error_result;
-    // a non-matching cwd simply leaves the filter empty.
-    q.project = infer_project(mem, a, a.value("project", ""));
     return q;
 }
 
@@ -69,7 +54,7 @@ AgentGetQuery parse_agent_get_query(const json& a) {
     return q;
 }
 
-TimelineQuery parse_timeline_query(const json& a, RaggerMemory& mem) {
+TimelineQuery parse_timeline_query(const json& a) {
     TimelineQuery q;
     q.session     = a.value("session", "");
     q.since       = a.value("since", "");
@@ -77,7 +62,6 @@ TimelineQuery parse_timeline_query(const json& a, RaggerMemory& mem) {
     q.granularity = a.value("granularity", "episode");
     q.limit       = a.value("limit", 20);
     q.cursor      = a.value("cursor", "");
-    q.project     = infer_project(mem, a, a.value("project", ""));
     return q;
 }
 
@@ -88,8 +72,6 @@ UpdateRequest parse_update_request(const json& a) {
         u.status = a["status"].get<std::string>();
     if (a.contains("tags") && !a["tags"].is_null())
         u.tags = a["tags"].get<std::string>();
-    if (a.contains("project") && !a["project"].is_null())
-        u.project = a["project"].get<std::string>();
     // Forwarded when present; agent_update rejects any text change with the
     // canonical message. (MCP previously dropped the field silently, letting
     // a caller's text pass without effect -- now both surfaces reject.)
@@ -98,7 +80,7 @@ UpdateRequest parse_update_request(const json& a) {
     return u;
 }
 
-DecisionInput parse_decision_input(const json& a, RaggerMemory& mem) {
+DecisionInput parse_decision_input(const json& a) {
     DecisionInput in;
     in.text         = a.value("text", "");
     in.trigger      = a.value("trigger", "");
@@ -111,15 +93,12 @@ DecisionInput parse_decision_input(const json& a, RaggerMemory& mem) {
         in.supersedes = a["supersedes"].get<int>();
     if (a.contains("evidence"))
         in.evidence = a["evidence"].get<std::vector<int>>();
-    in.project = infer_project(mem, a, a.value("project", ""));
     return in;
 }
 
-DecisionInput parse_note_insight(const json& a, const std::string& text,
-                                 const std::string& project) {
+DecisionInput parse_note_insight(const json& a, const std::string& text) {
     DecisionInput in;
     in.text     = text;
-    in.project  = project;
     in.evidence = a["evidence"].get<std::vector<int>>();
     in.tags     = tags_to_comma_string(a);
     return in;

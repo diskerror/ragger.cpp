@@ -1884,6 +1884,8 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
                 created_at INTEGER NOT NULL DEFAULT (unixepoch()));
             INSERT INTO sessions (guid, name, name_source) VALUES
                 ('guid-a', 'A', 'test'), ('guid-b', NULL, NULL);
+            INSERT INTO turns (user_text, session_id, created_at) VALUES
+                ('t1', 1, 1700000500), ('t2', 1, 1700000100), ('t3', 1, 1700000300);
             CREATE TABLE summaries (
                 summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 text TEXT NOT NULL, level TEXT NOT NULL,
@@ -1916,21 +1918,28 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
     }
     sqlite3* raw = p1_open_raw();
     CHECK(p1_scalar_text(raw, "SELECT value FROM settings WHERE key='db_version'") == "0.17");
-    // Canonical (fresh-install) column order: project_id BEFORE created_at.
+    // Canonical (fresh-install) column order: no project_id anywhere.
     CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('decisions') WHERE cid = 4") == "trigger");
-    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('decisions') WHERE cid = 9") == "project_id");
-    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('decisions') WHERE cid = 10") == "created_at");
-    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('summaries') WHERE cid = 6") == "project_id");
-    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('summaries') WHERE cid = 7") == "created_at");
-    // Projects, insights and their links all exist; new columns start NULL.
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('projects','insights','insight_evidence','insights_terms')") == 4);
+    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('decisions') WHERE cid = 9") == "created_at");
+    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('summaries') WHERE cid = 6") == "created_at");
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_table_info('decisions') WHERE name = 'project_id'") == 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_table_info('summaries') WHERE name = 'project_id'") == 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'project_id'") == 0);
+    // sessions gains the derived span columns (PHASE4).
+    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('sessions') WHERE cid = 4") == "started_on");
+    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('sessions') WHERE cid = 5") == "ended_on");
+    // Span derived from turns MIN/MAX; a session without turns is NULL/NULL.
+    CHECK(p1_scalar_text(raw, "SELECT started_on || '-' || ended_on FROM sessions WHERE guid = 'guid-a'") == "1700000100-1700000500");
+    CHECK(p1_scalar_text(raw, "SELECT ifnull(started_on,'NULL') || '-' || ifnull(ended_on,'NULL') FROM sessions WHERE guid = 'guid-b'") == "NULL-NULL");
+    // The AUTOINCREMENT counter survives the rebuild.
+    CHECK(p1_scalar_int(raw, "SELECT seq FROM sqlite_sequence WHERE name = 'sessions'") == 2);
+    // Insights and their links exist; the projects table is GONE.
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('insights','insight_evidence','insights_terms')") == 3);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = 'projects'") == 0);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='insights_view'") == 1);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_insights_status'") == 1);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM summaries") == 2);
     CHECK(p1_scalar_int(raw, "SELECT unigram_count FROM summaries WHERE text = 'episode one'") == 7);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM summaries WHERE project_id IS NULL") == 2);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sessions WHERE project_id IS NULL") == 2);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM decisions WHERE project_id IS NULL") == 3);
     // No stray rebuild tables / repointed REFERENCES (legacy_alter_table trap).
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%_rebuild%'") == 0);
     // document_sources.path is unique: pathless/empty sources got their own
@@ -2247,20 +2256,17 @@ void test_p5_insight_rebuild_is_stable(ragger::Embedder& emb) {
 
 // Phase 5 Step 4: the insight layer in agent_search (handles, status,
 // trigger), agent_get expand=sources/chain, agent_update transition table,
-// agent_review queue, and project_briefing insights_current.
+// agent_review queue.
 void test_p5_insight_layer(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
 
-    int pid = db.create_project("P5gizmo", "~/p5gizmo", "insight layer target");
-    CHECK(pid > 0);
     int ts = p1_make_turn_summary(db, "layer evidence");
 
     ragger::DecisionInput a;
     a.text     = "P5gizmo flange insight: casting follows machining.";
     a.trigger  = "Use when inspecting gizmo flanges";
     a.evidence = {ts};
-    a.project  = "P5gizmo";
     int a_id = db.store_insight(a).id;
 
     // ---- agent_search with layers=["insight"]
@@ -2347,16 +2353,7 @@ void test_p5_insight_layer(ragger::Embedder& emb) {
         if (item["id"] == "insight:" + std::to_string(rj_id)) still_listed = true;
     CHECK(!still_listed);
 
-    // ---- project_briefing insights_current (superseded 'a' excluded)
-    auto brief = db.project_briefing("P5gizmo");
-    CHECK(brief.contains("insights_current"));
-    bool in_brief = false;
-    for (const auto& item : brief["insights_current"]) {
-        CHECK(item["id"] != "insight:" + std::to_string(a_id));
-        if (item["id"] == "insight:" + std::to_string(b_id)) in_brief = true;
-    }
-    CHECK(in_brief);
-
+    (void)a_id; (void)b_id;
     db.close();
     cleanup();
 }
@@ -2393,249 +2390,6 @@ void test_p2_text_only_hides_superseded(ragger::Embedder& emb) {
     db.close();
     cleanup();
 }
-
-// =======================================================================
-// Agent API Phase 3 (step 3): project primitives
-// =======================================================================
-
-// Step 3: duplicate name throws; empty name throws.
-void test_p3_project_create_unique(ragger::Embedder& emb) {
-    cleanup();
-    ragger::sqlite::Backend db(emb, TEMP_DB);
-
-    int id = db.create_project("Ragger", "~/CLionProjects/Ragger", "the memory server");
-    CHECK(id > 0);
-    bool threw = false;
-    try { db.create_project("Ragger", "", ""); }
-    catch (const std::invalid_argument&) { threw = true; }
-    CHECK(threw);
-    threw = false;
-    try { db.create_project("   ", "", ""); }
-    catch (const std::invalid_argument&) { threw = true; }
-    CHECK(threw);
-
-    auto all = db.list_projects("");
-    CHECK(all.size() == 1);
-    CHECK(all[0]["name"] == "Ragger");
-    CHECK(all[0]["status"] == "active");
-    CHECK(all[0]["path"] == "~/CLionProjects/Ragger");   // stored collapsed
-
-    db.close();
-    cleanup();
-}
-
-// Step 3: prefix resolution on component boundaries.
-void test_p3_project_resolve(ragger::Embedder& emb) {
-    cleanup();
-    ragger::sqlite::Backend db(emb, TEMP_DB);
-
-    int rag = db.create_project("Ragger", "~/CLionProjects/Ragger", "");
-    int ragx = db.create_project("RaggerX", "~/CLionProjects/RaggerX", "");
-    CHECK(rag != ragx);
-
-    // Exact name wins.
-    auto r = db.resolve_project("Ragger");
-    CHECK(r.has_value() && *r == rag);
-
-    // Deep path picks the LONGEST matching prefix, not the first match.
-    r = db.resolve_project("~/CLionProjects/Ragger/src/x.cpp");
-    CHECK(r.has_value() && *r == rag);
-    r = db.resolve_project("~/CLionProjects/RaggerX/src/y.cpp");
-    CHECK(r.has_value() && *r == ragx);
-
-    // '/a/b' must NOT match '/a/bc'.
-    r = db.resolve_project("~/CLionProjects/RaggerZ");
-    CHECK(!r.has_value());
-    // Ancestor of a project root is not a match.
-    r = db.resolve_project("~/CLionProjects");
-    CHECK(!r.has_value());
-    // Absolute form of a collapsed stored path resolves the same.
-    r = db.resolve_project(std::string(ragger::home_dir()) + "/CLionProjects/Ragger/build/main.o");
-    CHECK(r.has_value() && *r == rag);
-    // Nothing matches -> nullopt, never an error.
-    r = db.resolve_project("/tmp/nowhere");
-    CHECK(!r.has_value());
-
-    db.close();
-    cleanup();
-}
-
-// Step 3: update_project bumps fields; unknown name throws.
-void test_p3_project_update(ragger::Embedder& emb) {
-    cleanup();
-    ragger::sqlite::Backend db(emb, TEMP_DB);
-
-    db.create_project("Widget", "~/widgets", "draft");
-    db.update_project("Widget", std::string("paused"), std::nullopt, std::nullopt);
-    auto all = db.list_projects("paused");
-    CHECK(all.size() == 1);
-    CHECK(all[0]["description"] == "draft");   // untouched field preserved
-    bool threw = false;
-    try { db.update_project("Nope", std::string("done"), std::nullopt, std::nullopt); }
-    catch (const std::invalid_argument&) { threw = true; }
-    CHECK(threw);
-
-    db.close();
-    cleanup();
-}
-
-// Step 3: briefing — superseded decision excluded; 'todo,x' tag matches,
-// 'todos' does not; episode via session project_id counts.
-void test_p3_project_briefing(ragger::Embedder& emb) {
-    cleanup();
-    ragger::sqlite::Backend db(emb, TEMP_DB);
-
-    int pid = db.create_project("Gizmo", "~/gizmo", "briefing target");
-    CHECK(pid > 0);
-
-    ragger::DecisionInput a;
-    a.text = "Gizmo flanges are machined, never cast.";
-    a.trigger = "Use when fabricating gizmo flanges";
-    a.project = "Gizmo";
-    int a_id = db.store_structured_decision(a).id;
-
-    ragger::DecisionInput b;
-    b.text = "Gizmo flanges are cast; machining is retired.";
-    b.trigger = "Use when fabricating gizmo flanges";
-    b.project = "Gizmo";
-    b.supersedes = a_id;
-    int b_id = db.store_structured_decision(b).id;
-
-    // A session belonging to the project, with an episode summary attached
-    // via session_id (the OR branch of recent_episodes). No public API sets
-    // sessions.project_id yet (housekeeping/rollups land in P4), so the
-    // OR-branch itself is exercised in the live smoke test instead; the
-    // turn here at least proves store_turn still works alongside projects.
-    int turn = db.store_turn("gizmo episode question", "answer", "test-model",
-                             false, "gizmo-guid");
-    CHECK(turn > 0);
-
-    // summaries with todo/open tags via store() metadata.
-    db.store("Gizmo: decide the flange tolerance.",
-             {{"level", "session"}, {"tags", "todo,x"}, {"project", "Gizmo"}});
-    db.store("Gizmo todos are not a tag match.",
-             {{"level", "session"}, {"tags", "todos"}, {"project", "Gizmo"}});
-
-    auto brief = db.project_briefing("Gizmo");
-    CHECK(brief["project"] == "Gizmo");
-    CHECK(brief["status"] == "active");
-    // Only the live decision (b) is listed; a is superseded.
-    CHECK(brief["decisions_current"].size() == 1);
-    CHECK(brief["decisions_current"][0]["id"] == "decision:" + std::to_string(b_id));
-    CHECK(brief["latest_summary"].is_null());
-    // 'todo,x' matched, 'todos' did not.
-    CHECK(brief["open_questions"].size() == 1);
-    CHECK(brief["open_questions"][0]["text"] == "Gizmo: decide the flange tolerance.");
-
-    bool threw = false;
-    try { db.project_briefing("NoSuchProject"); }
-    catch (const std::invalid_argument&) { threw = true; }
-    CHECK(threw);
-
-    db.close();
-    cleanup();
-}
-
-// Step 4: a decision stores its project_id; an unknown project throws.
-void test_p3_decision_project(ragger::Embedder& emb) {
-    cleanup();
-    ragger::sqlite::Backend db(emb, TEMP_DB);
-
-    int pid = db.create_project("Lathe", "~/lathe", "");
-    ragger::DecisionInput d;
-    d.text = "Lathe speeds start at 400 rpm for mild steel.";
-    d.trigger = "Use when setting lathe speed";
-    d.project = "~/lathe/tooling/jig.x";   // path inference on a deep file
-    int id = db.store_structured_decision(d).id;
-
-    sqlite3* raw = p1_open_raw();
-    CHECK(p1_scalar_int(raw, std::format(
-        "SELECT project_id FROM decisions WHERE decision_id = {}", id)) == pid);
-    sqlite3_close(raw);
-
-    ragger::DecisionInput bad;
-    bad.text = "Orphan ruling.";
-    bad.trigger = "Use when testing unknown projects";
-    bad.project = "NoSuchProject";
-    bool threw = false;
-    try { db.store_structured_decision(bad); }
-    catch (const std::invalid_argument&) { threw = true; }
-    CHECK(threw);
-
-    db.close();
-    cleanup();
-}
-
-// Step 4: a note (store()) stores its project_id; unknown project throws.
-void test_p3_note_project(ragger::Embedder& emb) {
-    cleanup();
-    ragger::sqlite::Backend db(emb, TEMP_DB);
-
-    int pid = db.create_project("Kiln", "~/kiln", "");
-    std::string id = db.store("Kiln firing note: cone 6 holds at 1222C.",
-                              {{"level", "session"}, {"project", "Kiln"}});
-    sqlite3* raw = p1_open_raw();
-    CHECK(p1_scalar_int(raw, std::format(
-        "SELECT project_id FROM summaries WHERE summary_id = {}", id)) == pid);
-    sqlite3_close(raw);
-
-    bool threw = false;
-    try {
-        db.store("Orphan note.", {{"level", "session"}, {"project", "Nope"}});
-    } catch (const std::invalid_argument&) { threw = true; }
-    CHECK(threw);
-
-    db.close();
-    cleanup();
-}
-
-// Step 4: agent_search with project filters out another project's decision;
-// an unknown project filter throws.
-void test_p3_search_project(ragger::Embedder& emb) {
-    cleanup();
-    ragger::sqlite::Backend db(emb, TEMP_DB);
-
-    db.create_project("Alpha", "~/alpha", "");
-    db.create_project("Beta", "~/beta", "");
-
-    ragger::DecisionInput a;
-    a.text = "Alpha widgets ship on Tuesdays.";
-    a.trigger = "Use when shipping alpha widgets";
-    a.project = "Alpha";
-    int a_id = db.store_structured_decision(a).id;
-
-    ragger::DecisionInput b;
-    b.text = "Beta widgets ship on Fridays.";
-    b.trigger = "Use when shipping beta widgets";
-    b.project = "Beta";
-    int b_id = db.store_structured_decision(b).id;
-
-    ragger::AgentSearchQuery q;
-    q.query = "widgets ship";
-    q.layers = {"decision"};
-    q.project = "Alpha";
-    auto hits = db.agent_search(q);
-    bool saw_a = false, saw_b = false;
-    for (const auto& h : hits) {
-        if (h.id == "decision:" + std::to_string(a_id)) saw_a = true;
-        if (h.id == "decision:" + std::to_string(b_id)) saw_b = true;
-    }
-    CHECK(saw_a);
-    CHECK(!saw_b);
-
-    bool threw = false;
-    try {
-        ragger::AgentSearchQuery bad;
-        bad.query = "widgets";
-        bad.project = "NoSuch";
-        db.agent_search(bad);
-    } catch (const std::invalid_argument&) { threw = true; }
-    CHECK(threw);
-
-    db.close();
-    cleanup();
-}
-
 // =======================================================================
 // Agent API Phase 2 (step 3/4): agent_search / agent_get
 // =======================================================================
@@ -3008,23 +2762,6 @@ void test_p2_possible_supersedes(ragger::Embedder& emb) {
     db.close();
     cleanup();
 }
-
-// =======================================================================
-// Agent API Phase 4: agent_timeline / agent_update / agent_review
-// =======================================================================
-
-// Set sessions.project_id directly (no API writes it yet; the summarizer
-// only reads it).
-static void p4_set_session_project(sqlite3* raw, const std::string& guid, int project_id) {
-    sqlite3_stmt* st = nullptr;
-    CHECK(sqlite3_prepare_v2(raw, "UPDATE sessions SET project_id = ? WHERE guid = ?",
-                             -1, &st, nullptr) == SQLITE_OK);
-    sqlite3_bind_int(st, 1, project_id);
-    sqlite3_bind_text(st, 2, guid.c_str(), -1, SQLITE_TRANSIENT);
-    CHECK(sqlite3_step(st) == SQLITE_DONE);
-    sqlite3_finalize(st);
-}
-
 // Step 1: three sessions with episodes at known created_at -> newest first;
 // paging limit 2 over 5 rows -> 2, 2, 1 with next_cursor null at the end.
 void test_p4_timeline_order_and_paging(ragger::Embedder& emb) {
@@ -3190,41 +2927,6 @@ void test_p4_timeline_turn_fallback(ragger::Embedder& emb) {
     db.close();
     cleanup();
 }
-
-// Step 1: the project filter works through sessions.project_id.
-void test_p4_timeline_project(ragger::Embedder& emb) {
-    cleanup();
-    ragger::sqlite::Backend db(emb, TEMP_DB);
-
-    db.create_project("P4Scope", "~/p4scope", "");
-    const int pid = *db.resolve_project("P4Scope");
-    const std::string ga = "p4tp-a", gb = "p4tp-b";
-    db.store_summary("Scoped episode", "episode", "summarizer-model", ga, "2026-04-01 08:00:00");
-    db.store_summary("Unscoped episode", "episode", "summarizer-model", gb, "2026-04-02 08:00:00");
-    {
-        sqlite3* raw = p1_open_raw();
-        p4_set_session_project(raw, ga, pid);
-        sqlite3_close(raw);
-    }
-
-    ragger::TimelineQuery q;
-    q.granularity = "episode";
-    q.project = "P4Scope";
-    auto page = db.agent_timeline(q);
-    CHECK(page["items"].size() == 1);
-    CHECK(page["items"][0]["text"].get<std::string>() == "Scoped episode");
-
-    // Unknown project -> invalid_argument.
-    bool threw = false;
-    try {
-        ragger::TimelineQuery bad; bad.project = "NoSuch"; db.agent_timeline(bad);
-    } catch (const std::invalid_argument&) { threw = true; }
-    CHECK(threw);
-
-    db.close();
-    cleanup();
-}
-
 // Step 2: update rules — text rejected, non-editable layers rejected,
 // notes editable (tags/project), rollups rejected, transitions enforced.
 void test_p4_update_rules(ragger::Embedder& emb) {
@@ -3260,13 +2962,11 @@ void test_p4_update_rules(ragger::Embedder& emb) {
     }
 
     // Rule 3: agent note (model_id NULL) editable; rollup rejected.
-    db.create_project("P4Note", "~/p4note", "");
     const std::string note_id = db.store("A note to curate.", {{"level", "session"}});
     {
         ragger::UpdateRequest r;
         r.id = "summary:" + note_id;
         r.tags = "curated,keep2";
-        r.project = "P4Note";
         auto row = db.agent_update(r);
         CHECK(row["tags"].get<std::string>() == "curated,keep2");
     }
@@ -3274,16 +2974,6 @@ void test_p4_update_rules(ragger::Embedder& emb) {
         sqlite3* raw = p1_open_raw();
         CHECK(p1_scalar_text(raw, "SELECT tags FROM summaries WHERE summary_id = " + note_id)
               == "curated,keep2");
-        CHECK(p1_scalar_int(raw, "SELECT project_id FROM summaries WHERE summary_id = " + note_id)
-              == *db.resolve_project("P4Note"));
-        sqlite3_close(raw);
-    }
-    {   // clear project
-        ragger::UpdateRequest r; r.id = "summary:" + note_id; r.project = "";
-        db.agent_update(r);
-        sqlite3* raw = p1_open_raw();
-        CHECK(p1_scalar_text(raw, "SELECT ifnull(project_id,'NULL') FROM summaries WHERE summary_id = "
-                                  + note_id) == "NULL");
         sqlite3_close(raw);
     }
     {   // rollup (model_id set) rejected
@@ -4024,6 +3714,100 @@ void p3_test_update_embedding(ragger::Embedder& emb) {
     std::println(" OK");
 }
 
+
+// PHASE4 Step 4: sessions.started_on/ended_on are the derived turn span.
+static std::string p4_span(sqlite3* raw, const std::string& guid) {
+    std::string sql = "SELECT ifnull(started_on,'NULL') || '-' || "
+                      "ifnull(ended_on,'NULL') FROM sessions WHERE guid = '" + guid + "'";
+    return p1_scalar_text(raw, sql);
+}
+
+void p4_session_span(ragger::Embedder& emb) {
+    std::println("  p4_session_span...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    // (a) Out-of-order source timestamps widen to MIN/MAX, not insert order.
+    db.store_turn("span b", "", "", false, "span-s", "2026-04-02 10:00:00");
+    db.store_turn("span a", "", "", false, "span-s", "2026-04-01 09:00:00");
+    db.store_turn("span c", "", "", false, "span-s", "2026-04-03 11:00:00");
+
+    // (b) A turn with no session: no error, no session row created.
+    db.store_turn("orphan turn", "", "", false, "", "");
+
+    // (c) A session with no turns is NULL/NULL (raw insert: nothing else
+    // creates a session without turns on the live path).
+    {
+        sqlite3* r2 = p1_open_raw();
+        CHECK(sqlite3_exec(r2, "INSERT INTO sessions (guid) VALUES ('span-none')",
+                           nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(r2);
+    }
+
+    sqlite3* raw = p1_open_raw();
+    CHECK(p4_span(raw, "span-s") ==
+          p1_scalar_text(raw, "SELECT (SELECT MIN(created_at) FROM turns WHERE session_id = "
+                              "(SELECT session_id FROM sessions WHERE guid='span-s')) || '-' || "
+                              "(SELECT MAX(created_at) FROM turns WHERE session_id = "
+                              "(SELECT session_id FROM sessions WHERE guid='span-s'))"));
+    CHECK(p4_span(raw, "span-none") == "NULL-NULL");
+
+    // Dedup path: re-storing 'span b' with a later timestamp updates the
+    // row's created_at and widens ended_on (touch on the dedup branch).
+    db.store_turn("span b", "", "", false, "span-s", "2026-04-05 08:00:00");
+    CHECK(p4_span(raw, "span-s") ==
+          p1_scalar_text(raw, "SELECT (SELECT MIN(created_at) FROM turns WHERE session_id = "
+                              "(SELECT session_id FROM sessions WHERE guid='span-s')) || '-' || "
+                              "(SELECT MAX(created_at) FROM turns WHERE session_id = "
+                              "(SELECT session_id FROM sessions WHERE guid='span-s'))"));
+    CHECK(p1_scalar_text(raw, "SELECT ended_on FROM sessions WHERE guid='span-s'") ==
+          p1_scalar_text(raw, "SELECT MAX(created_at) FROM turns WHERE session_id = "
+                              "(SELECT session_id FROM sessions WHERE guid='span-s')"));
+    sqlite3_close(raw);
+
+    // (d) update_turn_meta moving the ONLY 'span-none'-adjacent turn... use
+    // span-s: move one turn to a new session; both spans are recomputed.
+    {
+        sqlite3* r2 = p1_open_raw();
+        const std::string moved = p1_scalar_text(r2,
+            "SELECT turn_id FROM turns WHERE user_text = 'span a'");
+        sqlite3_close(r2);
+        CHECK(db.update_turn_meta(std::stoi(moved), "2026-04-10 12:00:00", "span-t"));
+    }
+    raw = p1_open_raw();
+    CHECK(p4_span(raw, "span-t") ==
+          p1_scalar_text(raw, "SELECT created_at || '-' || created_at FROM turns "
+                              "WHERE session_id = (SELECT session_id FROM sessions WHERE guid='span-t')"));
+    CHECK(p4_span(raw, "span-s") ==
+          p1_scalar_text(raw, "SELECT (SELECT MIN(created_at) FROM turns WHERE session_id = "
+                              "(SELECT session_id FROM sessions WHERE guid='span-s')) || '-' || "
+                              "(SELECT MAX(created_at) FROM turns WHERE session_id = "
+                              "(SELECT session_id FROM sessions WHERE guid='span-s'))"));
+    // The moved turn left span-s at a later timestamp than before.
+    CHECK(p1_scalar_text(raw, "SELECT started_on FROM sessions WHERE guid='span-s'") > "1774000000");
+    sqlite3_close(raw);
+
+    // Move the last remaining... empty the old session completely:
+    // span-none never had turns; verify a session emptied of turns goes
+    // NULL/NULL by moving every span-s turn out is overkill — instead move
+    // the sole turn of a two-turn session out and check shrink.
+    {
+        db.store_turn("solo turn", "", "", false, "span-u", "2026-04-06 06:00:00");
+        sqlite3* r2 = p1_open_raw();
+        const std::string tid = p1_scalar_text(r2,
+            "SELECT turn_id FROM turns WHERE user_text = 'solo turn'");
+        sqlite3_close(r2);
+        CHECK(db.update_turn_meta(std::stoi(tid), "2026-04-07 07:00:00", "span-s"));
+        raw = p1_open_raw();
+        CHECK(p4_span(raw, "span-u") == "NULL-NULL");   // emptied -> NULL
+        sqlite3_close(raw);
+    }
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
 int main() {
     TestEnv env("sqlite_backend");  // must be first: isolates from ~/.ragger
     // Need config for model dir
@@ -4094,17 +3878,9 @@ int main() {
     test_p5_insight_validation(emb);
     test_p5_insight_rebuild_is_stable(emb);
     test_p5_insight_layer(emb);
-    test_p3_project_create_unique(emb);
-    test_p3_project_resolve(emb);
-    test_p3_project_update(emb);
-    test_p3_project_briefing(emb);
-    test_p3_decision_project(emb);
-    test_p3_note_project(emb);
-    test_p3_search_project(emb);
     test_p4_timeline_order_and_paging(emb);
     test_p4_timeline_session_fallback(emb);
     test_p4_timeline_turn_fallback(emb);
-    test_p4_timeline_project(emb);
     test_p4_update_rules(emb);
     test_p4_update_cache_invalidation(emb);
     test_p4_review(emb);
@@ -4133,6 +3909,7 @@ int main() {
     p2_test_require_embedder(emb);
     p3_cache_pin(emb);
     p3_test_update_embedding(emb);
+    p4_session_span(emb);
 
     std::println("test_sqlite_backend: all passed");
     return 0;

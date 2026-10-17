@@ -29,9 +29,6 @@ struct DecisionInput {
     std::optional<int> supersedes;    ///< decision_id this replaces
     std::string session_guid;         ///< source session GUID ("" = none)
     std::vector<int> evidence;        ///< turn_summary_ids backing the decision
-    std::string project;              ///< project name or path (Phase 3);
-                                      ///  resolved via resolve_project — an
-                                      ///  unknown value throws. "" = none.
 };
 
 struct StructuredDecisionResult {
@@ -97,8 +94,6 @@ struct AgentSearchQuery {
     std::string status = "active";     ///< decisions only: "active" (current+provisional) | "any" | one exact status
     std::string session;               ///< only this session GUID
     std::string exclude_session;       ///< drop this session GUID
-    std::string project;               ///< only rows tied to this project id/name
-                                       ///  (resolved via resolve_project; "" = no filter)
     int limit = 10;
     int max_tokens = 0;                ///< 0 = no budget; else stop adding results past ~max_tokens (chars/4)
 };
@@ -127,7 +122,6 @@ struct AgentGetQuery {
 /// memory_timeline request (agent API Phase 4): deterministic range scan,
 /// newest first, key-paginated. No embeddings involved.
 struct TimelineQuery {
-    std::string project;           ///< name or path; "" = all
     std::string session;           ///< GUID; "" = all
     std::string since, until;      ///< same formats as AgentSearchQuery
     std::string granularity = "episode";   ///< turn | episode | session
@@ -141,7 +135,6 @@ struct UpdateRequest {
     std::string id;                          ///< typed handle
     std::optional<std::string> status;
     std::optional<std::string> tags;         ///< replaces the whole tag string
-    std::optional<std::string> project;      ///< name/path; "" = clear
     std::optional<std::string> text;         ///< present => always rejected
 };
 

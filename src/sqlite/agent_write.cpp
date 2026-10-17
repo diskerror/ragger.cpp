@@ -58,12 +58,6 @@ json Backend::Impl::agent_update(const UpdateRequest& req) {
         std::string set;
         if (req.tags.has_value())
             set += "tags = ?, ";
-        if (req.project.has_value()) {
-            if (!req.project->empty() && !resolve_project(*req.project))
-                throw std::invalid_argument(
-                    std::format("project '{}' does not exist", *req.project));
-            set += "project_id = ?, ";
-        }
         if (set.empty())
             throw std::invalid_argument("nothing to update");
         set.erase(set.end() - 2, set.end());   // trailing ", "
@@ -71,17 +65,13 @@ json Backend::Impl::agent_update(const UpdateRequest& req) {
                    ", updated_at = unixepoch() WHERE summary_id = ?");
         int b = 1;
         if (req.tags.has_value()) u.bind(b++, *req.tags);
-        if (req.project.has_value()) {
-            if (req.project->empty()) u.bind_null(b++);
-            else u.bind(b++, *resolve_project(*req.project));
-        }
         u.bind(b, rowid);
         if (!u.exec())
             throw std::runtime_error(std::format("agent_update summaries (id {}): {}",
                                                  rowid, sqlite3_errmsg(db)));
         invalidate_cache();
     } else if (layer == "decision" || layer == "insight") {
-        // Rule 4: status transitions per the table; tags/project free.
+        // Rule 4: status transitions per the table; tags free.
         // Insights share the decision transition table verbatim (P5 step 4).
         const bool is_dec = layer == "decision";
         const char* table = is_dec ? "decisions" : "insights";
@@ -94,8 +84,6 @@ json Backend::Impl::agent_update(const UpdateRequest& req) {
 
         std::string set;
         int b = 1;
-        std::optional<int> pid_bind;      // tri-state: nullopt=absent, -1=NULL
-        bool clear_project = false;
         if (req.status.has_value()) {
             if (!status::is_in(status::kAgentSettable, *req.status))
                 throw std::invalid_argument("unknown " + layer + " status: '" + *req.status + "'");
@@ -110,26 +98,12 @@ json Backend::Impl::agent_update(const UpdateRequest& req) {
             set += "status = ?, ";
         }
         if (req.tags.has_value()) set += "tags = ?, ";
-        if (req.project.has_value()) {
-            set += "project_id = ?, ";
-            if (req.project->empty()) clear_project = true;
-            else {
-                pid_bind = resolve_project(*req.project);
-                if (!pid_bind)
-                    throw std::invalid_argument(
-                        std::format("project '{}' does not exist", *req.project));
-            }
-        }
         if (set.empty())
             throw std::invalid_argument("nothing to update");
         set.erase(set.end() - 2, set.end());   // trailing ", "
         Stmt u(db, std::format("UPDATE {} SET {} WHERE {} = ?", table, set, pk));
         if (req.status.has_value()) u.bind(b++, *req.status);
         if (req.tags.has_value())   u.bind(b++, *req.tags);
-        if (req.project.has_value()) {
-            if (clear_project) u.bind_null(b++);
-            else u.bind(b++, *pid_bind);
-        }
         u.bind(b, rowid);
         if (!u.exec())
             throw std::runtime_error(std::format("agent_update {} (id {}): {}",

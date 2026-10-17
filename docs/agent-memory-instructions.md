@@ -26,6 +26,8 @@ remember later:
 - key facts about the user, their projects, and their environment;
 - outcomes worth recalling ("fixed Y by doing Z").
 
+Scope a memory to a project with a tag such as `project:ragger`.
+
 Write each memory as a **concise, self-contained statement** in the third
 person, understandable months later without the surrounding chat (e.g. "Reid's
 home directory is on an external drive at /Volumes/WDBlack2."). One fact per

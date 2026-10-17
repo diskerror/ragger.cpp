@@ -224,12 +224,14 @@ struct Backend::Impl {
 
     /// 0.16 -> 0.17 migration: the whole agent-API schema in one step.
     /// Rebuilds `decisions` (adds trigger, rationale, scope, supersedes,
-    /// session_id, project_id) and `summaries` (project_id) in the
-    /// canonical column order, adds project_id to sessions,
-    /// creates projects, insights and insight_evidence, and moves stray
-    /// category words that leaked into decisions.status ('fact', 'lesson')
-    /// into tags, setting status 'current'. decision_evidence and the
-    /// orphan-protection trigger are created after migration in create_schema().
+    /// session_id) and `summaries` in the canonical column order, rebuilds
+    /// `sessions` (drops project_id, adds started_on/ended_on span columns
+    /// computed from the session's turns), creates insights and
+    /// insight_evidence, drops the projects table and its indexes, and moves
+    /// stray category words that leaked into decisions.status ('fact',
+    /// 'lesson') into tags, setting status 'current'. decision_evidence and
+    /// the orphan-protection trigger are created after migration in
+    /// create_schema().
     void migrate_0_16_to_0_17();
 
     /// Custom terms index (v0.16) — replaces both FTS5 layers with a single
@@ -390,18 +392,6 @@ struct Backend::Impl {
     json agent_review(const std::string& action,
                       const std::vector<std::string>& ids);
 
-    // --- agent API Phase 3 projects (src/sqlite/projects.cpp) ---
-
-    int create_project(const std::string& name, const std::string& path,
-                       const std::string& description);
-    json list_projects(const std::string& status_filter);
-    void update_project(const std::string& name,
-                        std::optional<std::string> status,
-                        std::optional<std::string> description,
-                        std::optional<std::string> path);
-    std::optional<int> resolve_project(const std::string& name_or_path);
-    json project_briefing(const std::string& name);
-
     // --- write ---
 
     // ---- path normalization -------------------------------------------
@@ -474,6 +464,13 @@ struct Backend::Impl {
     // `source_timestamp` (non-empty, db format) overrides created_at for
     // historical imports; the regeneration-dedup window is skipped in that
     // case (it reasons about "now", which is meaningless for old turns).
+    // Widen a session's derived span (PHASE4): started_on = MIN, ended_on =
+    // MAX over stored turn epochs. NULL bounds start at the first value.
+    // Bounds are never recomputed smaller when turns are later culled —
+    // cheap and conservative: a stale-wide span is harmless, a wrong-narrow
+    // one would hide the session from range queries.
+    void touch_session_span(int session_id, int64_t epoch);
+
     int store_turn(const std::string& user_text, const std::string& assistant_text,
                    const std::string& model_name, bool defer_embedding,
                    const std::string& session_guid,

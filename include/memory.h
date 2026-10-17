@@ -102,16 +102,6 @@ public:
     json agent_review(const std::string& action,
                       const std::vector<std::string>& ids);
 
-    /// Projects (agent API Phase 3) — see StorageBackend docs.
-    int create_project(const std::string& name, const std::string& path,
-                       const std::string& description);
-    json list_projects(const std::string& status_filter);
-    void update_project(const std::string& name,
-                        std::optional<std::string> status,
-                        std::optional<std::string> description,
-                        std::optional<std::string> path);
-    std::optional<int> resolve_project(const std::string& name_or_path);
-    json project_briefing(const std::string& name);
     std::vector<std::pair<int,float>> possible_supersedes_for_text(
         const std::string& text);
 

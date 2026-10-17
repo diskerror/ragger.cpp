@@ -22,49 +22,33 @@
 
 namespace ragger {
 
-class RaggerMemory;
-
-/// Project resolution (Phase 3): an explicit name/path wins; else a `cwd`
-/// string that resolves to a known project is used; no match leaves it
-/// empty (not an error).
-std::string infer_project(RaggerMemory& mem, const nlohmann::json& a,
-                          const std::string& explicit_project);
-
 /// tags field -> comma string. Accepts an array of strings or a plain
 /// string (the documented contract); absent or other types yield "".
 std::string tags_to_comma_string(const nlohmann::json& a,
                                  const char* key = "tags");
 
-/// POST /memory/search body / memory_search arguments -> AgentSearchQuery,
-/// including cwd inference for the project filter.
-AgentSearchQuery parse_agent_search_query(const nlohmann::json& a,
-                                          RaggerMemory& mem);
+/// POST /memory/search body / memory_search arguments -> AgentSearchQuery.
+AgentSearchQuery parse_agent_search_query(const nlohmann::json& a);
 
 /// POST /memory/get body / memory_get arguments -> AgentGetQuery.
 AgentGetQuery parse_agent_get_query(const nlohmann::json& a);
 
-/// POST /memory/timeline body / memory_timeline arguments -> TimelineQuery,
-/// including cwd inference.
-TimelineQuery parse_timeline_query(const nlohmann::json& a,
-                                   RaggerMemory& mem);
+/// POST /memory/timeline body / memory_timeline arguments -> TimelineQuery.
+TimelineQuery parse_timeline_query(const nlohmann::json& a);
 
 /// POST /memory/update body / memory_update arguments -> UpdateRequest.
 /// `text` is forwarded when present; agent_update rejects it with the
 /// canonical "store a new row with supersedes" message.
 UpdateRequest parse_update_request(const nlohmann::json& a);
 
-/// POST /decision body / memory_decision arguments -> DecisionInput,
-/// including cwd inference.
-DecisionInput parse_decision_input(const nlohmann::json& a,
-                                   RaggerMemory& mem);
+/// POST /decision body / memory_decision arguments -> DecisionInput.
+DecisionInput parse_decision_input(const nlohmann::json& a);
 
 /// /memory/note insight routing (Phase 5): the evidence-array branch of
-/// the note body -> DecisionInput for store_insight. `text` and the
-/// already-resolved `project` come from the caller (the note body shares
-/// them with the plain-store branch).
+/// the note body -> DecisionInput for store_insight. `text` comes from the
+/// caller (the note body shares it with the plain-store branch).
 DecisionInput parse_note_insight(const nlohmann::json& a,
-                                 const std::string& text,
-                                 const std::string& project);
+                                 const std::string& text);
 
 /// possible_supersedes hint list -> the shared response shape
 /// [{"id":N,"score":f}...].

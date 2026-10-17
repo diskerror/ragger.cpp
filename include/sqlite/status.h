@@ -20,8 +20,8 @@ namespace ragger::sqlite::status {
 // vectors participate in scoring.
 inline constexpr std::string_view kCacheLoaded[] = {"current", "provisional", "roadmap"};
 
-// "active" filters: agent_search active mode (agent_read.cpp), projects
-// briefing (projects.cpp), supersede-hint candidates (write.cpp).
+// "active" filters: agent_search active mode (agent_read.cpp),
+// supersede-hint candidates (write.cpp).
 inline constexpr std::string_view kSearchActive[] = {"current", "provisional"};
 
 // Statuses accepted by the create path (store_structured_row) and the MCP

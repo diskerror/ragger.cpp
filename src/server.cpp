@@ -586,7 +586,7 @@ struct Server::Impl {
         // Project (Phase 3): explicit name/path wins; otherwise infer from
         // cwd (longest-prefix match). No match leaves it empty — not an
         // error. Shared with the MCP surface via parse_decision_input.
-        DecisionInput in = parse_decision_input(body, mem);
+        DecisionInput in = parse_decision_input(body);
         try {
             auto r = mem.store_structured_decision(in);
             Diskerror::Logger::debug("POST /decision 200");
@@ -604,12 +604,10 @@ struct Server::Impl {
     }
 
     // POST /memory/note — agent note (agent API Phase 3).
-    // Body: {text, project?, tags?, cwd?, evidence?}. Stores via store(), so
-    // the row lands where ragger_store notes land today (summaries), plus
-    // project_id. The response carries possible_supersedes exactly like
-    // /decision — compared against current decisions, hint only, nothing
-    // is changed. Explicit unknown project -> 400; a cwd that matches
-    // nothing simply leaves the note unfiled (not an error).
+    // Body: {text, tags?, evidence?}. Stores via store(), so the row lands
+    // where ragger_store notes land today (summaries). The response carries
+    // possible_supersedes exactly like /decision — compared against current
+    // decisions, hint only, nothing is changed.
     // Phase 5 step 6: `evidence: [turn_summary_id]` routes the write to
     // store_insight instead — a synthesized insight linked to its sources,
     // and the response says "table":"insights". Without evidence nothing
@@ -630,16 +628,11 @@ struct Server::Impl {
         if (body.contains("tags"))
             metadata["tags"] = body["tags"];
 
-        // Project (Phase 3): explicit name/path wins; otherwise infer from
-        // cwd. store() resolves it and throws on an unknown explicit project.
         auto& mem = _get_memory(user.username);
-        std::string project = infer_project(mem, body, body.value("project", ""));
-        if (!project.empty())
-            metadata["project"] = project;
 
         // ---- insight routing (Phase 5) ----------------------------------
         if (body.contains("evidence") && body["evidence"].is_array()) {
-            DecisionInput in = parse_note_insight(body, text, project);
+            DecisionInput in = parse_note_insight(body, text);
             try {
                 auto r = mem.store_insight(in);
                 Diskerror::Logger::debug("POST /memory/note 200 (insight)");
@@ -671,59 +664,14 @@ struct Server::Impl {
         }
     }
 
-    // POST /memory/project — projects (agent API Phase 3).
-    // Body: {action, name?, status?, description?, path?}.
-    //   list   -> {projects: [...]} (status filter optional; "" = all)
-    //   create -> {id, status:"stored"} (name required, unique)
-    //   get    -> the briefing packet (PHASE3-STEPS step 3 shape)
-    //   update -> {status:"ok"} (only supplied fields change)
-    // Validation failures are 400.
-    void handle_memory_project(const UserInfo& user, const httplib::Request& req,
-                               httplib::Response& res) {
-        auto body = json::parse(req.body);
-        const std::string action = body.value("action", "");
-        const std::string name   = body.value("name", "");
-        auto& mem = _get_memory(user.username);
-        try {
-            if (action == "list") {
-                respond_json(res, json{{"projects",
-                    mem.list_projects(body.value("status", ""))}});
-            } else if (action == "create") {
-                int id = mem.create_project(name,
-                    body.value("path", ""), body.value("description", ""));
-                respond_json(res, json{{"id", id}, {"status", "stored"}});
-            } else if (action == "get") {
-                respond_json(res, mem.project_briefing(name));
-            } else if (action == "update") {
-                std::optional<std::string> status, description, path;
-                if (body.contains("status") && !body["status"].is_null())
-                    status = body["status"].get<std::string>();
-                if (body.contains("description") && !body["description"].is_null())
-                    description = body["description"].get<std::string>();
-                if (body.contains("path") && !body["path"].is_null())
-                    path = body["path"].get<std::string>();
-                mem.update_project(name, status, description, path);
-                respond_json(res, json{{"status", "ok"}});
-            } else {
-                throw std::invalid_argument(
-                    "action must be one of: list, create, get, update");
-            }
-            Diskerror::Logger::debug("POST /memory/project 200");
-        } catch (const std::invalid_argument& e) {
-            Diskerror::Logger::debug("POST /memory/project 400");
-            res.status = 400;
-            res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
-        }
-    }
-
     // POST /memory/timeline — deterministic newest-first range scan
-    // (agent API Phase 4). Body: {project?, session?, since?, until?,
+    // (agent API Phase 4). Body: {session?, since?, until?,
     // granularity?, limit?, cursor?}. Returns {items, next_cursor}.
     void handle_memory_timeline(const UserInfo& user, const httplib::Request& req,
                                 httplib::Response& res) {
         auto body = json::parse(req.body);
         auto& mem = _get_memory(user.username);
-        TimelineQuery q = parse_timeline_query(body, mem);
+        TimelineQuery q = parse_timeline_query(body);
         try {
             Diskerror::Logger::debug("POST /memory/timeline 200");
             respond_json(res, mem.agent_timeline(q));
@@ -735,7 +683,7 @@ struct Server::Impl {
     }
 
     // POST /memory/update — metadata-only curation (agent API Phase 4).
-    // Body: {id, status?, tags?, project?, text?}. `text` present is always
+    // Body: {id, status?, tags?, text?}. `text` present is always
     // rejected: text changes go through a new decision/note with supersedes.
     void handle_memory_update(const UserInfo& user, const httplib::Request& req,
                               httplib::Response& res) {
@@ -780,11 +728,9 @@ struct Server::Impl {
     void handle_memory_search(const UserInfo& user, const httplib::Request& req,
                               httplib::Response& res) {
         auto body = json::parse(req.body);
-        // Project filter (Phase 3): explicit first, else cwd inference; a
-        // non-matching cwd simply leaves the filter empty. An explicit
-        // unknown project throws below -> 400. Shared with the MCP surface.
+        // Shared with the MCP surface via parse_agent_search_query.
         auto& mem = _get_memory(user.username);
-        AgentSearchQuery q = parse_agent_search_query(body, mem);
+        AgentSearchQuery q = parse_agent_search_query(body);
         try {
             auto hits = mem.agent_search(q);
             json arr = json::array();
@@ -1007,7 +953,6 @@ struct Server::Impl {
         svr.Post("/memory/search",      guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_search(u, req, res); }));
         svr.Post("/memory/get",         guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_get(u, req, res); }));
         svr.Post("/memory/note",        guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_note(u, req, res); }));
-        svr.Post("/memory/project",     guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_project(u, req, res); }));
         svr.Post("/memory/timeline",    guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_timeline(u, req, res); }));
         svr.Post("/memory/update",      guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_update(u, req, res); }));
         svr.Post("/memory/review",      guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_review(u, req, res); }));

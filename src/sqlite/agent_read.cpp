@@ -180,17 +180,6 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
     if (!q.session.empty())         sess_id = guid_to_id(q.session);
     if (!q.exclude_session.empty()) excl_id = guid_to_id(q.exclude_session);
 
-    // ---- project filter (Phase 3) ----------------------------------------
-    // An explicitly named project that doesn't resolve is an error (400);
-    // cwd INFERENCE happens at the HTTP layer and leaves the filter empty
-    // when nothing matches, per PHASE3-STEPS step 4.
-    std::optional<int> proj_id;
-    if (!q.project.empty()) {
-        proj_id = resolve_project(q.project);
-        if (!proj_id)
-            throw std::invalid_argument(std::format(
-                "project '{}' does not exist", q.project));
-    }
     // ---- batched per-layer lookups (review 3A) ----------------------------
     // One "WHERE <pk> IN (...)" query per layer per lookup instead of one
     // prepared query per candidate hit (pool is up to 250 ids). Ids are
@@ -229,10 +218,10 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
     fill_structured("decision", "decisions", "decision_id", dec_status, dec_trigger);
     fill_structured("insight",  "insights",  "insight_id",  ins_status, ins_trigger);
 
-    // Owning session / project per layer (documents have neither; the turn
-    // layer is never produced by the search corpora). Only fetched when the
-    // corresponding filter is active.
-    std::map<std::string, std::unordered_map<int, int>> session_of, project_of;
+    // Owning session per layer (documents have neither; the turn layer is
+    // never produced by the search corpora). Only fetched when a session
+    // filter is active.
+    std::map<std::string, std::unordered_map<int, int>> session_of;
     auto fill_owning = [&](std::map<std::string, std::unordered_map<int, int>>& out,
                            const char* layer, const char* sql_prefix) {
         auto it = ids_by_layer.find(layer);
@@ -251,19 +240,6 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
         fill_owning(session_of, "insight",
                     "SELECT insight_id, session_id FROM insights WHERE insight_id");
     }
-    if (proj_id) {
-        fill_owning(project_of, "decision",
-                    "SELECT decision_id, project_id FROM decisions WHERE decision_id");
-        fill_owning(project_of, "insight",
-                    "SELECT insight_id, project_id FROM insights WHERE insight_id");
-        fill_owning(project_of, "summary",
-                    "SELECT summary_id, project_id FROM summaries WHERE summary_id");
-        fill_owning(project_of, "turn_summary",
-                    "SELECT ts.turn_summary_id, s.project_id FROM turn_summaries ts "
-                    "JOIN sessions s ON s.session_id = ts.session_id "
-                    "WHERE ts.turn_summary_id");
-    }
-
     // Session GUIDs for turn_summary extras — one query for the whole pool.
     std::unordered_map<int, std::string> guid_of_session;
     {
@@ -316,16 +292,6 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
             }
             if (sess_id && (!sid || *sid != *sess_id)) continue;
             if (excl_id && sid && *sid == *excl_id) continue;
-        }
-
-        if (proj_id) {
-            std::optional<int> pid;
-            auto lit = project_of.find(layer);
-            if (lit != project_of.end()) {
-                auto it = lit->second.find(r.id);
-                if (it != lit->second.end()) pid = it->second;
-            }
-            if (!pid || *pid != *proj_id) continue;
         }
 
         AgentHit h;
@@ -450,15 +416,7 @@ json Backend::Impl::agent_timeline(const TimelineQuery& q) {
         cur_row = r;
     }
 
-    // Project filter: explicit name/path must resolve (400), same contract as
-    // agent_search. Session filter: unknown GUID matches nothing (nullopt).
-    std::optional<int> proj_id;
-    if (!q.project.empty()) {
-        auto p = resolve_project(q.project);
-        if (!p)
-            throw std::invalid_argument(std::format("project '{}' does not exist", q.project));
-        proj_id = *p;
-    }
+    // Session filter: unknown GUID matches nothing (nullopt).
     std::optional<int> sess_id;
     if (!q.session.empty()) {
         Stmt s(db, "SELECT session_id FROM sessions WHERE guid = ?");
@@ -496,10 +454,6 @@ json Backend::Impl::agent_timeline(const TimelineQuery& q) {
             sql += " AND t.session_id = ?";
             int_binds.push_back({static_cast<int>(int_binds.size()) + 1, *sess_id});
         }
-        if (proj_id) {
-            sql += " AND t.session_id IN (SELECT session_id FROM sessions WHERE project_id = ?)";
-            int_binds.push_back({static_cast<int>(int_binds.size()) + 1, *proj_id});
-        }
     } else if (q.granularity == "episode") {
         first_expr = "sm.created_at";
         row_expr = "sm.summary_id";
@@ -510,14 +464,6 @@ json Backend::Impl::agent_timeline(const TimelineQuery& q) {
         if (sess_id) {
             sql += " AND sm.session_id = ?";
             int_binds.push_back({static_cast<int>(int_binds.size()) + 1, *sess_id});
-        }
-        if (proj_id) {
-            // Own project_id or the owning session's (parity with the
-            // project briefing's recent_episodes query).
-            sql += " AND (sm.project_id = ? OR sm.session_id IN "
-                   "  (SELECT session_id FROM sessions WHERE project_id = ?))";
-            int_binds.push_back({static_cast<int>(int_binds.size()) + 1, *proj_id});
-            int_binds.push_back({static_cast<int>(int_binds.size()) + 1, *proj_id});
         }
     } else { // session
         // Per session: its session summary if one exists, else its newest
@@ -540,10 +486,6 @@ json Backend::Impl::agent_timeline(const TimelineQuery& q) {
         if (sess_id) {
             sql += " AND s.session_id = ?";
             int_binds.push_back({static_cast<int>(int_binds.size()) + 1, *sess_id});
-        }
-        if (proj_id) {
-            sql += " AND s.project_id = ?";
-            int_binds.push_back({static_cast<int>(int_binds.size()) + 1, *proj_id});
         }
     }
 

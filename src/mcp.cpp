@@ -118,7 +118,7 @@ static nlohmann::json tools_list() {
                     {"scope",      {{"type", "string"},
                                     {"description", "What this does NOT apply to."}}},
                     {"tags",       {{"type", "array"}, {"items", {{"type", "string"}}},
-                                    {"description", "Optional tags."}}},
+                                 {"description", "Optional tags (use `project:<name>` to scope)."}}},
                     {"status",     {{"type", "string"},
                                     {"enum", [&]{ nlohmann::json a = nlohmann::json::array();
                                     for (auto s : ragger::sqlite::status::kCreatable) a.push_back(s);
@@ -130,10 +130,6 @@ static nlohmann::json tools_list() {
                                     {"description", "Current session GUID, for provenance."}}},
                     {"evidence",   {{"type", "array"}, {"items", {{"type", "integer"}}},
                                     {"description", "turn_summary ids this decision rests on."}}},
-                    {"project",    {{"type", "string"},
-                                    {"description", "Project name or path this ruling belongs to (optional)."}}},
-                    {"cwd",        {{"type", "string"},
-                                    {"description", "Working directory, for project inference when project is omitted."}}}
                 }},
                 {"required", nlohmann::json::array({"text", "trigger"})}
             }}
@@ -187,10 +183,6 @@ static nlohmann::json tools_list() {
                                           {"description", "Max results (default 10, max 50)."}}},
                     {"max_tokens",      {{"type", "integer"},
                                           {"description", "Token budget (~chars/4) over snippets; 0 = none."}}},
-                    {"project",         {{"type", "string"},
-                                          {"description", "Only results tied to this project (name or path)."}}},
-                    {"cwd",             {{"type", "string"},
-                                          {"description", "Working directory, for project inference when project is omitted."}}}
                 }},
                 {"required", nlohmann::json::array({"query"})}
             }}
@@ -224,8 +216,8 @@ static nlohmann::json tools_list() {
         {
             {"name", "memory_note"},
             {"description",
-             "Store a note (fact, preference, lesson) into memory. `project` is a "
-             "project name or path; omit it and the server infers the project from "
+             "Store a note (fact, preference, lesson) into memory. To scope a "
+             "note to a project, tag it (e.g. `project:ragger`). The result may carry "
              "the working directory when `cwd` is given. The result may carry "
              "`possible_supersedes`: current decisions this note may contradict "
              "(hint only — nothing was changed; review them, and record a real "
@@ -237,43 +229,12 @@ static nlohmann::json tools_list() {
                 {"properties", {
                     {"text",    {{"type", "string"},
                                  {"description", "The note text."}}},
-                    {"project", {{"type", "string"},
-                                 {"description", "Project name or path (optional)."}}},
                     {"tags",    {{"type", "array"}, {"items", {{"type", "string"}}},
                                  {"description", "Optional tags."}}},
-                    {"cwd",     {{"type", "string"},
-                                 {"description", "Working directory, for project inference when project is omitted."}}},
                     {"evidence",{{"type", "array"}, {"items", {{"type", "integer"}}},
                                  {"description", "turn_summary ids this note synthesizes. When present the note is stored as an insight (response carries \"table\":\"insights\") instead of a plain note."}}}
                 }},
                 {"required", nlohmann::json::array({"text"})}
-            }}
-        },
-        {
-            {"name", "memory_project"},
-            {"description",
-             "Projects: named bodies of work. action 'list' returns all projects "
-             "(optional status filter); 'create' needs name (unique; path optional, "
-             "used for cwd inference); 'get' returns the project briefing packet — "
-             "current rulings, latest project summary, recent episodes, open "
-             "questions — read it before working on a project; 'update' changes "
-             "status/description/path (only supplied fields)."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"action",      {{"type", "string"},
-                                     {"enum", nlohmann::json::array({"list", "create", "get", "update"})},
-                                     {"description", "list | create | get | update."}}},
-                    {"name",        {{"type", "string"},
-                                     {"description", "Project name (required for create/get/update)."}}},
-                    {"status",      {{"type", "string"},
-                                     {"description", "create default active; update sets it (active|paused|done|abandoned, vocabulary may grow). For list: filter."}}},
-                    {"description", {{"type", "string"},
-                                     {"description", "What this project is."}}},
-                    {"path",        {{"type", "string"},
-                                     {"description", "Project root path (absolute or ~/...), used for cwd inference."}}}
-                }},
-                {"required", nlohmann::json::array({"action"})}
             }}
         },
         {
@@ -283,17 +244,12 @@ static nlohmann::json tools_list() {
              "search ranking). granularity 'turn' = per-exchange summaries "
              "(falling back to raw user text), 'episode' = episode summaries "
              "(default), 'session' = per session its session summary or newest "
-             "episode. Filters: project (name/path; cwd inference applies), "
-             "session GUID, since/until ('YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', "
+             "episode. Filters: session GUID, since/until ('YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', "
              "or relative '30d'/'12h'). Page through with the returned "
              "next_cursor; null means the end."},
             {"inputSchema", {
                 {"type", "object"},
                 {"properties", {
-                    {"project",     {{"type", "string"},
-                                     {"description", "Project name or path (optional)."}}},
-                    {"cwd",         {{"type", "string"},
-                                     {"description", "Working directory, for project inference when project is omitted."}}},
                     {"session",     {{"type", "string"},
                                      {"description", "Only this session GUID."}}},
                     {"since",       {{"type", "string"},
@@ -315,9 +271,8 @@ static nlohmann::json tools_list() {
             {"description",
              "Curate one row's METADATA by typed handle: decision status "
              "(legal transitions only; 'superseded' is set only by storing a "
-             "superseding decision), tags (replaces the whole set), project "
-             "(name/path; empty string clears). Agent notes (summaries without "
-             "a model) accept tags/project; summarizer rollups and turn / "
+             "superseding decision), tags (replaces the whole set). Agent notes "
+             "(summaries without a model) accept tags; summarizer rollups and turn / "
              "turn_summary / document rows are not editable. Text is NEVER "
              "edited in place — to change what something says, store a new "
              "decision (memory_decision with supersedes) or note; passing "
@@ -331,8 +286,6 @@ static nlohmann::json tools_list() {
                                 {"description", "Decision status: current | provisional | pending | roadmap | retired."}}},
                     {"tags",   {{"type", "string"},
                                 {"description", "Replacement tag string (comma-separated)."}}},
-                    {"project",{{"type", "string"},
-                                {"description", "Project name/path; empty string clears it."}}}
                 }},
                 {"required", nlohmann::json::array({"id"})}
             }}
@@ -475,8 +428,8 @@ static nlohmann::json tool_call(RaggerMemory& memory,
 
     } else if (tool_name == "memory_decision") {
         // Shared with HTTP POST /decision via parse_decision_input (tags
-        // accept array or string form, cwd inference included).
-        DecisionInput in = parse_decision_input(arguments, memory);
+        // accept array or string form).
+        DecisionInput in = parse_decision_input(arguments);
         try {
             const auto r = memory.store_structured_decision(in);
             return text_result(nlohmann::json({
@@ -493,7 +446,7 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         if (query.empty())
             return error_result(ragger::lang::ERR_MCP_QUERY_REQUIRED);
         // Shared with HTTP POST /memory/search via parse_agent_search_query.
-        AgentSearchQuery q = parse_agent_search_query(arguments, memory);
+        AgentSearchQuery q = parse_agent_search_query(arguments);
         try {
             const auto hits = memory.agent_search(q);
             nlohmann::json arr = nlohmann::json::array();
@@ -517,10 +470,9 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         }
 
     } else if (tool_name == "memory_note") {
-        // Phase 3: today's ragger_store plus project/tags. Lands where notes
-        // land today (summaries via store()), plus project_id. Phase 5:
-        // evidence present => stored as an insight instead (see HTTP
-        // /memory/note for the shared contract).
+        // Notes land in summaries via store(); evidence present => stored
+        // as an insight instead (see HTTP /memory/note for the shared
+        // contract).
         const auto text = arguments.value("text", "");
         if (text.empty())
             return error_result(ragger::lang::ERR_MCP_TEXT_REQUIRED);
@@ -528,13 +480,9 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         metadata["source"] = "mcp";
         if (arguments.contains("tags"))
             metadata["tags"] = arguments["tags"];
-        std::string project = infer_project(memory, arguments,
-                                            arguments.value("project", ""));
-        if (!project.empty())
-            metadata["project"] = project;
         try {
             if (arguments.contains("evidence") && arguments["evidence"].is_array()) {
-                DecisionInput in = parse_note_insight(arguments, text, project);
+                DecisionInput in = parse_note_insight(arguments, text);
                 const auto r = memory.store_insight(in);
                 return text_result(json({{"id", r.id}, {"table", "insights"},
                                          {"status", "stored"},
@@ -549,37 +497,8 @@ static nlohmann::json tool_call(RaggerMemory& memory,
             return error_result(e.what());
         }
 
-    } else if (tool_name == "memory_project") {
-        const auto action = arguments.value("action", "");
-        const auto name   = arguments.value("name", "");
-        try {
-            if (action == "list") {
-                return text_result(json({{"projects",
-                    memory.list_projects(arguments.value("status", ""))}}).dump());
-            } else if (action == "create") {
-                const int id = memory.create_project(name,
-                    arguments.value("path", ""), arguments.value("description", ""));
-                return text_result(json({{"id", id}, {"status", "stored"}}).dump());
-            } else if (action == "get") {
-                return text_result(memory.project_briefing(name).dump());
-            } else if (action == "update") {
-                std::optional<std::string> status, description, path;
-                if (arguments.contains("status") && !arguments["status"].is_null())
-                    status = arguments["status"].get<std::string>();
-                if (arguments.contains("description") && !arguments["description"].is_null())
-                    description = arguments["description"].get<std::string>();
-                if (arguments.contains("path") && !arguments["path"].is_null())
-                    path = arguments["path"].get<std::string>();
-                memory.update_project(name, status, description, path);
-                return text_result(json({{"status", "ok"}}).dump());
-            }
-            return error_result("action must be one of: list, create, get, update");
-        } catch (const std::invalid_argument& e) {
-            return error_result(e.what());
-        }
-
     } else if (tool_name == "memory_timeline") {
-        TimelineQuery q = parse_timeline_query(arguments, memory);
+        TimelineQuery q = parse_timeline_query(arguments);
         try {
             return text_result(memory.agent_timeline(q).dump());
         } catch (const std::invalid_argument& e) {
