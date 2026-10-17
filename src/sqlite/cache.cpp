@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <functional>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -145,121 +146,85 @@ void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
     void Backend::Impl::invalidate_turn_cache() { turn_cache_.valid = false; }
 
 
-    // Loads the summaries table into the vector cache. Keyword scores come
-    // from FTS5 (summaries_fts) at query time — see keyword_scores().
-    void Backend::Impl::ensure_cache() {
-        if (summary_cache_.valid) return;
+    // Shared body of the five loaders (PHASE3 Step 5). The loop shape is
+    // identical everywhere: id/text/embedding at columns 0/1/2, timestamp at
+    // column 5, everything else handed to fill_meta. SQL strings below are
+    // character-for-character the pre-refactor loader queries.
+    void Backend::Impl::load_cache(EmbeddingCache& c, const char* label,
+                                   const std::string& sql,
+                                   const std::function<void(Stmt&, json&)>& fill_meta) {
+        c.ids.clear();
+        c.texts.clear();
+        c.metadata.clear();
+        c.timestamps.clear();
 
-        summary_cache_.ids.clear();
-        summary_cache_.texts.clear();
-        summary_cache_.metadata.clear();
-        summary_cache_.timestamps.clear();
-
-        Stmt s(db,
-            "SELECT summary_id, text, embedding, level, tags, "
-            "       datetime(created_at,'unixepoch','localtime') "
-            "FROM summaries");
-
+        Stmt s(db, sql);
         std::vector<std::vector<float>> emb_rows;
         const int expected_dims = config().embedding_dimensions;
         bool blob_warned = false;
 
         while (s.step()) {
-            auto col_text = [&](int i) -> std::string { return s.column_text(i); };
-            summary_cache_.ids.push_back(s.column_int(0));
-            summary_cache_.texts.push_back(col_text(1));
+            c.ids.push_back(s.column_int(0));
+            c.texts.push_back(s.column_text(1));
 
             const void* blob = s.column_blob(2);
             int blob_bytes   = s.column_bytes(2);
-            std::vector<float> emb = decode_embedding_blob(
-                blob, blob_bytes, expected_dims, "summaries",
-                summary_cache_.ids.back(), blob_warned);
-            emb_rows.push_back(std::move(emb));
+            emb_rows.push_back(decode_embedding_blob(
+                blob, blob_bytes, expected_dims, label,
+                c.ids.back(), blob_warned));
 
-            // Lean v2 summaries: surface level/tags as metadata so the
-            // generic API and keep-protection (via tags) have what they need.
             json meta = json::object();
-            meta["source"] = "summary";
-            meta["level"]  = col_text(3);
-            std::string tags = col_text(4);
-            if (!tags.empty()) meta["tags"] = tags;
-            summary_cache_.metadata.push_back(std::move(meta));
+            fill_meta(s, meta);
+            c.metadata.push_back(std::move(meta));
 
-            summary_cache_.timestamps.push_back(col_text(5));
+            c.timestamps.push_back(s.column_text(5));
         }
 
-        // Pack into Eigen matrix (rows × dims). Every row is padded/zeroed to
-        // expected_dims so NULL-embedding rows don't poison the matrix shape.
-        pack_embeddings(summary_cache_, emb_rows, expected_dims);
+        pack_embeddings(c, emb_rows, expected_dims);
+    }
+
+
+    void Backend::Impl::ensure_cache() {
+        if (summary_cache_.valid) return;
+        load_cache(summary_cache_, "summaries",
+            "SELECT summary_id, text, embedding, level, tags, "
+            "       datetime(created_at,'unixepoch','localtime') "
+            "FROM summaries",
+            [](Stmt& s, json& meta) {
+                // Lean v2 summaries: surface level/tags as metadata so the
+                // generic API and keep-protection (via tags) have what they
+                // need.
+                meta["source"] = "summary";
+                meta["level"]  = s.column_text(3);
+                std::string tags = s.column_text(4);
+                if (!tags.empty()) meta["tags"] = tags;
+            });
         summary_cache_.valid = true;
     }
 
 
-    // Loads the documents (L5) table into the parallel vector cache. Mirrors
-    // ensure_cache(): vector scores come from here, keyword scores from FTS5
-    // (documents_fts) at query time. Metadata carries source="document" plus
-    // the title so search() consumers can distinguish documents from summaries.
     void Backend::Impl::ensure_doc_cache() {
         if (doc_cache_.valid) return;
-
-        doc_cache_.ids.clear();
-        doc_cache_.texts.clear();
-        doc_cache_.metadata.clear();
-        doc_cache_.timestamps.clear();
-
-        Stmt s(db,
+        load_cache(doc_cache_, "documents",
             "SELECT d.document_id, d.text, d.embedding, "
             "       ifnull(ds.title,''), d.tags, "
             "       datetime(ds.imported_at, 'unixepoch', 'localtime') "
             "FROM documents d "
             "LEFT JOIN document_sources ds "
-            "  ON ds.document_source_id = d.document_source_id");
-
-        std::vector<std::vector<float>> emb_rows;
-        const int expected_dims = config().embedding_dimensions;
-        bool blob_warned = false;
-
-        while (s.step()) {
-            auto col_text = [&](int i) -> std::string { return s.column_text(i); };
-            doc_cache_.ids.push_back(s.column_int(0));
-            doc_cache_.texts.push_back(col_text(1));
-
-            const void* blob = s.column_blob(2);
-            int blob_bytes   = s.column_bytes(2);
-            std::vector<float> emb = decode_embedding_blob(
-                blob, blob_bytes, expected_dims, "documents",
-                doc_cache_.ids.back(), blob_warned);
-            emb_rows.push_back(std::move(emb));
-
-            json meta = json::object();
-            meta["source"] = "document";
-            meta["title"]  = col_text(3);
-            std::string tags = col_text(4);
-            if (!tags.empty()) meta["tags"] = tags;
-            doc_cache_.metadata.push_back(std::move(meta));
-
-            doc_cache_.timestamps.push_back(col_text(5));
-        }
-
-        pack_embeddings(doc_cache_, emb_rows, expected_dims);
+            "  ON ds.document_source_id = d.document_source_id",
+            [](Stmt& s, json& meta) {
+                meta["source"] = "document";
+                meta["title"]  = s.column_text(3);
+                std::string tags = s.column_text(4);
+                if (!tags.empty()) meta["tags"] = tags;
+            });
         doc_cache_.valid = true;
     }
 
 
-    // Loads the decisions (L6) table into the parallel vector cache. Mirrors
-    // ensure_cache(): vector scores come from here, keyword scores from FTS5
-    // (decisions_fts) at query time. Metadata carries source="decision" plus
-    // the status so search() consumers can distinguish decisions from the
-    // other corpora.
     void Backend::Impl::ensure_dec_cache() {
         if (dec_cache_.valid) return;
-
-        dec_cache_.ids.clear();
-        dec_cache_.texts.clear();
-        dec_cache_.metadata.clear();
-        dec_cache_.timestamps.clear();
-
-        Stmt s(db,
+        load_cache(dec_cache_, "decisions",
             "SELECT decision_id, text, embedding, status, tags, "
             "       datetime(created_at,'unixepoch','localtime'), "
             "       ifnull(trigger,'') "
@@ -269,145 +234,55 @@ void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
             // Allow-list, not deny-list, so a future status stays hidden
             // until someone decides it should surface. 'roadmap' keeps its
             // pre-0.17 visibility.
-            "WHERE status IN ('current','provisional','roadmap')");
-
-        std::vector<std::vector<float>> emb_rows;
-        const int expected_dims = config().embedding_dimensions;
-        bool blob_warned = false;
-
-        while (s.step()) {
-            auto col_text = [&](int i) -> std::string { return s.column_text(i); };
-            dec_cache_.ids.push_back(s.column_int(0));
-            dec_cache_.texts.push_back(col_text(1));
-
-            const void* blob = s.column_blob(2);
-            int blob_bytes   = s.column_bytes(2);
-            std::vector<float> emb = decode_embedding_blob(
-                blob, blob_bytes, expected_dims, "decisions",
-                dec_cache_.ids.back(), blob_warned);
-            emb_rows.push_back(std::move(emb));
-
-            json meta = json::object();
-            meta["source"] = "decision";
-            meta["status"] = col_text(3);
-            std::string tags = col_text(4);
-            if (!tags.empty()) meta["tags"] = tags;
-            std::string trig = col_text(6);
-            if (!trig.empty()) meta["trigger"] = trig;
-            dec_cache_.metadata.push_back(std::move(meta));
-
-            dec_cache_.timestamps.push_back(col_text(5));
-        }
-
-        pack_embeddings(dec_cache_, emb_rows, expected_dims);
+            "WHERE status IN (" + status::in_list_sql(status::kCacheLoaded) + ")",
+            [](Stmt& s, json& meta) {
+                meta["source"] = "decision";
+                meta["status"] = s.column_text(3);
+                std::string tags = s.column_text(4);
+                if (!tags.empty()) meta["tags"] = tags;
+                std::string trig = s.column_text(6);
+                if (!trig.empty()) meta["trigger"] = trig;
+            });
         dec_cache_.valid = true;
     }
 
 
-    // Loads the insights table into the parallel vector cache. Mirrors
-    // ensure_dec_cache() exactly — same status allow-list (superseded /
-    // retired / pending rows are history or unreviewed drafts: kept in the
-    // table, hidden from search). Metadata carries source="insight" plus the
-    // status/trigger so search() consumers can distinguish insights from the
-    // other corpora.
     void Backend::Impl::ensure_ins_cache() {
         if (ins_cache_.valid) return;
-
-        ins_cache_.ids.clear();
-        ins_cache_.texts.clear();
-        ins_cache_.metadata.clear();
-        ins_cache_.timestamps.clear();
-
-        Stmt s(db,
+        load_cache(ins_cache_, "insights",
             "SELECT insight_id, text, embedding, status, tags, "
             "       datetime(created_at,'unixepoch','localtime'), "
             "       ifnull(trigger,'') "
             "FROM insights "
-            "WHERE status IN ('current','provisional','roadmap')");
-
-        std::vector<std::vector<float>> emb_rows;
-        const int expected_dims = config().embedding_dimensions;
-        bool blob_warned = false;
-
-        while (s.step()) {
-            auto col_text = [&](int i) -> std::string { return s.column_text(i); };
-            ins_cache_.ids.push_back(s.column_int(0));
-            ins_cache_.texts.push_back(col_text(1));
-
-            const void* blob = s.column_blob(2);
-            int blob_bytes   = s.column_bytes(2);
-            std::vector<float> emb = decode_embedding_blob(
-                blob, blob_bytes, expected_dims, "insights",
-                ins_cache_.ids.back(), blob_warned);
-            emb_rows.push_back(std::move(emb));
-
-            json meta = json::object();
-            meta["source"] = "insight";
-            meta["status"] = col_text(3);
-            std::string tags = col_text(4);
-            if (!tags.empty()) meta["tags"] = tags;
-            std::string trig = col_text(6);
-            if (!trig.empty()) meta["trigger"] = trig;
-            ins_cache_.metadata.push_back(std::move(meta));
-
-            ins_cache_.timestamps.push_back(col_text(5));
-        }
-
-        pack_embeddings(ins_cache_, emb_rows, expected_dims);
+            "WHERE status IN (" + status::in_list_sql(status::kCacheLoaded) + ")",
+            [](Stmt& s, json& meta) {
+                meta["source"] = "insight";
+                meta["status"] = s.column_text(3);
+                std::string tags = s.column_text(4);
+                if (!tags.empty()) meta["tags"] = tags;
+                std::string trig = s.column_text(6);
+                if (!trig.empty()) meta["trigger"] = trig;
+            });
         ins_cache_.valid = true;
     }
 
 
-    // Loads the turn_summaries (L2) table into the parallel vector cache.
-    // Mirrors ensure_dec_cache(): vector scores come from here, keyword
-    // scores from FTS5 (turn_summaries_fts) at query time. WHERE text IS NOT
-    // NULL excludes unfinalized placeholder rows (summarizer hasn't run yet)
-    // — these must never surface in search results or feed the embedding
-    // similarity matrix. Metadata carries source="turn_summary" plus
-    // turn_id/session_id (turn_summaries has no tags/status/level columns).
     void Backend::Impl::ensure_turn_cache() {
         if (turn_cache_.valid) return;
-
-        turn_cache_.ids.clear();
-        turn_cache_.texts.clear();
-        turn_cache_.metadata.clear();
-        turn_cache_.timestamps.clear();
-
-        Stmt s(db,
+        load_cache(turn_cache_, "turn_summaries",
             "SELECT turn_summary_id, text, embedding, turn_id, session_id, "
             "       datetime(turn_datetime,'unixepoch','localtime') "
-            "FROM turn_summaries WHERE text != ''");
-
-        std::vector<std::vector<float>> emb_rows;
-        const int expected_dims = config().embedding_dimensions;
-        bool blob_warned = false;
-
-        while (s.step()) {
-            auto col_text = [&](int i) -> std::string { return s.column_text(i); };
-            turn_cache_.ids.push_back(s.column_int(0));
-            turn_cache_.texts.push_back(col_text(1));
-
-            const void* blob = s.column_blob(2);
-            int blob_bytes   = s.column_bytes(2);
-            std::vector<float> emb = decode_embedding_blob(
-                blob, blob_bytes, expected_dims, "turn_summaries",
-                turn_cache_.ids.back(), blob_warned);
-            emb_rows.push_back(std::move(emb));
-
-            json meta = json::object();
-            meta["source"] = "turn_summary";
-            if (!s.is_null(3)) meta["turn_id"] = s.column_int(3);
-            if (!s.is_null(4)) meta["session_id"] = s.column_int(4);
-            // Human-readable datetime (mirrors turns.created_at) for temporal
-            // ordering; kept alongside turn_id (raw-turn lookup key).
-            std::string ts = col_text(5);
-            if (!ts.empty()) meta["datetime"] = ts;
-            turn_cache_.metadata.push_back(std::move(meta));
-
-            turn_cache_.timestamps.push_back(std::move(ts));
-        }
-
-        pack_embeddings(turn_cache_, emb_rows, expected_dims);
+            "FROM turn_summaries WHERE text != ''",
+            [](Stmt& s, json& meta) {
+                meta["source"] = "turn_summary";
+                if (!s.is_null(3)) meta["turn_id"] = s.column_int(3);
+                if (!s.is_null(4)) meta["session_id"] = s.column_int(4);
+                // Human-readable datetime (mirrors turns.created_at) for
+                // temporal ordering; kept alongside turn_id (raw-turn lookup
+                // key).
+                std::string ts = s.column_text(5);
+                if (!ts.empty()) meta["datetime"] = ts;
+            });
         turn_cache_.valid = true;
     }
 

@@ -333,21 +333,13 @@ namespace fs = std::filesystem;
         // NOT NULL, so a missing parent would be corruption, and surfacing zero
         // rows for it is the right signal. Ordered most-frequent-first within a
         // record, which is what you almost always want when eyeballing why
-        // something did or didn't match.
-        struct J { const char* view; const char* junc; const char* pk; };
-        for (const J& j : {
-                 J{"turns_terms_view",          "turns_terms",          "turn_id"},
-                 J{"turn_summaries_terms_view", "turn_summaries_terms", "turn_summary_id"},
-                 J{"summaries_terms_view",      "summaries_terms",      "summary_id"},
-                 J{"documents_terms_view",      "documents_terms",      "document_id"},
-                 J{"decisions_terms_view",      "decisions_terms",      "decision_id"},
-                 J{"insights_terms_view",       "insights_terms",       "insight_id"},
-             }) {
-            view(j.view, std::format(
-                "SELECT j.{} AS {}, t.term, j.count "
-                "FROM {} j JOIN terms t ON t.term_id = j.term_id "
-                "ORDER BY j.{}, j.count DESC, t.term",
-                j.pk, j.pk, j.junc, j.pk));
+        // something did or didn't match. Driven by the registry (PHASE3 Step 3).
+        for (const auto& t : kTextTables) {
+            view(std::string(t.junction) + "_view", std::format(
+                "SELECT j.{0} AS {0}, t.term, j.count "
+                "FROM {1} j JOIN terms t ON t.term_id = j.term_id "
+                "ORDER BY j.{0}, j.count DESC, t.term",
+                t.pk, t.junction));
         }
     }
 

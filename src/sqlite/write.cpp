@@ -779,9 +779,13 @@ static std::string tags_from_metadata(const json& metadata) {
                 "{} requires at least one evidence turn_summary_id", spec.noun));
         // Statuses a NEW row may start in. 'superseded' and 'retired' are
         // reached only by curation, never on create.
-        if (status != "current" && status != "provisional" && status != "pending")
-            throw std::invalid_argument(
-                "status must be one of: current, provisional, pending");
+        {
+            bool ok = false;
+            for (auto s : ragger::sqlite::status::kCreatable) if (status == s) ok = true;
+            if (!ok)
+                throw std::invalid_argument(
+                    "status must be one of: current, provisional, pending");
+        }
 
         if (in.supersedes) {
             Stmt s(db, std::format("SELECT status FROM {} WHERE {} = ?",
@@ -941,8 +945,8 @@ static std::string tags_from_metadata(const json& metadata) {
         const int expected_dims = config().embedding_dimensions;
         bool blob_warned = false;
         std::string sql =
-            std::format("SELECT {}, embedding FROM {} "
-                        "WHERE status IN ('current','provisional') ", pk, table);
+            std::format("SELECT {}, embedding FROM {} WHERE status IN ({}) ",
+                        pk, table, status::in_list_sql(status::kSearchActive));
         for (size_t i = 0; i < exclude_ids.size(); ++i)
             sql += std::format("  AND {} != ? ", pk);
         sql += "  AND embedding IS NOT NULL";

@@ -19,6 +19,7 @@
 #include "memory.h"
 #include "agent_parse.h"
 #include "sqlite/backend.h"
+#include "sqlite/status.h"
 #include "util/fs.h"
 #include "nlohmann_json.hpp"
 
@@ -119,7 +120,9 @@ static nlohmann::json tools_list() {
                     {"tags",       {{"type", "array"}, {"items", {{"type", "string"}}},
                                     {"description", "Optional tags."}}},
                     {"status",     {{"type", "string"},
-                                    {"enum", nlohmann::json::array({"current", "provisional", "pending"})},
+                                    {"enum", [&]{ nlohmann::json a = nlohmann::json::array();
+                                    for (auto s : ragger::sqlite::status::kCreatable) a.push_back(s);
+                                    return a; }()},
                                     {"description", "Default current. provisional = agreed, not yet proven."}}},
                     {"supersedes", {{"type", "integer"},
                                     {"description", "decision_id this replaces."}}},

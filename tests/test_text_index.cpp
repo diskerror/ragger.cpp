@@ -3,10 +3,163 @@
 
 #include "check.h"
 #include <iostream>
+#include <string>
+#include <vector>
 
 #include "sqlite/text_index.h"
+#include "sqlite/tables.h"
+
+namespace {
+
+// PHASE3 Step 1: registry self-consistency.
+void p3_registry_checks() {
+    using namespace ragger::sqlite;
+    CHECK(kTextTableCount == 6);
+    for (const auto& t : kTextTables) {
+        CHECK(std::string(t.junction) == std::string(t.table) + "_terms");
+        CHECK(find_text_table(t.table) == &t);
+    }
+    CHECK(find_text_table("nope") == nullptr);
+    CHECK(find_text_table("") == nullptr);
+    std::cout << "  registry OK\n";
+}
+
+// Raw-SQL mirrors of the index queries (TextIndex is `final` and its hooks
+// are protected; the pin asserts DB state directly, which is stronger).
+int p3_scalar(sqlite3* db, const char* sql) {
+    sqlite3_stmt* s = nullptr;
+    CHECK(sqlite3_prepare_v2(db, sql, -1, &s, nullptr) == SQLITE_OK);
+    int v = -1;
+    if (sqlite3_step(s) == SQLITE_ROW) v = sqlite3_column_int(s, 0);
+    sqlite3_finalize(s);
+    return v;
+}
+int p3_term_id(sqlite3* db, const std::string& term) {
+    std::string sql = "SELECT term_id FROM terms WHERE term = '" + term + "'";
+    return p3_scalar(db, sql.c_str());
+}
+int p3_doc_freq(sqlite3* db, const std::string& junction, int term_id) {
+    std::string sql = "SELECT COUNT(*) FROM " + junction +
+                      " WHERE term_id = " + std::to_string(term_id);
+    return p3_scalar(db, sql.c_str());
+}
+std::vector<int> p3_posting_ids(sqlite3* db, const std::string& junction,
+                                const std::string& pk, int term_id) {
+    std::string sql = "SELECT " + pk + " FROM " + junction +
+                      " WHERE term_id = " + std::to_string(term_id) +
+                      " ORDER BY " + pk;
+    std::vector<int> ids;
+    sqlite3_stmt* s = nullptr;
+    CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &s, nullptr) == SQLITE_OK);
+    while (sqlite3_step(s) == SQLITE_ROW) ids.push_back(sqlite3_column_int(s, 0));
+    sqlite3_finalize(s);
+    return ids;
+}
+
+// One raw INSERT per known text table (each has different required columns).
+// An unknown table name must fail loudly so later phases that add or remove
+// a table are forced to update this helper (PHASE3 Step 1 intent).
+void p3_insert_row(sqlite3* db, const std::string& table, int id,
+                   const std::string& text) {
+    const std::string i = std::to_string(id);
+    std::string sql;
+    if (table == "turns")
+        sql = "INSERT INTO turns(turn_id, user_text, assistant_text) VALUES ("
+              + i + ", '" + text + "', 'ack " + i + "')";
+    else if (table == "turn_summaries")
+        sql = "INSERT INTO turn_summaries(turn_summary_id, text) VALUES ("
+              + i + ", '" + text + "')";
+    else if (table == "summaries")
+        sql = "INSERT INTO summaries(summary_id, text) VALUES ("
+              + i + ", '" + text + "')";
+    else if (table == "decisions")
+        sql = "INSERT INTO decisions(decision_id, text) VALUES ("
+              + i + ", '" + text + "')";
+    else if (table == "insights")
+        sql = "INSERT INTO insights(insight_id, text) VALUES ("
+              + i + ", '" + text + "')";
+    else if (table == "documents") {
+        // The real store path always creates a document_sources row; the
+        // doc text formula's subquery needs one (no row => NULL fold).
+        std::string src = "INSERT INTO document_sources(document_source_id, title) VALUES ("
+                          + i + ", NULL);";
+        CHECK(sqlite3_exec(db, src.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+        sql = "INSERT INTO documents(document_id, text, document_source_id) VALUES ("
+              + i + ", '" + text + "', " + i + ")";
+    }
+    else
+        CHECK(!"p3_insert_row: unknown table");
+    CHECK(sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+}
+
+// PHASE3 Step 0 pin: every text table round-trips through the index —
+// insert 2 rows, index, corpus_size/doc_freq/postings, re-index changes
+// postings, reindex_table counts both rows. Safety net for the registry
+// refactor (Steps 1–3): behavior must be identical before and after.
+void p3_pin_all_tables() {
+    sqlite3* db = nullptr;
+    CHECK(sqlite3_open(":memory:", &db) == SQLITE_OK);
+    CHECK(sqlite3_exec(db, "PRAGMA foreign_keys = ON", nullptr, nullptr, nullptr) == SQLITE_OK);
+
+    const char* ddl =
+        "CREATE TABLE document_sources (document_source_id INTEGER PRIMARY KEY, title TEXT);"
+        "CREATE TABLE turns (turn_id INTEGER PRIMARY KEY, user_text TEXT, assistant_text TEXT,"
+        "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
+        "CREATE TABLE turn_summaries (turn_summary_id INTEGER PRIMARY KEY, text TEXT,"
+        "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
+        "CREATE TABLE summaries (summary_id INTEGER PRIMARY KEY, text TEXT,"
+        "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
+        "CREATE TABLE decisions (decision_id INTEGER PRIMARY KEY, text TEXT, trigger TEXT,"
+        "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
+        "CREATE TABLE insights (insight_id INTEGER PRIMARY KEY, text TEXT, trigger TEXT,"
+        "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
+        "CREATE TABLE documents (document_id INTEGER PRIMARY KEY, text TEXT,"
+        "  document_source_id INTEGER,"
+        "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);";
+    CHECK(sqlite3_exec(db, ddl, nullptr, nullptr, nullptr) == SQLITE_OK);
+
+    ragger::sqlite::TextIndex idx(db);
+    idx.create_schema();
+
+    // The pin iterates the registry itself: any phase that adds or removes
+    // a registry row must extend p3_insert_row (unknown name = loud fail).
+    for (const auto& t : ragger::sqlite::kTextTables) {
+        const std::string table = t.table;
+        const std::string pk = t.pk;
+        const std::string junction = t.junction;
+        CHECK(junction == table + "_terms");
+        p3_insert_row(db, table, 1, "qwertyuiop asdfghjkl");
+        p3_insert_row(db, table, 2, "zxcvbnm asdfghjkl");
+
+        CHECK(idx.reindex_table(table) == 2);
+        CHECK(p3_scalar(db, ("SELECT COUNT(*) FROM " + table).c_str()) == 2);
+
+        const int t_one = p3_term_id(db, "qwertyuiop");
+        CHECK(t_one != -1 && t_one != 0);
+        CHECK(p3_doc_freq(db, junction, t_one) == 1);
+        auto posts = p3_posting_ids(db, junction, pk, t_one);
+        CHECK(posts.size() == 1 && posts[0] == 1);
+
+        // Re-index row 1 with different text: the old word's posting goes
+        // away, the new word's appears.
+        idx.index_record(table, 1, "vbnmzxcv asdfghjkl");
+        CHECK(p3_doc_freq(db, junction, t_one) == 0);
+        CHECK(p3_posting_ids(db, junction, pk, t_one).empty());
+        CHECK(p3_doc_freq(db, junction, p3_term_id(db, "vbnmzxcv")) == 1);
+
+        CHECK(idx.reindex_table(table) == 2);
+        std::cout << "  pin " << table << " OK\n";
+    }
+
+    sqlite3_close(db);
+}
+
+} // namespace
 
 int main() {
+    p3_registry_checks();
+    p3_pin_all_tables();
+
     sqlite3* db = nullptr;
     CHECK(sqlite3_open(":memory:", &db) == SQLITE_OK);
 

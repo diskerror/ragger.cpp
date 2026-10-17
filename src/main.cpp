@@ -43,6 +43,7 @@
 #include "recipe_cli.h"
 #include "embed_executor.h"
 #include "sqlite/backend.h"
+#include "sqlite/tables.h"
 #include "user_store.h"
 #include "util/fs.h"
 #include "server.h"
@@ -1305,21 +1306,19 @@ int main(int argc, char **argv) {
             return ragger::run_recipe_cli(recipe_args, db_path);
         }
         else if (command == "re-embed") {
-            // Re-encode embeddings for one table, or all six (default).
-            // Mirrors `reindex`'s <table|all> argument handling.
-            static constexpr std::array<const char*, 6> kAllTables = {
-                "turns", "turn_summaries", "summaries", "decisions", "documents",
-                "insights"
-            };
+            // Re-encode embeddings for one table, or all (default).
+            // Mirrors `reindex`'s <table|all> argument handling. Table set
+            // from the registry (PHASE3 Step 3).
             auto args = opts.getParams("args");
             std::string target = args.empty() ? "all" : args[0];
             if (target != "all") {
                 bool found = false;
-                for (auto* t : kAllTables) if (target == t) { found = true; break; }
+                for (const auto& t : ragger::sqlite::kTextTables)
+                    if (target == t.table) { found = true; break; }
                 if (!found) {
                     Diskerror::Logger::error(std::format(
-                        "Unknown table '{}'. Expected one of: turns, turn_summaries, "
-                        "summaries, decisions, documents, insights, or \"all\"", target));
+                        "Unknown table '{}'. Expected one of: {}, or \"all\"",
+                        target, ragger::sqlite::text_table_names()));
                     return 1;
                 }
             }
@@ -1406,27 +1405,24 @@ int main(int argc, char **argv) {
             // table, or all five. Idempotent (delete-then-insert per record),
             // so safe to re-run any time — e.g. after a tokenizer/stopword
             // change, or to recover from a suspected inconsistency. Backs up
-            // the DB first — cheap rollback, no drift guard needed.
-            static constexpr std::array<const char*, 6> kAllTables = {
-                "turns", "turn_summaries", "summaries", "decisions", "documents",
-                "insights"
-            };
-
+            // the DB first — cheap rollback, no drift guard needed. Table
+            // set from the registry (PHASE3 Step 3).
             auto args = opts.getParams("args");
             if (args.empty()) {
-                Diskerror::Logger::error(
-                    "Usage: ragger reindex <table|all>  "
-                    "(tables: turns, turn_summaries, summaries, decisions, documents, insights)");
+                Diskerror::Logger::error(std::format(
+                    "Usage: ragger reindex <table|all>  (tables: {})",
+                    ragger::sqlite::text_table_names()));
                 return 1;
             }
             std::string target = args[0];
             if (target != "all") {
                 bool found = false;
-                for (auto* t : kAllTables) if (target == t) { found = true; break; }
+                for (const auto& t : ragger::sqlite::kTextTables)
+                    if (target == t.table) { found = true; break; }
                 if (!found) {
                     Diskerror::Logger::error(std::format(
-                        "Unknown table '{}'. Expected one of: turns, turn_summaries, "
-                        "summaries, decisions, documents, insights, or \"all\"", target));
+                        "Unknown table '{}'. Expected one of: {}, or \"all\"",
+                        target, ragger::sqlite::text_table_names()));
                     return 1;
                 }
             }
@@ -1454,9 +1450,9 @@ int main(int argc, char **argv) {
                 // stops term_id from climbing forever on a DB that's never
                 // fully reindexed.
                 memory.backend()->reset_terms_table();
-                for (auto* t : kAllTables) {
-                    int count = memory.backend()->reindex_table(t, /*progress=*/true);
-                    std::println("Reindexed {}: {} row(s).", t, count);
+                for (const auto& t : ragger::sqlite::kTextTables) {
+                    int count = memory.backend()->reindex_table(t.table, /*progress=*/true);
+                    std::println("Reindexed {}: {} row(s).", t.table, count);
                     total += count;
                 }
                 std::println("Reindexed all tables: {} row(s) total.", total);

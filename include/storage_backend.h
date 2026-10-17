@@ -591,7 +591,7 @@ public:
     /// Tokenizes every record's text, extracts/inserts terms, populates the
     /// <table>_terms junction table, and updates unigram_count/bigram_count.
     /// Idempotent: call multiple times with the same result.
-    /// table: one of "turns", "turn_summaries", "summaries", "documents", "decisions"
+    /// table: one of the registry's text tables (see sqlite/tables.h)
     /// progress: if true, log progress (e.g., every 100 records)
     /// Returns: number of records reindexed.
     virtual int reindex_table(const std::string& table, bool progress = false) = 0;

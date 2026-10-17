@@ -228,7 +228,7 @@ bool has_tag(const std::string& tags, const std::string& want) {
         {
             Stmt s(db,
                 "SELECT decision_id, trigger, text FROM decisions "
-                "WHERE project_id = ? AND status IN ('current','provisional') "
+                "WHERE project_id = ? AND status IN (" + status::in_list_sql(status::kSearchActive) + ") "
                 "ORDER BY created_at DESC, decision_id DESC LIMIT 50");
             s.bind(1, pid);
             json arr = json::array();
@@ -247,7 +247,7 @@ bool has_tag(const std::string& tags, const std::string& want) {
         {
             Stmt s(db,
                 "SELECT insight_id, trigger, text FROM insights "
-                "WHERE project_id = ? AND status IN ('current','provisional') "
+                "WHERE project_id = ? AND status IN (" + status::in_list_sql(status::kSearchActive) + ") "
                 "ORDER BY created_at DESC, insight_id DESC LIMIT 20");
             s.bind(1, pid);
             json arr = json::array();

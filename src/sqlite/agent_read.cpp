@@ -298,7 +298,7 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
             if (q.status == "active") {
                 // NOTE: deliberately narrower than the search cache's
                 // allow-list: 'roadmap' is planned work, not an active ruling.
-                if (row_status != "current" && row_status != "provisional") continue;
+                if (!status::is_in(status::kSearchActive, row_status)) continue;
             } else if (q.status != "any" && row_status != q.status) {
                 continue;
             }

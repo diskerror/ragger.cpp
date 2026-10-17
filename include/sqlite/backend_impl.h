@@ -9,6 +9,7 @@
 // they are file-local free functions taking Impl& in schema.cpp, so the
 // module boundary is enforced by the compiler rather than convention.
 #include "sqlite/backend.h"
+#include "sqlite/status.h"
 #include "sqlite/text_index.h"
 #include "vector_codec.h"
 #include "nlohmann_json.hpp"
@@ -324,6 +325,15 @@ struct Backend::Impl {
     /// turns). Use after any write that can change rows across several tables
     /// (embedding backfill/rebuild) so no table's stale rows survive.
     void invalidate_all_caches();
+
+    // Shared body of all five ensure_*_cache() loaders (PHASE3 Step 5):
+    // run `sql` (columns: id, text, embedding blob, ..., timestamp at
+    // index 5), decode blobs under `label`, and let fill_meta build each
+    // row's metadata JSON. Column layout stays per-table; only the loop
+    // shape is shared. SQL text must match the pre-refactor loaders.
+    void load_cache(EmbeddingCache& c, const char* label,
+                    const std::string& sql,
+                    const std::function<void(Stmt&, nlohmann::json&)>& fill_meta);
 
     // Loads the summaries table into the vector cache. Keyword scores come
     // from FTS5 (summaries_fts) at query time — see keyword_scores().
@@ -878,6 +888,10 @@ struct Backend::Impl {
 
     // Set a document's embedding (used by the import path after embedding
     // chunks via the subprocess executor). Returns true on a row update.
+    // PHASE3 Step 6: shared write-back + per-table cache invalidation.
+    void invalidate_cache_for(const TextTable& t);
+    bool update_embedding(const TextTable& t, int id, const std::vector<float>& emb);
+
     bool update_document_embedding(int document_id, const std::vector<float>& emb);
 
     // Per-row embedding write-back for the other three context tables.

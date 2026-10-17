@@ -1727,13 +1727,11 @@ void rebuild_table_column_order(Impl& self,
             // Category words that leaked into status (old ragger_store callers
             // passed category as status). Keep the word -- append it to tags --
             // and set status to 'current'. Nothing is discarded.
-            exec(R"(
+            exec(std::string(R"(
                 UPDATE decisions
                 SET tags = CASE WHEN tags = '' THEN status ELSE tags || ',' || status END,
                     status = 'current'
-                WHERE status NOT IN ('current','provisional','pending','superseded',
-                                     'retired','roadmap','deprecated')
-            )");
+                WHERE status NOT IN ()") + status::in_list_sql(status::kMigrationKnown) + ")");
             if (int n = sqlite3_changes(db); n > 0)
                 Diskerror::Logger::info(std::format(
                     "  decisions: moved {} non-status value(s) from status into tags", n));

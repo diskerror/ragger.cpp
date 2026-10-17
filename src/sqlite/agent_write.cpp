@@ -23,26 +23,8 @@ using json = nlohmann::json;
 // =======================================================================
 // agent_update — metadata-only curation (Phase 4).
 // Text never changes in place; a text change is a new row with supersedes.
+// The status transition table lives in sqlite/status.h (PHASE3 Step 4).
 // =======================================================================
-namespace {
-
-// Decision status transition table (PHASE4-STEPS step 2). 'superseded' is
-// reachable only through `supersedes` on a new decision, never here.
-bool decision_transition_ok(const std::string& from, const std::string& to) {
-    static const std::map<std::string, std::set<std::string>> kAllowed = {
-        {"pending",     {"current", "provisional", "retired"}},
-        {"provisional", {"current", "retired"}},
-        {"current",     {"provisional", "retired"}},
-        {"roadmap",     {"current", "provisional", "retired"}},
-        {"superseded",  {}},
-        {"retired",     {}},
-    };
-    auto it = kAllowed.find(from);
-    if (it == kAllowed.end()) return false;
-    return it->second.count(to) > 0;
-}
-
-} // anonymous namespace
 
 json Backend::Impl::agent_update(const UpdateRequest& req) {
     // Rule 1: text is never edited in place.
@@ -115,16 +97,14 @@ json Backend::Impl::agent_update(const UpdateRequest& req) {
         std::optional<int> pid_bind;      // tri-state: nullopt=absent, -1=NULL
         bool clear_project = false;
         if (req.status.has_value()) {
-            static const std::set<std::string> kStatuses = {
-                "current", "provisional", "pending", "roadmap", "retired"};
-            if (!kStatuses.count(*req.status))
+            if (!status::is_in(status::kAgentSettable, *req.status))
                 throw std::invalid_argument("unknown " + layer + " status: '" + *req.status + "'");
             if (*req.status == "superseded")
                 throw std::invalid_argument(std::format(
                     "status 'superseded' is set only by storing a superseding {}", layer));
             // Strict table: same-status is not a listed transition either
             // (the review queue relies on re-approving failing).
-            if (!decision_transition_ok(old_status, *req.status))
+            if (!status::transition_ok(old_status, *req.status))
                 throw std::invalid_argument(std::format(
                     "illegal {} status transition: {} -> {}", layer, old_status, *req.status));
             set += "status = ?, ";

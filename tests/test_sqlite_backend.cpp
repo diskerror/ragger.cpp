@@ -7,6 +7,8 @@
 #include "config.h"
 #include "embedder.h"
 #include "sqlite/backend.h"
+#include "sqlite/status.h"
+#include "sqlite/tables.h"
 #include "user_store.h"
 #include "auth.h"
 #include "util/time.h"
@@ -23,6 +25,7 @@
 #include <chrono>
 #include <ctime>
 #include <stdexcept>
+#include <set>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -3847,6 +3850,19 @@ void p2_test_db_version_gate(ragger::Embedder& emb) {
     std::println(" ok");
 }
 
+// PHASE3 Step 3: the agent-layer set derived from the registry must remain
+// exactly the six layers agent_search validates today.
+void p3_test_known_layers() {
+    std::println("  p3_test_known_layers...");
+    const std::set<std::string> expected = {
+        "turn", "turn_summary", "summary", "document", "decision", "insight"};
+    std::set<std::string> got;
+    for (const auto& t : ragger::sqlite::kTextTables)
+        if (t.layer && *t.layer) got.insert(t.layer);
+    CHECK(got == expected);
+    std::println(" ok");
+}
+
 // PHASE2 Step 6: DB-only backend (null embedder) throws on embedder use
 // instead of dereferencing null (B §1.17).
 void p2_test_require_embedder(ragger::Embedder& emb) {
@@ -3887,6 +3903,127 @@ void p2_test_require_embedder(ragger::Embedder& emb) {
     std::println(" ok");
 }
 
+// PHASE3 Step 4: one status vocabulary — lists pinned to their pre-refactor
+// membership; transition_ok pinned to the agent_update table (moved
+// verbatim), including the pairs the spec calls out.
+void p3s_test_status_vocabulary() {
+    std::println("  p3s_test_status_vocabulary...");
+    namespace st = ragger::sqlite::status;
+    CHECK(st::in_list_sql(st::kSearchActive) == "'current','provisional'");
+    CHECK(st::in_list_sql(st::kCacheLoaded) == "'current','provisional','roadmap'");
+    CHECK(st::in_list_sql(st::kCreatable) == "'current','provisional','pending'");
+    CHECK(st::in_list_sql(st::kMigrationKnown) ==
+          "'current','provisional','pending','superseded','retired','roadmap','deprecated'");
+    CHECK(st::in_list_sql(st::kAgentSettable) ==
+          "'current','provisional','pending','roadmap','retired'");
+
+    // transition_ok — verbatim table semantics.
+    CHECK(st::transition_ok("pending", "current"));
+    CHECK(st::transition_ok("pending", "provisional"));
+    CHECK(st::transition_ok("pending", "retired"));
+    CHECK(st::transition_ok("provisional", "current"));
+    CHECK(st::transition_ok("provisional", "retired"));
+    CHECK(!st::transition_ok("provisional", "pending"));
+    CHECK(st::transition_ok("current", "provisional"));
+    CHECK(st::transition_ok("current", "retired"));
+    CHECK(!st::transition_ok("current", "superseded"));   // superseded only via supersedes
+    CHECK(!st::transition_ok("current", "current"));     // strict: same-status not listed
+    CHECK(st::transition_ok("roadmap", "current"));
+    CHECK(st::transition_ok("roadmap", "provisional"));
+    CHECK(!st::transition_ok("superseded", "current"));  // terminal
+    CHECK(!st::transition_ok("retired", "current"));     // terminal
+    CHECK(!st::transition_ok("deprecated", "current"));  // not in table
+    CHECK(!st::transition_ok("nonsense", "current"));
+    std::println(" ok");
+}
+
+// PHASE3 Step 5 pin: one row per cached table -> search must surface each
+// with the SAME metadata keys it carried pre-refactor (captured from the
+// five hand-written loaders). The single load_cache() must not change any
+// key, value, or the set of rows that participate in search.
+void p3_cache_pin(ragger::Embedder& emb) {
+    std::println("  p3_cache_pin...");
+    try {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    db.store("cachepin summary sentence");                       // summaries
+    ragger::DocumentChunk chunk;
+    chunk.text  = "cachepin document chunk text";
+    chunk.title = "PinDocTitle";
+    chunk.path  = "/cachepin/doc.txt";
+    db.store_document(chunk, /*defer_embedding=*/false);          // documents
+    db.store_decision("cachepin decision ruling", "current", "", "",
+                      /*defer_embedding=*/false);                 // decisions
+    int t = db.store_turn("cachepin user", "cachepin assistant", "m",
+                          /*defer_embedding=*/false, "cachepin-session-guid");
+    CHECK(t > 0);
+    CHECK(db.finalize_turn_summary(t, "cachepin turn summary", "sum-model"));
+
+    ragger::DecisionInput in;
+    in.text     = "cachepin insight ruling";
+    { sqlite3* raw = p1_open_raw();
+      in.evidence = {static_cast<int>(p1_scalar_int(raw, "SELECT MAX(turn_summary_id) FROM turn_summaries"))};
+      sqlite3_close(raw); }
+    db.store_insight(in);                                         // insights
+
+    auto resp = db.search("cachepin", 50, 0.0f);
+    std::map<std::string, std::set<std::string>> keys_by_source;
+    std::map<std::string, int> count_by_source;
+    for (const auto& h : resp.results) {
+        const std::string src = h.metadata.value("source", "?");
+        count_by_source[src]++;
+        for (auto& [k, v] : h.metadata.items()) keys_by_source[src].insert(k);
+    }
+    for (const auto& [src, keys] : keys_by_source) {
+        std::string joined;
+        for (const auto& k : keys) { if (!joined.empty()) joined += ","; joined += k; }
+        std::println("    {} x{} [{}]", src, count_by_source[src], joined);
+    }
+
+    // Pinned pre-refactor (five hand-written loaders, one row each).
+    CHECK(count_by_source["summary"] == 1);
+    CHECK(count_by_source["document"] == 1);
+    CHECK(count_by_source["decision"] == 1);
+    CHECK(count_by_source["insight"] == 1);
+    CHECK(count_by_source["turn_summary"] == 1);
+    CHECK(keys_by_source["summary"] == std::set<std::string>({"source", "level"}));
+    CHECK(keys_by_source["document"] == std::set<std::string>({"source", "title"}));
+    CHECK(keys_by_source["decision"] == std::set<std::string>({"source", "status"}));
+    CHECK(keys_by_source["insight"] == std::set<std::string>({"source", "status"}));
+    CHECK(keys_by_source["turn_summary"] ==
+          std::set<std::string>({"source", "turn_id", "session_id", "datetime"}));
+    db.close();
+    cleanup();
+    std::println(" OK");
+    } catch (const std::exception& e) {
+        std::println("  p3_cache_pin EXCEPTION: {}", e.what());
+        throw;
+    }
+}
+
+// PHASE3 Step 6: the shared write-back updates the right table/pk and
+// invalidates the matching cache; a missing id returns false.
+void p3_test_update_embedding(ragger::Embedder& emb) {
+    std::println("  p3_test_update_embedding...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    int d = db.store_decision("updatemb deferred ruling", "current", "", "",
+                              /*defer_embedding=*/true);
+    CHECK(d > 0);
+    std::vector<float> v(static_cast<size_t>(ragger::config().embedding_dimensions), 0.0f);
+    v[0] = 1.0f;
+    CHECK(db.update_decision_embedding(d, v));
+    CHECK(!db.update_decision_embedding(d + 999, v));
+    sqlite3* raw = p1_open_raw();
+    CHECK(p1_scalar_int(raw, std::format(
+        "SELECT embedding IS NOT NULL FROM decisions WHERE decision_id = {}", d)) == 1);
+    sqlite3_close(raw);
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
 int main() {
     TestEnv env("sqlite_backend");  // must be first: isolates from ~/.ragger
     // Need config for model dir
@@ -3894,6 +4031,8 @@ int main() {
 
     // Model-free unit tests run even when the embedding model is absent.
     p1r_test_transaction();
+    p3_test_known_layers();
+    p3s_test_status_vocabulary();
 
     if (!fs::exists(model_dir + "/model.onnx") && !fs::exists(model_dir + "/onnx/model.onnx")) {
         std::cerr << "Skipping backend tests: model not found at " << model_dir << "\n";
@@ -3992,6 +4131,8 @@ int main() {
     p2_test_backfill_invalidates_dec_cache(emb);
     p2_test_db_version_gate(emb);
     p2_test_require_embedder(emb);
+    p3_cache_pin(emb);
+    p3_test_update_embedding(emb);
 
     std::println("test_sqlite_backend: all passed");
     return 0;

@@ -314,11 +314,11 @@ namespace fs = std::filesystem;
         // normal search hides them.
         score_text_corpus("decisions", "decision_id", "text", "decision",
                           "datetime(created_at,'unixepoch','localtime')",
-                          " AND status IN ('current','provisional','roadmap')");
+                          (" AND status IN (" + status::in_list_sql(status::kCacheLoaded) + ")").c_str());
         // Insights (db 0.17). Same allow-list as the decisions corpus above.
         score_text_corpus("insights", "insight_id", "text", "insight",
                           "datetime(created_at,'unixepoch','localtime')",
-                          " AND status IN ('current','provisional','roadmap')");
+                          (" AND status IN (" + status::in_list_sql(status::kCacheLoaded) + ")").c_str());
         // Turn summaries. NOTE: this table has no created_at — an L2 summary
         // inherits its source turn's timestamp in turn_datetime (the
         // (session_id, turn_datetime) pair is the join back to the turn). The

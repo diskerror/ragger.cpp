@@ -2,6 +2,7 @@
 // by review 5A so the read surface and the write surface share one copy.
 #include "sqlite/agent_common.h"
 
+#include "sqlite/tables.h"
 #include "util/sqlite.h"
 
 #include <sqlite3.h>
@@ -19,8 +20,15 @@ namespace {
 
 // The six searchable layers, shared by agent_search's validation (via
 // parse_agent_handle's layer check) and kept here as the one copy.
-const std::set<std::string> kKnownLayers = {
-    "turn", "turn_summary", "summary", "document", "decision", "insight"};
+// Known agent layers, derived from the table registry's non-empty `layer`
+// values (PHASE3 Step 3, B §2.2): adding a table with a layer name makes it
+// valid here automatically. Pinned by p3_test_known_layers.
+const std::set<std::string> kKnownLayers = [] {
+    std::set<std::string> s;
+    for (const auto& t : kTextTables)
+        if (t.layer && *t.layer) s.insert(t.layer);
+    return s;
+}();
 
 } // anonymous namespace
 

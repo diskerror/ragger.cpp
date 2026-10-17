@@ -71,17 +71,14 @@ namespace fs = std::filesystem;
     }
 
 
-    // Total rows across the six embedded tables (turns, turn_summaries,
-    // summaries, decisions, documents, insights) — i.e. how many rows
+    // Total rows across the registry's embedded tables — i.e. how many rows
     // `rebuild_embeddings()` will re-encode. (count() alone is just
     // summaries, which understates the rebuild scope.)
-    // NOTE: must stay in sync with embed_tables()'s kAllTables below —
-    // nothing enforces it (see ragger-memory-pipeline notes).
     int Backend::Impl::count_embeddable_rows(const std::string& table) const {
         int total = 0;
-        for (const char* tbl : {"turns", "turn_summaries", "summaries", "decisions", "documents", "insights"}) {
-            if (table != "all" && table != tbl) continue;
-            Stmt s(db, std::format("SELECT COUNT(*) FROM {}", tbl));
+        for (const auto& t : kTextTables) {
+            if (table != "all" && table != t.table) continue;
+            Stmt s(db, std::format("SELECT COUNT(*) FROM {}", t.table));
             if (s.step()) total += s.column_int(0);
         }
         return total;
@@ -92,15 +89,16 @@ namespace fs = std::filesystem;
     // circuits on the first hit. Deferred (NULL-embedding) rows don't count —
     // they get the current model on backfill, so they aren't incompatible.
     bool Backend::Impl::has_embeddings() const {
-        Stmt s(db,
-            "SELECT EXISTS("
-            "  SELECT 1 FROM summaries  WHERE embedding IS NOT NULL "
-            "  UNION ALL SELECT 1 FROM turns     WHERE embedding IS NOT NULL "
-            "  UNION ALL SELECT 1 FROM documents WHERE embedding IS NOT NULL "
-            "  UNION ALL SELECT 1 FROM decisions WHERE embedding IS NOT NULL "
-            "  UNION ALL SELECT 1 FROM insights  WHERE embedding IS NOT NULL "
-            "  UNION ALL SELECT 1 FROM turn_summaries WHERE embedding IS NOT NULL "
-            "  LIMIT 1)");
+        std::string sql = "SELECT EXISTS(";
+        bool first = true;
+        for (const auto& t : kTextTables) {
+            sql += first ? "SELECT 1 FROM " : " UNION ALL SELECT 1 FROM ";
+            sql += t.table;
+            sql += " WHERE embedding IS NOT NULL";
+            first = false;
+        }
+        sql += " LIMIT 1)";
+        Stmt s(db, sql);
         return s.step() && s.column_int(0) != 0;
     }
 
@@ -138,14 +136,16 @@ namespace fs = std::filesystem;
             const char* text_col;
             const char* extra_col;  // if set, combined with text_col via turn_embed_text
         };
-        static constexpr TableSpec kAllTables[] = {
-            { "turns",           "turn_id",         "user_text", "assistant_text" },
-            { "summaries",       "summary_id",      "text",      nullptr          },
-            { "decisions",       "decision_id",     kDecisionEmbedTextSQL, nullptr },
-            { "documents",       "document_id",     kDocEmbedTextSQL, nullptr       },
-            { "turn_summaries",  "turn_summary_id", "text",      nullptr          },
-            { "insights",        "insight_id",      kDecisionEmbedTextSQL, nullptr },
-        };
+        static constexpr std::size_t kSpecCount = kTextTableCount;
+        std::array<TableSpec, kSpecCount> kAllTables{};
+        for (std::size_t i = 0; i < kSpecCount; ++i) {
+            const auto& t = kTextTables[i];
+            if (std::string_view(t.table) == "turns")
+                kAllTables[i] = { t.table, t.pk, "user_text", "assistant_text" };
+            else
+                kAllTables[i] = { t.table, t.pk,
+                                  t.embed_sql ? t.embed_sql : "text", nullptr };
+        }
 
         // Filter to one table, or run the full fixed set when "all"/empty.
         std::vector<TableSpec> selected;
@@ -378,50 +378,51 @@ namespace fs = std::filesystem;
     }
 
 
-    // Set a document's embedding (used by the import path after embedding
-    // chunks via the subprocess executor). Returns true on a row update.
+    // PHASE3 Step 6: one embedding write-back. The four public
+    // update_*_embedding entry points forward here; the UPDATE shape and the
+    // cache invalidation live in one place. `turns` invalidates nothing:
+    // turns are not in the summaries cache (the old invalidate_cache() there
+    // was the wrong table), and the turn cache holds text rows, not vectors
+    // (B §1.6). Insights share the decision write-back path (no separate
+    // insight update existed pre-0.17; the switch covers it for symmetry).
+    void Backend::Impl::invalidate_cache_for(const TextTable& t) {
+        const std::string_view name = t.table;
+        if (name == "summaries")            invalidate_cache();
+        else if (name == "documents")       invalidate_doc_cache();
+        else if (name == "decisions")       invalidate_dec_cache();
+        else if (name == "insights")        invalidate_ins_cache();
+        // turns / turn_summaries: no vector cache keyed on these blobs.
+    }
+
+    bool Backend::Impl::update_embedding(const TextTable& t, int id,
+                                         const std::vector<float>& emb) {
+        Stmt s(db, std::format("UPDATE {} SET embedding_version = ?, "
+                               "embedding = ? WHERE {} = ?", t.table, t.pk));
+        bind_embedding_version(s.raw(), 1, emb);
+        bind_embedding(s.raw(), 2, emb);
+        s.bind(3, id);
+        if (s.exec() && sqlite3_changes(db) > 0) {
+            invalidate_cache_for(t);
+            return true;
+        }
+        return false;
+    }
+
     bool Backend::Impl::update_document_embedding(int document_id, const std::vector<float>& emb) {
-        Stmt s(db,
-            "UPDATE documents SET embedding_version = ?, embedding = ? WHERE document_id = ?");
-        bind_embedding_version(s.raw(), 1, emb);
-        bind_embedding(s.raw(), 2, emb);
-        s.bind(3, document_id);
-        if (s.exec() && sqlite3_changes(db) > 0) {
-            invalidate_doc_cache();
-            return true;
-        }
-        return false;
+        return update_embedding(*find_text_table("documents"), document_id, emb);
     }
 
-
-    // Per-row embedding write-back for the other three context tables.
-    // Mirrors update_document_embedding; each invalidates the cache that
-    // backs its table's vector search.
     bool Backend::Impl::update_decision_embedding(int decision_id, const std::vector<float>& emb) {
-        Stmt s(db, "UPDATE decisions SET embedding_version = ?, embedding = ? WHERE decision_id = ?");
-        bind_embedding_version(s.raw(), 1, emb);
-        bind_embedding(s.raw(), 2, emb);
-        s.bind(3, decision_id);
-        if (s.exec() && sqlite3_changes(db) > 0) {
-            invalidate_dec_cache();
-            return true;
-        }
-        return false;
+        return update_embedding(*find_text_table("decisions"), decision_id, emb);
     }
-
 
     bool Backend::Impl::update_summary_embedding(int summary_id, const std::vector<float>& emb) {
-        Stmt s(db, "UPDATE summaries SET embedding_version = ?, embedding = ? WHERE summary_id = ?");
-        bind_embedding_version(s.raw(), 1, emb);
-        bind_embedding(s.raw(), 2, emb);
-        s.bind(3, summary_id);
-        if (s.exec() && sqlite3_changes(db) > 0) {
-            invalidate_cache();
-            return true;
-        }
-        return false;
+        return update_embedding(*find_text_table("summaries"), summary_id, emb);
     }
 
+    bool Backend::Impl::update_turn_embedding(int turn_id, const std::vector<float>& emb) {
+        return update_embedding(*find_text_table("turns"), turn_id, emb);
+    }
 
     void Backend::Impl::invalidate_all_caches() {
         invalidate_cache();
@@ -430,21 +431,6 @@ namespace fs = std::filesystem;
         invalidate_ins_cache();
         invalidate_turn_cache();
     }
-
-
-    bool Backend::Impl::update_turn_embedding(int turn_id, const std::vector<float>& emb) {
-        Stmt s(db, "UPDATE turns SET embedding_version = ?, embedding = ? WHERE turn_id = ?");
-        bind_embedding_version(s.raw(), 1, emb);
-        bind_embedding(s.raw(), 2, emb);
-        s.bind(3, turn_id);
-        // No cache invalidation: turns are not in the summaries cache (the
-        // old invalidate_cache() here was the wrong table), and the turn
-        // cache holds text rows, not vectors (B §1.6).
-        if (s.exec() && sqlite3_changes(db) > 0)
-            return true;
-        return false;
-    }
-
 
     std::vector<std::string> Backend::Impl::collections() const {
         std::vector<std::string> result;

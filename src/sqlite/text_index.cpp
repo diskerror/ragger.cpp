@@ -6,51 +6,69 @@
 #include <format>
 #include <iostream>
 #include <stdexcept>
-#include <unordered_set>
 
 #include "util/sqlite.h"
 
 namespace ragger::sqlite {
 
-// The embed/index text formulas (kDocEmbedTextSQL / kDecisionEmbedTextSQL)
-// are declared in sqlite/text_index.h -- one shared definition for the
-// index, the embedding input, and the store paths.
+namespace {
+
+// Registry row for a validated table name; throws the same message the old
+// hand lists threw (B §2.2: one source of truth, sqlite/tables.h).
+const TextTable& table_or_throw(const std::string& table) {
+    const TextTable* t = find_text_table(table);
+    if (!t) throw std::runtime_error("Invalid table name: " + table);
+    return *t;
+}
+
+// One std::format template per verb (PHASE3 Step 2). The generated text is
+// byte-identical, whitespace-normalized, to the 36 old hand-written
+// accessors — verified by the Step 2 identity probe (REPORT-P3).
+std::string sql_doc_freq(const TextTable& t) {
+    return std::format("SELECT COUNT(*) FROM {} WHERE term_id = ?", t.junction);
+}
+std::string sql_count(const TextTable& t) {
+    return std::format("SELECT COUNT(*) FROM {}", t.table);
+}
+std::string sql_postings(const TextTable& t) {
+    return std::format(
+        "SELECT j.{0}, j.count, b.unigram_count, b.bigram_count "
+        "FROM {1} j JOIN {2} b ON b.{0} = j.{0} "
+        "WHERE j.term_id = ?",
+        t.pk, t.junction, t.table);
+}
+std::string sql_delete_terms(const TextTable& t) {
+    return std::format("DELETE FROM {} WHERE {} = ?", t.junction, t.pk);
+}
+std::string sql_insert_terms(const TextTable& t) {
+    return std::format(
+        "INSERT OR REPLACE INTO {} ({}, term_id, count) VALUES (?, ?, ?)",
+        t.junction, t.pk);
+}
+std::string sql_update_counts(const TextTable& t) {
+    return std::format(
+        "UPDATE {} SET unigram_count = ?, bigram_count = ? WHERE {} = ?",
+        t.table, t.pk);
+}
+
+} // namespace
 
 void TextIndex::validate_table(const std::string& table) {
-    static const std::unordered_set<std::string> valid = {
-        "turns", "turn_summaries", "summaries", "documents", "decisions",
-        "insights"};
-    if (valid.find(table) == valid.end())
-        throw std::runtime_error("Invalid table name: " + table);
+    table_or_throw(table);
 }
 
 std::string TextIndex::id_col_of(const std::string& table) {
-    if (table == "turns")          return "turn_id";
-    if (table == "turn_summaries") return "turn_summary_id";
-    if (table == "summaries")      return "summary_id";
-    if (table == "documents")      return "document_id";
-    if (table == "decisions")      return "decision_id";
-    if (table == "insights")       return "insight_id";
-    throw std::runtime_error("Invalid table name: " + table);
+    return table_or_throw(table).pk;
 }
 
 std::string TextIndex::text_select_of(const std::string& table) {
-    const std::string id = id_col_of(table);
-    if (table == "documents")
-        return std::format("SELECT {}, {} AS text FROM documents ORDER BY {}",
-                           id, kDocEmbedTextSQL, id);
-    if (table == "turns")
+    const TextTable& t = table_or_throw(table);
+    if (table == "turns")  // user_text + assistant_text special case
         return "SELECT turn_id, user_text, assistant_text FROM turns ORDER BY turn_id";
-    if (table == "decisions")
-        return std::format("SELECT {}, {} AS text FROM decisions ORDER BY {}",
-                           id, kDecisionEmbedTextSQL, id);
-    // insights share the decisions embed/index formula (trigger first when
-    // present). MUST stay identical to Backend::Impl::kDecisionEmbedTextSQL's
-    // use for decisions so a re-embed/reindex is stable.
-    if (table == "insights")
-        return std::format("SELECT {}, {} AS text FROM insights ORDER BY {}",
-                           id, kDecisionEmbedTextSQL, id);
-    return std::format("SELECT {}, text FROM {} ORDER BY {}", id, table, id);
+    if (t.embed_sql)
+        return std::format("SELECT {0}, {1} AS text FROM {2} ORDER BY {0}",
+                           t.pk, t.embed_sql, t.table);
+    return std::format("SELECT {}, text FROM {} ORDER BY {}", t.pk, t.table, t.pk);
 }
 
 void TextIndex::create_schema() {
@@ -70,30 +88,28 @@ void TextIndex::create_schema() {
         )
     )");
 
-    // One junction table per text table. FK ON DELETE CASCADE means a deleted
-    // record's index rows go away automatically — nothing to maintain in the
-    // write path beyond delete-then-insert for updates.
-    struct T { const char* junc; const char* base; const char* pk; };
-    const T tables[] = {
-        {"turns_terms",          "turns",          "turn_id"},
-        {"turn_summaries_terms", "turn_summaries", "turn_summary_id"},
-        {"summaries_terms",      "summaries",      "summary_id"},
-        {"documents_terms",      "documents",      "document_id"},
-        {"decisions_terms",      "decisions",      "decision_id"},
-        {"insights_terms",       "insights",       "insight_id"},
-    };
-    for (const auto& t : tables) {
-        exec(std::format(
-            "CREATE TABLE IF NOT EXISTS {} (\n"
-            "    {} INTEGER NOT NULL REFERENCES {}({}) ON DELETE CASCADE,\n"
-            "    term_id INTEGER NOT NULL REFERENCES terms(term_id) ON DELETE CASCADE,\n"
-            "    count   INTEGER NOT NULL DEFAULT 1,\n"
-            "    PRIMARY KEY ({}, term_id)\n)",
-            t.junc, t.pk, t.base, t.pk, t.pk));
-        exec(std::format(
-            "CREATE INDEX IF NOT EXISTS idx_{}_term ON {}(term_id)",
-            t.junc, t.junc));
+    // One junction table per registry row. FK ON DELETE CASCADE means a
+    // deleted record's index rows go away automatically — nothing to
+    // maintain in the write path beyond delete-then-insert for updates.
+    for (const auto& t : kTextTables) {
+        exec(junction_ddl(t));
+        exec(junction_index_ddl(t));
     }
+}
+
+std::string TextIndex::junction_ddl(const TextTable& t) {
+    return std::format(
+        "CREATE TABLE IF NOT EXISTS {} (\n"
+        "    {} INTEGER NOT NULL REFERENCES {}({}) ON DELETE CASCADE,\n"
+        "    term_id INTEGER NOT NULL REFERENCES terms(term_id) ON DELETE CASCADE,\n"
+        "    count   INTEGER NOT NULL DEFAULT 1,\n"
+        "    PRIMARY KEY ({}, term_id)\n)",
+        t.junction, t.pk, t.table, t.pk, t.pk);
+}
+
+std::string TextIndex::junction_index_ddl(const TextTable& t) {
+    return std::format("CREATE INDEX IF NOT EXISTS idx_{}_term ON {}(term_id)",
+                       t.junction, t.junction);
 }
 
 // ---- cached-statement plumbing --------------------------------------------
@@ -115,211 +131,48 @@ Stmt& TextIndex::insert_term() {
     return cached(insert_term_, "INSERT OR IGNORE INTO terms(term) VALUES (?)");
 }
 
-Stmt& TextIndex::doc_freq_turns() {
-    return cached(doc_freq_turns_, "SELECT COUNT(*) FROM turns_terms WHERE term_id = ?");
-}
-Stmt& TextIndex::doc_freq_turn_summaries() {
-    return cached(doc_freq_turn_summaries_,
-                  "SELECT COUNT(*) FROM turn_summaries_terms WHERE term_id = ?");
-}
-Stmt& TextIndex::doc_freq_summaries() {
-    return cached(doc_freq_summaries_,
-                  "SELECT COUNT(*) FROM summaries_terms WHERE term_id = ?");
-}
-Stmt& TextIndex::doc_freq_documents() {
-    return cached(doc_freq_documents_,
-                  "SELECT COUNT(*) FROM documents_terms WHERE term_id = ?");
-}
-Stmt& TextIndex::doc_freq_decisions() {
-    return cached(doc_freq_decisions_,
-                  "SELECT COUNT(*) FROM decisions_terms WHERE term_id = ?");
-}
-Stmt& TextIndex::doc_freq_insights() {
-    return cached(doc_freq_insights_,
-                  "SELECT COUNT(*) FROM insights_terms WHERE term_id = ?");
-}
+// ---- registry-driven cached statements -------------------------------------
+// One dispatcher per verb: table name -> registry row -> generated SQL ->
+// cached Stmt (PHASE3 Step 2). The generated text is byte-identical,
+// whitespace-normalized, to the 36 old hand-written accessors (identity
+// probe kept in REPORT-P3).
 
-Stmt& TextIndex::count_turns() {
-    return cached(count_turns_, "SELECT COUNT(*) FROM turns");
+namespace {
+size_t row_of(const std::string& table) {
+    const TextTable& t = table_or_throw(table);
+    return static_cast<size_t>(&t - kTextTables);
 }
-Stmt& TextIndex::count_turn_summaries() {
-    return cached(count_turn_summaries_, "SELECT COUNT(*) FROM turn_summaries");
-}
-Stmt& TextIndex::count_summaries() {
-    return cached(count_summaries_, "SELECT COUNT(*) FROM summaries");
-}
-Stmt& TextIndex::count_documents() {
-    return cached(count_documents_, "SELECT COUNT(*) FROM documents");
-}
-Stmt& TextIndex::count_decisions() {
-    return cached(count_decisions_, "SELECT COUNT(*) FROM decisions");
-}
-Stmt& TextIndex::count_insights() {
-    return cached(count_insights_, "SELECT COUNT(*) FROM insights");
-}
-
-Stmt& TextIndex::postings_turns() {
-    return cached(postings_turns_,
-        "SELECT j.turn_id, j.count, b.unigram_count, b.bigram_count "
-        "FROM turns_terms j JOIN turns b ON b.turn_id = j.turn_id "
-        "WHERE j.term_id = ?");
-}
-Stmt& TextIndex::postings_turn_summaries() {
-    return cached(postings_turn_summaries_,
-        "SELECT j.turn_summary_id, j.count, b.unigram_count, b.bigram_count "
-        "FROM turn_summaries_terms j JOIN turn_summaries b "
-        "ON b.turn_summary_id = j.turn_summary_id "
-        "WHERE j.term_id = ?");
-}
-Stmt& TextIndex::postings_summaries() {
-    return cached(postings_summaries_,
-        "SELECT j.summary_id, j.count, b.unigram_count, b.bigram_count "
-        "FROM summaries_terms j JOIN summaries b ON b.summary_id = j.summary_id "
-        "WHERE j.term_id = ?");
-}
-Stmt& TextIndex::postings_documents() {
-    return cached(postings_documents_,
-        "SELECT j.document_id, j.count, b.unigram_count, b.bigram_count "
-        "FROM documents_terms j JOIN documents b ON b.document_id = j.document_id "
-        "WHERE j.term_id = ?");
-}
-Stmt& TextIndex::postings_decisions() {
-    return cached(postings_decisions_,
-        "SELECT j.decision_id, j.count, b.unigram_count, b.bigram_count "
-        "FROM decisions_terms j JOIN decisions b ON b.decision_id = j.decision_id "
-        "WHERE j.term_id = ?");
-}
-Stmt& TextIndex::postings_insights() {
-    return cached(postings_insights_,
-        "SELECT j.insight_id, j.count, b.unigram_count, b.bigram_count "
-        "FROM insights_terms j JOIN insights b ON b.insight_id = j.insight_id "
-        "WHERE j.term_id = ?");
-}
-
-Stmt& TextIndex::delete_terms_turns() {
-    return cached(delete_terms_turns_, "DELETE FROM turns_terms WHERE turn_id = ?");
-}
-Stmt& TextIndex::delete_terms_turn_summaries() {
-    return cached(delete_terms_turn_summaries_,
-                  "DELETE FROM turn_summaries_terms WHERE turn_summary_id = ?");
-}
-Stmt& TextIndex::delete_terms_summaries() {
-    return cached(delete_terms_summaries_, "DELETE FROM summaries_terms WHERE summary_id = ?");
-}
-Stmt& TextIndex::delete_terms_documents() {
-    return cached(delete_terms_documents_, "DELETE FROM documents_terms WHERE document_id = ?");
-}
-Stmt& TextIndex::delete_terms_decisions() {
-    return cached(delete_terms_decisions_, "DELETE FROM decisions_terms WHERE decision_id = ?");
-}
-Stmt& TextIndex::delete_terms_insights() {
-    return cached(delete_terms_insights_, "DELETE FROM insights_terms WHERE insight_id = ?");
-}
-
-Stmt& TextIndex::insert_terms_turns() {
-    return cached(insert_terms_turns_,
-        "INSERT OR REPLACE INTO turns_terms (turn_id, term_id, count) VALUES (?, ?, ?)");
-}
-Stmt& TextIndex::insert_terms_turn_summaries() {
-    return cached(insert_terms_turn_summaries_,
-        "INSERT OR REPLACE INTO turn_summaries_terms (turn_summary_id, term_id, count) "
-        "VALUES (?, ?, ?)");
-}
-Stmt& TextIndex::insert_terms_summaries() {
-    return cached(insert_terms_summaries_,
-        "INSERT OR REPLACE INTO summaries_terms (summary_id, term_id, count) VALUES (?, ?, ?)");
-}
-Stmt& TextIndex::insert_terms_documents() {
-    return cached(insert_terms_documents_,
-        "INSERT OR REPLACE INTO documents_terms (document_id, term_id, count) "
-        "VALUES (?, ?, ?)");
-}
-Stmt& TextIndex::insert_terms_decisions() {
-    return cached(insert_terms_decisions_,
-        "INSERT OR REPLACE INTO decisions_terms (decision_id, term_id, count) "
-        "VALUES (?, ?, ?)");
-}
-Stmt& TextIndex::insert_terms_insights() {
-    return cached(insert_terms_insights_,
-        "INSERT OR REPLACE INTO insights_terms (insight_id, term_id, count) "
-        "VALUES (?, ?, ?)");
-}
-
-Stmt& TextIndex::update_counts_turns() {
-    return cached(update_counts_turns_,
-        "UPDATE turns SET unigram_count = ?, bigram_count = ? WHERE turn_id = ?");
-}
-Stmt& TextIndex::update_counts_turn_summaries() {
-    return cached(update_counts_turn_summaries_,
-        "UPDATE turn_summaries SET unigram_count = ?, bigram_count = ? "
-        "WHERE turn_summary_id = ?");
-}
-Stmt& TextIndex::update_counts_summaries() {
-    return cached(update_counts_summaries_,
-        "UPDATE summaries SET unigram_count = ?, bigram_count = ? WHERE summary_id = ?");
-}
-Stmt& TextIndex::update_counts_documents() {
-    return cached(update_counts_documents_,
-        "UPDATE documents SET unigram_count = ?, bigram_count = ? WHERE document_id = ?");
-}
-Stmt& TextIndex::update_counts_decisions() {
-    return cached(update_counts_decisions_,
-        "UPDATE decisions SET unigram_count = ?, bigram_count = ? WHERE decision_id = ?");
-}
-Stmt& TextIndex::update_counts_insights() {
-    return cached(update_counts_insights_,
-        "UPDATE insights SET unigram_count = ?, bigram_count = ? WHERE insight_id = ?");
-}
-
-// ---- runtime dispatch over the fixed 6-table set --------------------------
+} // namespace
 
 Stmt& TextIndex::doc_freq_stmt(const std::string& table) {
-    if (table == "turns")          return doc_freq_turns();
-    if (table == "turn_summaries") return doc_freq_turn_summaries();
-    if (table == "summaries")      return doc_freq_summaries();
-    if (table == "documents")      return doc_freq_documents();
-    if (table == "insights")       return doc_freq_insights();
-    return doc_freq_decisions();
+    const size_t i = row_of(table);
+    std::string sql = sql_doc_freq(kTextTables[i]);
+    return cached(stmts_[i].doc_freq, sql.c_str());
 }
 Stmt& TextIndex::count_stmt(const std::string& table) {
-    if (table == "turns")          return count_turns();
-    if (table == "turn_summaries") return count_turn_summaries();
-    if (table == "summaries")      return count_summaries();
-    if (table == "documents")      return count_documents();
-    if (table == "insights")       return count_insights();
-    return count_decisions();
+    const size_t i = row_of(table);
+    std::string sql = sql_count(kTextTables[i]);
+    return cached(stmts_[i].count, sql.c_str());
 }
 Stmt& TextIndex::postings_stmt(const std::string& table) {
-    if (table == "turns")          return postings_turns();
-    if (table == "turn_summaries") return postings_turn_summaries();
-    if (table == "summaries")      return postings_summaries();
-    if (table == "documents")      return postings_documents();
-    if (table == "insights")       return postings_insights();
-    return postings_decisions();
+    const size_t i = row_of(table);
+    std::string sql = sql_postings(kTextTables[i]);
+    return cached(stmts_[i].postings, sql.c_str());
 }
 Stmt& TextIndex::delete_terms_stmt(const std::string& table) {
-    if (table == "turns")          return delete_terms_turns();
-    if (table == "turn_summaries") return delete_terms_turn_summaries();
-    if (table == "summaries")      return delete_terms_summaries();
-    if (table == "documents")      return delete_terms_documents();
-    if (table == "insights")       return delete_terms_insights();
-    return delete_terms_decisions();
+    const size_t i = row_of(table);
+    std::string sql = sql_delete_terms(kTextTables[i]);
+    return cached(stmts_[i].delete_terms, sql.c_str());
 }
 Stmt& TextIndex::insert_terms_stmt(const std::string& table) {
-    if (table == "turns")          return insert_terms_turns();
-    if (table == "turn_summaries") return insert_terms_turn_summaries();
-    if (table == "summaries")      return insert_terms_summaries();
-    if (table == "documents")      return insert_terms_documents();
-    if (table == "insights")       return insert_terms_insights();
-    return insert_terms_decisions();
+    const size_t i = row_of(table);
+    std::string sql = sql_insert_terms(kTextTables[i]);
+    return cached(stmts_[i].insert_terms, sql.c_str());
 }
 Stmt& TextIndex::update_counts_stmt(const std::string& table) {
-    if (table == "turns")          return update_counts_turns();
-    if (table == "turn_summaries") return update_counts_turn_summaries();
-    if (table == "summaries")      return update_counts_summaries();
-    if (table == "documents")      return update_counts_documents();
-    if (table == "insights")       return update_counts_insights();
-    return update_counts_decisions();
+    const size_t i = row_of(table);
+    std::string sql = sql_update_counts(kTextTables[i]);
+    return cached(stmts_[i].update_counts, sql.c_str());
 }
 
 // ---- TextIndex overrides ---------------------------------------------------
@@ -357,12 +210,8 @@ void TextIndex::reset_terms_table() {
         // statement can observe a junction row pointing at a gone table
         // (though within one transaction this is moot for correctness, it
         // keeps drop order mirroring the FK dependency direction).
-        exec("DROP TABLE IF EXISTS turns_terms");
-        exec("DROP TABLE IF EXISTS turn_summaries_terms");
-        exec("DROP TABLE IF EXISTS summaries_terms");
-        exec("DROP TABLE IF EXISTS documents_terms");
-        exec("DROP TABLE IF EXISTS decisions_terms");
-        exec("DROP TABLE IF EXISTS insights_terms");
+        for (const auto& t : kTextTables)
+            exec(("DROP TABLE IF EXISTS " + std::string(t.junction)).c_str());
         exec("DROP TABLE IF EXISTS terms");
         create_schema();  // CREATE TABLE/INDEX IF NOT EXISTS -- recreates all 7, empty
         exec("COMMIT");
