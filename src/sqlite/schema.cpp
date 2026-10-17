@@ -556,14 +556,16 @@ void rebuild_table_column_order(Impl& self,
         {
             std::string actual = db_version();
             if (actual != kExpectedDbVersion) {
-                std::cerr << std::format(
+                // Throw, never exit: a library must not kill its host
+                // process (B §1.11). Callers (main, server, mcp) already
+                // report std::exception and exit non-zero.
+                throw std::runtime_error(std::format(
                     "Ragger: database schema version mismatch (found '{}', need '{}').\n"
                     "This binary requires a database migrated to schema {}.\n"
-                    "Run scripts/migrate_to_db{}.sh against your ~/.ragger/memories.db, "
-                    "then restart.\n",
+                    "Restore the pre-migration backup next to the database, "
+                    "or run the build that created this database.",
                     actual.empty() ? "<none>" : actual,
-                    kExpectedDbVersion, kExpectedDbVersion, kExpectedDbVersion);
-                std::exit(1);
+                    kExpectedDbVersion, kExpectedDbVersion));
             }
         }
 

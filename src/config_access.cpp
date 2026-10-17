@@ -211,6 +211,14 @@ nlohmann::json config_entry_json(const lang::ConfigMeta& m,
         {"help",    std::string(m.help)},
         {"value",   value},
     };
+    if (m.secret) {
+        // Never echo a credential through the read surfaces; a non-empty
+        // secret shows as the "<set>" marker (writing "<set>" back is a
+        // no-op, so a dashboard that round-trips the mask cannot clobber
+        // the real key). Empty stays "" (C §1.7).
+        j["secret"] = true;
+        if (!value.empty()) j["value"] = "<set>";
+    }
     if (m.type == CfgType::Enum) {
         nlohmann::json opts = nlohmann::json::array();
         std::string_view o = m.options;
@@ -420,6 +428,13 @@ std::expected<ConfigSetResult, ConfigSetError> set_config_persisted(
     if (!meta) return std::unexpected(ConfigSetError::UnknownKey);
     if (meta->edit == CfgEdit::Locked && !allow_locked)
         return std::unexpected(ConfigSetError::Locked);
+
+    // A secret key written back as the "<set>" mask is a no-op: the read
+    // surfaces only ever show "<set>", so a client that echoes the field
+    // unchanged must never overwrite the real credential (C §1.7). Shared
+    // path — covers both PUT /config/:key and `ragger config set`.
+    if (meta->secret && value == "<set>")
+        return ConfigSetResult{};
 
     // Update the live config first (also validates). On failure, nothing is
     // persisted.

@@ -728,6 +728,20 @@ static void housekeeping_thread(RaggerMemory& memory,
 // Public entry point
 // -----------------------------------------------------------------------
 
+// Wrapper over the file-local tool_call: a malformed argument that nlohmann
+// rejects (e.g. {"limit":"10"} where an int is expected) must come back as an
+// isError tool result, not escape as a JSON-RPC protocol error (C §1.12).
+nlohmann::json mcp_tool_call(RaggerMemory& memory, const nlohmann::json& params) {
+    try {
+        return tool_call(memory, params);
+    } catch (const nlohmann::json::exception& e) {
+        return nlohmann::json{
+            {"content", nlohmann::json::array({{{"type", "text"}, {"text", e.what()}}})},
+            {"isError", true}
+        };
+    }
+}
+
 void run_mcp(RaggerMemory& memory) {
     // Spawn housekeeping only when this is the sole Ragger process.
     if (!http_server_running()) {
@@ -747,6 +761,7 @@ void run_mcp(RaggerMemory& memory) {
         if (line.empty()) continue;
 
         if (line[0] == '{') {
+            nlohmann::json req_id = nullptr;
             try {
                 auto request = nlohmann::json::parse(line);
                 const auto method = request.value("method", "");
@@ -755,7 +770,7 @@ void run_mcp(RaggerMemory& memory) {
 
                 // Notifications have no "id" — no response required.
                 if (!request.contains("id")) continue;
-                const auto req_id = request["id"];
+                req_id = request["id"];
 
                 nlohmann::json result;
 
@@ -772,7 +787,7 @@ void run_mcp(RaggerMemory& memory) {
                     result = tools_list();
 
                 } else if (method == "tools/call") {
-                    result = tool_call(memory, params);
+                    result = mcp_tool_call(memory, params);
 
                 } else {
                     send({{"jsonrpc", "2.0"}, {"id", req_id},
@@ -784,8 +799,10 @@ void run_mcp(RaggerMemory& memory) {
                 send({{"jsonrpc", "2.0"}, {"id", req_id}, {"result", result}});
 
             } catch (const std::exception& e) {
+                // Echo the request id when we got far enough to parse it, so
+                // the client can correlate the error (C §1.12).
                 send({{"jsonrpc", "2.0"},
-                      {"id",      nullptr},
+                      {"id",      req_id},
                       {"error",   {{"code", -32603}, {"message", e.what()}}}});
             }
 

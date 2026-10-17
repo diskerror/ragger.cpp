@@ -3685,6 +3685,208 @@ void p1_test_embedder_swap(ragger::Embedder& emb, const std::string& model_dir) 
     std::println(" OK");
 }
 
+// =======================================================================
+// PHASE2 Step 1: close() really closes; row+postings atomic on the
+// stable store paths.
+// =======================================================================
+void p2_test_close_really_closes(ragger::Embedder& emb) {
+    std::println("  p2_test_close_really_closes...");
+    cleanup();
+    {
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        int t = db.store_turn("close probe user", "close probe assistant text");
+        CHECK(t > 0);
+        // WAL is live while the connection is open.
+        CHECK(fs::exists(TEMP_DB + "-wal"));
+        db.close();
+        // SQLite deletes the WAL only when the LAST connection closes
+        // cleanly — before the fix sqlite3_close returned SQLITE_BUSY
+        // (TextIndex still held statements) and the file stayed.
+        CHECK(!fs::exists(TEMP_DB + "-wal"));
+        CHECK(!fs::exists(TEMP_DB + "-shm"));
+        db.close();  // second close is harmless
+    }
+    cleanup();
+    std::println(" OK");
+}
+
+void p2_test_write_paths_postings(ragger::Embedder& emb) {
+    std::println("  p2_test_write_paths_postings...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    int t = db.store_turn("alpha beta gamma", "", "m");  // partial turn
+    CHECK(t > 0);
+    CHECK(db.finalize_turn(t, "delta epsilon zeta final answer"));
+
+    ragger::DocumentChunk chunk;
+    chunk.path = "/docs/p2probe.md";
+    chunk.text = "theta iota kappa document body text";
+    chunk.title = "p2 probe";
+    int doc_id = db.store_document(chunk);
+    CHECK(doc_id > 0);
+
+    sqlite3* raw = p1_open_raw();
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turns WHERE turn_id = " + std::to_string(t)) == 1);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turns_terms WHERE turn_id = " + std::to_string(t)) > 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM documents_terms WHERE document_id = " + std::to_string(doc_id)) > 0);
+    sqlite3_close(raw);
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+void p2_test_store_turn_under_outer_begin(ragger::Embedder& emb) {
+    std::println("  p2_test_store_turn_under_outer_begin...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    // Outer raw BEGIN on a second connection, then store_turn, then
+    // COMMIT: the deferred outer BEGIN holds no write lock, so the
+    // store's BEGIN IMMEDIATE runs and commits normally. (Same-connection
+    // join semantics are covered by p1r_test_transaction; Backend does not
+    // expose its own sqlite3* to open an outer transaction on it.)
+    sqlite3* raw = p1_open_raw();
+    p1r_exec_raw(raw, "BEGIN");
+    int t = db.store_turn("outer tx user", "outer tx assistant reply text");
+    CHECK(t > 0);
+    p1r_exec_raw(raw, "COMMIT");
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turns WHERE turn_id = " + std::to_string(t)) == 1);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turns_terms WHERE turn_id = " + std::to_string(t)) > 0);
+    sqlite3_close(raw);
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+// =======================================================================
+// PHASE2 Step 2: backfill/rebuild must drop ALL warm caches;
+// has_embeddings must see turn_summaries.
+// =======================================================================
+void p2_test_has_embeddings_turn_summaries(ragger::Embedder& emb) {
+    std::println("  p2_test_has_embeddings_turn_summaries...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    int t = db.store_turn("haseemb user", "haseemb assistant", "m",
+                          /*defer_embedding=*/true);
+    CHECK(t > 0);
+    CHECK(!db.has_embeddings());  // nothing embedded yet
+    CHECK(db.finalize_turn_summary(t, "A finalized summary sentence.", "sum-model"));
+    // The ONLY embedded row is a turn_summaries row — before the fix the
+    // UNION omitted that table and this returned false.
+    CHECK(db.has_embeddings());
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+void p2_test_backfill_invalidates_dec_cache(ragger::Embedder& emb) {
+    std::println("  p2_test_backfill_invalidates_dec_cache...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    const std::string stored = "The cat sat on the mat.";
+    const std::string query  = "A feline rested upon a rug";  // no shared stems
+    int d = db.store_decision(stored, "current", "", "", /*defer_embedding=*/true);
+    CHECK(d > 0);
+
+    // Warm the decision cache while the row still has no vector.
+    auto before = db.search(query, 5, 0.0f);
+    bool found_before = false;
+    for (const auto& r : before.results)
+        if (r.text == stored && r.score > 0.2f) found_before = true;
+    CHECK(!found_before);
+
+    int n = db.backfill_embeddings(emb);
+    CHECK(n >= 1);
+
+    // Same connection, same caches: only a cache drop makes the freshly
+    // embedded decision findable semantically.
+    auto after = db.search(query, 5, 0.0f);
+    bool found_after = false;
+    for (const auto& r : after.results)
+        if (r.text == stored && r.score > 0.2f) found_after = true;
+    CHECK(found_after);
+    // Insights: skipped — the public store_insight() requires evidence and
+    // exposes no defer_embedding knob, so the deferral scenario cannot be
+    // built through the public API (noted in REPORT-P2).
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+// PHASE2 Step 6: the db-version gate must throw, not std::exit (B §1.11).
+void p2_test_db_version_gate(ragger::Embedder& emb) {
+    std::println("  p2_test_db_version_gate...");
+    const std::string path = "/tmp/ragger_test_dbversion_gate.db";
+    std::filesystem::remove(path);
+    {
+        sqlite3* raw = nullptr;
+        CHECK(sqlite3_open(path.c_str(), &raw) == SQLITE_OK);
+        char* err = nullptr;
+        const char* sql =
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+            "INSERT INTO settings (key, value) VALUES ('db_version', '0.99');";
+        CHECK(sqlite3_exec(raw, sql, nullptr, nullptr, &err) == SQLITE_OK);
+        sqlite3_free(err);
+        sqlite3_close(raw);
+    }
+    bool threw = false;
+    try {
+        ragger::sqlite::Backend db(emb, path);
+    } catch (const std::runtime_error& e) {
+        threw = true;
+        const std::string msg = e.what();
+        CHECK(msg.find("schema version mismatch") != std::string::npos);
+        CHECK(msg.find("0.99") != std::string::npos);
+        // The old text named a script that does not exist; the new text
+        // must not.
+        CHECK(msg.find("migrate_to_db") == std::string::npos);
+    }
+    CHECK(threw);  // construction must reject, not exit the process
+    std::filesystem::remove(path);
+    std::println(" ok");
+}
+
+// PHASE2 Step 6: DB-only backend (null embedder) throws on embedder use
+// instead of dereferencing null (B §1.17).
+void p2_test_require_embedder(ragger::Embedder& emb) {
+    std::println("  p2_test_require_embedder...");
+    cleanup();
+    {
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        db.store("hello there general kenobi");
+        db.store_turn("hello there", "general kenobi", "test-model");
+        db.close();
+    }
+    {
+        ragger::sqlite::Backend db_only(TEMP_DB);
+        // Write path: null embedder -> require_embedder() throws.
+        bool threw = false;
+        try {
+            db_only.store_turn("another", "turn", "test-model");
+        } catch (const std::runtime_error& e) {
+            threw = true;
+            CHECK(std::string(e.what()) == "embedder not available");
+        }
+        CHECK(threw);
+        // Read path: corpus is non-empty (one embedded turn above), so
+        // search reaches the embedder gate and throws the readiness
+        // message rather than feeding Eigen an empty vector.
+        threw = false;
+        try {
+            db_only.search("hello", 5, 0.0f);
+        } catch (const std::runtime_error& e) {
+            threw = true;
+            CHECK(std::string(e.what()) ==
+                  "semantic search unavailable: embedder not ready");
+        }
+        CHECK(threw);
+        db_only.close();
+    }
+    cleanup();
+    std::println(" ok");
+}
+
 int main() {
     TestEnv env("sqlite_backend");  // must be first: isolates from ~/.ragger
     // Need config for model dir
@@ -3783,6 +3985,13 @@ int main() {
     p1_test_turn_summary_index_keying(emb);
     p1t_test_import_probes(emb);
     p1_test_embedder_swap(emb, model_dir);
+    p2_test_close_really_closes(emb);
+    p2_test_write_paths_postings(emb);
+    p2_test_store_turn_under_outer_begin(emb);
+    p2_test_has_embeddings_turn_summaries(emb);
+    p2_test_backfill_invalidates_dec_cache(emb);
+    p2_test_db_version_gate(emb);
+    p2_test_require_embedder(emb);
 
     std::println("test_sqlite_backend: all passed");
     return 0;

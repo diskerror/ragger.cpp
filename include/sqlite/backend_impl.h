@@ -320,6 +320,10 @@ struct Backend::Impl {
     void invalidate_dec_cache();
     void invalidate_ins_cache();
     void invalidate_turn_cache();
+    /// Drop all five warm caches (summaries, documents, decisions, insights,
+    /// turns). Use after any write that can change rows across several tables
+    /// (embedding backfill/rebuild) so no table's stale rows survive.
+    void invalidate_all_caches();
 
     // Loads the summaries table into the vector cache. Keyword scores come
     // from FTS5 (summaries_fts) at query time — see keyword_scores().
@@ -852,6 +856,12 @@ struct Backend::Impl {
     // a bulk pass: a full rebuild would walk every table replacing good
     // vectors with NULL. Refuse instead.
     bool embedder_usable(const Embedder& emb_ref) const;
+
+    /// The embedder, or throw. Every write path that must encode calls
+    /// this instead of dereferencing `embedder` directly: the DB-only
+    /// constructor leaves it null, and a silent crash there is worse than
+    /// an exception the caller can report (B §1.17).
+    Embedder& require_embedder();
 
     uint8_t get_embedding_version() const;
 

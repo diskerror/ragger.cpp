@@ -134,8 +134,9 @@ int main(int argc, char **argv) {
                 "Conversation source format: code | web | telegram")
             ("self", Diskerror::po::value<std::string>()->default_value(""),
                 "Telegram format only: your display name, to split user/assistant turns")
-            ("all", "import-conversations: treat a directory, or a file with sibling export "
-                "files (memories.json, projects/), as one multi-file import unit")
+            ("all,a", "import-conversations: treat a directory, or a file with sibling export "
+                "files (memories.json, projects/), as one multi-file import unit; "
+                "config get: show all settings")
             ("fdate", "import-conversations: use each input file's mtime as the timestamp "
                 "for rows with no derivable date (e.g. memories.json)")
             ("date", Diskerror::po::value<std::string>()->default_value(""),
@@ -152,7 +153,6 @@ int main(int argc, char **argv) {
                 "JSONL file ({text, tags?, timestamp?} per line)")
             // admin flags removed — sudo is the admin gate
             ("yes,y", CLI_YES)
-            ("all,a", "config get: show all settings")
             ("json,j", "config get: format output as JSON")
             ("browser,b", "dashboard: open the URL in the default browser")
             ("embeddings,e", CLI_EMBEDDINGS)

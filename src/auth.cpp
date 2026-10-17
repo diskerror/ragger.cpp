@@ -12,6 +12,7 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <cctype>
 #include <filesystem>
 #include <random>
 #include <cstdio>
@@ -250,6 +251,36 @@ AuthResult verify_token(UserStore& db, const std::string& token) {
     auto user_info = db.get_user_by_token_hash(token_hash);
     if (!user_info) return {};
     return {true, user_info->username};
+}
+
+bool request_origin_allowed(std::string_view method,
+                            std::string_view origin,
+                            std::string_view host) {
+    // Safe methods never mutate state — CORS preflight (OPTIONS) included.
+    if (method == "GET" || method == "HEAD" || method == "OPTIONS")
+        return true;
+    // No Origin header: curl, the CLI, the Hermes plugin, MCP — none send
+    // one, and none are browser cross-site contexts.
+    if (origin.empty())
+        return true;
+    // Strip the scheme ("http://" / "https://") to get the authority.
+    std::string_view authority = origin;
+    if (auto sep = origin.find("://"); sep != std::string_view::npos)
+        authority = origin.substr(sep + 3);
+    if (authority.empty())
+        return false;
+    // Case-insensitive exact match against Host (scheme-less). Hosts are
+    // case-insensitive per RFC; ports must match too.
+    auto ieq = [](std::string_view a, std::string_view b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            unsigned char ca = static_cast<unsigned char>(a[i]);
+            unsigned char cb = static_cast<unsigned char>(b[i]);
+            if (std::tolower(ca) != std::tolower(cb)) return false;
+        }
+        return true;
+    };
+    return ieq(authority, host);
 }
 
 } // namespace ragger

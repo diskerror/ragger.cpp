@@ -80,6 +80,12 @@ namespace fs = std::filesystem;
                                    config().fts_w_metaphone, config().fts_literal_enabled});
 
         // ---- query embedding ------------------------------------------
+        // A null or not-ready embedder here would reach Eigen with an
+        // empty/mismatched vector — an assert or garbage, not a reportable
+        // error. Gate it (B §1.17). RaggerMemory checks readiness first;
+        // this protects every other caller.
+        if (!embedder || !embedder->ready())
+            throw std::runtime_error("semantic search unavailable: embedder not ready");
         auto t_embed_start = clock::now();
         auto q_vec = embedder->encode(query);
         auto t_embed_end = clock::now();

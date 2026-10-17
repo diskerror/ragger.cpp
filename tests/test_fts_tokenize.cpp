@@ -322,6 +322,21 @@ int main() {
         std::cout << "  ✓ Metaphone assignment is consistent (one per unigram)\n";
     }
 
+    // ===== Test: raw UTF-8 bytes must not trip <cctype> UB =====
+    {
+        std::cout << "Test UTF-8: multibyte input tokenizes without crashing\n";
+        // Pre-fix, normalize_words fed raw (possibly negative) chars to
+        // isalnum/isalpha — UB that can index far outside the ctype table.
+        auto words = normalize_words("café naïve 日本語 ok");
+        auto lits = std::vector<std::string>(words.begin(), words.end());
+        assert(std::find(lits.begin(), lits.end(), "ok") != lits.end());
+        // Full pipeline too, not just the splitter.
+        StopSet uni_stops = stopword_set(STOPWORDS_UNIGRAM);
+        auto uni = unigrams(words, uni_stops);
+        std::cout << "  ✓ UTF-8 survives (" << words.size() << " words, "
+                  << uni.size() << " unigrams)\n";
+    }
+
     std::cout << "\n=== All tests passed! ===\n";
     return 0;
 }

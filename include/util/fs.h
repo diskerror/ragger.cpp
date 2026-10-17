@@ -57,4 +57,12 @@ std::string ragger_base_dir();
 std::string archive_db_files(const std::string& db_path,
                               const std::vector<std::string>& extra_db_paths = {});
 
+/// Validate a HuggingFace "provider/model" repo id for use as a filesystem
+/// path segment (POST /models/download). Rejects anything that could escape
+/// the models directory or smuggle separators: requires exactly one '/',
+/// both parts non-empty, each part only [A-Za-z0-9._-] and not "." or "..",
+/// no backslash, no embedded NUL, total length <= 200. Pure — no filesystem
+/// access. (C §1.6)
+bool is_safe_model_repo(std::string_view repo);
+
 } // namespace ragger

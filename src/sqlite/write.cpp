@@ -185,7 +185,7 @@ static std::string tags_from_metadata(const json& metadata) {
 
         std::vector<float> emb;
         if (!defer_embedding) {
-            emb = embedder->encode(text);
+            emb = require_embedder().encode(text);
         }
 
         auto ts = resolve_epoch(ts_override);
@@ -376,7 +376,7 @@ static std::string tags_from_metadata(const json& metadata) {
 
         std::vector<float> emb;
         if (!defer_embedding) {
-            emb = embedder->encode(signal_text);
+            emb = require_embedder().encode(signal_text);
         }
 
         // Resolve/insert the source; every chunk of a (path,title) doc shares
@@ -407,13 +407,17 @@ static std::string tags_from_metadata(const json& metadata) {
             bind_embedding(s.raw(), 7, emb);
         }
 
-        if (!s.exec()) {
-            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+        int doc_id = -1;
+        {
+            Transaction tx(db);  // row + postings atomic (B §1.3)
+            if (!s.exec()) {
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            }
+            doc_id = static_cast<int>(sqlite3_last_insert_rowid(db));
+            text_index_->index_record("documents", doc_id, signal_text);
+            tx.commit();
         }
-
-        invalidate_doc_cache();
-        int doc_id = static_cast<int>(sqlite3_last_insert_rowid(db));
-        text_index_->index_record("documents", doc_id, signal_text);
+        invalidate_doc_cache();  // after commit, not before (B §1.3)
         return doc_id;
     }
 
@@ -525,12 +529,15 @@ static std::string tags_from_metadata(const json& metadata) {
                     within_window = (now_ep - prev_ts_ep) <= 300;
                 }
                 if (within_window) {
-                    std::vector<float> emb2 = embedder->encode(turn_embed_text(u, a));
+                    std::vector<float> emb2 = require_embedder().encode(turn_embed_text(u, a));
                     // Single timestamp value shared by the turns UPDATE and the
                     // placeholder cleanup/insert below — computed once, never
                     // re-read from the clock, so the two writes can't drift
                     // apart and strand the old (session_id, prev_ts) slot.
                     const int64_t new_ts = db_epoch();
+                    // Row write + postings in one transaction (B §1.3); the
+                    // embedder call above stays outside on purpose.
+                    Transaction tx(db);
                     Stmt up(db,
                         "UPDATE turns SET assistant_text = ?, embedding_version = ?, embedding = ?, "
                         "model_id = COALESCE(?, model_id), "
@@ -546,6 +553,7 @@ static std::string tags_from_metadata(const json& metadata) {
                     if (!up.exec())
                         throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
                     text_index_->index_record("turns", prev_id, u + "\n" + a);
+                    tx.commit();
                     return prev_id;
                 }
             }
@@ -554,7 +562,7 @@ static std::string tags_from_metadata(const json& metadata) {
         std::vector<float> emb;
         bool have_emb = false;
         if (!defer_embedding && !a.empty()) {
-            emb = embedder->encode(turn_embed_text(u, a));
+            emb = require_embedder().encode(turn_embed_text(u, a));
             have_emb = true;
         }
 
@@ -575,10 +583,15 @@ static std::string tags_from_metadata(const json& metadata) {
         }
         s.bind(7, resolve_epoch(source_timestamp));
 
-        if (!s.exec())
-            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-        int new_id = static_cast<int>(sqlite3_last_insert_rowid(db));
-        text_index_->index_record("turns", new_id, a.empty() ? u : (u + "\n" + a));
+        int new_id = -1;
+        {
+            Transaction tx(db);  // row + postings atomic (B §1.3)
+            if (!s.exec())
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            new_id = static_cast<int>(sqlite3_last_insert_rowid(db));
+            text_index_->index_record("turns", new_id, a.empty() ? u : (u + "\n" + a));
+            tx.commit();
+        }
         return new_id;
     }
 
@@ -639,8 +652,9 @@ static std::string tags_from_metadata(const json& metadata) {
 
         std::string a = normalize_path(assistant_text);
         int model_id  = get_or_create_model(model_name);
-        auto emb = embedder->encode(turn_embed_text(u, a));
+        auto emb = require_embedder().encode(turn_embed_text(u, a));
 
+        Transaction tx(db);  // row + postings atomic (B §1.3)
         Stmt s(db,
             "UPDATE turns SET assistant_text = ?, embedding_version = ?, embedding = ?, "
             "model_id = COALESCE(?, model_id) WHERE turn_id = ?");
@@ -649,8 +663,9 @@ static std::string tags_from_metadata(const json& metadata) {
         bind_embedding(s.raw(), 3, emb);
         if (model_id) s.bind(4, model_id); else s.bind_null(4);
         s.bind(5, turn_id);
-        if (!s.exec()) return false;
+        if (!s.exec()) return false;  // tx rolls back on scope exit
         text_index_->index_record("turns", turn_id, u + "\n" + a);
+        tx.commit();
         return true;
     }
 
@@ -670,7 +685,7 @@ static std::string tags_from_metadata(const json& metadata) {
         std::string t = normalize_path(text);
         int model_id   = get_or_create_model(model_name);
         int session_id = get_or_create_session(session_guid);
-        auto emb = embedder->encode(t);
+        auto emb = require_embedder().encode(t);
 
         Stmt s(db,
             "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, level, tags, created_at, updated_at) "
@@ -713,7 +728,7 @@ static std::string tags_from_metadata(const json& metadata) {
             s.bind_null(2);
             s.bind_null(3);
         } else {
-            auto emb = embedder->encode(t);
+            auto emb = require_embedder().encode(t);
             bind_embedding_version(s.raw(), 2, emb);
             bind_embedding(s.raw(), 3, emb);
         }
@@ -818,7 +833,7 @@ static std::string tags_from_metadata(const json& metadata) {
         // allow that; decisions never reach the empty branch.)
         const std::string embed_text =
             trigger.empty() ? text : trigger + "\n" + text;
-        auto emb = embedder->encode(embed_text);
+        auto emb = require_embedder().encode(embed_text);
 
         // ---- 3. write ---------------------------------------------------
         StructuredDecisionResult out;
@@ -956,7 +971,7 @@ static std::string tags_from_metadata(const json& metadata) {
             const std::string& text) {
         if (!embedder || !embedder->ready() || text.empty())
             return {};                       // degraded: no hints (per P2 rule)
-        return supersede_hints(embedder->encode(text), {});
+        return supersede_hints(require_embedder().encode(text), {});
     }
 
 
@@ -1056,7 +1071,7 @@ static std::string tags_from_metadata(const json& metadata) {
                                 const std::string& summary_model_name) {
         std::string t = normalize_path(text);
         int model_id = get_or_create_model(summary_model_name);
-        auto emb = embedder->encode(t);
+        auto emb = require_embedder().encode(t);
 
         Stmt g(db, "SELECT created_at, model_id, session_id FROM turns WHERE turn_id = ?");
         g.bind(1, turn_id);
@@ -1316,7 +1331,7 @@ static std::string tags_from_metadata(const json& metadata) {
         std::string t = normalize_path(text);
         int model_id   = get_or_create_model(model_name);
         int session_id = get_or_create_session(session_guid);
-        auto emb = embedder->encode(t);
+        auto emb = require_embedder().encode(t);
 
         Stmt s(db,
             "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, "
@@ -1623,7 +1638,7 @@ static std::string tags_from_metadata(const json& metadata) {
         std::string t = normalize_path(text);
         int model_id   = get_or_create_model(model_name);
         int session_id = get_or_create_session(session_guid);
-        auto emb = embedder->encode(t);
+        auto emb = require_embedder().encode(t);
 
         Stmt s(db,
             "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, "
@@ -1653,7 +1668,7 @@ static std::string tags_from_metadata(const json& metadata) {
                               int64_t first_ts, int64_t last_ts) {
         std::string t = normalize_path(text);
         int model_id   = get_or_create_model(model_name);
-        auto emb = embedder->encode(t);
+        auto emb = require_embedder().encode(t);
 
         Stmt s(db,
             "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, "
@@ -1924,7 +1939,7 @@ static std::string tags_from_metadata(const json& metadata) {
                              const std::string& model_name) {
         std::string t = normalize_path(text);
         int model_id  = get_or_create_model(model_name);
-        auto emb = embedder->encode(t);
+        auto emb = require_embedder().encode(t);
 
         Stmt s(db,
             "UPDATE summaries SET text = ?, embedding_version = ?, embedding = ?, "
@@ -1969,7 +1984,7 @@ static std::string tags_from_metadata(const json& metadata) {
         std::string text = normalize_path(raw_text);
         std::vector<float> emb;
         if (!defer_embedding) {
-            emb = embedder->encode(text);
+            emb = require_embedder().encode(text);
         }
 
         // Custom index: re-tokenize the record on the new text (v0.16).

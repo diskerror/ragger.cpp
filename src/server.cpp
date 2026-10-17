@@ -15,6 +15,7 @@
 #include "config_access.h"
 #include "embedder.h"
 #include "util/fs.h"
+#include "util/parse.h"
 #include "inference.h"
 
 #include <curl/curl.h>
@@ -138,6 +139,8 @@ struct Server::Impl {
     // Housekeeping timer
     std::atomic<bool> timer_running_{false};
     std::thread timer_thread_;
+    std::atomic<bool> poller_running_{false};
+    std::thread poller_thread_;
     std::string pid_file_;
 
     Impl(RaggerMemory& mem, const std::string& h, int p)
@@ -331,57 +334,86 @@ struct Server::Impl {
 
     /// Start background timer for periodic housekeeping.
     /// Housekeeping only acts on users whose locks we hold.
+    void start_background_threads() {
+        start_signal_poller();
+        start_housekeeping_timer();
+    }
+
+    /// Signal handling thread — ALWAYS started, even with
+    /// housekeeping_interval == 0 (C §1.5): shutdown, restart, and SIGHUP
+    /// reload must not depend on the housekeeping thread existing. With
+    /// SA_RESTART, accept() resumes after a signal, so without this poller
+    /// SIGTERM was swallowed and POST /restart answered "restarting" but
+    /// nothing happened.
+    void start_signal_poller() {
+        poller_running_ = true;
+        poller_thread_ = std::thread([this]() {
+            while (poller_running_) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                // (1) shutdown / restart — stop the listeners exactly as the
+                // old housekeeping-thread block did; main() re-execs on
+                // restart after the listeners return.
+                if (g_shutdown_requested.load(std::memory_order_relaxed) ||
+                    g_restart_requested.load(std::memory_order_relaxed)) {
+                    Diskerror::Logger::info(
+                        g_restart_requested.load(std::memory_order_relaxed)
+                            ? "Restart signal received; stopping listeners to re-exec"
+                            : "Shutdown signal received; stopping listeners");
+                    if (unix_svr.is_running()) unix_svr.stop();
+                    if (tcp_svr && tcp_svr->is_running()) tcp_svr->stop();
+                    return;
+                }
+                // (2) Reload (SIGHUP): config, plus the search caches — the
+                // DB file may have been changed by another process (CLI
+                // import/delete, a hand edit). SIGHUP, not a new signal, so
+                // a newer CLI can never kill an older daemon. Lives here so
+                // reload works with housekeeping disabled (every CLI write
+                // sends SIGHUP).
+                if (g_config_reload_requested.exchange(false)) {
+                    memory.backend()->invalidate_all_caches();
+                    Diskerror::Logger::info(lang::MSG_CACHE_RELOADED);
+                    int n = reload_config();
+                    if (n > 0) {
+                        Diskerror::Logger::info(std::format(ragger::lang::MSG_CONFIG_RELOADED_N, n));
+                        // Re-initialize inference client if endpoints changed
+                        try {
+                            auto fresh = std::make_shared<InferenceClient>(
+                                InferenceClient::from_config(config()));
+                            set_inference(std::move(fresh));
+                            Diskerror::Logger::info(lang::MSG_INFERENCE_CLIENT_OK);
+                        } catch (const std::exception& e) {
+                            Diskerror::Logger::critical(std::format(lang::ERR_INFERENCE_CLIENT_FAIL, e.what()));
+                        }
+                    } else {
+                        Diskerror::Logger::info(lang::MSG_CONFIG_RELOADED_NONE);
+                    }
+                }
+            }
+        });
+    }
+
+    /// Periodic housekeeping only. The interval is re-read every iteration
+    /// so a changed setting takes effect without a restart; 0 still means
+    /// the thread is not started at all.
     void start_housekeeping_timer() {
-        int interval = config().housekeeping_interval;
-        if (interval == 0) {
+        if (config().housekeeping_interval == 0) {
             Diskerror::Logger::info(lang::MSG_HOUSEKEEPING_DISABLED);
             return;
         }
         timer_running_ = true;
-        timer_thread_ = std::thread([this, interval]() {
+        timer_thread_ = std::thread([this]() {
             while (timer_running_) {
+                const int interval = config().housekeeping_interval;  // live
+                if (interval <= 0) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    continue;
+                }
                 for (int i = 0; i < interval && timer_running_; ++i) {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
-                    // Check for shutdown (or restart, which stops listeners
-                    // the same way — main() re-execs afterward).
-                    if (g_shutdown_requested.load(std::memory_order_relaxed) ||
-                        g_restart_requested.load(std::memory_order_relaxed)) {
-                        Diskerror::Logger::info(
-                            g_restart_requested.load(std::memory_order_relaxed)
-                                ? "Restart signal received; stopping listeners to re-exec"
-                                : "Shutdown signal received; stopping listeners");
-                        timer_running_ = false;
-                        if (unix_svr.is_running()) unix_svr.stop();
-                        if (tcp_svr && tcp_svr->is_running()) tcp_svr->stop();
-                        break;
-                    }
                     // Check for signal-triggered housekeeping
                     if (g_housekeeping_requested.exchange(false)) {
                         Diskerror::Logger::info(lang::MSG_HOUSEKEEPING_SIGNAL);
                         run_housekeeping();
-                    }
-                    // Reload (SIGHUP): config, plus the search caches -- the
-                    // DB file may have been changed by another process (CLI
-                    // import/delete, a hand edit). SIGHUP, not a new signal,
-                    // so a newer CLI can never kill an older daemon.
-                    if (g_config_reload_requested.exchange(false)) {
-                        memory.backend()->invalidate_all_caches();
-                        Diskerror::Logger::info(lang::MSG_CACHE_RELOADED);
-                        int n = reload_config();
-                        if (n > 0) {
-                            Diskerror::Logger::info(std::format(ragger::lang::MSG_CONFIG_RELOADED_N, n));
-                            // Re-initialize inference client if endpoints changed
-                            try {
-                                auto fresh = std::make_shared<InferenceClient>(
-                                    InferenceClient::from_config(config()));
-                                set_inference(std::move(fresh));
-                                Diskerror::Logger::info(lang::MSG_INFERENCE_CLIENT_OK);
-                            } catch (const std::exception& e) {
-                                Diskerror::Logger::critical(std::format(lang::ERR_INFERENCE_CLIENT_FAIL, e.what()));
-                            }
-                        } else {
-                            Diskerror::Logger::info(lang::MSG_CONFIG_RELOADED_NONE);
-                        }
                     }
                 }
                 if (timer_running_) {
@@ -391,10 +423,14 @@ struct Server::Impl {
         });
     }
 
-    void stop_housekeeping_timer() {
+    void stop_background_threads() {
         timer_running_ = false;
+        poller_running_ = false;
         if (timer_thread_.joinable()) {
             timer_thread_.join();
+        }
+        if (poller_thread_.joinable()) {
+            poller_thread_.join();
         }
         // Release all user housekeeping locks
         std::lock_guard<std::mutex> lock(housekeeping_locks_mutex_);
@@ -860,7 +896,9 @@ struct Server::Impl {
 
     void handle_delete_memory(const UserInfo& user, const httplib::Request& req,
                                httplib::Response& res) {
-        int id = std::stoi(req.matches[1]);
+        int id = 0;
+        if (!util::parse_positive_int(std::string(req.matches[1]), id))
+            throw std::invalid_argument("memory id must be a positive integer");
         auto& mem = _get_memory(user.username);
         if (mem.delete_memory(id)) {
             Diskerror::Logger::debug("DELETE /memory 200");
@@ -925,12 +963,30 @@ struct Server::Impl {
                     res.set_content(lang::HTTP_UNAUTHORIZED, "text/plain");
                     return;
                 }
+                // Cross-origin write guard (C §1.8): after auth, before the
+                // handler. A browser sends Origin on cross-site writes; the
+                // authority must match Host. GET/HEAD/OPTIONS and requests
+                // with no Origin (curl, CLI, plugin, MCP) pass through.
+                if (!request_origin_allowed(req.method,
+                                            req.get_header_value("Origin"),
+                                            req.get_header_value("Host"))) {
+                    Diskerror::Logger::debug(std::format("{} {} 403 (origin)", req.method, req.path));
+                    res.status = 403;
+                    res.set_content("ERROR: cross-origin request refused", "text/plain");
+                    return;
+                }
                 try {
                     handler(*user, req, res);
                 } catch (const json::exception& e) {
                     Diskerror::Logger::debug(std::format("{} {} 400", req.method, req.path));
                     res.status = 400;
                     res.set_content(std::format(lang::HTTP_JSON_ERROR, e.what()), "text/plain");
+                } catch (const std::invalid_argument& e) {
+                    // Malformed inputs (bad ids, bad ports, validation failures)
+                    // are client errors, not server faults (C §1.10).
+                    Diskerror::Logger::debug(std::format("{} {} 400", req.method, req.path));
+                    res.status = 400;
+                    res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
                 } catch (const std::exception& e) {
                     Diskerror::Logger::critical(std::format(lang::ERR_ROUTE_FAILED, req.method, req.path, e.what()));
                     res.status = 500;
@@ -1145,7 +1201,9 @@ struct Server::Impl {
                 res.set_content(R"({"error":"host and port required"})", "application/json");
                 return;
             }
-            int port = std::stoi(port_s);
+            int port = 0;
+            if (!util::parse_positive_int(port_s, port))
+                throw std::invalid_argument("port must be a positive integer");
             Embedder probe_emb(host, port, "", key);
             auto models = probe_emb.list_remote_models();
             json arr = json::array();
@@ -1257,15 +1315,29 @@ struct Server::Impl {
                 return;
             }
             std::string repo = body["repo"].get<std::string>();
-            // Validate repo format: "provider/model"
-            auto slash = repo.find('/');
-            if (slash == std::string::npos || slash == 0 || slash == repo.size() - 1) {
+            // Validate repo format: "provider/model" — strict, so no
+            // traversal into or out of the models directory (C §1.6).
+            if (!is_safe_model_repo(repo)) {
                 res.status = 400;
                 res.set_content(R"({"error":"repo must be 'provider/model'"})", "application/json");
                 return;
             }
 
             std::string dest = ragger_base_dir() + "/models/" + repo;
+            // Belt and braces: the canonical destination must still live
+            // under <base>/models (defense in depth against a future
+            // base-dir quirk slipping past the syntax check).
+            {
+                namespace stdfs = std::filesystem;
+                const auto dest_canon   = stdfs::weakly_canonical(dest).string();
+                const auto models_root  = stdfs::weakly_canonical(ragger_base_dir() + "/models").string();
+                if (dest_canon.size() <= models_root.size() + 1 ||
+                    dest_canon.compare(0, models_root.size() + 1, models_root + "/") != 0) {
+                    res.status = 400;
+                    res.set_content(R"({"error":"repo must be 'provider/model'"})", "application/json");
+                    return;
+                }
+            }
             std::string hf_base = "https://huggingface.co/" + repo + "/resolve/main";
 
             // Check if already present (model.onnx or onnx/model.onnx)
@@ -1739,8 +1811,9 @@ bool Server::run() {
     sigaction(SIGTERM, &sa, nullptr);
     sigaction(SIGINT,  &sa, nullptr);
 
-    // Start housekeeping timer (runs every 60s + on SIGUSR1)
-    pImpl->start_housekeeping_timer();
+    // Start background threads: the always-on signal poller plus the
+    // periodic housekeeping timer (runs every interval + on SIGUSR1).
+    pImpl->start_background_threads();
 
     // Start the daemon-resident summarizer (L2 per-turn + L3 on idle pause).
     // Only the HTTP daemon runs this: it keeps the inference + embedder warm
@@ -1814,7 +1887,7 @@ bool Server::run() {
 
     // Cleanup
     if (pImpl->summarizer_) pImpl->summarizer_->stop();
-    pImpl->stop_housekeeping_timer();
+    pImpl->stop_background_threads();
     if (!pImpl->pid_file_.empty()) std::remove(pImpl->pid_file_.c_str());
 
     return g_restart_requested.load(std::memory_order_relaxed);
@@ -1826,7 +1899,7 @@ bool Server::restart_requested() {
 
 void Server::stop() {
     if (pImpl->summarizer_) pImpl->summarizer_->stop();
-    pImpl->stop_housekeeping_timer();
+    pImpl->stop_background_threads();
     if (pImpl->unix_svr.is_running()) pImpl->unix_svr.stop();
     if (pImpl->tcp_svr && pImpl->tcp_svr->is_running()) pImpl->tcp_svr->stop();
 }

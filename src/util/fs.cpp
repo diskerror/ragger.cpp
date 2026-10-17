@@ -165,4 +165,29 @@ std::string archive_db_files(const std::string& db_path,
     return copy_path.string();
 }
 
+bool is_safe_model_repo(std::string_view repo) {
+    if (repo.empty() || repo.size() > 200) return false;
+    if (repo.find('\\') != std::string_view::npos) return false;
+    if (repo.find('\0') != std::string_view::npos) return false;
+
+    // Exactly one '/', both sides non-empty.
+    const size_t slash = repo.find('/');
+    if (slash == std::string_view::npos) return false;
+    if (repo.find('/', slash + 1) != std::string_view::npos) return false;
+    const std::string_view provider = repo.substr(0, slash);
+    const std::string_view model    = repo.substr(slash + 1);
+    if (provider.empty() || model.empty()) return false;
+
+    auto part_ok = [](std::string_view p) {
+        if (p == "." || p == "..") return false;
+        for (char c : p) {
+            const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                            (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+            if (!ok) return false;
+        }
+        return true;
+    };
+    return part_ok(provider) && part_ok(model);
+}
+
 } // namespace ragger

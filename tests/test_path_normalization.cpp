@@ -129,9 +129,30 @@ void test_normalize_embedded_in_longer_text(ragger::Embedder& emb) {
     std::println(" OK");
 }
 
+// PHASE2 Step 5: is_safe_model_repo (C §1.6).
+void test_is_safe_model_repo() {
+    std::println("  test_is_safe_model_repo...");
+    using ragger::is_safe_model_repo;
+    for (const char* ok : {"sentence-transformers/all-MiniLM-L6-v2", "a/b",
+                           "a.b.c/d_e-f.g", "A1/B2"})
+        CHECK(is_safe_model_repo(ok));
+    for (const char* bad : {"x/../../../tmp/evil", "../a", "a/..", "a//b",
+                            "a/b/c", "/a", "a/", "a\\b/c", "", "a/b c",
+                            ".", "./a", "a/.", "..", "a/.."})
+        CHECK(!is_safe_model_repo(bad));
+    // Embedded NUL (built with an explicit length so the NUL is inside).
+    CHECK(!is_safe_model_repo(std::string("a/b\0c", 5)));
+    // Over-long.
+    CHECK(!is_safe_model_repo(std::string(150, 'a') + "/" + std::string(60, 'b')));
+    CHECK(is_safe_model_repo(std::string(100, 'a') + "/" + std::string(99, 'b')));  // 200 total
+    std::println(" OK");
+}
+
 int main() {
     TestEnv env("path_normalization");  // must be first: isolates from ~/.ragger
     std::println("Running path normalization tests:");
+
+    test_is_safe_model_repo();  // pure function — before the model gate
 
     auto cfg = ragger::config();
     assert(cfg.normalize_home_path == true);

@@ -63,7 +63,7 @@ std::vector<std::string> normalize_words(std::string_view sentence) {
         char c = lower_sent[i];
         unsigned char uc = static_cast<unsigned char>(c);
         
-        if (std::isalnum(c)) {
+        if (std::isalnum(uc)) {
             current_word += c;
         } else if (c == '+' || c == '=' || c == '-') {
             // Preserve +, =, - as potential operator symbols
@@ -115,7 +115,7 @@ std::vector<std::string> normalize_words(std::string_view sentence) {
                     current_word.clear();
                 }
             }
-        } else if (c == '\'' && i > 0 && i < lower_sent.size() - 1 && std::isalpha(lower_sent[i + 1])) {
+        } else if (c == '\'' && i > 0 && i < lower_sent.size() - 1 && std::isalpha(static_cast<unsigned char>(lower_sent[i + 1]))) {
             // Preserve apostrophe in contractions (e.g., "isn't", "don't")
             current_word += c;
         } else {

@@ -11,8 +11,10 @@
 #include "agent_parse.h"
 #include "check.h"
 #include "config.h"
+#include "mcp.h"
 #include "test_env.h"
 #include "memory.h"
+#include "util/parse.h"
 
 #include <filesystem>
 #include <iostream>
@@ -207,6 +209,43 @@ void test_decision_input_parsing(ragger::RaggerMemory& mem) {
     std::println(" OK");
 }
 
+// PHASE2 Step 4: strict positive-int parser (C §1.10). Rejects the forms
+// std::stoi wrongly accepts ("0", "007", "-1", "1x", " 1") and overflow.
+void test_parse_positive_int() {
+    std::println("  test_parse_positive_int...");
+    int out = -999;
+    for (const char* ok : {"1", "9", "10", "2147483647"}) {
+        out = -999;
+        CHECK(ragger::util::parse_positive_int(ok, out));
+        CHECK(out == std::stoi(ok));
+    }
+    for (const char* bad : {"", "0", "007", "-1", "+1", "1x", "x1",
+                            " 1", "1 ", "2147483648", "99999999999999999999"}) {
+        out = -4242;
+        CHECK(!ragger::util::parse_positive_int(bad, out));
+        CHECK(out == -4242);  // out untouched on failure
+    }
+    std::println(" OK");
+}
+
+// PHASE2 Step 4: a mistyped MCP argument ({"limit":"10"}) must come back as
+// an isError tool result, not throw (C §1.12).
+void test_mcp_tool_call_bad_arg_type(ragger::RaggerMemory& mem) {
+    std::println("  test_mcp_tool_call_bad_arg_type...");
+    json params = {{"name", "memory_search"},
+                   {"arguments", {{"query", "hello"}, {"limit", "10"}}}};
+    bool threw = false;
+    json r;
+    try {
+        r = ragger::mcp_tool_call(mem, params);
+    } catch (...) {
+        threw = true;
+    }
+    CHECK(!threw);
+    CHECK(r.value("isError", false) == true);
+    std::println(" OK");
+}
+
 int main() {
     TestEnv env("agent_parse");  // must be first: isolates from ~/.ragger
     std::println("Running agent-parse tests:");
@@ -216,12 +255,14 @@ int main() {
     test_supersedes_json();
     test_parse_agent_get_query();
     test_parse_update_request();
+    test_parse_positive_int();
 
     {
         ragger::RaggerMemory mem(TEMP_DB);
         mem.create_project("ParseProj", "/tmp/ragger_parse_proj", "");
         test_search_and_timeline_parsing(mem);
         test_decision_input_parsing(mem);
+        test_mcp_tool_call_bad_arg_type(mem);
         mem.close();
     }
 

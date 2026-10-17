@@ -52,6 +52,9 @@ struct ConfigMeta {
     std::string_view default_value; // canonical default as TEXT
     std::string_view options;       // Enum only: comma-separated choices
     std::string_view help;          // explanation (CLI help + dashboard tooltip)
+    bool secret = false;            // value is a credential: never expose it
+                                    // through GET /config / MCP get_config —
+                                    // emit "<set>" instead (C §1.7)
 };
 
 // Defined in include/ragger/lang/en.h (kConfigSchema[]).

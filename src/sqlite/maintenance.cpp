@@ -99,6 +99,7 @@ namespace fs = std::filesystem;
             "  UNION ALL SELECT 1 FROM documents WHERE embedding IS NOT NULL "
             "  UNION ALL SELECT 1 FROM decisions WHERE embedding IS NOT NULL "
             "  UNION ALL SELECT 1 FROM insights  WHERE embedding IS NOT NULL "
+            "  UNION ALL SELECT 1 FROM turn_summaries WHERE embedding IS NOT NULL "
             "  LIMIT 1)");
         return s.step() && s.column_int(0) != 0;
     }
@@ -298,9 +299,9 @@ namespace fs = std::filesystem;
         }
 
         if (done > 0 || !only_missing) {
-            invalidate_cache();
-            invalidate_doc_cache();
-            invalidate_dec_cache();
+            // Backfill/re-embed can touch every corpus (turn_summaries and
+            // insights included) — drop ALL caches, not just three (B §1.6).
+            invalidate_all_caches();
         }
         return done;
     }
@@ -311,14 +312,9 @@ namespace fs = std::filesystem;
     int Backend::Impl::rebuild_embeddings(Embedder& emb_ref, bool progress, const std::string& table) {
         if (!embedder_usable(emb_ref)) return 0;
         int n = embed_tables(emb_ref, /*only_missing=*/false, progress, table);
-        // embed_tables invalidates the summary/doc/decision caches only; a
-        // full rebuild touches every corpus (turns + insights included), and
-        // a dtype change makes every cached decoded vector stale — drop all.
-        invalidate_cache();
-        invalidate_doc_cache();
-        invalidate_dec_cache();
-        invalidate_ins_cache();
-        invalidate_turn_cache();
+        // Belt and braces: a full rebuild touches every corpus and a dtype
+        // change makes every cached decoded vector stale — drop all.
+        invalidate_all_caches();
         return n;
     }
 
@@ -339,6 +335,12 @@ namespace fs = std::filesystem;
         if (emb_ref.ready()) return true;
         Diskerror::Logger::error(ragger::lang::ERR_EMBED_NO_MODEL_BULK);
         return false;
+    }
+
+    Embedder& Backend::Impl::require_embedder() {
+        if (!embedder)
+            throw std::runtime_error("embedder not available");
+        return *embedder;
     }
 
 
@@ -421,15 +423,25 @@ namespace fs = std::filesystem;
     }
 
 
+    void Backend::Impl::invalidate_all_caches() {
+        invalidate_cache();
+        invalidate_doc_cache();
+        invalidate_dec_cache();
+        invalidate_ins_cache();
+        invalidate_turn_cache();
+    }
+
+
     bool Backend::Impl::update_turn_embedding(int turn_id, const std::vector<float>& emb) {
         Stmt s(db, "UPDATE turns SET embedding_version = ?, embedding = ? WHERE turn_id = ?");
         bind_embedding_version(s.raw(), 1, emb);
         bind_embedding(s.raw(), 2, emb);
         s.bind(3, turn_id);
-        if (s.exec() && sqlite3_changes(db) > 0) {
-            invalidate_cache();
+        // No cache invalidation: turns are not in the summaries cache (the
+        // old invalidate_cache() here was the wrong table), and the turn
+        // cache holds text rows, not vectors (B §1.6).
+        if (s.exec() && sqlite3_changes(db) > 0)
             return true;
-        }
         return false;
     }
 
@@ -474,13 +486,18 @@ namespace fs = std::filesystem;
             sql += "?";
         }
         sql += ") AND (tags IS NULL OR tags NOT LIKE '%keep%')";
-        Stmt(db, "BEGIN").exec();
-        Stmt stmt(db, sql);
-        for (size_t i = 0; i < memory_ids.size(); ++i)
-            stmt.bind(static_cast<int>(i + 1), memory_ids[i]);
-        stmt.step();
-        int changes = sqlite3_changes(db);
-        Stmt(db, "COMMIT").exec();
+        int changes = 0;
+        {
+            // RAII: a throw between BEGIN and COMMIT used to leave the
+            // connection inside an open transaction.
+            Transaction tx(db);
+            Stmt stmt(db, sql);
+            for (size_t i = 0; i < memory_ids.size(); ++i)
+                stmt.bind(static_cast<int>(i + 1), memory_ids[i]);
+            stmt.step();
+            changes = sqlite3_changes(db);
+            tx.commit();
+        }
         if (changes > 0) invalidate_cache();
         return changes;
     }
@@ -561,7 +578,14 @@ namespace fs = std::filesystem;
 
     void Backend::Impl::close() {
         if (db) {
-            sqlite3_close(db);
+            // TextIndex owns prepared statements against db and is declared
+            // after it: destroy the index FIRST or sqlite3_close returns
+            // SQLITE_BUSY and leaks the connection + WAL checkpoint (B §1.8).
+            text_index_.reset();
+            const int rc = sqlite3_close(db);
+            if (rc != SQLITE_OK)
+                Diskerror::Logger::warn(std::format(
+                    "sqlite3_close failed: {} (connection leaked)", sqlite3_errstr(rc)));
             db = nullptr;
         }
     }

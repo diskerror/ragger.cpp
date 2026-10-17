@@ -372,11 +372,7 @@ StructuredDecisionResult Backend::store_structured_decision(const DecisionInput&
 
 void Backend::invalidate_all_caches() {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    pImpl->invalidate_cache();
-    pImpl->invalidate_doc_cache();
-    pImpl->invalidate_dec_cache();
-    pImpl->invalidate_ins_cache();
-    pImpl->invalidate_turn_cache();
+    pImpl->invalidate_all_caches();
 }
 
 json Backend::list_document_sources() {
@@ -483,7 +479,10 @@ std::vector<std::string> Backend::collections() const {
     return pImpl->collections();
 }
 
-void Backend::close() { pImpl->close(); }
+void Backend::close() {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    pImpl->close();
+}
 
 bool Backend::delete_memory(int memory_id) {
     std::lock_guard<std::mutex> lk(pImpl->mu);

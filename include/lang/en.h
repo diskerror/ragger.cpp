@@ -645,7 +645,7 @@ inline constexpr std::array<ConfigMeta, 62> kConfigSchema = {{
      "Port of the external embedding server."},
     {"embedding_external_api_key", "embedding", "External API Key", CfgType::String, CfgEdit::RebuildRequired,
      "", "",
-     "API key for the external embedding endpoint, if required."},
+     "API key for the external embedding endpoint, if required.", true},
     // Embedding tweaks (always visible).
     {"embed_timeout_ms", "embedding", "Embed Timeout (ms)", CfgType::Integer, CfgEdit::Live,
      "10000", "",
@@ -698,7 +698,7 @@ inline constexpr std::array<ConfigMeta, 62> kConfigSchema = {{
      "Inference endpoint. Default follows the LM Studio convention."},
     {"summarizer_api_key", "summarizer", "API Key", CfgType::String, CfgEdit::Live,
      "", "",
-     "API key for the summarizer endpoint, if required."},
+     "API key for the summarizer endpoint, if required.", true},
     {"summarizer_max_tokens", "summarizer", "Max Tokens", CfgType::Integer, CfgEdit::Live,
      "1024", "",
      "Maximum tokens for a summary generation. 0 inherits the global inference default."},
