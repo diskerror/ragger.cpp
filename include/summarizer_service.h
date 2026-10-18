@@ -21,6 +21,8 @@
  */
 #pragma once
 
+#include "backoff.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -71,6 +73,9 @@ public:
     /// pause timer, and by the housekeeping pass (SIGUSR1).
     void enqueue_catch_up();
 
+    /// Current queue depth (for tests).
+    size_t queue_size() const;
+
 private:
     // db 0.17: the session/project rollup and draft job kinds are gone with
     // session/project rollup layers (PHASE5 D.1).
@@ -97,15 +102,27 @@ private:
     std::function<std::shared_ptr<InferenceClient>()> inference_provider_;
 
     std::deque<Job>            queue_;
-    std::mutex                 mutex_;
+    mutable std::mutex         mutex_;
+    // PHASE6 5: only one catch-up scan at a time. enqueue_catch_up is called
+    // from the pause timer AND the server housekeeping thread; the queue_
+    // guard alone releases the lock before the scans, so both could scan and
+    // double-queue. A try_lock miss means the other caller is already doing
+    // the work — returning is correct.
+    std::mutex                 scan_mu_;
     std::condition_variable    cv_;
     std::atomic<bool>          running_{false};
     std::thread                worker_thread_;
     std::thread                pause_timer_thread_;
 
+    // PHASE6 4: exponential back-off for the poison-abandon reset inside
+    // enqueue_catch_up (5 min base, 6 h cap). Guarded by mutex_.
+    Backoff reset_backoff_{std::chrono::seconds(300), std::chrono::seconds(21600)};
+
     // Per-turn failure counter keyed by turn_id (real FK, replaces the old
     // "session_guid\x1F timestamp" compound-string key). Guarded by mutex_.
-    // Entries are removed on success or abandonment.
+    // Entries are removed on success or abandonment. NOT persisted (PHASE6 8):
+    // a daemon restart gives every failing turn a fresh set of attempts —
+    // bounded by reset_backoff_'s wait, not by max_turn_failures alone.
     std::unordered_map<int, int> turn_failures_;
 };
 

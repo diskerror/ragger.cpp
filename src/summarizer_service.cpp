@@ -5,6 +5,7 @@
 #include "summarizer_service.h"
 
 #include "config.h"
+#include "episode_boundaries.h"
 #include "inference.h"
 #include "lang.h"
 #include "storage_backend.h"
@@ -18,24 +19,6 @@
 #include <format>
 
 namespace ragger {
-
-namespace {
-
-/// Cosine similarity between two float vectors of equal length.
-/// Returns 0 if either vector has zero magnitude.
-float cosine_similarity(const std::vector<float>& a, const std::vector<float>& b) {
-    if (a.size() != b.size() || a.empty()) return 0.0f;
-    float dot = 0.0f, ma = 0.0f, mb = 0.0f;
-    for (size_t i = 0; i < a.size(); ++i) {
-        dot += a[i] * b[i];
-        ma  += a[i] * a[i];
-        mb  += b[i] * b[i];
-    }
-    float denom = std::sqrt(ma) * std::sqrt(mb);
-    return (denom > 0.0f) ? dot / denom : 0.0f;
-}
-
-} // namespace
 
 SummarizerService::SummarizerService(
     StorageBackend& backend,
@@ -77,13 +60,33 @@ void SummarizerService::enqueue_turn(int turn_id,
           user_text, assistant_text, model_name, session_guid, source_timestamp};
     {
         std::lock_guard<std::mutex> lk(mutex_);
+        // PHASE6 2.3: bounded queue. An unbounded queue behind a dead
+        // inference server is a memory leak; dropping the live job is safe
+        // because the periodic tick re-finds the turn via unsummarized_turns.
+        if (queue_.size() >= 1000) {
+            static std::atomic<bool> warned_full{false};
+            if (!warned_full.exchange(true))
+                Diskerror::Logger::warn(
+                    "[summarizer] live queue full (1000) — dropping live jobs; "
+                    "the periodic tick will pick turns up (one-time warning)");
+            return;
+        }
         queue_.push_back(std::move(j));
     }
     cv_.notify_one();
 }
 
+size_t SummarizerService::queue_size() const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    return queue_.size();
+}
+
 void SummarizerService::enqueue_catch_up() {
     auto* backend = &backend_;
+
+    // PHASE6 5: one scan at a time (pause timer + housekeeping can race).
+    std::unique_lock scan_lk(scan_mu_, std::try_to_lock);
+    if (!scan_lk.owns_lock()) return;
 
     // Re-entrancy guard: if the queue still has work from the previous
     // catch-up, don't rescan — with a large backlog (e.g. a bulk import
@@ -129,8 +132,28 @@ void SummarizerService::enqueue_catch_up() {
     // for a turn that was permanently abandoned. Reset on this tick, picked
     // up as ordinary L2 catch-up on the NEXT tick (unsummarized_turns() was
     // already queried above this tick, before the reset took effect).
-    size_t reset_n = static_cast<size_t>(
-        backend->reset_abandoned_turn_summaries(catch_up_cap));
+    // PHASE6 4: gated by exponential back-off. While inference is down,
+    // resetting abandoned turns every tick just re-arms the poison loop;
+    // wait 5 min after a reset that actually reset rows, doubling to 6 h.
+    // A successful summary anywhere calls reset_backoff_.succeeded() so the
+    // reset runs again on the next tick once inference is back.
+    size_t reset_n = 0;
+    {
+        const auto now = std::chrono::steady_clock::now();
+        bool do_reset;
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            do_reset = reset_backoff_.due(now);
+        }
+        if (do_reset) {
+            reset_n = static_cast<size_t>(
+                backend->reset_abandoned_turn_summaries(catch_up_cap));
+            if (reset_n > 0) {
+                std::lock_guard<std::mutex> lk(mutex_);
+                reset_backoff_.failed(now);
+            }
+        }
+    }
 
     // Episode closes: every session whose open episode is idle past
     // episode_idle_minutes (the only rollup layer left at 0.17).
@@ -249,11 +272,17 @@ bool SummarizerService::handle_l2(const Job& j) {
         const size_t combined = eff_user.size() + j.assistant_text.size();
         if (combined < 80 || j.assistant_text.size() < 20) {
             // Trivial turn: don't spend an inference call. Mark it done via
-            // mark_turn_summarized so it leaves the unsummarized queue
+            // mark_turn_summarized so it leaves the unsummarized queue —
+            // PHASE6 3: unconditionally, even with inference down. The old
+            // gate on a non-empty model name meant trivial turns were never
+            // marked while inference was down and got re-queued every tick
+            // forever. Model name: the real summarizer model when known,
+            // else the pseudo-model "(skipped)" — never "bad", which
+            // reset_abandoned_turn_summaries() deletes.
             const std::string summarizer_model =
-                inf ? inf->memory_model : "";
-            if (!summarizer_model.empty())
-                backend_.mark_turn_summarized(j.turn_id, summarizer_model);
+                inf && !inf->memory_model.empty() ? inf->memory_model
+                                                  : std::string("(skipped)");
+            backend_.mark_turn_summarized(j.turn_id, summarizer_model);
             Diskerror::Logger::info(std::format(
                 "[summarizer] skipping trivial turn (turn_id={}, session={}, ts={}, "
                 "combined_chars={})",
@@ -328,9 +357,12 @@ bool SummarizerService::handle_l2(const Job& j) {
         return false;
     }
     {
-        // Clear any prior failure count for this turn.
+        // Clear any prior failure count for this turn, and open the
+        // abandoned-turn reset window again: inference just worked, so
+        // poison turns abandoned during the outage should retry now.
         std::lock_guard<std::mutex> lk(mutex_);
         turn_failures_.erase(j.turn_id);
+        reset_backoff_.succeeded();
     }
     Diskerror::Logger::info(std::format(
         lang::MSG_SUMMARIZER_L2, display_guid, ts));
@@ -374,31 +406,13 @@ bool SummarizerService::handle_episode_close(const Job& j) {
     const float th_step = cfg.episode_threshold_step;
     const float step_min = cfg.episode_step_minutes;
 
-    // Find episode boundaries via sliding average-similarity threshold.
-    // boundary_indices[k] means candidate[k] starts a new episode.
-    // Index 0 is always an implicit boundary (start of unclosed turns).
-    std::vector<size_t> boundary_indices;
-    boundary_indices.push_back(0);
-
-    for (size_t i = 1; i < candidates.size(); ++i) {
-        const auto& prev = candidates[i - 1];
-        const auto& curr = candidates[i];
-
-        float turn_sim = cosine_similarity(curr.turn_embedding, prev.turn_embedding);
-        float summ_sim = cosine_similarity(curr.summary_embedding, prev.summary_embedding);
-        float avg_sim  = (turn_sim + summ_sim) / 2.0f;
-
-        // Compute time-scaled threshold.
-        float gap_minutes = static_cast<float>(curr.epoch - prev.epoch) / 60.0f;
-        float threshold = th_base;
-        if (step_min > 0.0f)
-            threshold += th_step * static_cast<float>(
-                static_cast<int>(gap_minutes / step_min));
-        threshold = std::min(threshold, th_cap);
-
-        if (avg_sim <= threshold)
-            boundary_indices.push_back(i);
-    }
+    // Find episode boundaries via the sliding average-similarity threshold.
+    // PHASE6 7: the algorithm lives in episode_boundaries.cpp as a pure
+    // function (moved VERBATIM — behavior is bit-for-bit what Phase 5 ran);
+    // boundary_indices[k] means candidate[k] starts a new episode, and
+    // index 0 is always an implicit boundary (start of unclosed turns).
+    std::vector<size_t> boundary_indices = find_episode_boundaries(
+        candidates, EpisodeBoundaryParams{th_base, th_cap, th_step, step_min});
 
     // Summarize each segment.
     const std::string summarizer_model =

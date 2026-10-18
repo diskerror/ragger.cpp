@@ -747,7 +747,7 @@ CaptureResult capture_turn(RaggerMemory& memory,
                            const std::string& session_name,
                            const std::string& name_source) {
     // Gate: turn capture is opt-in. Agent-driven store/search are unaffected.
-    if (!config().capture_turns) return {false, -1};
+    if (!config().capture_turns) return {false, -1, {}};
 
     // Strip any leading Hermes system-injected annotation (interruption
     // notices, model-switch notes, compaction handoffs, bg-process reports)
@@ -760,13 +760,13 @@ CaptureResult capture_turn(RaggerMemory& memory,
     // Skip empty pushes. A turn needs real content on at least one side: keep
     // assistant-only turns (interrupted turn the agent still answered), but
     // drop a turn that was nothing but a system note with no assistant output.
-    if (clean_user.empty() && assistant.empty()) return {false, -1};
+    if (clean_user.empty() && assistant.empty()) return {false, -1, {}};
 
     int turn_id = memory.store_turn(clean_user, assistant, model,
                                     /*defer_embedding=*/false, session_id,
                                     /*source_timestamp=*/"",
                                     session_name, name_source);
-    return {true, turn_id};
+    return {true, turn_id, clean_user};
 }
 
 namespace {

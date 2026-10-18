@@ -4018,6 +4018,77 @@ void p5_test_episode_reads(ragger::Embedder& emb) {
 }
 
 
+// PHASE6 6: the single "pending content L2" predicate — episodes_needing_close
+// and episode_candidate_turns agree; unsummarized turns block a close.
+void p6_test_pending_predicate(ragger::Embedder& emb) {
+    std::println("  p6_test_pending_predicate...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    auto queued = [&](const std::string& g) {
+        auto v = db.episodes_needing_close(60);
+        return std::find(v.begin(), v.end(), g) != v.end();
+    };
+
+    // (a) post-episode content L2 without an embedding -> NOT queued; with
+    //     one -> queued (the old disagreement, fixed).
+    const std::string ga = "p6pp-a";
+    auto a = p5_seed_members(db, ga, {"2020-02-01 10:00:00"});
+    CHECK(queued(ga));                       // baseline: everything embedded
+    {
+        sqlite3* raw = p1_open_raw();
+        CHECK(sqlite3_exec(raw, ("UPDATE turn_summaries SET embedding = NULL WHERE turn_summary_id = "
+                                 + std::to_string(a[0])).c_str(),
+                           nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(raw);
+        CHECK(!queued(ga));                  // un-embeddable row must not queue
+    }
+    {
+        sqlite3* raw = p1_open_raw();
+        const auto vec = emb.encode("p5 summary " + ga + "0");
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(raw, "UPDATE turn_summaries SET embedding = ? WHERE turn_summary_id = ?",
+                                 -1, &st, nullptr) == SQLITE_OK);
+        sqlite3_bind_blob(st, 1, vec.data(), static_cast<int>(vec.size() * sizeof(float)), SQLITE_TRANSIENT);
+        sqlite3_bind_int(st, 2, a[0]);
+        CHECK(sqlite3_step(st) == SQLITE_DONE);
+        sqlite3_finalize(st);
+        sqlite3_close(raw);
+        CHECK(queued(ga));                   // backfill restores queueing
+    }
+
+    // (b) an unsummarized turn in the session blocks the close; marking it
+    //     (even as a bad/skip marker) unblocks.
+    const std::string gb = "p6pp-b";
+    auto b = p5_seed_members(db, gb, {"2020-02-01 10:00:00"});
+    CHECK(queued(gb));
+    const int t2 = db.store_turn("p6pp extra q",
+                                 "p6pp extra answer " + std::string(60, 'u'),
+                                 "test-model", false, gb, "2020-02-01 11:00:00");
+    CHECK(!queued(gb));                      // late L2 could still land in-span
+    CHECK(db.mark_turn_summarized(t2, "bad"));
+    CHECK(queued(gb));
+
+    // (c) rows already carrying an episode_id are never candidates again,
+    //     even with since='' (a late L2 inside a closed span must not be
+    //     re-episoded into an overlapping episode).
+    {
+        ragger::EpisodeClose ec;
+        ec.text = "p6pp close"; ec.model_name = "summarizer-model";
+        ec.session_guid = ga;
+        ec.span_start = p5_epoch("2020-02-01 10:00:00");
+        ec.span_end   = p5_epoch("2020-02-01 10:00:00");
+        ec.member_turn_summary_ids = {a[0]};
+        CHECK(db.store_episode_close(ec) > 0);
+        CHECK(db.episode_candidate_turns(ga, "").empty());
+    }
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+
 int main() {
     TestEnv env("sqlite_backend");  // must be first: isolates from ~/.ragger
     // Need config for model dir
@@ -4121,6 +4192,7 @@ int main() {
     p5_test_episode_close(emb);
     p5_test_episodes_needing_close(emb);
     p5_test_episode_reads(emb);
+    p6_test_pending_predicate(emb);
 
     std::println("test_sqlite_backend: all passed");
     return 0;

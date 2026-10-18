@@ -1031,8 +1031,8 @@ static std::string tags_from_metadata(const json& metadata) {
     // unsummarized_turns()'s normal candidate set on the very next
     // enqueue_catch_up() pass, giving it a fresh set of max_turn_failures
     // attempts. Trivial-turn skips are NOT touched -- those are tagged with
-    // the real summarizer model name, never "bad", so this only targets
-    // genuine poison-abandon rows.
+    // a real model name or the "(skipped)" pseudo-model (PHASE6 3), never
+    // "bad", so this only targets genuine poison-abandon rows.
     int Backend::Impl::reset_abandoned_turn_summaries(int limit) {
         // SQLite's DELETE doesn't support ORDER BY/LIMIT without a special
         // build flag (SQLITE_ENABLE_UPDATE_DELETE_LIMIT), which we don't
@@ -1219,12 +1219,34 @@ static std::string tags_from_metadata(const json& metadata) {
     // turn_summaries against turns to fetch both embeddings (turn + summary)
     // plus the turn-summary text. Rows where EITHER embedding is NULL are
     // skipped (boundary detection requires both signals).
+    // PHASE6 6: ONE predicate for "pending content L2 of session X after
+    // epoch Y". Both episodes_needing_close() and episode_candidate_turns()
+    // build their WHERE clauses from this, so they cannot drift apart again
+    // (the old disagreement: the scan counted any L2 past the last episode,
+    // the candidate query additionally required embeddings — a session whose
+    // newest L2 had no embedding yet was re-queued every tick forever).
+    // Requires `turn_summaries ts JOIN turns t ON t.turn_id = ts.turn_id`.
+    // Rows whose source turn was culled (ts.turn_id NULL) can never be
+    // candidates — the JOIN drops them; they cannot close an episode either.
+    std::string pending_episode_l2_conditions(const std::string& epoch_expr) {
+        return " AND ts.text != '' "
+               " AND ts.episode_id IS NULL "
+               " AND ts.turn_datetime > " + epoch_expr + " "
+               " AND ts.embedding IS NOT NULL "
+               " AND t.embedding IS NOT NULL ";
+    }
+
     std::vector<EpisodeCandidateTurn> Backend::Impl::episode_candidate_turns(
             const std::string& session_guid, const std::string& since_ts) {
         std::vector<EpisodeCandidateTurn> out;
         if (session_guid.empty()) return out;
         const int dims = config().embedding_dimensions;
 
+        // PHASE6 6: WHERE clause from the shared predicate. episode_id IS
+        // NULL means rows already inside a closed episode are never returned
+        // again, even when their turn_datetime falls after `since` (a late
+        // L2 landing inside a span that was closed around it).
+        const std::string epoch_expr = since_ts.empty() ? "0" : "?";
         std::string sql =
             "SELECT ts.turn_summary_id, ts.text, "
             "       datetime(ts.turn_datetime,'unixepoch','localtime'), "
@@ -1234,11 +1256,9 @@ static std::string tags_from_metadata(const json& metadata) {
             "FROM turn_summaries ts "
             "JOIN turns t ON ts.turn_id = t.turn_id "
             "JOIN sessions ss ON ts.session_id = ss.session_id "
-            "WHERE ss.guid = ? "
-            "  AND t.embedding IS NOT NULL "
-            "  AND ts.embedding IS NOT NULL ";
-        if (!since_ts.empty()) sql += "AND ts.turn_datetime > ? ";
-        sql += "ORDER BY ts.turn_datetime ASC, ts.turn_summary_id ASC";
+            "WHERE ss.guid = ? " +
+            pending_episode_l2_conditions(epoch_expr) +
+            "ORDER BY ts.turn_datetime ASC, ts.turn_summary_id ASC";
 
         Stmt s(db, sql);
         s.bind(1, session_guid);
@@ -1343,18 +1363,30 @@ static std::string tags_from_metadata(const json& metadata) {
         if (idle_minutes <= 0) return out;
         const std::string cutoff =
             std::format("(unixepoch('now','-{} minutes'))", idle_minutes);
-        // `AND s.text != ''` is the verified-bug fix: ''-text done-marker
-        // rows used to re-queue a session every tick forever.
+        // EXISTS(shared predicate): content L2 past the last episode end,
+        // embeddings present on both sides (verified-bug fix for ''-text
+        // marker rows included in the predicate). PHASE6 6 additionally
+        // requires that NO turn of the session is still unsummarized — an
+        // episode must not close while a late L2 could still land inside
+        // the span it just wrote. A bad/skip marker row counts as
+        // summarized (its turn_summaries row exists).
         std::string sql =
             "SELECT ss.guid "
             "FROM sessions ss "
             "WHERE EXISTS ("
-            "  SELECT 1 FROM turn_summaries s "
-            "  WHERE s.session_id = ss.session_id "
-            "    AND s.text != '' "
-            "    AND s.turn_datetime > COALESCE(("
-            "        SELECT MAX(e.span_end) FROM episodes e "
-            "        WHERE e.session_id = ss.session_id), 0)) "
+            "  SELECT 1 FROM turn_summaries ts "
+            "  JOIN turns t ON t.turn_id = ts.turn_id "
+            "  WHERE ts.session_id = ss.session_id " +
+            pending_episode_l2_conditions(
+                "COALESCE((SELECT MAX(e.span_end) FROM episodes e "
+                "WHERE e.session_id = ss.session_id), 0)") +
+            ") "
+            "  AND NOT EXISTS ("
+            "    SELECT 1 FROM turns t2 "
+            "    WHERE t2.session_id = ss.session_id "
+            "      AND t2.assistant_text IS NOT NULL AND t2.assistant_text <> '' "
+            "      AND NOT EXISTS (SELECT 1 FROM turn_summaries x "
+            "                      WHERE x.turn_id = t2.turn_id)) "
             "  AND (SELECT MAX(t.created_at) FROM turns t "
             "        WHERE t.session_id = ss.session_id) < " + cutoff + " "
             "ORDER BY ss.session_id ASC";

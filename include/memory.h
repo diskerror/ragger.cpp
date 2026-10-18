@@ -289,6 +289,10 @@ private:
 struct CaptureResult {
     bool captured;
     int  turn_id;
+    /// The system-prefix-stripped user text actually stored (PHASE6 2.1).
+    /// The summarizer's is_system_injected_turn() test must see the text as
+    /// stored, not the raw envelope.
+    std::string clean_user;
 };
 
 /// Shared entry point behind the `capture_turn` MCP tool and HTTP POST /turn:

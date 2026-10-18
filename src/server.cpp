@@ -810,10 +810,17 @@ struct Server::Impl {
         auto& mem = _get_memory(user.username);
         auto result = capture_turn(mem, user_text, assistant, model, session_id,
                                    session_name, name_source);
-        // Raw text is written to both turns and summaries (as a NULL-model_id
-        // placeholder) by capture_turn. The summarizer picks it up on the next
-        // housekeeping tick (every 60s) via enqueue_catch_up — no immediate
-        // LLM call here.
+        // PHASE6 2.2: hand the fresh turn straight to the summarizer so L2
+        // runs as soon as the single worker is free (the periodic tick is
+        // the safety net, not the primary path). Non-blocking: enqueue only,
+        // the request never waits for inference. summarizer_ is assigned in
+        // serve() before the listeners start, so every request thread sees a
+        // fully-constructed pointer without locking. MCP capture (no daemon
+        // summarizer in-process) is unchanged: the daemon's tick finds those.
+        if (result.captured && !assistant.empty() && summarizer_)
+            summarizer_->enqueue_turn(result.turn_id, result.clean_user, assistant,
+                                      model, session_id, /*source_timestamp=*/"");
+
         Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "POST", "/turn", "200"));
         respond_json(res, json{{"status",  result.captured ? "captured" : "disabled"},
                              {"turn_id", result.turn_id}});
