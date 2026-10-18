@@ -145,6 +145,8 @@ void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
 
     void Backend::Impl::invalidate_turn_cache() { turn_cache_.valid = false; }
 
+    void Backend::Impl::invalidate_episode_cache() { episode_cache_.valid = false; }
+
 
     // Shared body of the five loaders (PHASE3 Step 5). The loop shape is
     // identical everywhere: id/text/embedding at columns 0/1/2, timestamp at
@@ -189,7 +191,9 @@ void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
         load_cache(summary_cache_, "summaries",
             "SELECT summary_id, text, embedding, level, tags, "
             "       datetime(created_at,'unixepoch','localtime') "
-            "FROM summaries",
+            "FROM summaries WHERE level != 'episode'",
+            // PHASE5 B.3: episodes moved to their own table (episode_cache_);
+            // the filter is belt-and-braces for any pre-move row.
             [](Stmt& s, json& meta) {
                 // Lean v2 summaries: surface level/tags as metadata so the
                 // generic API and keep-protection (via tags) have what they
@@ -284,6 +288,28 @@ void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
                 if (!ts.empty()) meta["datetime"] = ts;
             });
         turn_cache_.valid = true;
+    }
+
+
+    // PHASE5 B.3: episodes are a search corpus of their own. Marker rows
+    // (text = '') never load. `level` metadata is kept alongside `layer` so
+    // legacy /search output keeps its shape.
+    void Backend::Impl::ensure_episode_cache() {
+        if (episode_cache_.valid) return;
+        load_cache(episode_cache_, "episodes",
+            "SELECT episode_id, text, embedding, tags, session_id, "
+            "       datetime(span_end,'unixepoch','localtime'), model_id "
+            "FROM episodes WHERE text != ''",
+            [](Stmt& s, json& meta) {
+                meta["source"] = "episode";
+                meta["layer"]  = "episode";
+                meta["level"]  = "episode";
+                std::string tags = s.column_text(3);
+                if (!tags.empty()) meta["tags"] = tags;
+                if (!s.is_null(4)) meta["session_id"] = s.column_int(4);
+                if (!s.is_null(6)) meta["model_id"] = s.column_int(6);
+            });
+        episode_cache_.valid = true;
     }
 
 

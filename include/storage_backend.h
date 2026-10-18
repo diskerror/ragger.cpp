@@ -66,18 +66,6 @@ struct TurnSummaryRecord {
     int64_t summarized_on;   // epoch seconds
 };
 
-/// One maximal run of turns closed by boundary-detection (session_id
-/// change for session runs, time-gap for project runs). first_ts/last_ts
-/// are epoch seconds (turns.created_at of the run's first/last turn).
-/// session_guid is empty for project-boundary runs (session-unscoped).
-struct ClosedRun {
-    std::string session_guid;
-    int64_t first_ts;
-    int64_t last_ts;
-    int first_turn_id;
-    int last_turn_id;
-};
-
 /**
  * Abstract base class for storage backends.
  *
@@ -360,30 +348,16 @@ public:
     /// summarizer model name, never "bad").
     virtual int reset_abandoned_turn_summaries(int limit = 0) = 0;
 
-    /// Summary rows tagged 'draft' (heuristic fallback writes that the
-    /// summarizer should rewrite when inference is back). Returned
-    /// oldest-first, capped at `limit` (0 = unbounded).
-    virtual std::vector<DraftSummary> draft_summaries(int limit = 0) = 0;
-
-    /// Sessions whose most recent turn is older than `pause_minutes` AND
-    /// that have a `level='session' status='current'` running summary,
-    /// returned as session GUIDs. The summarizer's pause-timer uses this to
-    /// pick sessions whose L3 running summary should be finalized.
-    virtual std::vector<std::string> sessions_needing_close(
-        int pause_minutes) = 0;
-
-    // --- episode layer (EPISODE_PLAN Phase 1) ---
-    /// The end timestamp (last turn) of the most recent `level='episode'` row
-    /// for this session, or empty if the session has no episodes yet. Stored
-    /// in the episode row's `updated_at` (timestamp=first turn, updated_at=last
-    /// turn). Marks where the next open episode begins.
+    // --- episode layer (db 0.17) ---
+    /// The span end of the most recent episode for this session (rendered
+    /// "%F %T" local time), or empty if the session has no episodes yet.
+    /// Marks where the next open episode begins.
     virtual std::string last_episode_end(const std::string& session_guid) = 0;
 
-    /// L2 ('turn') summaries for a session with timestamp strictly greater than
-    /// `since_ts` (pass the previous episode's end; empty = all), oldest-first,
-    /// excluding drafts. These compose the closing episode. Returned as
-    /// SummaryRecords so the caller can read each row's timestamp to derive the
-    /// episode span (first/last turn).
+    /// L2 turn summaries for a session with timestamp strictly greater than
+    /// `since_ts` (pass the previous episode's end; empty = all), oldest-first.
+    /// These compose the closing episode. Returned as SummaryRecords so the
+    /// caller can read each row's timestamp to derive the episode span.
     virtual std::vector<SummaryRecord> l2_summaries_since(
         const std::string& session_guid, const std::string& since_ts) = 0;
 
@@ -394,88 +368,24 @@ public:
     virtual std::vector<EpisodeCandidateTurn> episode_candidate_turns(
         const std::string& session_guid, const std::string& since_ts) = 0;
 
-    /// Insert one immutable `level='episode'` row for a session. `first_ts`
-    /// becomes the row `timestamp`; `last_ts` is stored in `updated_at` (the
-    /// span end). Mirrors store_summary (embed, phon, cache invalidation).
-    /// Returns the new summary_id.
-    virtual int store_episode(const std::string& text,
-                              const std::string& model_name,
-                              const std::string& session_guid,
-                              const std::string& first_ts,
-                              const std::string& last_ts) = 0;
+    /// Close an episode: insert one immutable `episodes` row and record its
+    /// membership by setting `episode_id` on each member turn_summary in the
+    /// same transaction. Contract (the order is the point): validate ->
+    /// embed outside the transaction -> INSERT -> per-member UPDATE requiring
+    /// total changes == members.size() (any member from another session,
+    /// already in an episode, a marker row, or missing fails the whole close
+    /// and rolls back) -> index -> commit -> invalidate the episode cache.
+    /// A unique-key collision on (session, span_start) — someone already
+    /// closed this span — returns 0 (nothing written; caller must not retry).
+    /// Returns the new episode_id.
+    virtual int store_episode_close(const EpisodeClose& close) = 0;
 
-    /// Sessions with at least one non-draft L2 turn summary past their last
+    /// Sessions with at least one non-empty L2 turn summary past their last
     /// episode's end AND whose most recent turn is older than `idle_minutes`
     /// (idle) — i.e. ready to have their open episode closed. Returns session
     /// GUIDs. Anonymous (session_id NULL) turns are skipped.
     virtual std::vector<std::string> episodes_needing_close(
         int idle_minutes) = 0;
-
-    /// All `level='episode'` summary texts for a session, oldest-first. The
-    /// ordered episode corpus a session rollup is rebuilt from (Phase 2).
-    virtual std::vector<std::string> episode_texts(
-        const std::string& session_guid) = 0;
-
-    /// Stamp a summary row's `updated_at` = now (last-regenerate time for a
-    /// running rollup row). Returns false if the row is absent.
-    virtual bool set_summary_updated_at(int summary_id) = 0;
-
-    // --- boundary-detection scans (new session/project rollup design) ---
-
-    /// Maximal runs of consecutive (by turn_id) turns sharing the same
-    /// non-NULL session_id that have already been superseded by a later,
-    /// different-session run (edge detection) and not yet reported past
-    /// the persisted watermark. The most recent run is never included —
-    /// it's still open. Ordered oldest-first.
-    virtual std::vector<ClosedRun> sessions_needing_close_boundary() = 0;
-
-    /// Maximal runs of turns (any session, including anonymous) separated
-    /// by a time gap of >= gap_days days between consecutive turns (by
-    /// turn_id), already superseded by a later run, not yet reported past
-    /// the persisted watermark. The most recent run is never included.
-    /// Returned ClosedRun.session_guid is always empty (project runs are
-    /// session-unscoped). Ordered oldest-first.
-    virtual std::vector<ClosedRun> projects_needing_close_boundary(
-        int gap_days) = 0;
-
-    /// Advance the persisted session-boundary watermark to turn_id (task D
-    /// calls this only after a successful level='session' rollup insert).
-    virtual void advance_session_boundary_watermark(int turn_id) = 0;
-
-    /// Advance the persisted project-boundary watermark to turn_id (task D
-    /// calls this only after a successful level='project' rollup insert).
-    virtual void advance_project_boundary_watermark(int turn_id) = 0;
-
-    /// Bounded text-gathering for a closed session run: episodes fully
-    /// spanned by [first_ts, last_ts] plus trailing turn_summaries after
-    /// the newest such episode (or from first_ts if none) up to last_ts,
-    /// oldest-first. Unlike episode_texts()/l2_summaries_since(), this
-    /// never reaches into a LATER run of the same session_guid.
-    virtual std::vector<std::string> bounded_session_rollup_texts(
-        const std::string& session_guid, int64_t first_ts,
-        int64_t last_ts) = 0;
-
-    /// Bounded text-gathering for a closed project run: every level='session'
-    /// row (produced by store_session_summary) whose full span
-    /// [created_at, COALESCE(updated_at,created_at)] falls entirely within
-    /// [first_ts, last_ts], session-unscoped (project runs span sessions),
-    /// oldest-first.
-    virtual std::vector<std::string> bounded_project_rollup_texts(
-        int64_t first_ts, int64_t last_ts) = 0;
-
-    /// Insert one immutable level='session' row spanning a closed run.
-    /// Mirrors store_episode's shape exactly (created_at=first_ts,
-    /// updated_at=last_ts). Returns the new summary_id.
-    virtual int store_session_summary(const std::string& text,
-                                      const std::string& model_name,
-                                      const std::string& session_guid,
-                                      int64_t first_ts, int64_t last_ts) = 0;
-
-    /// Insert one immutable level='project' row spanning a closed run.
-    /// Session-unscoped (session_id NULL). Returns the new summary_id.
-    virtual int store_project_summary(const std::string& text,
-                                      const std::string& model_name,
-                                      int64_t first_ts, int64_t last_ts) = 0;
 
     /// All turns belonging to a session GUID, newest-first up to `limit`
     /// (0 = unbounded). Mirrors `turns_by_session` but in reverse order and
@@ -483,15 +393,17 @@ public:
     virtual std::vector<TurnRecord> turns_by_session_desc(
         const std::string& session_guid, int limit = 0) = 0;
 
-    /// Turn-level (L2) summaries for a session, newest-first up to `limit`.
-    /// Returned with the summary row's timestamp (= the source turn's
-    /// timestamp) so recipes can align them against raw turns.
+    /// Turn-level (L2) summaries for a session, newest-first up to `limit`
+    /// (PHASE5 B.5: reads `turn_summaries` directly — the old
+    /// summaries.level='turn' rows have been gone since 0.12). Empty-text
+    /// marker rows are excluded.
     virtual std::vector<SummaryRecord> turn_summaries_by_session_desc(
         const std::string& session_guid, int limit = 0) = 0;
 
-    /// The session's (level='session') summary rows, newest-first up to
-    /// `limit`. Recipe's session-summary layer pulls from here.
-    virtual std::vector<SummaryRecord> session_summaries_desc(
+    /// This session's episodes, newest-first (span_start DESC) up to `limit`
+    /// (0 = unbounded). `timestamp` carries the rendered span_end. Recipe
+    /// episode layer (PHASE5 D.3).
+    virtual std::vector<SummaryRecord> episodes_by_session_desc(
         const std::string& session_guid, int limit = 0) = 0;
 
     /// Replace text + metadata of an existing row. Re-embeds (or NULLs the

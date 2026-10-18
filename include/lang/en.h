@@ -294,15 +294,11 @@ constexpr const char* WARN_EMBED_SUBPROCESS   = "Warning: embed subprocess faile
 constexpr const char* WARN_IMPORT_EMBED_SKIPPED = "Warning: {}/{} chunks left unembedded (embed subprocess failed or timed out); re-import to retry";
 
 // --- Summarizer service (daemon-resident L2/L3 worker) -------------
-constexpr const char* MSG_SUMMARIZER_START    = "Summarizer started (catch-up queued: {} turn(s), {} draft(s), {} session(s) to close)";
+constexpr const char* MSG_SUMMARIZER_START    = "Summarizer started (catch-up queued: {} turn(s), {} episode close(s))";
 constexpr const char* MSG_SUMMARIZER_STOP     = "Summarizer stopped";
 constexpr const char* MSG_SUMMARIZER_L2       = "L2 turn summary written for session {} at {}";
-constexpr const char* MSG_SUMMARIZER_L3       = "L3 session summary finalized for session {}";
-constexpr const char* MSG_SUMMARIZER_DRAFT    = "Stored draft L2 (inference unreachable) for session {} at {}";
-constexpr const char* MSG_SUMMARIZER_REDRAFT  = "Rewrote draft L2 summary_id {} with real summary";
 constexpr const char* WARN_SUMMARIZER_L2      = "Summarizer L2 failed for turn_id {}: {}";
 constexpr const char* WARN_SUMMARIZER_L3      = "Summarizer L3 failed for session {}: {}";
-constexpr const char* WARN_SUMMARIZER_DRAFT   = "Summarizer draft retry failed for summary_id {}: {}";
 constexpr const char* WARN_SUMMARY            = "Warning: summary generation failed: {}";
 
 // --- Generic CLI error wrapper ---
@@ -747,10 +743,7 @@ inline constexpr std::array<ConfigMeta, 62> kConfigSchema = {{
      "Minutes of idle per threshold increment."},
     {"catch_up_batch_size", "housekeeping", "Catch-up Batch Size", CfgType::Integer, CfgEdit::Live,
      "8", "",
-     "Per-tick cap on unsummarized turns / draft retries enqueued at once. Keeps a manual resummarize to a small deliberate slice per tick."},
-    {"project_gap_days", "housekeeping", "Project Gap Days", CfgType::Integer, CfgEdit::Live,
-     "7", "",
-     "Minimum time-gap (days) between consecutive turns that triggers a project-boundary close."},
+     "Per-tick cap on unsummarized turns / episode closes enqueued at once. Keeps a manual resummarize to a small deliberate slice per tick."},
     {"max_turn_failures", "housekeeping", "Max Turn Failures", CfgType::Integer, CfgEdit::Live,
      "3", "",
      "Consecutive inference failures on a single turn before marking it 'bad' and removing it from the unsummarized queue. 0 = retry forever (old behaviour)."},

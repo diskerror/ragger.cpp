@@ -163,16 +163,6 @@ std::vector<TurnRecord> Backend::unsummarized_turns(int limit) {
     return pImpl->unsummarized_turns(limit);
 }
 
-std::vector<DraftSummary> Backend::draft_summaries(int limit) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->draft_summaries(limit);
-}
-
-std::vector<std::string> Backend::sessions_needing_close(int pause_minutes) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->sessions_needing_close(pause_minutes);
-}
-
 std::string Backend::last_episode_end(const std::string& session_guid) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->last_episode_end(session_guid);
@@ -190,71 +180,14 @@ std::vector<EpisodeCandidateTurn> Backend::episode_candidate_turns(
     return pImpl->episode_candidate_turns(session_guid, since_ts);
 }
 
-int Backend::store_episode(const std::string& text,
-        const std::string& model_name, const std::string& session_guid,
-        const std::string& first_ts, const std::string& last_ts) {
+int Backend::store_episode_close(const EpisodeClose& close) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->store_episode(text, model_name, session_guid, first_ts, last_ts);
+    return pImpl->store_episode_close(close);
 }
 
 std::vector<std::string> Backend::episodes_needing_close(int idle_minutes) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->episodes_needing_close(idle_minutes);
-}
-
-std::vector<std::string> Backend::episode_texts(const std::string& session_guid) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->episode_texts(session_guid);
-}
-
-bool Backend::set_summary_updated_at(int summary_id) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->set_summary_updated_at(summary_id);
-}
-
-std::vector<ClosedRun> Backend::sessions_needing_close_boundary() {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->sessions_needing_close_boundary();
-}
-
-std::vector<ClosedRun> Backend::projects_needing_close_boundary(int gap_days) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->projects_needing_close_boundary(gap_days);
-}
-
-void Backend::advance_session_boundary_watermark(int turn_id) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    pImpl->advance_session_boundary_watermark(turn_id);
-}
-
-void Backend::advance_project_boundary_watermark(int turn_id) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    pImpl->advance_project_boundary_watermark(turn_id);
-}
-
-std::vector<std::string> Backend::bounded_session_rollup_texts(
-        const std::string& session_guid, int64_t first_ts, int64_t last_ts) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->bounded_session_rollup_texts(session_guid, first_ts, last_ts);
-}
-
-std::vector<std::string> Backend::bounded_project_rollup_texts(
-        int64_t first_ts, int64_t last_ts) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->bounded_project_rollup_texts(first_ts, last_ts);
-}
-
-int Backend::store_session_summary(const std::string& text,
-        const std::string& model_name, const std::string& session_guid,
-        int64_t first_ts, int64_t last_ts) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->store_session_summary(text, model_name, session_guid, first_ts, last_ts);
-}
-
-int Backend::store_project_summary(const std::string& text,
-        const std::string& model_name, int64_t first_ts, int64_t last_ts) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->store_project_summary(text, model_name, first_ts, last_ts);
 }
 
 std::vector<TurnRecord> Backend::turns_by_session_desc(
@@ -271,10 +204,10 @@ Backend::turn_summaries_by_session_desc(
 }
 
 std::vector<SummaryRecord>
-Backend::session_summaries_desc(
+Backend::episodes_by_session_desc(
         const std::string& session_guid, int limit) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->session_summaries_desc(session_guid, limit);
+    return pImpl->episodes_by_session_desc(session_guid, limit);
 }
 
 bool Backend::update_text(int memory_id, const std::string& text, json metadata, bool defer_embedding) {

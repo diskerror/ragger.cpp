@@ -186,7 +186,9 @@ void TextIndex::reset_terms_table() {
     // exact DDL, so the two paths can never drift apart.
     //
     // Wrapped in one transaction: a crash mid-sequence rolls back to the
-    // pre-reset state instead of leaving tables half-gone.
+    // pre-reset state instead of leaving tables half-gone. When the caller
+    // is already inside a transaction (the 0.16->0.17 leg runs this as its
+    // last data step), JOIN it: no BEGIN/COMMIT of our own.
     //
     // No manual sqlite_sequence cleanup needed -- a freshly CREATE'd
     // AUTOINCREMENT table has no sqlite_sequence row until its first insert.
@@ -204,7 +206,9 @@ void TextIndex::reset_terms_table() {
             throw std::runtime_error("TextIndex reset_terms_table: " + msg);
         }
     };
-    exec("BEGIN IMMEDIATE");
+    const bool own_txn = sqlite3_get_autocommit(db_) != 0;
+    if (own_txn)
+        exec("BEGIN IMMEDIATE");
     try {
         // Junction tables reference terms(term_id); drop them first so no
         // statement can observe a junction row pointing at a gone table
@@ -213,10 +217,12 @@ void TextIndex::reset_terms_table() {
         for (const auto& t : kTextTables)
             exec(("DROP TABLE IF EXISTS " + std::string(t.junction)).c_str());
         exec("DROP TABLE IF EXISTS terms");
-        create_schema();  // CREATE TABLE/INDEX IF NOT EXISTS -- recreates all 7, empty
-        exec("COMMIT");
+        create_schema();  // CREATE TABLE/INDEX IF NOT EXISTS -- recreates all, empty
+        if (own_txn)
+            exec("COMMIT");
     } catch (...) {
-        exec("ROLLBACK");
+        if (own_txn)
+            exec("ROLLBACK");
         throw;
     }
 }
@@ -323,6 +329,7 @@ int TextIndex::reindex_table(const std::string& table, bool progress) {
     if (progress) {
         Stmt& c = count_stmt(table);
         if (c.step()) total = c.column_int(0);
+        c.reset();  // cached stmt: release the read lock before VACUUM etc.
     }
 
     // Two-pass batches: read a bounded batch (finalize the SELECT), then write.

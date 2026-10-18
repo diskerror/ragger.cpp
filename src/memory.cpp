@@ -855,7 +855,6 @@ SessionContext build_context(RaggerMemory& memory,
     // independent of the walk.
     auto turns_desc        = backend->turns_by_session_desc(session_id, 0);
     auto turn_summaries    = backend->turn_summaries_by_session_desc(session_id, 0);
-    auto session_summaries = backend->session_summaries_desc(session_id, 0);
 
     // Walk pointers — index into the newest-first arrays. Turn summaries
     // for raw turns already consumed are skipped via the timestamp
@@ -908,21 +907,19 @@ SessionContext build_context(RaggerMemory& memory,
                 }
                 break;
             }
-            case LayerKind::SessionSummary: {
+            case LayerKind::Episode: {
+                // This session's episodes, newest-first (PHASE5 D.3).
                 int wanted = layer.limit > 0 ? layer.limit : 1;
                 int taken = 0;
-                for (const auto& s : session_summaries) {
-                    if (taken >= wanted) break;
-                    rev.push_back({"session_summary", s.text, s.timestamp});
+                for (const auto& e : backend->episodes_by_session_desc(session_id, wanted)) {
+                    rev.push_back({"episode", e.text, e.timestamp});
                     ++taken;
                 }
                 break;
             }
             case LayerKind::ProjectSummary: {
-                int wanted = layer.limit > 0 ? layer.limit : 1;
-                for (const auto& text : backend->recent_summaries("project", wanted)) {
-                    rev.push_back({"project_summary", text, ""});
-                }
+                // Parses for compatibility with user recipe copies; emits
+                // nothing — the project rollup layer was removed at 0.17.
                 break;
             }
             case LayerKind::Decisions: {

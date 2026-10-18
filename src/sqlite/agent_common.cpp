@@ -181,6 +181,27 @@ json fetch_agent_row(sqlite3* db, const std::string& layer, int rowid) {
             {"session", s.column_text(5)},
         };
     }
+    if (layer == "episode") {
+        Stmt s(db, "SELECT text, "
+                   "datetime(created_at,'unixepoch','localtime'), "
+                   "datetime(created_at,'unixepoch','localtime'), "   // immutable: updated == created
+                   "datetime(span_start,'unixepoch','localtime'), "
+                   "datetime(span_end,'unixepoch','localtime'), "
+                   "COALESCE((SELECT guid FROM sessions WHERE session_id = episodes.session_id), '') "
+                   "FROM episodes WHERE episode_id = ?");
+        s.bind(1, rowid);
+        if (!s.step()) return json(nullptr);
+        return {
+            {"id",        std::format("episode:{}", rowid)},
+            {"layer",     "episode"},
+            {"text",      s.column_text(0)},
+            {"created",   s.column_text(1)},
+            {"updated",   s.column_text(2)},
+            {"span_start", s.column_text(3)},
+            {"span_end",  s.column_text(4)},
+            {"session",   s.column_text(5)},
+        };
+    }
     if (layer == "document") {
         Stmt s(db, "SELECT d.text, d.tags, d.chunk_index, d.document_source_id, "
                    "COALESCE(ds.title, ''), "

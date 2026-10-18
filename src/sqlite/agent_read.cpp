@@ -431,7 +431,7 @@ json Backend::Impl::agent_timeline(const TimelineQuery& q) {
     // must match the first projected column so the cursor and the ORDER BY
     // agree.
     std::string sql;
-    std::string first_expr, row_expr;
+    std::string first_expr, row_expr, since_expr;
     std::vector<std::pair<int, long long>> int_binds;   // positional binds (1-based)
     if (q.granularity == "turn") {
         // One entry per turn: its turn_summary text when one exists, else the
@@ -442,6 +442,7 @@ json Backend::Impl::agent_timeline(const TimelineQuery& q) {
             "COALESCE((SELECT ts.turn_datetime FROM turn_summaries ts "
             "WHERE ts.turn_id = t.turn_id AND ts.text != ''), t.created_at)";
         row_expr = "t.turn_id";
+        since_expr = first_expr;
         sql =
             "SELECT " + first_expr + ", " + row_expr + ", "
             "  COALESCE((SELECT ts.text FROM turn_summaries ts "
@@ -455,34 +456,38 @@ json Backend::Impl::agent_timeline(const TimelineQuery& q) {
             int_binds.push_back({static_cast<int>(int_binds.size()) + 1, *sess_id});
         }
     } else if (q.granularity == "episode") {
-        first_expr = "sm.created_at";
-        row_expr = "sm.summary_id";
+        // PHASE5 C.3: episodes live in their own table now. Rows ordered by
+        // span_start; a date filter matches on SPAN OVERLAP (span_end >=
+        // since AND span_start <= until), not on span start alone.
+        first_expr = "sm.span_start";
+        row_expr = "sm.episode_id";
+        since_expr = "sm.span_end";
         sql =
-            "SELECT sm.created_at, sm.summary_id, sm.text, "
+            "SELECT sm.span_start, sm.episode_id, sm.text, "
             "  COALESCE((SELECT guid FROM sessions WHERE session_id = sm.session_id), '') "
-            "FROM summaries sm WHERE sm.level = 'episode' AND sm.text != ''";
+            "FROM episodes sm WHERE sm.text != ''";
         if (sess_id) {
             sql += " AND sm.session_id = ?";
             int_binds.push_back({static_cast<int>(int_binds.size()) + 1, *sess_id});
         }
     } else { // session
-        // Per session: its session summary if one exists, else its newest
-        // episode. Sessions with neither contribute nothing (never require
-        // session summaries — design §10.2.5).
-        first_expr = "sm.created_at";
-        row_expr = "sm.summary_id";
+        // PHASE5 C.3: one row per session in range — never reads summaries
+        // (there are no session rollups at 0.17). started_on/ended_on are the
+        // derived turn span (NULL for a session with no turns). Date filters
+        // match on span overlap, same rule as episodes.
+        first_expr = "COALESCE(s.started_on, s.ended_on, 0)";
+        row_expr = "s.session_id";
+        since_expr = "COALESCE(s.ended_on, s.started_on, 0)";
         sql =
-            "SELECT sm.created_at, sm.summary_id, sm.text, s.guid "
-            "FROM sessions s "
-            "JOIN summaries sm ON sm.summary_id = ("
-            "  SELECT summary_id FROM summaries "
-            "  WHERE session_id = s.session_id AND text != '' AND ("
-            "    level = 'session' OR summary_id = ("
-            "      SELECT summary_id FROM summaries "
-            "      WHERE session_id = s.session_id AND level = 'episode' AND text != '' "
-            "      ORDER BY created_at DESC, summary_id DESC LIMIT 1)) "
-            "  ORDER BY CASE level WHEN 'session' THEN 0 ELSE 1 END, "
-            "           created_at DESC, summary_id DESC LIMIT 1)";
+            "SELECT " + first_expr + ", " + row_expr + ", "
+            "  s.guid, s.name, "
+            "  datetime(s.started_on,'unixepoch','localtime'), "
+            "  datetime(s.ended_on,'unixepoch','localtime'), "
+            "  (SELECT COUNT(*) FROM episodes e WHERE e.session_id = s.session_id), "
+            "  COALESCE((SELECT e.text FROM episodes e "
+            "            WHERE e.session_id = s.session_id "
+            "            ORDER BY e.span_start DESC, e.episode_id DESC LIMIT 1), '') "
+            "FROM sessions s WHERE 1=1";
         if (sess_id) {
             sql += " AND s.session_id = ?";
             int_binds.push_back({static_cast<int>(int_binds.size()) + 1, *sess_id});
@@ -491,8 +496,9 @@ json Backend::Impl::agent_timeline(const TimelineQuery& q) {
 
     // Time bounds and the cursor apply to the first projected column pair
     // (created epoch, rowid) — one continuation predicate for all three
-    // granularities: strictly older in (created, rowid) order.
-    if (since_e) sql += " AND " + first_expr + " >= ?";
+    // granularities: strictly older in (created, rowid) order. The `since`
+    // bound uses since_expr (span end for episodes/sessions — overlap).
+    if (since_e) sql += " AND " + since_expr + " >= ?";
     if (until_e) sql += " AND " + first_expr + " <= ?";
     if (cur_epoch)
         sql += " AND (" + first_expr + " < ? OR (" + first_expr + " = ? AND " + row_expr + " < ?))";
@@ -519,6 +525,20 @@ json Backend::Impl::agent_timeline(const TimelineQuery& q) {
         if (rows > limit) { more = true; break; }
         last_epoch = s.column_int64(0);
         last_row   = s.column_int64(1);
+        if (q.granularity == "session") {
+            // PHASE5 C.3 shape: the session itself, its derived span, and a
+            // snippet of its newest episode ("" when it has none).
+            items.push_back({
+                {"session_id", last_row},
+                {"guid",       s.column_text(2)},
+                {"name",       s.is_null(3) ? json(nullptr) : json(s.column_text(3))},
+                {"started_on", s.is_null(4) ? json(nullptr) : json(s.column_text(4))},
+                {"ended_on",   s.is_null(5) ? json(nullptr) : json(s.column_text(5))},
+                {"episodes",   s.column_int(6)},
+                {"snippet",    agent_snippet(s.column_text(7))},
+            });
+            continue;
+        }
         const std::string text = s.column_text(2);
         json item = {
             // Turn-granularity entries are keyed by turn_id (the summary is
@@ -526,7 +546,7 @@ json Backend::Impl::agent_timeline(const TimelineQuery& q) {
             // by agent_get even when the entry shows summary text.
             {"id",      q.granularity == "turn"
                            ? std::format("turn:{}", last_row)
-                           : std::format("summary:{}", last_row)},
+                           : std::format("episode:{}", last_row)},
             {"created", db_timestamp(static_cast<std::time_t>(last_epoch))},
             {"session", s.column_text(3)},
             {"text",    agent_snippet(text)},
@@ -631,6 +651,16 @@ json Backend::Impl::agent_get(const AgentGetQuery& q) {
                     e.bind(1, rowid);
                     while (e.step())
                         expanded.push_back(fetch_agent_row(db, "turn_summary", e.column_int(0)));
+                } else if (layer == "episode") {
+                    // Recorded membership (PHASE5 C.2): replaces the old
+                    // turn_datetime BETWEEN span heuristic, which
+                    // mis-assigned turn summaries on same-second boundaries.
+                    Stmt c(db, "SELECT turn_summary_id FROM turn_summaries "
+                               "WHERE episode_id = ? AND text != '' "
+                               "ORDER BY turn_datetime, turn_summary_id");
+                    c.bind(1, rowid);
+                    while (c.step())
+                        expanded.push_back(fetch_agent_row(db, "turn_summary", c.column_int(0)));
                 } else if (layer == "summary") {
                     // The turn_summaries in its session within its span.
                     // Episodes/turn_summaries only — never depends on session

@@ -70,6 +70,9 @@ public:
     /// SQLITE_DONE. (Do NOT use the bool to detect success of a write — for
     /// INSERT/UPDATE/DELETE use exec(), which returns true on SQLITE_DONE.)
     bool step() { return sqlite3_step(stmt_) == SQLITE_ROW; }
+    // Release any read lock a partially-stepped cached statement holds
+    // (a stepped-but-unfinished statement blocks e.g. VACUUM).
+    void reset() { sqlite3_reset(stmt_); }
 
     /// Same as step(), but throws on an actual error instead of reporting it
     /// as end-of-rows. step() cannot distinguish SQLITE_DONE from

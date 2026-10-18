@@ -268,10 +268,7 @@ void rebuild_table_column_order(Impl& self,
         // integer id, mirroring `models`. Grouping key only (PHASE4): guid +
         // title + derived started_on/ended_on span; no project_id.
         {
-            std::string ddl = ddl::sessions("sessions");
-            ddl = std::format("CREATE TABLE IF NOT EXISTS {}",
-                              ddl.substr(std::string_view("CREATE TABLE ").size()));
-            exec(ddl);
+            exec(ddl::if_not_exists(ddl::sessions("sessions")));
         }
 
         // turns (L1) — raw verbatim exchanges. embedding nullable for the
@@ -325,30 +322,10 @@ void rebuild_table_column_order(Impl& self,
         // summarized turn, split out of `summaries`. turn_id is a real FK,
         // ON DELETE SET NULL: pruning the raw turn leaves the summary behind
         // with turn_id NULL rather than stranding it via a fragile
-        // (session_id, created_at) match. See scripts/schema_db0.12.sql.
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS turn_summaries (
-                turn_summary_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-                text             TEXT,
-                turn_id          INTEGER REFERENCES turns(turn_id) ON DELETE SET NULL,
-                session_id       INTEGER REFERENCES sessions(session_id),
-                turn_model_id    INTEGER REFERENCES models(model_id),
-                summary_model_id INTEGER REFERENCES models(model_id),
-                turn_datetime    INTEGER NOT NULL,
-                summarized_on    INTEGER NOT NULL DEFAULT (unixepoch()),
-                unigram_count  INTEGER NOT NULL DEFAULT 0,
-                bigram_count   INTEGER NOT NULL DEFAULT 0,
-                embedding_version INTEGER,
-                embedding        BLOB
-            )
-        )");
-        exec("CREATE INDEX IF NOT EXISTS idx_turn_summaries_turn_id    ON turn_summaries(turn_id)");
-        exec("CREATE INDEX IF NOT EXISTS idx_turn_summaries_session_id ON turn_summaries(session_id)");
-        exec("CREATE INDEX IF NOT EXISTS idx_turn_summaries_datetime   ON turn_summaries(turn_datetime)");
-        // Upsert target for finalize_turn_summary: one row per turn_id. NULL
-        // turn_id (a pruned turn) is excepted -- multiple such rows are fine.
-        exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_turn_summaries_turn_id_uniq "
-             "ON turn_summaries(turn_id) WHERE turn_id IS NOT NULL");
+        // (session_id, created_at) match. 0.17 adds episode_id (recorded
+        // membership) — the ddl:: definition is the single source of truth
+        // for fresh DBs and the 0.16->0.17 rebuild alike.
+        exec(ddl::if_not_exists(ddl::turn_summaries("turn_summaries")));
 
         // In-place migration for pre-sessions databases: add the session_id
         // FK column to turns/summaries if an existing DB predates it. SQLite
@@ -615,24 +592,22 @@ void rebuild_table_column_order(Impl& self,
         exec("CREATE INDEX IF NOT EXISTS idx_insight_evidence_ts "
              "ON insight_evidence(turn_summary_id)");
 
-        // An orphaned turn summary (its turn culled) is the only surviving
-        // record of that exchange. Code never deletes one; this makes the
-        // schema refuse too. Empty-text marker rows stay deletable so
-        // reset_abandoned_turn_summaries() keeps working.
-        exec(R"(
-            CREATE TRIGGER IF NOT EXISTS protect_orphan_turn_summaries
-            BEFORE DELETE ON turn_summaries
-            WHEN OLD.turn_id IS NULL AND OLD.text <> ''
-            BEGIN SELECT RAISE(ABORT, 'orphaned turn summary is sole evidence'); END
-        )");
+        // episodes (PHASE5) — narrative segments. Created AFTER migrations
+        // (like the evidence tables) so it never takes part in a rebuild
+        // dance; the 0.16->0.17 leg creates and populates it itself (§2).
+        exec(ddl::if_not_exists(ddl::episodes()));
+        exec(ddl::if_not_exists(ddl::episodes_indexes()));
+
+        // turn_summaries indexes + the orphan-protection trigger. An orphaned
+        // turn summary (its turn culled) is the only surviving record of that
+        // exchange; code never deletes one, and this makes the schema refuse
+        // too. Empty-text marker rows stay deletable so
+        // reset_abandoned_turn_summaries() keeps working. Recreated here after
+        // any rebuild (dropping a table drops its indexes and triggers).
+        exec(ddl::if_not_exists(ddl::turn_summaries_indexes_and_trigger()));
 
         exec("CREATE INDEX IF NOT EXISTS idx_document_sources_imported_at ON document_sources(imported_at)");
         exec("CREATE INDEX IF NOT EXISTS idx_documents_document_source_id ON documents(document_source_id)");
-        exec("CREATE INDEX IF NOT EXISTS idx_turn_summaries_turn_id    ON turn_summaries(turn_id)");
-        exec("CREATE INDEX IF NOT EXISTS idx_turn_summaries_session_id ON turn_summaries(session_id)");
-        exec("CREATE INDEX IF NOT EXISTS idx_turn_summaries_datetime   ON turn_summaries(turn_datetime)");
-        exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_turn_summaries_turn_id_uniq "
-             "ON turn_summaries(turn_id) WHERE turn_id IS NOT NULL");
 
         // FTS5 — external-content virtual tables + sync triggers replace
         // the old hand-rolled bm25_* sidecars (issue #49).
@@ -1606,6 +1581,7 @@ void rebuild_table_column_order(Impl& self,
             // them after migrations.
             exec("DROP VIEW IF EXISTS sessions_view");
             exec("DROP VIEW IF EXISTS summaries_view");
+            exec("DROP VIEW IF EXISTS turn_summaries_view");   // PHASE5 rebuild
             exec("DROP VIEW IF EXISTS decisions_view");
             exec("DROP VIEW IF EXISTS document_sources_view");
             exec("DROP VIEW IF EXISTS documents_view");   // joins document_sources
@@ -1636,12 +1612,13 @@ void rebuild_table_column_order(Impl& self,
 
             // ---- sessions rebuild (PHASE4; migrate-0.16-to-0.17.sql §1,
             // transcribed here until Phase 9 executes the file) ------------
-            // §0: save the AUTOINCREMENT counter for sessions (Phase 5 adds
-            // turn_summaries to the same mechanism).
+            // §0: save the AUTOINCREMENT counters (PHASE5: turn_summaries
+            // joins the mechanism with its own rebuild below).
             exec("CREATE TEMP TABLE IF NOT EXISTS seq_save ("
                  "name TEXT PRIMARY KEY, seq INTEGER)");
             exec("INSERT OR REPLACE INTO seq_save "
-                 "SELECT name, seq FROM sqlite_sequence WHERE name = 'sessions'");
+                 "SELECT name, seq FROM sqlite_sequence "
+                 "WHERE name IN ('sessions','turn_summaries')");
 
             // §1: rebuild with started_on/ended_on derived from the turns
             // table (NULL for sessions without turns). No project_id.
@@ -1658,6 +1635,61 @@ void rebuild_table_column_order(Impl& self,
             exec("DROP TABLE sessions");
             exec("ALTER TABLE sessions_rebuild RENAME TO sessions");
             exec("CREATE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name)");
+
+            // ---- episodes (PHASE5; migrate-0.16-to-0.17.sql §2) ----------
+            // level='episode' rows MOVE out of summaries; ids are preserved
+            // (episode_id = old summary_id), span = old created_at/updated_at.
+            exec(ddl::episodes());
+            exec(R"(
+                INSERT INTO episodes (episode_id, text, tags, session_id, model_id,
+                                      span_start, span_end, created_at,
+                                      unigram_count, bigram_count, embedding_version, embedding)
+                SELECT summary_id, text, tags, session_id, model_id,
+                       created_at, updated_at, created_at,
+                       unigram_count, bigram_count, embedding_version, embedding
+                FROM summaries WHERE level = 'episode' ORDER BY summary_id
+            )");
+            exec(ddl::episodes_indexes());
+            // PHASE-8: remove — both statements exist only while `summaries`
+            // still lives. The rows MOVED to episodes; FK actions do not fire
+            // inside the leg (foreign_keys OFF), so the junction orphans are
+            // deleted explicitly.
+            exec("DELETE FROM summaries WHERE level = 'episode'");
+            exec("DELETE FROM summaries_terms WHERE summary_id NOT IN "
+                 "(SELECT summary_id FROM summaries)");
+
+            // ---- turn_summaries rebuild (PHASE5; §3) ---------------------
+            // Adds episode_id (recorded membership) in canonical column
+            // order and gives session_id ON DELETE SET NULL. Backfill: a
+            // content row joins the FIRST episode (by span_start, id) of its
+            // OWN session whose span contains turn_datetime — same-second
+            // collisions across sessions cannot cross-assign because the
+            // subquery is session-scoped. Marker rows ('' text) and NULL-text
+            // rows stay unassigned. Ids preserved, so turn_summaries_terms
+            // rows keep pointing at the same rows (no reindex needed for
+            // them; the all-table reindex below refreshes everything anyway).
+            exec(ddl::turn_summaries("turn_summaries_rebuild"));
+            exec(R"(
+                INSERT INTO turn_summaries_rebuild
+                    (turn_summary_id, text, turn_id, session_id, episode_id,
+                     turn_model_id, summary_model_id, turn_datetime, summarized_on,
+                     unigram_count, bigram_count, embedding_version, embedding)
+                SELECT t.turn_summary_id, t.text, t.turn_id, t.session_id,
+                       CASE WHEN t.text IS NOT NULL AND t.text <> '' THEN
+                            (SELECT e.episode_id FROM episodes e
+                              WHERE e.session_id = t.session_id
+                                AND t.turn_datetime BETWEEN e.span_start AND e.span_end
+                              ORDER BY e.span_start, e.episode_id LIMIT 1)
+                       END,
+                       t.turn_model_id, t.summary_model_id, t.turn_datetime, t.summarized_on,
+                       t.unigram_count, t.bigram_count, t.embedding_version, t.embedding
+                FROM turn_summaries t ORDER BY t.turn_summary_id
+            )");
+            exec("DROP TABLE turn_summaries");
+            exec("ALTER TABLE turn_summaries_rebuild RENAME TO turn_summaries");
+            // The rebuild dropped the indexes and the orphan-protection
+            // trigger (SQL file's ts_rest): recreate both.
+            exec(ddl::turn_summaries_indexes_and_trigger());
 
             // Counts ARE carried over (unlike 0.16): they are valid, and
             // decisions_terms rows still point at the same decision_ids, so no
@@ -1725,7 +1757,24 @@ void rebuild_table_column_order(Impl& self,
                 )
             )");
 
+            // PHASE5: the boundary-watermark machinery is deleted with the
+            // session/project rollups; drop their settings rows (§7).
+            exec("DELETE FROM settings WHERE key IN "
+                 "('session_boundary_watermark_turn_id', "
+                 " 'project_boundary_watermark_turn_id')");
+
             set_db_version("0.17");
+
+            // PHASE5: all-table reindex as the LAST data step. The leg moved
+            // episode rows and rebuilt turn_summaries; a full rebuild of the
+            // terms index from the final table contents is cheaper to reason
+            // about than surgical fixes, and it also repairs the pre-Phase-1
+            // L2 mis-keying on migrated DBs. Later phases keep this block at
+            // the end; only the registry changes.
+            Diskerror::Logger::info("  reindexing all text tables...");
+            reset_terms_table();
+            for (const auto& t : kTextTables)
+                reindex_table(t.table, /*progress=*/true);
 
             // Only NEW violations abort; pre-existing ones are carried
             // through and warned about (fk_before baseline above).
@@ -1751,10 +1800,16 @@ void rebuild_table_column_order(Impl& self,
             }
 
             // Restore the saved AUTOINCREMENT counters (§0 restore; the
-            // rebuild reset sqlite_sequence). INSERT OR REPLACE: a DB whose
-            // sessions table was empty has no row to UPDATE.
-            exec("INSERT OR REPLACE INTO sqlite_sequence (name, seq) "
-                 "SELECT 'sessions', seq FROM seq_save WHERE name = 'sessions'");
+            // rebuilds reset sqlite_sequence to MAX(id); the saved watermark
+            // is never lower). UPDATE, not INSERT OR REPLACE: sqlite_sequence
+            // has NO unique constraint on name, so an INSERT would append a
+            // duplicate row instead of replacing (the canonical §7 form).
+            // A table that was empty pre-migration has no row in seq_save
+            // and none after its rebuild — consistent, nothing to restore.
+            exec("UPDATE sqlite_sequence SET seq = "
+                 "(SELECT s.seq FROM seq_save s WHERE s.name = sqlite_sequence.name) "
+                 "WHERE name IN ('sessions','turn_summaries') "
+                 "AND (SELECT s.seq FROM seq_save s WHERE s.name = sqlite_sequence.name) > seq");
 
             Stmt(db, "COMMIT").exec();
             exec("PRAGMA legacy_alter_table = OFF");

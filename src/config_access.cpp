@@ -66,7 +66,6 @@ const std::unordered_map<std::string_view, int Config::*>& int_fields() {
         {"housekeeping_interval", &Config::housekeeping_interval},
         {"episode_idle_minutes",  &Config::episode_idle_minutes},
         {"catch_up_batch_size",   &Config::catch_up_batch_size},
-        {"project_gap_days",      &Config::project_gap_days},
         {"max_turn_failures",     &Config::max_turn_failures},
         {"minimum_chunk_size",    &Config::minimum_chunk_size},
     };

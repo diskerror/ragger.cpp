@@ -4,11 +4,17 @@
  * Requires ONNX model files at the configured model_dir.
  */
 #include "config.h"
+#include "config_access.h"
+#include "embedder.h"
 #include "memory.h"
+#include "sqlite/backend.h"
 #include "test_env.h"
+#include <sqlite3.h>
 #include <algorithm>
 #include <cassert>
+#include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <print>
 #include <stdexcept>
@@ -123,6 +129,97 @@ void test_empty_db_path_throws() {
     std::println(" OK");
 }
 
+// PHASE5 D.3: recipe Episode layer emits newest-session episodes
+// chronologically; a project_summary recipe parses, emits nothing, no error.
+void p5_recipe_context(const std::string& model_dir) {
+    std::println("  p5_recipe_context...");
+    cleanup_all();
+
+    auto r1 = ragger::set_config_persisted("capture_turns", "true");
+    auto r2 = ragger::set_config_persisted("build_context", "true");
+    assert(r1.has_value() && r2.has_value());
+
+    ragger::RaggerMemory mem(TEMP_DB1);
+    ragger::Embedder emb(model_dir);
+    ragger::sqlite::Backend db(emb, TEMP_DB1);
+
+    const std::string guid = "p5rc";
+    std::vector<int> m1, m2;
+    auto seed = [&](std::vector<int>& out, const std::string& stamp) {
+        const int t = db.store_turn("p5rc q " + stamp, "p5rc answer " + std::string(60, 'r') + stamp,
+                                    "test-model", false, guid, stamp);
+        assert(db.finalize_turn_summary(t, "p5rc summary " + stamp, "summarizer-model"));
+        sqlite3* raw = nullptr;
+        assert(sqlite3_open(TEMP_DB1.c_str(), &raw) == SQLITE_OK);
+        sqlite3_stmt* st = nullptr;
+        const std::string sql = "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t);
+        assert(sqlite3_prepare_v2(raw, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        assert(sqlite3_step(st) == SQLITE_ROW);
+        out.push_back(sqlite3_column_int(st, 0));
+        sqlite3_finalize(st);
+        sqlite3_close(raw);
+    };
+    seed(m1, "2026-07-01 10:00:00");
+    seed(m2, "2026-07-01 11:00:00");
+
+    auto close_ep = [&](const std::string& text, const std::vector<int>& members,
+                        const std::string& stamp) {
+        ragger::EpisodeClose ec;
+        ec.text = text;
+        ec.model_name = "summarizer-model";
+        ec.session_guid = guid;
+        std::tm tm{};
+        strptime(stamp.c_str(), "%Y-%m-%d %H:%M:%S", &tm);
+        tm.tm_isdst = -1;
+        ec.span_start = ec.span_end = static_cast<long long>(mktime(&tm));
+        ec.member_turn_summary_ids = members;
+        assert(db.store_episode_close(ec) > 0);
+    };
+    close_ep("p5rc episode one", m1, "2026-07-01 10:00:00");
+    close_ep("p5rc episode two", m2, "2026-07-01 11:00:00");
+
+    // Custom recipe files under the (isolated) base recipes dir.
+    std::error_code ec;
+    const std::string rdir = ragger::config().resolved_recipes_dir();
+    fs::create_directories(rdir, ec);
+    {
+        std::ofstream f(rdir + "/p5rc_two.json");
+        f << R"({"name":"p5rc_two","layers":[{"kind":"episode","limit":2}],"max_tokens":8000})";
+    }
+    {
+        std::ofstream f(rdir + "/p5rc_proj.json");
+        f << R"({"name":"p5rc_proj","layers":[{"kind":"project_summary","limit":3}]})";
+    }
+
+    auto ctx = ragger::build_context(mem, guid, "p5rc_two");
+    assert(ctx.enabled);
+    assert(ctx.chunks.size() == 2);
+    // Chronological (oldest first) per SessionContext contract.
+    assert(ctx.chunks[0].kind == "episode");
+    assert(ctx.chunks[0].text == "p5rc episode one");
+    assert(ctx.chunks[1].text == "p5rc episode two");
+
+    auto ctx2 = ragger::build_context(mem, guid, "p5rc_proj");
+    assert(ctx2.enabled);
+    assert(ctx2.chunks.empty());   // parses, emits nothing
+
+    // "session_summary" alias resolves to the episode layer.
+    {
+        std::ofstream f(rdir + "/p5rc_alias.json");
+        f << R"({"name":"p5rc_alias","layers":[{"kind":"session_summary","limit":2}]})";
+    }
+    auto ctx3 = ragger::build_context(mem, guid, "p5rc_alias");
+    assert(ctx3.enabled);
+    assert(ctx3.chunks.size() == 2);
+    assert(ctx3.chunks[0].kind == "episode");
+
+    mem.close();
+    db.close();
+    cleanup_all();
+    std::println(" OK");
+}
+
+
 int main() {
     TestEnv env("memory");  // must be first: isolates from ~/.ragger
     auto model_dir = env.model_dir();
@@ -134,6 +231,7 @@ int main() {
     }
 
     std::println("Running memory facade tests:");
+    p5_recipe_context(model_dir);
 
     test_store_and_search();
     test_store_with_tags();

@@ -31,6 +31,19 @@ struct DecisionInput {
     std::vector<int> evidence;        ///< turn_summary_ids backing the decision
 };
 
+/// Input to store_episode_close (db 0.17, PHASE5 B.1): one closed episode —
+/// its text plus the recorded membership. span_start/span_end are epoch
+/// seconds of the first/last member turn. members must be non-empty and all
+/// belong to session_guid; any straggler fails the whole close.
+struct EpisodeClose {
+    std::string text;
+    std::string model_name;
+    std::string session_guid;
+    int64_t span_start = 0;
+    int64_t span_end = 0;
+    std::vector<int> member_turn_summary_ids;
+};
+
 struct StructuredDecisionResult {
     int id = 0;                       ///< new decision_id
     std::optional<int> superseded;    ///< decision_id flipped to 'superseded'
@@ -88,7 +101,7 @@ struct SearchResponse {
 /// memory_search request (agent API Phase 2). Empty vectors/strings = no filter.
 struct AgentSearchQuery {
     std::string query;
-    std::vector<std::string> layers;   ///< subset of turn|turn_summary|summary|document|decision; empty = all
+    std::vector<std::string> layers;   ///< subset of turn|turn_summary|episode|summary|document|decision; empty = all
     std::string since;                 ///< "YYYY-MM-DD", "YYYY-MM-DD HH:MM:SS", or relative "30d"/"12h"; "" = none
     std::string until;                 ///< same formats; "" = none
     std::string status = "active";     ///< decisions only: "active" (current+provisional) | "any" | one exact status
@@ -146,16 +159,7 @@ struct UserInfo {
     std::string token_hash;
 };
 
-/// A summary row that was written as a heuristic fallback ('draft') while
-/// inference was unavailable. The summarizer rewrites these when it comes back.
-struct DraftSummary {
-    int         summary_id;
-    std::string level;
-    std::string session_guid;   // empty when session_id is NULL
-    std::string timestamp;      // source-turn timestamp for L2
-};
-
-/// A summary row returned by session-level queries (turn or session summaries).
+/// A summary row returned by session-level queries (turn/episode reads).
 struct SummaryRecord {
     int         summary_id;
     std::string text;

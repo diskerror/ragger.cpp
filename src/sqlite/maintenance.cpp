@@ -391,6 +391,7 @@ namespace fs = std::filesystem;
         else if (name == "documents")       invalidate_doc_cache();
         else if (name == "decisions")       invalidate_dec_cache();
         else if (name == "insights")        invalidate_ins_cache();
+        else if (name == "episodes")        invalidate_episode_cache();
         // turns / turn_summaries: no vector cache keyed on these blobs.
     }
 
@@ -430,6 +431,7 @@ namespace fs = std::filesystem;
         invalidate_dec_cache();
         invalidate_ins_cache();
         invalidate_turn_cache();
+        invalidate_episode_cache();
     }
 
     std::vector<std::string> Backend::Impl::collections() const {

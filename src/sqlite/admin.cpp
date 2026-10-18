@@ -270,16 +270,29 @@ namespace fs = std::filesystem;
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM turns
         )");
+        // PHASE5: gains episode_id. The view shows ALL rows including ''
+        // marker rows (the raw table is the admin truth); Phase 9 decides
+        // whether a filtered `_live_view` joins the set.
         view("turn_summaries_view", R"(
             SELECT
-                turn_summary_id, text, turn_id, session_id, turn_model_id, summary_model_id,
+                turn_summary_id, text, turn_id, session_id, episode_id,
+                turn_model_id, summary_model_id,
                 datetime(turn_datetime, 'unixepoch', 'localtime') AS turn_datetime,
                 datetime(summarized_on, 'unixepoch', 'localtime') AS summarized_on,
                 unigram_count, bigram_count,
                 embedding_version,
                 CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM turn_summaries
-            WHERE text != ''
+        )");
+        view("episodes_view", R"(
+            SELECT episode_id, text, tags, session_id, model_id, supersedes,
+                   datetime(span_start, 'unixepoch', 'localtime') AS span_start,
+                   datetime(span_end, 'unixepoch', 'localtime') AS span_end,
+                   datetime(created_at, 'unixepoch', 'localtime') AS created_at,
+                   unigram_count, bigram_count,
+                   embedding_version,
+                   CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
+            FROM episodes
         )");
         view("summaries_view", R"(
             SELECT summary_id, text, level, tags, session_id, model_id,

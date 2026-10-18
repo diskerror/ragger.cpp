@@ -224,7 +224,6 @@ struct Config {
     // project-boundary close, per the session/project boundary-detection
     // design (edge-detected on the gap, not an idle-scan like episodes).
     // Any positive integer; default 7.
-    int   project_gap_days       = 7;
     // Per-housekeeping-tick cap on how many unsummarized L2 turns (and,
     // separately, how many draft-tagged retry rows) get enqueued in one
     // pass. Was a hardcoded constexpr of 200; made configurable so a manual

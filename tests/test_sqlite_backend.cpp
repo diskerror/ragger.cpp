@@ -1267,209 +1267,6 @@ void test_summary_primitives(ragger::Embedder& emb) {
     cleanup();
 }
 
-// Phase 2 (EPISODE_PLAN): episode layer + boundary-triggered session/project
-// rollups. Deterministic backend-level verification of the bloat-bug fix — no
-// inference needed. Reproduces the shape of the original 1956–1977 defect
-// (repeated rollups after a "close") and asserts exactly one session row.
-void test_episode_rollup_no_dup(ragger::Embedder& emb) {
-    cleanup();
-    ragger::sqlite::Backend db(emb, TEMP_DB);
-
-    const std::string G = "phase2-session";
-
-    // No episodes yet.
-    CHECK(db.last_episode_end(G).empty());
-    CHECK(db.episode_texts(G).empty());
-
-    // Two L2 turn summaries land (distinct timestamps → distinct rows).
-    // Turn-level summaries now live in turn_summaries, keyed by a real
-    // turn_id -- create the underlying turns first, then finalize each
-    // one's summary, rather than writing level='turn' rows into
-    // `summaries` directly (that path no longer exists post-db_version
-    // 0.12; see l2_summaries_since's redirect to turn_summaries).
-    int t1 = db.store_turn("Q1", "A1", "memo", false, G, "2026-01-01 10:00:00");
-    int t2 = db.store_turn("Q2", "A2", "memo", false, G, "2026-01-01 10:00:02");
-    CHECK(db.finalize_turn_summary(t1, "Turn one: discussed knowledge graphs.", "memo"));
-    CHECK(db.finalize_turn_summary(t2, "Turn two: phonetic pun edges.", "memo"));
-
-    // Before any episode, l2_summaries_since(all) returns both.
-    CHECK(db.l2_summaries_since(G, "").size() == 2);
-
-    // Close episode 1 spanning both turns.
-    int ep1 = db.store_episode("Episode 1: KG design + phonetic edges.",
-                               "memo", G, "2026-01-01 10:00:00",
-                               "2026-01-01 10:00:02");
-    CHECK(ep1 > 0);
-    CHECK(db.last_episode_end(G) == "2026-01-01 10:00:02");
-    CHECK(db.episode_texts(G).size() == 1);
-    // No L2 past the episode end now.
-    CHECK(db.l2_summaries_since(G, db.last_episode_end(G)).empty());
-
-    // Second episode.
-    int t3 = db.store_turn("Q3", "A3", "memo", false, G, "2026-01-01 11:00:00");
-    CHECK(db.finalize_turn_summary(t3, "Turn three: curated fiction corpus.", "memo"));
-    db.store_episode("Episode 2: curated corpus bet.", "memo", G,
-                     "2026-01-01 11:00:00", "2026-01-01 11:00:00");
-    CHECK(db.episode_texts(G).size() == 2);
-
-    // Episode rows are immutable: timestamp=first, updated_at=last (span).
-    sqlite3* raw = nullptr;
-    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
-    sqlite3_stmt* st = nullptr;
-    sqlite3_prepare_v2(raw,
-        "SELECT COUNT(*) FROM summaries WHERE level='episode' "
-        "AND session_id=(SELECT session_id FROM sessions WHERE guid='phase2-session')",
-        -1, &st, nullptr);
-    CHECK(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 2);
-    sqlite3_finalize(st);
-    sqlite3_close(raw);
-
-    // --- Boundary-detection session/project rollup (new design) ---------
-    // A run closes on session_id edge (session) or a >= gap_days time gap
-    // (project). Both are immutable-insert-per-closed-run, no upsert. We
-    // exercise the raw store_session_summary/store_project_summary +
-    // bounded_*_rollup_texts primitives directly here (the housekeeping
-    // scan itself -- sessions_needing_close_boundary/watermark advance --
-    // is exercised functionally in the summarizer smoke test, not here).
-
-    // bounded_session_rollup_texts pulls in episodes + trailing turn
-    // summaries whose span falls entirely within [first_ts, last_ts] for
-    // this session_guid -- both episodes above qualify for a run spanning
-    // the whole session.
-    auto first_ep = ragger::parse_db_timestamp("2026-01-01 10:00:00");
-    auto last_ep  = ragger::parse_db_timestamp("2026-01-01 11:00:00");
-    CHECK(first_ep.has_value() && last_ep.has_value());
-    auto sess_texts = db.bounded_session_rollup_texts(
-        G, static_cast<int64_t>(*first_ep), static_cast<int64_t>(*last_ep));
-    CHECK(sess_texts.size() == 2);  // both episode texts, oldest-first
-    CHECK(sess_texts[0] == "Episode 1: KG design + phonetic edges.");
-    CHECK(sess_texts[1] == "Episode 2: curated corpus bet.");
-
-    // A LATER run of the SAME session_guid must not leak into an EARLIER
-    // run's bounded query -- add a third episode outside [first_ep,last_ep]
-    // and confirm it's excluded.
-    int t4 = db.store_turn("Q4", "A4", "memo", false, G, "2026-01-02 09:00:00");
-    CHECK(db.finalize_turn_summary(t4, "Turn four: unrelated later topic.", "memo"));
-    db.store_episode("Episode 3: later unrelated run.", "memo", G,
-                     "2026-01-02 09:00:00", "2026-01-02 09:00:00");
-    auto sess_texts2 = db.bounded_session_rollup_texts(
-        G, static_cast<int64_t>(*first_ep), static_cast<int64_t>(*last_ep));
-    CHECK(sess_texts2.size() == 2);  // unchanged -- later episode excluded
-
-    // store_session_summary: one immutable insert per closed run. Two
-    // separate closes of the SAME session_guid produce TWO rows (unlike
-    // the old running-upsert model, which kept exactly one).
-    int sess1 = db.store_session_summary("Session run 1 rollup.", "memo", G,
-                                         static_cast<int64_t>(*first_ep),
-                                         static_cast<int64_t>(*last_ep));
-    CHECK(sess1 > 0);
-    auto later_ep = ragger::parse_db_timestamp("2026-01-02 09:00:00");
-    CHECK(later_ep.has_value());
-    int sess2 = db.store_session_summary("Session run 2 rollup.", "memo", G,
-                                         static_cast<int64_t>(*later_ep),
-                                         static_cast<int64_t>(*later_ep));
-    CHECK(sess2 > 0);
-    CHECK(sess1 != sess2);
-
-    raw = nullptr;
-    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
-    sqlite3_prepare_v2(raw,
-        "SELECT COUNT(*) FROM summaries WHERE level='session' "
-        "AND session_id=(SELECT session_id FROM sessions WHERE guid='phase2-session')",
-        -1, &st, nullptr);
-    CHECK(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 2);
-    sqlite3_finalize(st);
-    sqlite3_close(raw);
-
-    // bounded_project_rollup_texts: gathers level='session' rows (produced
-    // above) whose span falls entirely within [first_ts, last_ts],
-    // session-unscoped.
-    auto proj_texts = db.bounded_project_rollup_texts(
-        static_cast<int64_t>(*first_ep), static_cast<int64_t>(*later_ep));
-    CHECK(proj_texts.size() == 2);
-    CHECK(proj_texts[0] == "Session run 1 rollup.");
-    CHECK(proj_texts[1] == "Session run 2 rollup.");
-
-    // store_project_summary: one immutable insert per closed project run.
-    int proj1 = db.store_project_summary("Project run 1 rollup.", "memo",
-                                         static_cast<int64_t>(*first_ep),
-                                         static_cast<int64_t>(*later_ep));
-    CHECK(proj1 > 0);
-
-    raw = nullptr;
-    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
-    sqlite3_prepare_v2(raw,
-        "SELECT COUNT(*), session_id FROM summaries WHERE level='project'",
-        -1, &st, nullptr);
-    CHECK(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1);
-    CHECK(sqlite3_column_type(st, 1) == SQLITE_NULL);  // session-unscoped
-    sqlite3_finalize(st);
-    sqlite3_close(raw);
-
-    // watermark advance is idempotent / monotonic bookkeeping -- exercised
-    // via advance_session_boundary_watermark + a fresh
-    // sessions_needing_close_boundary() call. With everything already
-    // consumed above, calling it now with a turn_id shouldn't throw.
-    db.advance_session_boundary_watermark(t4);
-    db.advance_project_boundary_watermark(t4);
-
-    db.close();
-    cleanup();
-}
-
-// Regression: sessions_needing_close_boundary() must NOT re-close a run
-// that already has a session summary covering it, even when the boundary
-// watermark is zero/unset (e.g. right after a schema migration that never
-// stamped the watermark key -- get_watermark() then defaults to 0).
-//
-// Reid's invariant: "there should not be an automatic lookback to do any
-// session summary before the last session summary." The watermark is a
-// belt-and-suspenders optimization; correctness must come structurally
-// from the summaries that already exist, not from the watermark value.
-//
-// Pre-fix behavior (the bug): watermark=0 -> every historical closed run
-// (last_turn_id > 0) re-qualifies -> the housekeeping scan re-summarizes
-// all of session history, one duplicate level='session' row per tick.
-void test_session_close_no_lookback_before_existing_summary(ragger::Embedder& emb) {
-    cleanup();
-    ragger::sqlite::Backend db(emb, TEMP_DB);
-
-    const std::string G1 = "already-summarized-session";
-    const std::string G2 = "later-session";
-
-    // A closed run for G1: two consecutive turns, then a turn in a DIFFERENT
-    // session (G2) which edge-closes G1's run and becomes the open tail.
-    int t1 = db.store_turn("Q1", "A1", "memo", false, G1, "2026-03-01 10:00:00");
-    int t2 = db.store_turn("Q2", "A2", "memo", false, G1, "2026-03-01 10:00:05");
-    CHECK(db.finalize_turn_summary(t1, "Turn one.", "memo"));
-    CHECK(db.finalize_turn_summary(t2, "Turn two.", "memo"));
-    (void)db.store_turn("Q3", "A3", "memo", false, G2, "2026-03-01 11:00:00");
-
-    auto first_ts = ragger::parse_db_timestamp("2026-03-01 10:00:00");
-    auto last_ts  = ragger::parse_db_timestamp("2026-03-01 10:00:05");
-    CHECK(first_ts.has_value() && last_ts.has_value());
-
-    // G1's run has already been summarized once (the normal, correct close).
-    int s1 = db.store_session_summary("G1 run rollup.", "memo", G1,
-                                      static_cast<int64_t>(*first_ts),
-                                      static_cast<int64_t>(*last_ts));
-    CHECK(s1 > 0);
-
-    // Simulate the post-migration state: watermark is 0 (never stamped).
-    db.advance_session_boundary_watermark(0);
-
-    // The scan must NOT return G1's already-summarized run. (G2's run is the
-    // open tail -- excluded by the MAX(grp) rule regardless.)
-    auto runs = db.sessions_needing_close_boundary();
-    for (const auto& r : runs) {
-        CHECK(r.session_guid != G1 &&
-               "already-summarized run re-closed with zeroed watermark (lookback bug)");
-    }
-
-    db.close();
-    cleanup();
-}
-
 void test_path_normalization(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
@@ -1620,7 +1417,10 @@ static long long p1_scalar_int(sqlite3* raw, const std::string& sql) {
 static std::string p1_scalar_text(sqlite3* raw, const std::string& sql) {
     sqlite3_stmt* st = nullptr;
     CHECK(sqlite3_prepare_v2(raw, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
-    CHECK(sqlite3_step(st) == SQLITE_ROW);
+    if (sqlite3_step(st) != SQLITE_ROW) {
+        std::println("  p1_scalar_text NO ROW: {}", sql);
+        CHECK(false);
+    }
     const unsigned char* t = sqlite3_column_text(st, 0);
     std::string v = t ? reinterpret_cast<const char*>(t) : "<NULL>";
     sqlite3_finalize(st);
@@ -1637,6 +1437,15 @@ static int p1_make_turn_summary(ragger::sqlite::Backend& db, const std::string& 
     sqlite3_close(raw);
     return id;
 }
+// PHASE5: "%F %T" local wall-time -> epoch seconds (matches resolve_epoch's
+// localtime interpretation, which is what store_turn/episodes store).
+static long long p5_epoch(const std::string& ts) {
+    std::tm tm{};
+    strptime(ts.c_str(), "%Y-%m-%d %H:%M:%S", &tm);
+    tm.tm_isdst = -1;                              // let mktime pick DST (PDT etc.)
+    return static_cast<long long>(mktime(&tm));   // localtime, like resolve_epoch
+}
+
 static bool p1_throws_invalid(ragger::sqlite::Backend& db, const ragger::DecisionInput& in) {
     try { db.store_structured_decision(in); }
     catch (const std::invalid_argument&) { return true; }
@@ -1850,7 +1659,10 @@ void test_orphan_turn_summary_protected(ragger::Embedder& emb) {
 
 // A hand-built 0.16-shaped DB must migrate to 0.17: new columns in canonical
 // order, stray status words moved into tags, evidence table + trigger present,
-// existing decisions_terms rows intact.
+// existing decisions_terms rows intact. PHASE5 extends it to cover episodes
+// (ids/spans moved out of summaries), the turn_summaries rebuild (episode_id
+// backfill incl. cross-session same-second collision), watermarks, and the
+// seq_save mechanism.
 void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
     cleanup();
     {
@@ -1859,6 +1671,8 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
         const char* ddl = R"(
             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             INSERT INTO settings VALUES ('db_version', '0.16');
+            INSERT INTO settings VALUES ('session_boundary_watermark_turn_id', '99');
+            INSERT INTO settings VALUES ('project_boundary_watermark_turn_id', '98');
             CREATE TABLE turns (
                 turn_id INTEGER PRIMARY KEY AUTOINCREMENT, user_text TEXT NOT NULL,
                 assistant_text TEXT, model_id INTEGER, session_id INTEGER,
@@ -1896,9 +1710,32 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
                 unigram_count INTEGER NOT NULL DEFAULT 0,
                 bigram_count INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER, embedding BLOB);
-            INSERT INTO summaries (text, level, tags, session_id, unigram_count) VALUES
-                ('episode one', 'episode', '', 1, 7),
-                ('note two',    'session', 'x', 2, 3);
+            -- Two episodes with OVERLAPPING wall-clock spans, one per
+            -- session: the backfill must never cross-assign.
+            INSERT INTO summaries (text, level, tags, session_id, unigram_count,
+                                   created_at, updated_at) VALUES
+                ('episode one', 'episode', '', 1, 7, 1700000100, 1700000300),
+                ('episode two', 'episode', '', 2, 5, 1700000150, 1700000250),
+                ('note two',    'session', 'x', 2, 3, 1700000200, 1700000200),
+                ('legacy proj', 'project', '', 1, 4, 1700000200, 1700000200);
+            CREATE TABLE turn_summaries (
+                turn_summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                text TEXT,
+                turn_id INTEGER REFERENCES turns(turn_id) ON DELETE SET NULL,
+                session_id INTEGER REFERENCES sessions(session_id),
+                turn_model_id INTEGER, summary_model_id INTEGER,
+                turn_datetime INTEGER NOT NULL,
+                summarized_on INTEGER NOT NULL DEFAULT (unixepoch()),
+                unigram_count INTEGER NOT NULL DEFAULT 0,
+                bigram_count INTEGER NOT NULL DEFAULT 0,
+                embedding_version INTEGER, embedding BLOB);
+            INSERT INTO turn_summaries (text, session_id, turn_datetime) VALUES
+                ('in span A',      1, 1700000200),  -- -> episode one
+                ('in span B',      2, 1700000200),  -- -> episode two (collision)
+                ('after spans',    1, 1700000900),  -- NULL (outside)
+                ('',               1, 1700000200),  -- NULL (marker)
+                (NULL,             1, 1700000200),  -- NULL (null text)
+                ('no session',  NULL, 1700000200);  -- NULL (no session)
             CREATE TABLE document_sources (
                 document_source_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT, path TEXT, year INTEGER,
@@ -1910,6 +1747,11 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
                        ('Empty',    '',   NULL, '', 1760000002);
         )";
         CHECK(sqlite3_exec(raw, ddl, nullptr, nullptr, nullptr) == SQLITE_OK);
+        // Seed the AUTOINCREMENT watermark ABOVE MAX(id): rows were deleted
+        // in the fixture's "past life"; the rebuild must not restart below it.
+        CHECK(sqlite3_exec(raw,
+            "UPDATE sqlite_sequence SET seq = 42 WHERE name = 'turn_summaries'",
+            nullptr, nullptr, nullptr) == SQLITE_OK);
         sqlite3_close(raw);
     }
     {
@@ -1938,8 +1780,36 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = 'projects'") == 0);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='insights_view'") == 1);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_insights_status'") == 1);
+    // PHASE5: episodes MOVED out of summaries (ids preserved, span = old
+    // created_at/updated_at); only the session/project rollups remain.
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM summaries") == 2);
-    CHECK(p1_scalar_int(raw, "SELECT unigram_count FROM summaries WHERE text = 'episode one'") == 7);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM summaries WHERE level = 'episode'") == 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM episodes") == 2);
+    CHECK(p1_scalar_text(raw, "SELECT episode_id || '|' || span_start || '-' || span_end || '|' || unigram_count "
+                              "FROM episodes WHERE text = 'episode one'") == "1|1700000100-1700000300|2");  // count recomputed by the leg's final reindex
+    CHECK(p1_scalar_text(raw, "SELECT episode_id || '|' || span_start || '-' || span_end || '|' || unigram_count "
+                              "FROM episodes WHERE text = 'episode two'") == "2|1700000150-1700000250|2");
+    // episode_id backfill: in-span rows get their OWN session's episode even
+    // when the other session's span covers the same second; marker, NULL-text,
+    // after-span, and no-session rows stay NULL.
+    CHECK(p1_scalar_text(raw, "SELECT ifnull(episode_id,'NULL') FROM turn_summaries WHERE text = 'in span A'") == "1");
+    CHECK(p1_scalar_text(raw, "SELECT ifnull(episode_id,'NULL') FROM turn_summaries WHERE text = 'in span B'") == "2");
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turn_summaries WHERE episode_id IS NOT NULL") == 2);
+    // turn_summaries rebuilt in canonical column order with episode_id.
+    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('turn_summaries') WHERE cid = 4") == "episode_id");
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_table_info('turn_summaries')") == 13);
+    // session_id FK gained ON DELETE SET NULL.
+    CHECK(p1_scalar_text(raw, "SELECT on_delete FROM pragma_foreign_key_list('turn_summaries') WHERE \"table\" = 'sessions'") == "SET NULL");
+    // The seeded AUTOINCREMENT watermark (42 > MAX(id)=6) survived the
+    // rebuild — exactly one row (INSERT into sqlite_sequence would append a
+    // duplicate; the restore must UPDATE).
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_sequence WHERE name = 'turn_summaries'") == 1);
+    CHECK(p1_scalar_int(raw, "SELECT seq FROM sqlite_sequence WHERE name = 'turn_summaries'") == 42);
+    // Watermark settings rows deleted with the rollup machinery.
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM settings WHERE key LIKE '%boundary_watermark_turn_id'") == 0);
+    // All-table reindex ran: junctions consistent, episodes indexed.
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turn_summaries_terms WHERE turn_summary_id NOT IN (SELECT turn_summary_id FROM turn_summaries)") == 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM episodes_terms") > 0);
     // No stray rebuild tables / repointed REFERENCES (legacy_alter_table trap).
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%_rebuild%'") == 0);
     // document_sources.path is unique: pathless/empty sources got their own
@@ -2768,16 +2638,30 @@ void test_p4_timeline_order_and_paging(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
 
-    // Five episodes, one per "session", spaced a day apart. store_summary's
-    // source_timestamp override sets created_at exactly.
+    // Five episodes, one per "session", spaced a day apart (PHASE5: episodes
+    // live in their own table; close each via store_episode_close around a
+    // single seeded member).
     const std::vector<std::string> days = {
         "2026-04-01 10:00:00", "2026-04-02 10:00:00", "2026-04-03 10:00:00",
         "2026-04-04 10:00:00", "2026-04-05 10:00:00"};
-    std::vector<int> ids;
     for (size_t i = 0; i < days.size(); ++i) {
         const std::string guid = "p4tl-" + std::to_string(i);
-        ids.push_back(db.store_summary("Timeline episode " + std::to_string(i),
-                                       "episode", "summarizer-model", guid, days[i]));
+        const int t = db.store_turn("p4tl q" + std::to_string(i),
+                                    "p4tl answer " + std::string(60, 'a') + std::to_string(i),
+                                    "test-model", false, guid, days[i]);
+        CHECK(db.finalize_turn_summary(t, "p4tl summary " + std::to_string(i), "summarizer-model"));
+        sqlite3* raw = p1_open_raw();
+        const int tsid = static_cast<int>(p1_scalar_int(raw, std::format(
+            "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = {}", t)));
+        sqlite3_close(raw);
+        ragger::EpisodeClose ec;
+        ec.text         = "Timeline episode " + std::to_string(i);
+        ec.model_name   = "summarizer-model";
+        ec.session_guid = guid;
+        ec.span_start   = p5_epoch(days[i]);
+        ec.span_end     = p5_epoch(days[i]);
+        ec.member_turn_summary_ids = {tsid};
+        CHECK(db.store_episode_close(ec) > 0);
     }
 
     ragger::TimelineQuery q;
@@ -2854,22 +2738,43 @@ void test_p4_timeline_order_and_paging(ragger::Embedder& emb) {
     cleanup();
 }
 
-// Step 1: granularity=session returns the session summary when present, and
-// the newest episode when not (never requires session summaries).
+// PHASE5 C.3: granularity=session returns ONE ROW PER SESSION in range —
+// {session_id, guid, name, started_on, ended_on, episodes, snippet} — and
+// never reads summaries. Sessions with no turns still appear (NULL bounds).
 void test_p4_timeline_session_fallback(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
 
-    // Session A: two episodes + a session summary.
     const std::string ga = "p4sf-a";
-    db.store_summary("A episode one", "episode", "summarizer-model", ga, "2026-04-01 08:00:00");
-    db.store_summary("A episode two", "episode", "summarizer-model", ga, "2026-04-02 08:00:00");
-    db.store_summary("A session wrap", "session", "summarizer-model", ga, "2026-04-02 12:00:00");
-    // Session B: episodes only.
     const std::string gb = "p4sf-b";
-    db.store_summary("B episode one", "episode", "summarizer-model", gb, "2026-04-03 08:00:00");
-    db.store_summary("B episode two", "episode", "summarizer-model", gb, "2026-04-04 08:00:00");
-    // Session C: nothing at all -> contributes no entry.
+    const std::string gc = "p4sf-c";
+
+    auto seed = [&](const std::string& guid, const std::string& day, int idx) {
+        const std::string stamp = day + " 08:00:00";
+        const int t = db.store_turn("p4sf q" + guid + std::to_string(idx),
+                                    "p4sf answer " + std::string(60, 'b') + guid + std::to_string(idx),
+                                    "test-model", false, guid, stamp);
+        CHECK(db.finalize_turn_summary(t, "p4sf summary " + guid + std::to_string(idx), "summarizer-model"));
+        sqlite3* raw = p1_open_raw();
+        const int tsid = static_cast<int>(p1_scalar_int(raw, std::format(
+            "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = {}", t)));
+        sqlite3_close(raw);
+        ragger::EpisodeClose ec;
+        ec.text         = guid + " episode " + std::to_string(idx);
+        ec.model_name   = "summarizer-model";
+        ec.session_guid = guid;
+        ec.span_start   = p5_epoch(stamp);
+        ec.span_end     = p5_epoch(stamp);
+        ec.member_turn_summary_ids = {tsid};
+        CHECK(db.store_episode_close(ec) > 0);
+    };
+
+    // Session A: two episodes (04-01, 04-02). Session B: two (04-03, 04-04).
+    seed(ga, "2026-04-01", 0);
+    seed(ga, "2026-04-02", 1);
+    seed(gb, "2026-04-03", 0);
+    seed(gb, "2026-04-04", 1);
+    // Session C: no turns at all -> still one row, NULL bounds, 0 episodes.
     {
         sqlite3* raw = p1_open_raw();
         sqlite3_stmt* st = nullptr;
@@ -2883,12 +2788,30 @@ void test_p4_timeline_session_fallback(ragger::Embedder& emb) {
     ragger::TimelineQuery q;
     q.granularity = "session";
     auto page = db.agent_timeline(q);
-    CHECK(page["items"].size() == 2);   // A and B only
-    // Newest first: B (its newest episode, 04-04) then A (session summary 04-02).
-    CHECK(page["items"][0]["text"].get<std::string>() == "B episode two");
-    CHECK(page["items"][0]["session"].get<std::string>() == gb);
-    CHECK(page["items"][1]["text"].get<std::string>() == "A session wrap");
-    CHECK(page["items"][1]["session"].get<std::string>() == ga);
+    CHECK(page["items"].size() == 3);   // one row per session, always
+    // Newest first by started_on: B (04-03) then A (04-01) then C (no span).
+    CHECK(page["items"][0]["guid"].get<std::string>() == gb);
+    CHECK(page["items"][0]["episodes"].get<int>() == 2);
+    CHECK(page["items"][0]["snippet"].get<std::string>() == "p4sf-b episode 1");
+    CHECK(page["items"][1]["guid"].get<std::string>() == ga);
+    CHECK(page["items"][1]["episodes"].get<int>() == 2);
+    CHECK(page["items"][1]["snippet"].get<std::string>() == "p4sf-a episode 1");
+    CHECK(page["items"][2]["guid"].get<std::string>() == gc);
+    CHECK(page["items"][2]["episodes"].get<int>() == 0);
+    CHECK(page["items"][2]["snippet"].get<std::string>() == "");
+    CHECK(page["items"][2]["started_on"].is_null());
+    CHECK(page["items"][2]["ended_on"].is_null());
+    // started_on/ended_on rendered for sessions with turns.
+    CHECK(!page["items"][0]["started_on"].is_null());
+
+    // Date filter on sessions matches span overlap: since=04-02 keeps B
+    // (span 04-03..04-04) but drops A (span 04-01..04-02 08:00 < since).
+    ragger::TimelineQuery w;
+    w.granularity = "session";
+    w.since = "2026-04-02 12:00:00";
+    auto wp = db.agent_timeline(w);
+    CHECK(wp["items"].size() == 1);
+    CHECK(wp["items"][0]["guid"].get<std::string>() == gb);
 
     db.close();
     cleanup();
@@ -3541,11 +3464,12 @@ void p2_test_db_version_gate(ragger::Embedder& emb) {
 }
 
 // PHASE3 Step 3: the agent-layer set derived from the registry must remain
-// exactly the six layers agent_search validates today.
+// exactly the layers agent_search validates today (PHASE5 adds `episode`).
 void p3_test_known_layers() {
     std::println("  p3_test_known_layers...");
     const std::set<std::string> expected = {
-        "turn", "turn_summary", "summary", "document", "decision", "insight"};
+        "turn", "turn_summary", "summary", "document", "decision", "insight",
+        "episode"};
     std::set<std::string> got;
     for (const auto& t : ragger::sqlite::kTextTables)
         if (t.layer && *t.layer) got.insert(t.layer);
@@ -3808,6 +3732,292 @@ void p4_session_span(ragger::Embedder& emb) {
     std::println(" OK");
 }
 
+// PHASE5 E.1/E.2: store_episode_close contract + episode reads.
+static std::vector<int> p5_seed_members(ragger::sqlite::Backend& db,
+                                        const std::string& guid,
+                                        const std::vector<std::string>& stamps) {
+    std::vector<int> ids;
+    for (size_t i = 0; i < stamps.size(); ++i) {
+        const int t = db.store_turn("p5 q" + guid + std::to_string(i),
+                                    "p5 answer " + std::string(60, 'c') + guid + std::to_string(i),
+                                    "test-model", false, guid, stamps[i]);
+        CHECK(db.finalize_turn_summary(t, "p5 summary " + guid + std::to_string(i),
+                                       "summarizer-model"));
+        sqlite3* raw = p1_open_raw();
+        ids.push_back(static_cast<int>(p1_scalar_int(raw, std::format(
+            "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = {}", t))));
+        sqlite3_close(raw);
+    }
+    return ids;
+}
+
+void p5_test_episode_close(ragger::Embedder& emb) {
+    std::println("  p5_test_episode_close...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    const std::string ga = "p5ec-a", gb = "p5ec-b";
+    auto m = p5_seed_members(db, ga, {"2026-05-01 10:00:00", "2026-05-01 10:05:00",
+                                      "2026-05-01 10:10:00"});
+    CHECK(m.size() == 3);
+
+    // (a) happy path: episode row + membership + terms + last_episode_end.
+    ragger::EpisodeClose ec;
+    ec.text = "p5ec first episode";
+    ec.model_name = "summarizer-model";
+    ec.session_guid = ga;
+    ec.span_start = p5_epoch("2026-05-01 10:00:00");
+    ec.span_end   = p5_epoch("2026-05-01 10:10:00");
+    ec.member_turn_summary_ids = m;
+    const int ep = db.store_episode_close(ec);
+    CHECK(ep > 0);
+    {
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM episodes") == 1);
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turn_summaries WHERE episode_id = "
+                                 + std::to_string(ep)) == 3);
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM episodes_terms WHERE episode_id = "
+                                 + std::to_string(ep)) > 0);
+        CHECK(p1_scalar_text(raw, "SELECT span_start || '-' || span_end FROM episodes "
+                                  "WHERE episode_id = " + std::to_string(ep)) ==
+              std::to_string(ec.span_start) + "-" + std::to_string(ec.span_end));
+        sqlite3_close(raw);
+    }
+    CHECK(db.last_episode_end(ga) == "2026-05-01 10:10:00");
+
+    // (c) member already in an episode -> throws, nothing written.
+    {
+        ragger::EpisodeClose ec2 = ec;
+        ec2.text = "p5ec overlap attempt";
+        ec2.span_start = p5_epoch("2026-05-01 09:00:00");   // different key, same members
+        ec2.span_end   = p5_epoch("2026-05-01 10:10:00");
+        bool threw = false;
+        try { db.store_episode_close(ec2); } catch (const std::runtime_error&) { threw = true; }
+        CHECK(threw);
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM episodes") == 1);   // rolled back
+        sqlite3_close(raw);
+    }
+
+    // (b) member from ANOTHER session -> throws; no episode row, no member touched.
+    auto n = p5_seed_members(db, gb, {"2026-05-01 10:07:00"});
+    {
+        ragger::EpisodeClose ec3;
+        ec3.text = "p5ec foreign member";
+        ec3.model_name = "summarizer-model";
+        ec3.session_guid = ga;
+        ec3.span_start = p5_epoch("2026-05-01 11:00:00");
+        ec3.span_end   = p5_epoch("2026-05-01 11:00:00");
+        ec3.member_turn_summary_ids = {m[0], n[0]};   // m[0] already assigned too
+        bool threw = false;
+        try { db.store_episode_close(ec3); } catch (const std::runtime_error&) { threw = true; }
+        CHECK(threw);
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM episodes") == 1);
+        CHECK(p1_scalar_text(raw, "SELECT ifnull(episode_id,'NULL') FROM turn_summaries "
+                                  "WHERE turn_summary_id = " + std::to_string(n[0])) == "NULL");
+        sqlite3_close(raw);
+    }
+
+    // (d) marker row (text = '') as member -> throws.
+    {
+        const int t = db.store_turn("p5ec marker q", "p5ec marker answer " + std::string(60, 'd'),
+                                    "test-model", false, ga, "2026-05-01 12:00:00");
+        CHECK(db.mark_turn_summarized(t, "bad"));
+        sqlite3* raw = p1_open_raw();
+        const int marker = static_cast<int>(p1_scalar_int(raw, std::format(
+            "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = {}", t)));
+        sqlite3_close(raw);
+        ragger::EpisodeClose ec4;
+        ec4.text = "p5ec marker member";
+        ec4.model_name = "summarizer-model";
+        ec4.session_guid = ga;
+        ec4.span_start = p5_epoch("2026-05-01 12:00:00");
+        ec4.span_end   = p5_epoch("2026-05-01 12:00:00");
+        ec4.member_turn_summary_ids = {marker};
+        bool threw = false;
+        try { db.store_episode_close(ec4); } catch (const std::runtime_error&) { threw = true; }
+        CHECK(threw);
+        sqlite3* r2 = p1_open_raw();
+        CHECK(p1_scalar_int(r2, "SELECT COUNT(*) FROM episodes") == 1);
+        sqlite3_close(r2);
+    }
+
+    // (e) second close with the SAME (session, span_start) -> returns 0,
+    // one episode row (unique key, "already closed", not an error).
+    {
+        ragger::EpisodeClose ec5;
+        ec5.text = "p5ec duplicate span";
+        ec5.model_name = "summarizer-model";
+        ec5.session_guid = ga;
+        ec5.span_start = ec.span_start;
+        ec5.span_end   = ec.span_end;
+        ec5.member_turn_summary_ids = {n[0]};
+        CHECK(db.store_episode_close(ec5) == 0);
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM episodes") == 1);
+        // Unassigned: n[0] (the duplicate attempt rolled back) + the (d) marker row.
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turn_summaries WHERE episode_id IS NULL") == 2);
+        sqlite3_close(raw);
+    }
+
+    // Validation rejects: empty text / empty members / inverted span.
+    {
+        ragger::EpisodeClose bad;
+        bad.session_guid = ga; bad.span_start = 1; bad.span_end = 2;
+        bad.member_turn_summary_ids = {m[1]};
+        bool threw = false;
+        try { db.store_episode_close(bad); } catch (const std::invalid_argument&) { threw = true; }
+        CHECK(threw);   // empty text
+        bad.text = "x"; bad.member_turn_summary_ids.clear();
+        threw = false;
+        try { db.store_episode_close(bad); } catch (const std::invalid_argument&) { threw = true; }
+        CHECK(threw);   // no members
+        bad.member_turn_summary_ids = {m[1]}; bad.span_start = 5; bad.span_end = 4;
+        threw = false;
+        try { db.store_episode_close(bad); } catch (const std::invalid_argument&) { threw = true; }
+        CHECK(threw);   // inverted span
+    }
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+void p5_test_episodes_needing_close(ragger::Embedder& emb) {
+    std::println("  p5_test_episodes_needing_close...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    // Old (idle) turns everywhere: 2020 timestamps vs idle_minutes=60.
+    const std::string gq = "p5nc-queued", gm = "p5nc-marker", gc = "p5nc-closed";
+
+    // gq: content summary after (no) episode -> queued.
+    auto q = p5_seed_members(db, gq, {"2020-01-01 10:00:00"});
+    // gm: ONLY a marker row after -> NOT queued (the verified bug).
+    {
+        const int t = db.store_turn("p5nc marker q", "p5nc marker answer " + std::string(60, 'e'),
+                                    "test-model", false, gm, "2020-01-01 10:00:00");
+        CHECK(db.mark_turn_summarized(t, "bad"));
+    }
+    auto closes = db.episodes_needing_close(60);
+    CHECK(std::find(closes.begin(), closes.end(), gq) != closes.end());
+    CHECK(std::find(closes.begin(), closes.end(), gm) == closes.end());
+
+    // gc: summary covered by a closed episode -> NOT queued.
+    auto c = p5_seed_members(db, gc, {"2020-01-01 10:00:00"});
+    {
+        ragger::EpisodeClose ec;
+        ec.text = "p5nc closed"; ec.model_name = "summarizer-model";
+        ec.session_guid = gc;
+        ec.span_start = p5_epoch("2020-01-01 10:00:00");
+        ec.span_end   = p5_epoch("2020-01-01 10:00:00");
+        ec.member_turn_summary_ids = c;
+        CHECK(db.store_episode_close(ec) > 0);
+    }
+    closes = db.episodes_needing_close(60);
+    CHECK(std::find(closes.begin(), closes.end(), gc) == closes.end());
+    // l2_summaries_since: nothing after the episode end for gc; content-only
+    // rows (no markers) for gq since ''.
+    CHECK(db.l2_summaries_since(gc, db.last_episode_end(gc)).empty());
+    auto since_all = db.l2_summaries_since(gq, "");
+    CHECK(since_all.size() == 1);
+    CHECK(since_all[0].text == "p5 summary " + gq + "0");
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+void p5_test_episode_reads(ragger::Embedder& emb) {
+    std::println("  p5_test_episode_reads...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    // Session A: episode spanning 09:00..11:00 with two members. Session B:
+    // a turn summary at 10:05 — INSIDE A's span (the same-second /
+    // cross-session collision the old BETWEEN heuristic mis-assigned).
+    const std::string ga = "p5er-a", gb = "p5er-b";
+    auto a = p5_seed_members(db, ga, {"2026-06-01 09:00:00", "2026-06-01 11:00:00"});
+    auto b = p5_seed_members(db, gb, {"2026-06-01 10:05:00"});
+    ragger::EpisodeClose ec;
+    ec.text = "p5er episode A"; ec.model_name = "summarizer-model";
+    ec.session_guid = ga;
+    ec.span_start = p5_epoch("2026-06-01 09:00:00");
+    ec.span_end   = p5_epoch("2026-06-01 11:00:00");
+    ec.member_turn_summary_ids = a;
+    const int ep = db.store_episode_close(ec);
+    CHECK(ep > 0);
+
+    // (f) expand=sources returns EXACTLY the recorded members.
+    {
+        ragger::AgentGetQuery g;
+        g.ids = {"episode:" + std::to_string(ep)};
+        g.expand = "sources";
+        auto items = db.agent_get(g);
+        CHECK(items["items"].size() == 1);
+        const auto& item = items["items"][0];
+        CHECK(item.contains("expanded"));
+        CHECK(item["expanded"].size() == 2);
+        for (const auto& e : item["expanded"]) {
+            const int id = e["id"].get<std::string>() == "turn_summary:" + std::to_string(a[0])
+                               ? a[0] : a[1];
+            CHECK(id == a[0] || id == a[1]);
+        }
+    }
+
+    // (i) episode:N fetch shape + update rejection.
+    {
+        ragger::AgentGetQuery g;
+        g.ids = {"episode:" + std::to_string(ep)};
+        auto items = db.agent_get(g);
+        const auto& row = items["items"][0];
+        CHECK(row["layer"] == "episode");
+        CHECK(row["text"] == "p5er episode A");
+        CHECK(row["session"] == ga);
+        CHECK(row["span_start"].get<std::string>() == "2026-06-01 09:00:00");
+        CHECK(row["span_end"].get<std::string>() == "2026-06-01 11:00:00");
+
+        ragger::UpdateRequest r;
+        r.id = "episode:" + std::to_string(ep);
+        r.tags = "x";
+        bool threw = false;
+        try { db.agent_update(r); }
+        catch (const std::invalid_argument& e) {
+            threw = true;
+            CHECK(std::string(e.what()) == "episodes are immutable");
+        }
+        CHECK(threw);
+    }
+
+    // (h) span-overlap date filter: since=10:30 (inside the span, after
+    // span_start) still returns the episode.
+    {
+        ragger::TimelineQuery q;
+        q.granularity = "episode";
+        q.since = "2026-06-01 10:30:00";
+        auto page = db.agent_timeline(q);
+        CHECK(page["items"].size() == 1);
+        CHECK(page["items"][0]["id"].get<std::string>() == "episode:" + std::to_string(ep));
+    }
+
+    // Episode corpus in search: layer=episode hits.
+    {
+        ragger::AgentSearchQuery q;
+        q.query = "p5er episode";
+        auto hits = db.agent_search(q);
+        bool found = false;
+        for (const auto& h : hits)
+            if (h.layer == "episode" && h.id == "episode:" + std::to_string(ep)) found = true;
+        CHECK(found);
+    }
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+
 int main() {
     TestEnv env("sqlite_backend");  // must be first: isolates from ~/.ragger
     // Need config for model dir
@@ -3861,8 +4071,6 @@ int main() {
     test_mark_turn_summarized_trivial_turn(emb);
     test_reset_abandoned_turn_summaries(emb);
     test_summary_primitives(emb);
-    test_episode_rollup_no_dup(emb);
-    test_session_close_no_lookback_before_existing_summary(emb);
     test_path_normalization(emb);
     test_structured_decision_basic(emb);
     test_structured_decision_rebuild_is_stable(emb);
@@ -3910,6 +4118,9 @@ int main() {
     p3_cache_pin(emb);
     p3_test_update_embedding(emb);
     p4_session_span(emb);
+    p5_test_episode_close(emb);
+    p5_test_episodes_needing_close(emb);
+    p5_test_episode_reads(emb);
 
     std::println("test_sqlite_backend: all passed");
     return 0;

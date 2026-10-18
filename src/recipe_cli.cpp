@@ -27,7 +27,7 @@ const char* layer_kind_name(LayerKind k) {
     switch (k) {
         case LayerKind::RawTurn:        return "raw_turn";
         case LayerKind::TurnSummary:    return "turn_summary";
-        case LayerKind::SessionSummary: return "session_summary";
+        case LayerKind::Episode:        return "episode";
         case LayerKind::ProjectSummary: return "project_summary";
         case LayerKind::Decisions:      return "decisions";
         case LayerKind::GeneralSearch:  return "general_search";

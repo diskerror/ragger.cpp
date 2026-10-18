@@ -14,10 +14,10 @@
  * is needed, and rebuilding embeddings under a new model preserves the
  * link. See `StorageBackend::unsummarized_turns()`.
  *
- * Fallback: when the inference endpoint is unreachable, the worker writes
- * a `draft`-tagged heuristic summary instead of dropping the turn. A
- * housekeeping pass (`rerun_drafts`) re-summarizes drafts whenever
- * inference is back.
+ * Fallback: when the inference endpoint is unreachable, the turn simply
+ * stays unsummarized and the next catch-up pass retries it (db 0.17: the
+ * old `draft`-tagged heuristic path is gone — nothing ever wrote drafts
+ * anymore, and the rollup layers they fed were removed).
  */
 #pragma once
 
@@ -48,8 +48,8 @@ public:
     ~SummarizerService();
 
     /// Start worker + pause-timer threads. Enqueues the catch-up scan
-    /// (un-summarized turns + draft rewrites + ready-to-close sessions)
-    /// before returning. Safe to call once.
+    /// (un-summarized turns + ready-to-close episodes) before returning.
+    /// Safe to call once.
     void start();
 
     /// Signal shutdown, wake worker, join threads. Safe to call multiple
@@ -66,25 +66,24 @@ public:
                       const std::string& session_guid,
                       const std::string& source_timestamp);
 
-    /// One-shot scan: enqueue every un-summarized turn (newest first),
-    /// every draft row, and any session ready to close. Called by start(),
-    /// by the pause timer, and by the housekeeping pass (SIGUSR1).
+    /// One-shot scan: enqueue every un-summarized turn (newest first) and
+    /// any session with an idle open episode. Called by start(), by the
+    /// pause timer, and by the housekeeping pass (SIGUSR1).
     void enqueue_catch_up();
 
 private:
-    enum class JobKind { L2Turn, DraftRetry, SessionClose, ProjectClose, EpisodeClose };
+    // db 0.17: the session/project rollup and draft job kinds are gone with
+    // session/project rollup layers (PHASE5 D.1).
+    enum class JobKind { L2Turn, EpisodeClose };
 
     struct Job {
         JobKind     kind;
         int         turn_id      = -1;
-        int         summary_id   = -1;
         std::string user_text;
         std::string assistant_text;
         std::string model_name;
         std::string session_guid;
         std::string source_timestamp;
-        int64_t     first_ts = 0;
-        int64_t     last_ts  = 0;
     };
 
     void worker_loop();
@@ -92,16 +91,7 @@ private:
 
     /// Handlers — each returns true on success, false on retryable error.
     bool handle_l2(const Job& j);
-    bool handle_session_close(const Job& j); // housekeeping-only: closed session-boundary run -> immutable rollup
-    bool handle_project_close(const Job& j); // housekeeping-only: closed project-boundary run -> immutable rollup
-    bool handle_episode_close(const Job& j); // close open episode → immutable L3a row
-    bool handle_draft(const Job& j);
-
-    /// Build a heuristic "draft" summary when inference is unreachable.
-    /// Concatenates trimmed user + assistant so the row carries something
-    /// retrievable; tagged `draft` for housekeeping to overwrite later.
-    static std::string heuristic_draft(const std::string& user_text,
-                                       const std::string& assistant_text);
+    bool handle_episode_close(const Job& j); // close open episode(s) -> immutable episodes rows
 
     StorageBackend&  backend_;
     std::function<std::shared_ptr<InferenceClient>()> inference_provider_;

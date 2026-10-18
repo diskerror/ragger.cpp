@@ -21,15 +21,6 @@ namespace ragger {
 
 namespace {
 
-// Cap the per-side text in the heuristic draft. Picked to keep the row
-// small and embedding-cheap; real summaries replace it later.
-constexpr size_t kDraftSideCap = 300;
-
-std::string trim_to(const std::string& s, size_t cap) {
-    if (s.size() <= cap) return s;
-    return s.substr(0, cap) + "...";
-}
-
 /// Cosine similarity between two float vectors of equal length.
 /// Returns 0 if either vector has zero magnitude.
 float cosine_similarity(const std::vector<float>& a, const std::vector<float>& b) {
@@ -82,7 +73,7 @@ void SummarizerService::enqueue_turn(int turn_id,
                                      const std::string& session_guid,
                                      const std::string& source_timestamp) {
     if (!running_.load() || assistant_text.empty()) return;
-    Job j{JobKind::L2Turn, turn_id, -1,
+    Job j{JobKind::L2Turn, turn_id,
           user_text, assistant_text, model_name, session_guid, source_timestamp};
     {
         std::lock_guard<std::mutex> lk(mutex_);
@@ -114,14 +105,14 @@ void SummarizerService::enqueue_catch_up() {
     // hundreds at once.
     const int catch_up_cap = std::max(1, config().catch_up_batch_size);
 
-    size_t turn_n = 0, draft_n = 0;
+    size_t turn_n = 0;
 
     // L2 catch-up: unsummarized turns (newest first), capped per tick.
     // `session_guid` is empty for anonymous turns (turns.session_id NULL);
     // we still summarize them — the L2 row just lands without a session.
     for (const auto& t : backend->unsummarized_turns(catch_up_cap)) {
         if (t.assistant_text.empty()) continue;  // partial turn, skip
-        Job j{JobKind::L2Turn, t.turn_id, -1,
+        Job j{JobKind::L2Turn, t.turn_id,
               t.user_text, t.assistant_text, t.model_name,
               t.session_guid, t.timestamp};
         {
@@ -129,15 +120,6 @@ void SummarizerService::enqueue_catch_up() {
             queue_.push_back(std::move(j));
         }
         ++turn_n;
-    }
-
-    // Draft retry: draft-tagged rows (housekeeping retry), same cap.
-    for (const auto& d : backend->draft_summaries(catch_up_cap)) {
-        Job j{JobKind::DraftRetry, -1, d.summary_id,
-              {}, {}, {}, d.session_guid, d.timestamp};
-        std::lock_guard<std::mutex> lk(mutex_);
-        queue_.push_back(std::move(j));
-        ++draft_n;
     }
 
     // Poison-abandon retry: delete "bad"-tagged turn_summaries rows so the
@@ -150,37 +132,12 @@ void SummarizerService::enqueue_catch_up() {
     size_t reset_n = static_cast<size_t>(
         backend->reset_abandoned_turn_summaries(catch_up_cap));
 
-    // Session boundary closes: housekeeping-only trigger (no fast-path from
-    // store_turn -- Reid's explicit design: summarization work spawns from
-    // turns but housekeeping is what catches/retries it reliably).
-    size_t sess_close_n = 0;
-    for (const auto& run : backend->sessions_needing_close_boundary()) {
-        Job j{JobKind::SessionClose, run.last_turn_id, -1, {}, {}, {}, run.session_guid, {}};
-        j.first_ts = run.first_ts;
-        j.last_ts  = run.last_ts;
-        std::lock_guard<std::mutex> lk(mutex_);
-        queue_.push_back(std::move(j));
-        ++sess_close_n;
-    }
-
-    // Project boundary closes: same housekeeping-only trigger.
-    size_t proj_close_n = 0;
-    for (const auto& run : backend->projects_needing_close_boundary(config().project_gap_days)) {
-        Job j{JobKind::ProjectClose, run.last_turn_id, -1, {}, {}, {}, {}, {}};
-        j.first_ts = run.first_ts;
-        j.last_ts  = run.last_ts;
-        std::lock_guard<std::mutex> lk(mutex_);
-        queue_.push_back(std::move(j));
-        ++proj_close_n;
-    }
-
-    // Episode close (EPISODE_PLAN Phase 1): every session whose open episode
-    // is idle past episode_idle_minutes. Each close cascades into the session
-    // and project rollups (Phase 2).
+    // Episode closes: every session whose open episode is idle past
+    // episode_idle_minutes (the only rollup layer left at 0.17).
     size_t ep_n = 0;
     const int idle_min = config().episode_idle_minutes;
     for (const auto& guid : backend->episodes_needing_close(idle_min)) {
-        Job j{JobKind::EpisodeClose, -1, -1,
+        Job j{JobKind::EpisodeClose, -1,
               {}, {}, {}, guid, {}};
         std::lock_guard<std::mutex> lk(mutex_);
         queue_.push_back(std::move(j));
@@ -188,14 +145,11 @@ void SummarizerService::enqueue_catch_up() {
     }
 
     Diskerror::Logger::info(std::format(
-        lang::MSG_SUMMARIZER_START, turn_n, draft_n, sess_close_n));
+        lang::MSG_SUMMARIZER_START, turn_n, ep_n));
     if (reset_n)
         Diskerror::Logger::info(std::format(
             "[summarizer] housekeeping reset {} poison-abandoned turn_summaries "
             "row(s) for retry", reset_n));
-    if (proj_close_n)
-        Diskerror::Logger::info(std::format(
-            "[summarizer] catch-up queued {} project close(s)", proj_close_n));
     if (ep_n)
         Diskerror::Logger::info(std::format(
             "[summarizer] catch-up queued {} episode close(s)", ep_n));
@@ -215,19 +169,14 @@ void SummarizerService::worker_loop() {
 
         try {
             switch (job.kind) {
-                case JobKind::L2Turn:           handle_l2(job);         break;
-                case JobKind::SessionClose:     handle_session_close(job); break;
-                case JobKind::ProjectClose:     handle_project_close(job); break;
-                case JobKind::EpisodeClose:     handle_episode_close(job); break;
-                case JobKind::DraftRetry:       handle_draft(job);      break;
+                case JobKind::L2Turn:       handle_l2(job);            break;
+                case JobKind::EpisodeClose: handle_episode_close(job); break;
             }
         } catch (const std::exception& e) {
-            if (job.kind == JobKind::DraftRetry)
-                Diskerror::Logger::warn(std::format(
-                    lang::WARN_SUMMARIZER_DRAFT, job.summary_id, e.what()));
-            else
-                Diskerror::Logger::warn(std::format(
-                    lang::WARN_SUMMARIZER_L2, job.turn_id, e.what()));
+            Diskerror::Logger::warn(std::format(
+                "[summarizer] job failed (kind={}, turn_id={}, session={}): {}",
+                static_cast<int>(job.kind), job.turn_id,
+                job.session_guid.empty() ? "-" : job.session_guid, e.what()));
         }
     }
 }
@@ -253,8 +202,7 @@ void SummarizerService::pause_timer_loop() {
         try {
             // Mop-up scan: anything the L2 worker hasn't picked up (a turn
             // captured during inference-down should still be queued for
-            // retry), plus session closures, plus draft rewrites once
-            // inference is back.
+            // retry), plus idle episode closes.
             enqueue_catch_up();
         } catch (const std::exception& e) {
             Diskerror::Logger::warn(std::format(
@@ -366,7 +314,8 @@ bool SummarizerService::handle_l2(const Job& j) {
         // No turn_summaries row is created on inference failure — the turn
         // stays in the unsummarized queue and the next catch-up pass retries.
         Diskerror::Logger::info(std::format(
-            lang::MSG_SUMMARIZER_DRAFT, display_guid, ts));
+            "[summarizer] L2 deferred (inference unreachable) for session {} at {}",
+            display_guid, ts));
         return false;
     }
 
@@ -386,91 +335,6 @@ bool SummarizerService::handle_l2(const Job& j) {
     Diskerror::Logger::info(std::format(
         lang::MSG_SUMMARIZER_L2, display_guid, ts));
 
-    // Phase 2: no per-turn running-L3 update. The session rollup is rebuilt
-    // only on boundaries (episode close / session end), driven from
-    // handle_episode_close — this is what kills the running-L3 churn that was
-    // snapshotting the same summary dozens of times.
-    return true;
-}
-
-// --------------------------------------------------------------------
-// Session boundary close (housekeeping-only trigger): a maximal run of
-// consecutive turns sharing one session_id, edge-detected the instant a
-// different session_id's turn arrives after it. Immutable INSERT of one
-// level='session' row per closed run -- no running-upsert, no status flip.
-// The watermark only advances on success (insert or nothing-to-summarize);
-// on failure the run is retried by the next housekeeping tick.
-// --------------------------------------------------------------------
-bool SummarizerService::handle_session_close(const Job& j) {
-    if (j.session_guid.empty()) return true;  // shouldn't happen, defensive
-
-    auto inf = inference_provider_ ? inference_provider_() : nullptr;  // once per job
-
-    auto texts = backend_.bounded_session_rollup_texts(j.session_guid, j.first_ts, j.last_ts);
-    if (texts.empty()) {
-        // Nothing to summarize (e.g. a run with only trivial/skipped turns) --
-        // still advance the watermark so this run isn't rescanned forever.
-        backend_.advance_session_boundary_watermark(j.turn_id /* = last_turn_id */);
-        return true;
-    }
-
-    const std::string summarizer_model =
-        inf ? inf->memory_model : "";
-
-    std::string summary;
-    if (inf) summary = summarize_texts(*inf, texts);
-    if (summary.empty()) return false;  // retry next housekeeping tick -- watermark NOT advanced
-
-    int id = backend_.store_session_summary(summary, summarizer_model, j.session_guid,
-                                            j.first_ts, j.last_ts);
-    if (id <= 0) {
-        Diskerror::Logger::warn(std::format(
-            "[summarizer] store_session_summary failed for session {} ({} -> {})",
-            j.session_guid, j.first_ts, j.last_ts));
-        return false;  // retry -- watermark NOT advanced
-    }
-
-    backend_.advance_session_boundary_watermark(j.turn_id /* = last_turn_id */);
-    Diskerror::Logger::info(std::format(
-        lang::MSG_SUMMARIZER_L3, j.session_guid));
-    return true;
-}
-
-// --------------------------------------------------------------------
-// Project boundary close (housekeeping-only trigger): a maximal run of
-// turns (any session) separated from the next by a >= project_gap_days
-// gap. Corpus = every level='session' row whose span falls entirely
-// within the closed run's [first_ts, last_ts]. Immutable INSERT of one
-// level='project' row per closed run, same watermark-on-success discipline
-// as handle_session_close.
-// --------------------------------------------------------------------
-bool SummarizerService::handle_project_close(const Job& j) {
-    auto inf = inference_provider_ ? inference_provider_() : nullptr;  // once per job
-
-    auto texts = backend_.bounded_project_rollup_texts(j.first_ts, j.last_ts);
-    if (texts.empty()) {
-        backend_.advance_project_boundary_watermark(j.turn_id /* = last_turn_id */);
-        return true;
-    }
-
-    const std::string summarizer_model =
-        inf ? inf->memory_model : "";
-
-    std::string summary;
-    if (inf) summary = summarize_texts(*inf, texts);
-    if (summary.empty()) return false;  // retry next housekeeping tick -- watermark NOT advanced
-
-    int id = backend_.store_project_summary(summary, summarizer_model, j.first_ts, j.last_ts);
-    if (id <= 0) {
-        Diskerror::Logger::warn(std::format(
-            "[summarizer] store_project_summary failed ({} -> {})",
-            j.first_ts, j.last_ts));
-        return false;  // retry -- watermark NOT advanced
-    }
-
-    backend_.advance_project_boundary_watermark(j.turn_id /* = last_turn_id */);
-    Diskerror::Logger::info(std::format(
-        "[summarizer] project boundary closed ({} -> {})", j.first_ts, j.last_ts));
     return true;
 }
 
@@ -542,8 +406,7 @@ bool SummarizerService::handle_episode_close(const Job& j) {
 
     struct EpisodeSegment {
         std::string summary;
-        std::string first_ts;
-        std::string last_ts;
+        size_t      start, end;   // candidate index range [start, end)
         size_t      turn_count;
     };
     std::vector<EpisodeSegment> segments;
@@ -567,23 +430,41 @@ bool SummarizerService::handle_episode_close(const Job& j) {
             summary = summarize_texts(*inf, texts);
         if (summary.empty()) return false;  // inference down — retry ALL next pass
 
-        segments.push_back({
-            std::move(summary),
-            candidates[start].timestamp,
-            candidates[end - 1].timestamp,
-            texts.size()
-        });
+        segments.push_back({std::move(summary), start, end, texts.size()});
     }
 
     if (segments.empty()) return true;
 
-    // Commit all segments — inference succeeded for each.
+    // Commit all segments in order (PHASE5 D.2): each close records the
+    // episode AND its membership atomically (store_episode_close). A 0
+    // return means the span was already closed (unique key) — log and move
+    // on, do not retry. An exception aborts the remaining segments for this
+    // session; the next tick re-derives candidates from the new
+    // last_episode_end and retries only what is left. Retry cost after a
+    // mid-loop failure is one more model call per uncommitted segment —
+    // accepted: inference already succeeded once, and each segment commits
+    // on its own so partial progress is durable.
     for (const auto& seg : segments) {
-        backend_.store_episode(seg.summary, summarizer_model, j.session_guid,
-                               seg.first_ts, seg.last_ts);
+        EpisodeClose ec;
+        ec.text         = seg.summary;
+        ec.model_name   = summarizer_model;
+        ec.session_guid = j.session_guid;
+        ec.span_start   = candidates[seg.start].epoch;
+        ec.span_end     = candidates[seg.end - 1].epoch;
+        for (size_t k = seg.start; k < seg.end; ++k)
+            ec.member_turn_summary_ids.push_back(candidates[k].turn_summary_id);
+
+        const int id = backend_.store_episode_close(ec);
+        if (id == 0) {
+            Diskerror::Logger::info(std::format(
+                "[summarizer] episode span already closed for session {} "
+                "({} -> {}) — skipped", j.session_guid,
+                ec.span_start, ec.span_end));
+            continue;
+        }
         Diskerror::Logger::info(std::format(
-            "[summarizer] episode closed for session {} ({} turns, {} → {})",
-            j.session_guid, seg.turn_count, seg.first_ts, seg.last_ts));
+            "[summarizer] episode closed for session {} ({} turns, {} -> {})",
+            j.session_guid, seg.turn_count, ec.span_start, ec.span_end));
     }
 
     if (segments.size() > 1)
@@ -591,57 +472,7 @@ bool SummarizerService::handle_episode_close(const Job& j) {
             "[summarizer] session {} split into {} episodes by similarity threshold",
             j.session_guid, segments.size()));
 
-    // Session/project rollups no longer cascade off episode close -- they
-    // close on their own boundary logic (session_id edge / time gap),
-    // scanned independently by the housekeeping tick (enqueue_catch_up).
     return true;
-}
-
-// --------------------------------------------------------------------
-// Draft retry: re-summarize a draft-tagged L2 row using inference. On
-// success, the row's text/embedding/tags are rewritten in place
-// (timestamp preserved — the chronology is what makes the link work).
-// On failure, the draft row stays; next catch-up will pick it up again.
-// --------------------------------------------------------------------
-bool SummarizerService::handle_draft(const Job& j) {
-    auto inf = inference_provider_ ? inference_provider_() : nullptr;  // once per job
-    if (j.summary_id <= 0 || !inf) return false;
-    auto* backend = &backend_;
-    if (!backend) return false;
-
-    // To re-summarize, we need the source turn. The draft row's
-    // (session_id, timestamp) pair points right at it.
-    const auto turns = backend->turns_by_session_desc(j.session_guid, /*limit=*/0);
-    auto it = std::find_if(turns.begin(), turns.end(),
-        [&](const TurnRecord& t) { return t.timestamp == j.source_timestamp; });
-    if (it == turns.end()) return false;  // turn vanished — drop the draft
-
-    // Apply the same strip as in handle_l2 to remove system-injected turns
-    std::string eff_user = is_system_injected_turn(it->user_text) ? std::string{} : it->user_text;
-
-    auto fresh = summarize_transcript(
-        *inf, {{ eff_user, it->assistant_text }});
-    if (fresh.empty()) return false;
-
-    // update_summary_text re-embeds + records the model. We then clear
-    // the `draft` tag so this row doesn't get re-enqueued forever.
-    if (!backend->update_summary_text(j.summary_id, fresh, it->model_name)) {
-        return false;
-    }
-    backend->set_summary_tags(j.summary_id, "");
-    Diskerror::Logger::info(std::format(
-        lang::MSG_SUMMARIZER_REDRAFT, j.summary_id));
-    return true;
-}
-
-std::string SummarizerService::heuristic_draft(const std::string& user_text,
-                                               const std::string& assistant_text) {
-    // Assistant-only turns (system-injected user side stripped upstream) emit
-    // just the assistant half — no empty "User:" prefix.
-    if (user_text.empty())
-        return "Assistant: " + trim_to(assistant_text, kDraftSideCap);
-    return "User: " + trim_to(user_text, kDraftSideCap) +
-           " | Assistant: " + trim_to(assistant_text, kDraftSideCap);
 }
 
 } // namespace ragger

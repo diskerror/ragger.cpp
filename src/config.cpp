@@ -332,10 +332,6 @@ static std::expected<Config, ConfigError> parse_config(std::istream& file) {
                 int v = std::stoi(val);
                 if (v > 0) cfg.catch_up_batch_size = v;
             }
-            else if (key == "project_gap_days") {
-                int v = std::stoi(val);
-                if (v > 0) cfg.project_gap_days = v;
-            }
             else if (key == "max_turn_failures") {
                 int v = std::stoi(val);
                 if (v >= 0) cfg.max_turn_failures = v;
@@ -524,7 +520,6 @@ int reload_config() {
     RELOAD(summary_pause_minutes);
     RELOAD(episode_idle_minutes);
     RELOAD(catch_up_batch_size);
-    RELOAD(project_gap_days);
     RELOAD(max_turn_failures);
     RELOAD(capture_turns);
     RELOAD(build_context);

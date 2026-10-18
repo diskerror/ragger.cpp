@@ -38,6 +38,8 @@ json Backend::Impl::agent_update(const UpdateRequest& req) {
         throw std::invalid_argument("bad handle: '" + req.id + "'");
 
     // Rule 2: agents can't modify turn / turn_summary / document rows.
+    if (layer == "episode")
+        throw std::invalid_argument("episodes are immutable");
     if (layer == "turn" || layer == "turn_summary" || layer == "document")
         throw std::invalid_argument(
             layer + " rows are not agent-editable");

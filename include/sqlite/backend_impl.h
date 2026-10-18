@@ -96,6 +96,7 @@ struct Backend::Impl {
     EmbeddingCache dec_cache_;       // decisions (L6)
     EmbeddingCache ins_cache_;       // insights (db 0.17)
     EmbeddingCache turn_cache_;      // turn_summaries (L2)
+    EmbeddingCache episode_cache_;   // episodes (db 0.17, PHASE5 B.3)
 
     // Serializes all public-API access (H1): two httplib thread pools, the
     // housekeeping timer, and the SummarizerService worker share one backend.
@@ -136,15 +137,6 @@ struct Backend::Impl {
     // before this key existed) -- returns "" in that case. Startup hard-gates
     // on this via kExpectedDbVersion below; there is no in-binary migration.
     static constexpr std::string_view kExpectedDbVersion = "0.17";
-
-    // Watermark keys for the boundary-detection housekeeping scans (see
-    // sessions_needing_close_boundary()/projects_needing_close_boundary()
-    // below). Persisted in the same `settings` key/value table as
-    // db_version, so a failed/skipped close never re-scans from scratch.
-    static constexpr std::string_view kSessionBoundaryWatermarkKey =
-        "session_boundary_watermark_turn_id";
-    static constexpr std::string_view kProjectBoundaryWatermarkKey =
-        "project_boundary_watermark_turn_id";
 
     std::string db_version();
 
@@ -323,7 +315,8 @@ struct Backend::Impl {
     void invalidate_dec_cache();
     void invalidate_ins_cache();
     void invalidate_turn_cache();
-    /// Drop all five warm caches (summaries, documents, decisions, insights,
+    void invalidate_episode_cache();
+    /// Drop all six warm caches (summaries, documents, decisions, insights,
     /// turns). Use after any write that can change rows across several tables
     /// (embedding backfill/rebuild) so no table's stale rows survive.
     void invalidate_all_caches();
@@ -367,6 +360,9 @@ struct Backend::Impl {
     // similarity matrix. Metadata carries source="turn_summary" plus
     // turn_id/session_id (turn_summaries has no tags/status/level columns).
     void ensure_turn_cache();
+    /// Episode corpus (db 0.17, PHASE5 B.3): loaded from `episodes` through
+    /// the shared load_cache(); marker rows (text='') never load.
+    void ensure_episode_cache();
 
     // --- agent API Phase 2 reads (src/sqlite/agent_read.cpp) ---
 
@@ -604,14 +600,6 @@ struct Backend::Impl {
     // or poison-abandon), never an in-progress sentinel.
     bool mark_turn_summarized(int turn_id, const std::string& model_name);
 
-    // Draft-tagged summary rows for re-summarization (housekeeping retry).
-    std::vector<DraftSummary> draft_summaries(int limit);
-
-    // Sessions whose newest turn is older than (now - pause_minutes) AND
-    // that have at least one non-draft L2 summary but no complete L3 yet.
-    // The summarizer's pause timer treats this set as "ready to finalize."
-    // Returns session GUIDs; anonymous (session_id NULL) turns are skipped.
-    std::vector<std::string> sessions_needing_close(int pause_minutes);
 
     // ---- episode layer (EPISODE_PLAN Phase 1) --------------------------
     // Most recent episode's span-end (stored in updated_at) for a session.
@@ -633,90 +621,29 @@ struct Backend::Impl {
     std::vector<EpisodeCandidateTurn> episode_candidate_turns(
             const std::string& session_guid, const std::string& since_ts);
 
-    // Insert one immutable level='episode' row: timestamp=first_ts (span
-    // start), updated_at=last_ts (span end). Mirrors store_summary.
-    int store_episode(const std::string& text, const std::string& model_name,
-                      const std::string& session_guid,
-                      const std::string& first_ts, const std::string& last_ts);
+    // Close an episode (PHASE5 B.1): insert one `episodes` row and set
+    // episode_id on every member turn_summary in ONE transaction — any bad
+    // member (other session, already assigned, marker, missing) rolls the
+    // whole close back. Unique-key collision on (session, span_start)
+    // returns 0. See storage_backend.h for the full contract.
+    int store_episode_close(const EpisodeClose& close);
 
-    // Sessions whose open episode is ready to close: they have >=1 non-draft
-    // L2 turn summary past the last episode's end, and their newest turn is
-    // older than idle_minutes. Returns session GUIDs.
+    // Sessions whose open episode is ready to close: they have >=1 non-empty
+    // L2 turn summary past the last episode's span_end, and their newest
+    // turn is older than idle_minutes. Returns session GUIDs.
     std::vector<std::string> episodes_needing_close(int idle_minutes);
 
-    // ---- Phase 2: boundary-triggered session/project rollups -----------
-    // All episode texts for a session, oldest-first. Corpus for the session
-    // rollup (episodes + any tail L2 turns are combined by the caller).
-    std::vector<std::string> episode_texts(const std::string& session_guid);
-
-    // Stamp updated_at = now for a running rollup row.
-    bool set_summary_updated_at(int summary_id);
-
-    // ---- boundary-detection watermark (settings key/value table) --------
-    int64_t get_watermark(const std::string& key);
-
-    void set_watermark(const std::string& key, int64_t turn_id);
-
-    // Maximal runs of consecutive (by turn_id) turns sharing the same
-    // non-NULL session_id, edge-detected via a running group id that
-    // increments whenever session_id changes from the previous row. The
-    // final/currently-open group (grp == MAX(grp)) is always excluded —
-    // it's still open because a future turn could extend it.
-    std::vector<ClosedRun> sessions_needing_close_boundary();
-
-    // Same shape as sessions_needing_close_boundary(), but grouped by a
-    // time gap (>= gap_days days) between consecutive turns (by turn_id)
-    // rather than a session_id change, and NOT restricted to non-NULL
-    // session_id (project runs span all turns, anonymous included).
-    std::vector<ClosedRun> projects_needing_close_boundary(int gap_days);
-
-    void advance_session_boundary_watermark(int turn_id);
-
-    void advance_project_boundary_watermark(int turn_id);
-
-    // Bounded text-gathering for a closed session run: episodes whose full
-    // span [created_at, COALESCE(updated_at,created_at)] lies entirely
-    // within [first_ts, last_ts] for this session_guid, plus trailing
-    // turn_summaries after the newest such episode's end (or from
-    // first_ts if there are none) up to last_ts. Unlike episode_texts()/
-    // l2_summaries_since() (unbounded above), this never reaches into a
-    // LATER run of the same session_guid.
-    std::vector<std::string> bounded_session_rollup_texts(
-            const std::string& session_guid, int64_t first_ts, int64_t last_ts);
-
-    // Bounded text-gathering for a closed project run: every level='session'
-    // row whose full span [created_at, COALESCE(updated_at,created_at)]
-    // lies entirely within [first_ts, last_ts], session-unscoped (a project
-    // run spans sessions), oldest-first.
-    std::vector<std::string> bounded_project_rollup_texts(
-            int64_t first_ts, int64_t last_ts);
-
-    // Insert one immutable level='session' row spanning a closed run.
-    // Mirrors store_episode's shape exactly, except created_at/updated_at
-    // are bound directly as epoch ints (ClosedRun already carries real
-    // epoch seconds — no resolve_epoch() round-trip needed).
-    int store_session_summary(const std::string& text, const std::string& model_name,
-                              const std::string& session_guid,
-                              int64_t first_ts, int64_t last_ts);
-
-    // Insert one immutable level='project' row spanning a closed run.
-    // Session-unscoped (session_id NULL). Otherwise mirrors store_episode.
-    int store_project_summary(const std::string& text, const std::string& model_name,
-                              int64_t first_ts, int64_t last_ts);
-    std::vector<TurnRecord> turns_by_session_desc(
-            const std::string& session_guid, int limit);
-
-    // Shared query: summaries for a session filtered by level, newest-first.
-    std::vector<SummaryRecord> summaries_by_level_desc(
-            const std::string& session_guid, const std::string& level, int limit);
-
-    // L2 (turn) summaries for a session, newest-first.
+    // L2 (turn) summaries for a session, newest-first (reads turn_summaries
+    // directly; PHASE5 B.5).
     std::vector<SummaryRecord> turn_summaries_by_session_desc(
             const std::string& session_guid, int limit);
 
-    // L3 (session) summaries for a session, newest-first.
-    std::vector<SummaryRecord> session_summaries_desc(
+    // This session's episodes, newest-first (span_start DESC).
+    std::vector<SummaryRecord> episodes_by_session_desc(
             const std::string& session_guid, int limit);
+    std::vector<TurnRecord> turns_by_session_desc(
+            const std::string& session_guid, int limit);
+
 
     // Exact-match existence check for import idempotency: same text +
     // same created_at timestamp already present in summaries. Used by

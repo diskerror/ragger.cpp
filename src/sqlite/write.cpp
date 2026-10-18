@@ -1165,77 +1165,17 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // Draft-tagged summary rows for re-summarization (housekeeping retry).
-    std::vector<DraftSummary> Backend::Impl::draft_summaries(int limit) {
-        std::vector<DraftSummary> out;
-        std::string sql =
-            "SELECT s.summary_id, s.level, COALESCE(ss.guid, ''), "
-            "       datetime(s.created_at,'unixepoch','localtime') "
-            "FROM summaries s "
-            "LEFT JOIN sessions ss ON s.session_id = ss.session_id "
-            "WHERE s.tags LIKE '%draft%' "
-            "ORDER BY s.created_at ASC, s.summary_id ASC";
-        if (limit > 0) sql += " LIMIT ?";
-        Stmt s(db, sql);
-        if (limit > 0) s.bind(1, limit);
-        while (s.step()) {
-            out.push_back({
-                s.column_int(0),
-                s.column_text(1),
-                s.column_text(2),
-                s.column_text(3)
-            });
-        }
-        return out;
-    }
-
-
-    // Sessions whose newest turn is older than (now - pause_minutes) AND
-    // that have at least one non-draft L2 summary but no complete L3 yet.
-    // The summarizer's pause timer treats this set as "ready to finalize."
-    // Returns session GUIDs; anonymous (session_id NULL) turns are skipped.
-    std::vector<std::string> Backend::Impl::sessions_needing_close(int pause_minutes) {
-        std::vector<std::string> out;
-        if (pause_minutes <= 0) return out;
-        const std::string cutoff =
-            std::format("datetime('now','localtime','-{} minutes')", pause_minutes);
-        std::string sql =
-            "SELECT ss.guid "
-            "FROM sessions ss "
-            // NOTE: sessions_needing_close() has no live callers as of the
-            // Phase-2 episode/session-rollup rework (see summarizer_service.cpp's
-            // "sessions_needing_close() path is retired" comment) -- this query
-            // is dead code today. Redirected to turn_summaries anyway (rather
-            // than left pointing at the now-empty summaries/level='turn' rows)
-            // so the function stays correct if it's ever revived.
-            "WHERE EXISTS (SELECT 1 FROM turn_summaries s2 "
-            "               WHERE s2.session_id = ss.session_id) "
-            "  AND (SELECT MAX(t.created_at) FROM turns t "
-            "        WHERE t.session_id = ss.session_id) < " + cutoff + " "
-            "  AND NOT EXISTS (SELECT 1 FROM summaries s "
-            "                   WHERE s.session_id = ss.session_id "
-            "                     AND s.level = 'session') "
-            "ORDER BY ss.session_id ASC";
-        Stmt s(db, sql);
-        while (s.step()) {
-            const auto g = s.column_text(0);
-            if (!g.empty()) out.push_back(g);
-        }
-        return out;
-    }
-
-
-    // ---- episode layer (EPISODE_PLAN Phase 1) --------------------------
-    // Most recent episode's span-end (stored in updated_at) for a session.
-    // Empty when the session has no episode rows yet.
+    // ---- episode layer (db 0.17) ----------------------------------------
+    // Most recent episode's span_end for a session, rendered "%F %T" local
+    // so callers/tests keep the historic shape. Empty when no episodes.
     std::string Backend::Impl::last_episode_end(const std::string& session_guid) {
         if (session_guid.empty()) return {};
         Stmt s(db,
-            "SELECT datetime(COALESCE(s.updated_at, s.created_at),'unixepoch','localtime') "
-            "FROM summaries s "
-            "JOIN sessions ss ON s.session_id = ss.session_id "
-            "WHERE ss.guid = ? AND s.level = 'episode' "
-            "ORDER BY s.created_at DESC, s.summary_id DESC LIMIT 1");
+            "SELECT datetime(e.span_end,'unixepoch','localtime') "
+            "FROM episodes e "
+            "JOIN sessions ss ON e.session_id = ss.session_id "
+            "WHERE ss.guid = ? "
+            "ORDER BY e.span_start DESC, e.episode_id DESC LIMIT 1");
         s.bind(1, session_guid);
         if (s.step()) return s.column_text(0);
         return {};
@@ -1321,61 +1261,100 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // Insert one immutable level='episode' row: timestamp=first_ts (span
-    // start), updated_at=last_ts (span end). Mirrors store_summary.
-    int Backend::Impl::store_episode(const std::string& text, const std::string& model_name,
-                      const std::string& session_guid,
-                      const std::string& first_ts, const std::string& last_ts) {
-        std::string t = normalize_path(text);
-        int model_id   = get_or_create_model(model_name);
-        int session_id = get_or_create_session(session_guid);
+    // Close an episode (PHASE5 B.1): one atomic episode + membership record.
+    // The contract ORDER is the point: validate -> embed (outside the txn) ->
+    // INSERT -> per-member UPDATE (all-or-nothing) -> index -> commit ->
+    // invalidate. See storage_backend.h for the full contract.
+    int Backend::Impl::store_episode_close(const EpisodeClose& close) {
+        if (close.text.empty())
+            throw std::invalid_argument("store_episode_close: empty text");
+        if (close.member_turn_summary_ids.empty())
+            throw std::invalid_argument("store_episode_close: no members");
+        if (close.span_end < close.span_start)
+            throw std::invalid_argument("store_episode_close: span_end < span_start");
+        const int session_id = get_or_create_session(close.session_guid);
+        if (!session_id)
+            throw std::invalid_argument("store_episode_close: unknown session '" +
+                                        close.session_guid + "'");
+
+        const std::string t = normalize_path(close.text);
+        const int model_id = get_or_create_model(close.model_name);
+
+        // Compute the embedding OUTSIDE the transaction: encoding is slow and
+        // holding the write lock across a model call would block every other
+        // writer.
         auto emb = require_embedder().encode(t);
 
-        Stmt s(db,
-            "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, "
-            "level, tags, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)");
-        if (model_id) s.bind(1, model_id); else s.bind_null(1);
-        if (session_id) s.bind(2, session_id); else s.bind_null(2);
-        s.bind(3, t);
-        bind_embedding_version(s.raw(), 4, emb);
-        bind_embedding(s.raw(), 5, emb);
-        s.bind(6, std::string("episode"))
-         .bind(7, std::string(""));
-        s.bind(8, resolve_epoch(first_ts));
-        s.bind(9, resolve_epoch(last_ts.empty() ? first_ts : last_ts));
-        if (!s.exec())
+        Transaction tx(db);
+        Stmt ins(db,
+            "INSERT INTO episodes (text, tags, session_id, model_id, "
+            "span_start, span_end, embedding_version, embedding) "
+            "VALUES (?,?,?,?,?,?,?,?)");
+        ins.bind(1, t).bind(2, std::string(""));
+        ins.bind(3, session_id);
+        if (model_id) ins.bind(4, model_id); else ins.bind_null(4);
+        ins.bind(5, close.span_start).bind(6, close.span_end);
+        bind_embedding_version(ins.raw(), 7, emb);
+        bind_embedding(ins.raw(), 8, emb);
+        if (!ins.exec()) {
+            if (sqlite3_extended_errcode(db) == SQLITE_CONSTRAINT_UNIQUE) {
+                // Someone already closed this (session, span_start): not an
+                // error. The Transaction destructor rolls back; the caller
+                // logs "already closed" and does not retry.
+                return 0;
+            }
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-        invalidate_cache();
-        int eid = static_cast<int>(sqlite3_last_insert_rowid(db));
-        text_index_->index_record("summaries", eid, t);
-        return eid;
+        }
+        const int episode_id = static_cast<int>(sqlite3_last_insert_rowid(db));
+
+        // Membership: each member must exist in THIS session, be unassigned,
+        // and not be a marker row. Any straggler (foreign session, already
+        // closed, marker, missing) comes up short on the change count and the
+        // whole close rolls back — nothing half-written survives.
+        int assigned = 0;
+        for (const int ts_id : close.member_turn_summary_ids) {
+            Stmt u(db,
+                "UPDATE turn_summaries SET episode_id = ? "
+                "WHERE turn_summary_id = ? AND session_id = ? "
+                "  AND episode_id IS NULL AND text != ''");
+            u.bind(1, episode_id).bind(2, ts_id).bind(3, session_id);
+            if (!u.exec())
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            assigned += sqlite3_changes(db);
+        }
+        if (assigned != static_cast<int>(close.member_turn_summary_ids.size()))
+            throw std::runtime_error(std::format(
+                "store_episode_close: {} of {} members assignable "
+                "(foreign session / already closed / marker / missing); rolled back",
+                assigned, close.member_turn_summary_ids.size()));
+
+        text_index_->index_record("episodes", episode_id, t);
+        tx.commit();
+        invalidate_episode_cache();
+        return episode_id;
     }
 
 
-    // Sessions whose open episode is ready to close: they have >=1 non-draft
-    // L2 turn summary past the last episode's end, and their newest turn is
-    // older than idle_minutes. Returns session GUIDs.
+    // Sessions whose open episode is ready to close: >=1 non-empty L2 turn
+    // summary past the last episode's span_end (0 when none), and their
+    // newest turn is older than idle_minutes. Returns session GUIDs.
     std::vector<std::string> Backend::Impl::episodes_needing_close(int idle_minutes) {
         std::vector<std::string> out;
         if (idle_minutes <= 0) return out;
         const std::string cutoff =
             std::format("(unixepoch('now','-{} minutes'))", idle_minutes);
-        // For each session: last episode end (updated_at of newest episode, or
-        // '' when none). "Turns needing an episode" = L2 turn_summaries rows
-        // with timestamp > that end (turn_summaries has no tags/'draft'
-        // state under the new design, so the old tags != 'draft' filter is
-        // simply dropped here). Idle = MAX(turn.timestamp) < cutoff.
+        // `AND s.text != ''` is the verified-bug fix: ''-text done-marker
+        // rows used to re-queue a session every tick forever.
         std::string sql =
             "SELECT ss.guid "
             "FROM sessions ss "
             "WHERE EXISTS ("
             "  SELECT 1 FROM turn_summaries s "
             "  WHERE s.session_id = ss.session_id "
+            "    AND s.text != '' "
             "    AND s.turn_datetime > COALESCE(("
-            "        SELECT COALESCE(e.updated_at, e.created_at) FROM summaries e "
-            "        WHERE e.session_id = ss.session_id AND e.level = 'episode' "
-            "        ORDER BY e.created_at DESC, e.summary_id DESC LIMIT 1), 0)) "
+            "        SELECT MAX(e.span_end) FROM episodes e "
+            "        WHERE e.session_id = ss.session_id), 0)) "
             "  AND (SELECT MAX(t.created_at) FROM turns t "
             "        WHERE t.session_id = ss.session_id) < " + cutoff + " "
             "ORDER BY ss.session_id ASC";
@@ -1388,306 +1367,6 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // ---- Phase 2: boundary-triggered session/project rollups -----------
-    // All episode texts for a session, oldest-first. Corpus for the session
-    // rollup (episodes + any tail L2 turns are combined by the caller).
-    std::vector<std::string> Backend::Impl::episode_texts(const std::string& session_guid) {
-        std::vector<std::string> out;
-        if (session_guid.empty()) return out;
-        Stmt s(db,
-            "SELECT s.text FROM summaries s "
-            "JOIN sessions ss ON s.session_id = ss.session_id "
-            "WHERE ss.guid = ? AND s.level = 'episode' "
-            "ORDER BY s.created_at ASC, s.summary_id ASC");
-        s.bind(1, session_guid);
-        while (s.step()) {
-            auto t = s.column_text(0);
-            if (!t.empty()) out.push_back(std::move(t));
-        }
-        return out;
-    }
-
-
-    // Stamp updated_at = now for a running rollup row.
-    bool Backend::Impl::set_summary_updated_at(int summary_id) {
-        Stmt s(db, "UPDATE summaries SET updated_at = ? WHERE summary_id = ?");
-        s.bind(1, db_epoch()).bind(2, summary_id);
-        return s.exec() && sqlite3_changes(db) > 0;
-    }
-
-
-    // ---- boundary-detection watermark (settings key/value table) --------
-    int64_t Backend::Impl::get_watermark(const std::string& key) {
-        Stmt s(db, "SELECT value FROM settings WHERE key = ?");
-        s.bind(1, key);
-        if (s.step()) {
-            try { return std::stoll(s.column_text(0)); } catch (...) { return 0; }
-        }
-        return 0;
-    }
-
-
-    void Backend::Impl::set_watermark(const std::string& key, int64_t turn_id) {
-        Stmt s(db, "INSERT INTO settings (key, value) VALUES (?, ?) "
-                   "ON CONFLICT(key) DO UPDATE SET value = excluded.value");
-        s.bind(1, key);
-        s.bind(2, std::to_string(turn_id));
-        s.exec();
-    }
-
-
-    // Maximal runs of consecutive (by turn_id) turns sharing the same
-    // non-NULL session_id, edge-detected via a running group id that
-    // increments whenever session_id changes from the previous row. The
-    // final/currently-open group (grp == MAX(grp)) is always excluded —
-    // it's still open because a future turn could extend it.
-    std::vector<ClosedRun> Backend::Impl::sessions_needing_close_boundary() {
-        std::vector<ClosedRun> out;
-        int64_t watermark = get_watermark(std::string(kSessionBoundaryWatermarkKey));
-        // Structural floor (Reid's invariant: "no automatic lookback to do
-        // any session summary before the last session summary"). A run is
-        // eligible only if NO level='session' summary already covers it --
-        // i.e. none exists for this session whose stored span end
-        // (updated_at == the run's last_ts at store time) reaches this run's
-        // last turn timestamp. This makes correctness independent of the
-        // watermark: even with watermark=0 (e.g. a migration that never
-        // stamped the key -> get_watermark() defaults to 0), an
-        // already-summarized run is never re-closed. The watermark remains as
-        // a cheap first-pass filter (`last_turn_id > ?`) so the common
-        // steady-state scan stays bounded, but it is no longer the sole
-        // guard against re-summarizing history.
-        Stmt s(db, R"(
-            WITH lagged AS (
-                SELECT t.turn_id, t.session_id, t.created_at,
-                    LAG(t.session_id) OVER (ORDER BY t.turn_id) AS prev_sid
-                FROM turns t
-            ),
-            numbered AS (
-                SELECT turn_id, session_id, created_at,
-                    SUM(CASE WHEN session_id IS prev_sid THEN 0 ELSE 1 END)
-                        OVER (ORDER BY turn_id) AS grp
-                FROM lagged
-            ),
-            runs AS (
-                SELECT session_id, grp,
-                       MIN(turn_id) AS first_turn_id, MAX(turn_id) AS last_turn_id,
-                       MIN(created_at) AS first_ts, MAX(created_at) AS last_ts
-                FROM numbered
-                GROUP BY grp
-            )
-            SELECT ss.guid, r.first_ts, r.last_ts, r.first_turn_id, r.last_turn_id
-            FROM runs r
-            JOIN sessions ss ON r.session_id = ss.session_id
-            WHERE r.session_id IS NOT NULL
-              AND r.last_turn_id > ?
-              AND r.grp < (SELECT MAX(grp) FROM numbered)
-              AND NOT EXISTS (
-                  SELECT 1 FROM summaries sm
-                  WHERE sm.level = 'session'
-                    AND sm.session_id = r.session_id
-                    AND sm.updated_at >= r.last_ts
-              )
-            ORDER BY r.first_turn_id ASC
-        )");
-        s.bind(1, watermark);
-        while (s.step()) {
-            out.push_back({s.column_text(0), s.column_int64(1), s.column_int64(2),
-                            s.column_int(3), s.column_int(4)});
-        }
-        return out;
-    }
-
-
-    // Same shape as sessions_needing_close_boundary(), but grouped by a
-    // time gap (>= gap_days days) between consecutive turns (by turn_id)
-    // rather than a session_id change, and NOT restricted to non-NULL
-    // session_id (project runs span all turns, anonymous included).
-    std::vector<ClosedRun> Backend::Impl::projects_needing_close_boundary(int gap_days) {
-        std::vector<ClosedRun> out;
-        if (gap_days <= 0) return out;
-        int64_t gap_seconds = static_cast<int64_t>(gap_days) * 86400;
-        int64_t watermark = get_watermark(std::string(kProjectBoundaryWatermarkKey));
-        Stmt s(db, R"(
-            WITH lagged AS (
-                SELECT t.turn_id, t.created_at,
-                    LAG(t.created_at) OVER (ORDER BY t.turn_id) AS prev_ts
-                FROM turns t
-            ),
-            numbered AS (
-                SELECT turn_id, created_at,
-                    SUM(CASE
-                            WHEN prev_ts IS NULL THEN 1
-                            WHEN (created_at - prev_ts) >= ? THEN 1
-                            ELSE 0
-                        END) OVER (ORDER BY turn_id) AS grp
-                FROM lagged
-            ),
-            runs AS (
-                SELECT grp,
-                       MIN(turn_id) AS first_turn_id, MAX(turn_id) AS last_turn_id,
-                       MIN(created_at) AS first_ts, MAX(created_at) AS last_ts
-                FROM numbered
-                GROUP BY grp
-            )
-            SELECT r.first_ts, r.last_ts, r.first_turn_id, r.last_turn_id
-            FROM runs r
-            WHERE r.last_turn_id > ?
-              AND r.grp < (SELECT MAX(grp) FROM numbered)
-            ORDER BY r.first_turn_id ASC
-        )");
-        s.bind(1, gap_seconds);
-        s.bind(2, watermark);
-        while (s.step()) {
-            out.push_back({"", s.column_int64(0), s.column_int64(1),
-                            s.column_int(2), s.column_int(3)});
-        }
-        return out;
-    }
-
-
-    void Backend::Impl::advance_session_boundary_watermark(int turn_id) {
-        set_watermark(std::string(kSessionBoundaryWatermarkKey), turn_id);
-    }
-
-
-    void Backend::Impl::advance_project_boundary_watermark(int turn_id) {
-        set_watermark(std::string(kProjectBoundaryWatermarkKey), turn_id);
-    }
-
-
-    // Bounded text-gathering for a closed session run: episodes whose full
-    // span [created_at, COALESCE(updated_at,created_at)] lies entirely
-    // within [first_ts, last_ts] for this session_guid, plus trailing
-    // turn_summaries after the newest such episode's end (or from
-    // first_ts if there are none) up to last_ts. Unlike episode_texts()/
-    // l2_summaries_since() (unbounded above), this never reaches into a
-    // LATER run of the same session_guid.
-    std::vector<std::string> Backend::Impl::bounded_session_rollup_texts(
-            const std::string& session_guid, int64_t first_ts, int64_t last_ts) {
-        std::vector<std::string> out;
-        if (session_guid.empty()) return out;
-
-        // Episodes whose full span lies within the run, oldest-first.
-        Stmt e(db,
-            "SELECT s.text, COALESCE(s.updated_at, s.created_at) FROM summaries s "
-            "JOIN sessions ss ON s.session_id = ss.session_id "
-            "WHERE ss.guid = ? AND s.level = 'episode' "
-            "  AND s.created_at >= ? AND COALESCE(s.updated_at, s.created_at) <= ? "
-            "ORDER BY s.created_at ASC, s.summary_id ASC");
-        e.bind(1, session_guid);
-        e.bind(2, first_ts);
-        e.bind(3, last_ts);
-        int64_t newest_episode_end = first_ts - 1;  // sentinel: no episodes yet
-        while (e.step()) {
-            auto t = e.column_text(0);
-            int64_t end_ts = e.column_int64(1);
-            if (!t.empty()) out.push_back(std::move(t));
-            if (end_ts > newest_episode_end) newest_episode_end = end_ts;
-        }
-
-        // Trailing turn_summaries strictly after the newest episode's end
-        // (or from first_ts-1 if no episodes), up to and including last_ts.
-        Stmt ts_q(db,
-            "SELECT ts.text FROM turn_summaries ts "
-            "JOIN sessions ss ON ts.session_id = ss.session_id "
-            "WHERE ss.guid = ? AND ts.text != '' "
-            "  AND ts.turn_datetime > ? AND ts.turn_datetime <= ? "
-            "ORDER BY ts.turn_datetime ASC, ts.turn_summary_id ASC");
-        ts_q.bind(1, session_guid);
-        ts_q.bind(2, newest_episode_end);
-        ts_q.bind(3, last_ts);
-        while (ts_q.step()) {
-            auto t = ts_q.column_text(0);
-            if (!t.empty()) out.push_back(std::move(t));
-        }
-        return out;
-    }
-
-
-    // Bounded text-gathering for a closed project run: every level='session'
-    // row whose full span [created_at, COALESCE(updated_at,created_at)]
-    // lies entirely within [first_ts, last_ts], session-unscoped (a project
-    // run spans sessions), oldest-first.
-    std::vector<std::string> Backend::Impl::bounded_project_rollup_texts(
-            int64_t first_ts, int64_t last_ts) {
-        std::vector<std::string> out;
-        Stmt s(db,
-            "SELECT text FROM summaries "
-            "WHERE level = 'session' "
-            "  AND created_at >= ? AND COALESCE(updated_at, created_at) <= ? "
-            "ORDER BY created_at ASC, summary_id ASC");
-        s.bind(1, first_ts);
-        s.bind(2, last_ts);
-        while (s.step()) {
-            auto t = s.column_text(0);
-            if (!t.empty()) out.push_back(std::move(t));
-        }
-        return out;
-    }
-
-
-    // Insert one immutable level='session' row spanning a closed run.
-    // Mirrors store_episode's shape exactly, except created_at/updated_at
-    // are bound directly as epoch ints (ClosedRun already carries real
-    // epoch seconds — no resolve_epoch() round-trip needed).
-    int Backend::Impl::store_session_summary(const std::string& text, const std::string& model_name,
-                              const std::string& session_guid,
-                              int64_t first_ts, int64_t last_ts) {
-        std::string t = normalize_path(text);
-        int model_id   = get_or_create_model(model_name);
-        int session_id = get_or_create_session(session_guid);
-        auto emb = require_embedder().encode(t);
-
-        Stmt s(db,
-            "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, "
-            "level, tags, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)");
-        if (model_id) s.bind(1, model_id); else s.bind_null(1);
-        if (session_id) s.bind(2, session_id); else s.bind_null(2);
-        s.bind(3, t);
-        bind_embedding_version(s.raw(), 4, emb);
-        bind_embedding(s.raw(), 5, emb);
-        s.bind(6, std::string("session"))
-         .bind(7, std::string(""));
-        s.bind(8, first_ts);
-        s.bind(9, last_ts);
-        if (!s.exec())
-            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-        invalidate_cache();
-        int sid = static_cast<int>(sqlite3_last_insert_rowid(db));
-        text_index_->index_record("summaries", sid, t);
-        return sid;
-    }
-
-
-    // Insert one immutable level='project' row spanning a closed run.
-    // Session-unscoped (session_id NULL). Otherwise mirrors store_episode.
-    int Backend::Impl::store_project_summary(const std::string& text, const std::string& model_name,
-                              int64_t first_ts, int64_t last_ts) {
-        std::string t = normalize_path(text);
-        int model_id   = get_or_create_model(model_name);
-        auto emb = require_embedder().encode(t);
-
-        Stmt s(db,
-            "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, "
-            "level, tags, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)");
-        if (model_id) s.bind(1, model_id); else s.bind_null(1);
-        s.bind_null(2);
-        s.bind(3, t);
-        bind_embedding_version(s.raw(), 4, emb);
-        bind_embedding(s.raw(), 5, emb);
-        s.bind(6, std::string("project"))
-         .bind(7, std::string(""));
-        s.bind(8, first_ts);
-        s.bind(9, last_ts);
-        if (!s.exec())
-            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-        invalidate_cache();
-        int pid = static_cast<int>(sqlite3_last_insert_rowid(db));
-        text_index_->index_record("summaries", pid, t);
-        return pid;
-    }
 
     std::vector<TurnRecord> Backend::Impl::turns_by_session_desc(
             const std::string& session_guid, int limit) {
@@ -1695,41 +1374,58 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // Shared query: summaries for a session filtered by level, newest-first.
-    std::vector<SummaryRecord> Backend::Impl::summaries_by_level_desc(
-            const std::string& session_guid, const std::string& level, int limit) {
+
+
+    // L2 (turn) summaries for a session, newest-first (PHASE5 B.5: reads
+    // turn_summaries directly — the summaries.level='turn' rows this used to
+    // query have been empty since 0.12).
+    std::vector<SummaryRecord> Backend::Impl::turn_summaries_by_session_desc(
+            const std::string& session_guid, int limit) {
         std::vector<SummaryRecord> out;
         if (session_guid.empty()) return out;
         std::string sql =
-            "SELECT s.summary_id, s.text, s.created_at "
-            "FROM summaries s "
-            "JOIN sessions ss ON s.session_id = ss.session_id "
-            "WHERE ss.guid = ? AND s.level = ? "
-            "ORDER BY s.created_at DESC, s.summary_id DESC";
+            "SELECT ts.turn_summary_id, ts.text, '', "
+            "       datetime(ts.turn_datetime,'unixepoch','localtime') "
+            "FROM turn_summaries ts "
+            "JOIN sessions ss ON ts.session_id = ss.session_id "
+            "WHERE ss.guid = ? AND ts.text != '' "
+            "ORDER BY ts.turn_datetime DESC, ts.turn_summary_id DESC";
         if (limit > 0) sql += " LIMIT ?";
         Stmt s(db, sql);
-        s.bind(1, session_guid).bind(2, level);
-        if (limit > 0) s.bind(3, limit);
+        s.bind(1, session_guid);
+        if (limit > 0) s.bind(2, limit);
         while (s.step()) {
             out.push_back({s.column_int(0), s.column_text(1),
-                           std::string(), s.column_text(2)});
+                           s.column_text(2), s.column_text(3)});
         }
         return out;
     }
 
 
-    // L2 (turn) summaries for a session, newest-first.
-    std::vector<SummaryRecord> Backend::Impl::turn_summaries_by_session_desc(
+    // This session's episodes, newest-first (span_start DESC). Timestamp
+    // carries the rendered span_end (the episode's "when it ended").
+    std::vector<SummaryRecord> Backend::Impl::episodes_by_session_desc(
             const std::string& session_guid, int limit) {
-        return summaries_by_level_desc(session_guid, "turn", limit);
+        std::vector<SummaryRecord> out;
+        if (session_guid.empty()) return out;
+        std::string sql =
+            "SELECT e.episode_id, e.text, '', "
+            "       datetime(e.span_end,'unixepoch','localtime') "
+            "FROM episodes e "
+            "JOIN sessions ss ON e.session_id = ss.session_id "
+            "WHERE ss.guid = ? AND e.text != '' "
+            "ORDER BY e.span_start DESC, e.episode_id DESC";
+        if (limit > 0) sql += " LIMIT ?";
+        Stmt s(db, sql);
+        s.bind(1, session_guid);
+        if (limit > 0) s.bind(2, limit);
+        while (s.step()) {
+            out.push_back({s.column_int(0), s.column_text(1),
+                           s.column_text(2), s.column_text(3)});
+        }
+        return out;
     }
 
-
-    // L3 (session) summaries for a session, newest-first.
-    std::vector<SummaryRecord> Backend::Impl::session_summaries_desc(
-            const std::string& session_guid, int limit) {
-        return summaries_by_level_desc(session_guid, "session", limit);
-    }
 
 
     // Exact-match existence check for import idempotency: same text +

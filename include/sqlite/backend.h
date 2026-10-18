@@ -131,39 +131,18 @@ public:
     bool mark_turn_summarized(int turn_id, const std::string& model_name) override;
     int  reset_abandoned_turn_summaries(int limit = 0) override;
 
-    std::vector<DraftSummary> draft_summaries(int limit = 0) override;
-    std::vector<std::string> sessions_needing_close(int pause_minutes) override;
     std::string last_episode_end(const std::string& session_guid) override;
     std::vector<SummaryRecord> l2_summaries_since(
         const std::string& session_guid, const std::string& since_ts) override;
     std::vector<EpisodeCandidateTurn> episode_candidate_turns(
         const std::string& session_guid, const std::string& since_ts) override;
-    int store_episode(const std::string& text,
-                      const std::string& model_name,
-                      const std::string& session_guid,
-                      const std::string& first_ts,
-                      const std::string& last_ts) override;
+    int store_episode_close(const EpisodeClose& close) override;
     std::vector<std::string> episodes_needing_close(int idle_minutes) override;
-    std::vector<std::string> episode_texts(const std::string& session_guid) override;
-    bool set_summary_updated_at(int summary_id) override;
-    std::vector<ClosedRun> sessions_needing_close_boundary() override;
-    std::vector<ClosedRun> projects_needing_close_boundary(int gap_days) override;
-    void advance_session_boundary_watermark(int turn_id) override;
-    void advance_project_boundary_watermark(int turn_id) override;
-    std::vector<std::string> bounded_session_rollup_texts(
-        const std::string& session_guid, int64_t first_ts, int64_t last_ts) override;
-    std::vector<std::string> bounded_project_rollup_texts(
-        int64_t first_ts, int64_t last_ts) override;
-    int store_session_summary(const std::string& text, const std::string& model_name,
-                              const std::string& session_guid,
-                              int64_t first_ts, int64_t last_ts) override;
-    int store_project_summary(const std::string& text, const std::string& model_name,
-                              int64_t first_ts, int64_t last_ts) override;
     std::vector<TurnRecord> turns_by_session_desc(
         const std::string& session_guid, int limit = 0) override;
     std::vector<SummaryRecord> turn_summaries_by_session_desc(
         const std::string& session_guid, int limit = 0) override;
-    std::vector<SummaryRecord> session_summaries_desc(
+    std::vector<SummaryRecord> episodes_by_session_desc(
         const std::string& session_guid, int limit = 0) override;
 
     /// Replace text + metadata of an existing row.

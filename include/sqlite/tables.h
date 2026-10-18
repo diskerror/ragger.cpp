@@ -71,6 +71,7 @@ inline constexpr TextTable kTextTables[] = {
     {"decisions",      "decision_id",     "decisions_terms",      "decision",     kDecisionEmbedTextSQL},
     {"documents",      "document_id",     "documents_terms",      "document",     kDocEmbedTextSQL},
     {"turn_summaries", "turn_summary_id", "turn_summaries_terms", "turn_summary", nullptr},
+    {"episodes",       "episode_id",      "episodes_terms",       "episode",      nullptr},
     {"insights",       "insight_id",      "insights_terms",       "insight",      kDecisionEmbedTextSQL},
 };
 
