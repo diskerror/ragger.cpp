@@ -58,8 +58,8 @@ a `phon` column) in favor of a small, fully custom, hand-rolled index —
   bigram, literal (stemmed) or metaphone, no type/flag column. They
   self-filter: a real word and its phonetic code never collide as strings.
 - **`<table>_terms`** — one join table per text table (`turns_terms`,
-  `turn_summaries_terms`, `summaries_terms`, `decisions_terms`,
-  `documents_terms`), each `(record_id, term_id, count)`.
+  `turn_summaries_terms`, `summaries_terms`, `episodes_terms`,
+  `knowledge_terms`, `documents_terms`), each `(record_id, term_id, count)`.
 - **Tokenization pipeline:** normalize → expand negated contractions
   (`isn't` → `is not`, keeping the negation) → stopword-filter the raw word
   → **stem** (Porter/Snowball, from the `c_lib` project) → emit the stem as
