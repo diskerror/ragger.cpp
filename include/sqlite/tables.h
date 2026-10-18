@@ -67,7 +67,6 @@ struct TextTable {
 
 inline constexpr TextTable kTextTables[] = {
     {"turns",          "turn_id",         "turns_terms",          "turn",         nullptr},
-    {"summaries",      "summary_id",      "summaries_terms",      "summary",      nullptr},
     {"knowledge",      "knowledge_id",    "knowledge_terms",      "knowledge",    kKnowledgeEmbedTextSQL},
     {"documents",      "document_id",     "documents_terms",      "document",     kDocEmbedTextSQL},
     {"turn_summaries", "turn_summary_id", "turn_summaries_terms", "turn_summary", nullptr},

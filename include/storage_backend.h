@@ -230,38 +230,25 @@ public:
     /// (documents already covered above). Returns true if a row was updated.
     virtual bool update_decision_embedding(int decision_id,
                                            const std::vector<float>& emb) = 0;
-    virtual bool update_summary_embedding(int summary_id,
-                                          const std::vector<float>& emb) = 0;
     virtual bool update_turn_embedding(int turn_id,
                                        const std::vector<float>& emb) = 0;
 
-    // --- summaries (L2/L3) pipeline (issue #22) ---
-    /// Insert a summary (level 'turn'|'session'|'project'); embeds text,
-    /// records model. Returns summary_id.
-    /// `source_timestamp` (when non-empty) overrides the row's timestamp —
-    /// L2 turn summaries inherit the source turn's timestamp so chronology
-    /// is the linkage between turn and its summary (no FK column needed) and
-    /// remains stable across embedding-model changes. `tags` is stored verbatim
-    /// on the row (used to mark drafts: "draft" → housekeeping re-summarizes
-    /// it when inference becomes available again).
-    virtual int store_summary(const std::string& text, const std::string& level,
-                              const std::string& model_name = "",
-                              const std::string& session_guid = "",
-                              const std::string& source_timestamp = "",
-                              const std::string& tags = "") = 0;
+    // PHASE8: the old summary-store and summary embedding write-back are gone
+    // with the `summaries` table. Importers write knowledge rows of kind='note' via
+    // store_knowledge; re-embedding goes through update_embedding(knowledge).
 
-    /// Exact-match existence check on the `summaries` table: does a row
-    /// already exist with this text and created_at timestamp? Used by
-    /// bulk importers (conversation/summary import) to make re-running an
-    /// import idempotent — safe to feed the same export file (or an
-    /// overlapping one) twice without duplicating rows.
-    virtual bool summary_exists_exact(const std::string& text,
-                                      const std::string& created_at) = 0;
+    /// Exact-match existence check among knowledge notes (kind='note'):
+    /// does a row already exist with this text and created_at timestamp?
+    /// Used by bulk importers (conversation/summary import) to make
+    /// re-running an import idempotent — safe to feed the same export file
+    /// (or an overlapping one) twice without duplicating rows.
+    virtual bool note_exists_exact(const std::string& text,
+                                   const std::string& created_at) = 0;
 
-    /// Exact-match existence check on the `decisions` table: same text +
-    /// same created_at already present? Mirrors summary_exists_exact —
-    /// used by importers (e.g. memories.json → decisions) to stay
-    /// idempotent across re-runs.
+    /// Exact-match existence check on decision rows (kind='decision'):
+    /// same text + same created_at already present? Mirrors
+    /// note_exists_exact — used by importers (e.g. memories.json →
+    /// decisions) to stay idempotent across re-runs.
     virtual bool decision_exists_exact(const std::string& text,
                                        const std::string& created_at) = 0;
 
@@ -296,16 +283,9 @@ public:
                                   const std::string& timestamp = "",
                                   const std::string& session_guid = "") = 0;
 
-    /// Replace a summary's text + embedding (and model). False if absent.
-    virtual bool update_summary_text(int summary_id, const std::string& text,
-                                     const std::string& model_name = "") = 0;
-    /// Replace a summary's `tags` column (used to clear "draft" once the
-    /// row has been rewritten with a real summary).
-    virtual bool set_summary_tags(int summary_id, const std::string& tags) = 0;
-    /// Recent summaries of a given level ('turn'|'session'|'project'), newest
-    /// first — recipe ingredients for tiered payload assembly (issue #23).
-    virtual std::vector<std::string> recent_summaries(const std::string& level,
-                                                      int limit) = 0;
+    // PHASE8: the old summary text-update / tag-setter / recent-list are gone
+    // with the `summaries` table (text is never rewritten in place;
+    // recipes read episodes since PHASE5).
     /// Current (active) decisions, newest first.
     virtual std::vector<std::string> current_decisions(int limit) = 0;
 
@@ -404,18 +384,13 @@ public:
     virtual std::vector<SummaryRecord> episodes_by_session_desc(
         const std::string& session_guid, int limit = 0) = 0;
 
-    /// Replace text + metadata of an existing row. Re-embeds (or NULLs the
-    /// embedding when `defer_embedding`); FTS5 sync triggers reindex the row.
-    /// Preserves id and original timestamp. Returns false if the row
-    /// doesn't exist or is protected (keep tag).
-    virtual bool update_text(int memory_id,
-                             const std::string& text,
-                             json metadata = {},
-                             bool defer_embedding = false) = 0;
+    // PHASE8: update_text is gone — text is never rewritten in place;
+    // corrections go through store_knowledge with supersedes, or
+    // agent_update for status/tag changes.
 
-    /// Hybrid search over summaries: vector cosine blended with FTS5 keyword
-    /// relevance. (Lean v2 summaries has no collection column, so the
-    /// `collections` filter is currently a no-op; kept for API compat.)
+    /// Hybrid search across the four corpora: vector cosine blended with the
+    /// custom terms-index keyword relevance. (The `collections` filter is
+    /// currently a no-op; kept for API compat.)
     virtual SearchResponse search(const std::string& query,
                                   int limit = 5,
                                   float min_score = 0.0f,

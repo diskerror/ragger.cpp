@@ -122,12 +122,13 @@ import — this is deliberate, there's no implicit default:
 With `--all`, in addition to the turns described above:
 
 - Each conversation's own `summary` field (Claude's own per-conversation
-  digest) is stored as one L3 `summaries` row (`level=session`,
-  `tags=session`), dated by that conversation's real `created_at` — no
-  re-summarization needed, it's already good.
-- Each file under `projects/*.json` contributes one L4 `summaries` row
-  (`level=project`, `tags=claude-project`) built from that project's `name`
-  + `description`, dated by the project's own `created_at`.
+  digest) is stored as one knowledge note (`kind='note'`,
+  `tags=session,imported`), dated by that conversation's real
+  `created_at` — no re-summarization needed, it's already good.
+- Each file under `projects/*.json` contributes one knowledge note
+  (`kind='note'`, `tags=claude-project,imported`) built from that
+  project's `name` + `description`, dated by the project's own
+  `created_at`.
 - `memories.json`, if present, is imported as described next.
 
 ## Memories (decisions)

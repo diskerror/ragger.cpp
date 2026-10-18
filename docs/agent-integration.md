@@ -33,23 +33,25 @@ Once turn capture is on, the daemon-resident summarizer takes care of:
   written *with the source turn's timestamp* so a turn and its summary
   share a join key — no FK column, embedding rebuilds preserve the
   link.
-- **L3 session summaries.** After `episode_idle_minutes` of idle on a
-  session, the worker reads the session's turns, summarizes the whole
-  transcript, and writes a `level='session'` row. The session is
-  closed by the existence of that row — no separate state.
+- **Episodes.** After `episode_idle_minutes` of idle on a session (or
+  when the topic visibly shifts), the worker closes an *episode*: a
+  summary of that stretch of work, stored as an immutable row in the
+  `episodes` table. Sessions themselves are never rolled up — episodes
+  are the session-level unit.
 - **Catch-up on startup.** Turns captured via MCP while the daemon
   was down are picked up on the next start. A `LEFT JOIN` finds
   unsummarized turns.
 - **Graceful inference failure.** If the summarizer model is
-  unreachable, Ragger writes a heuristic "draft" L2 (tagged `draft`).
-  Housekeeping rewrites drafts once inference is back; the agent
-  never blocks on a model that's down.
+  unreachable, the turn simply stays unsummarized and is retried with
+  exponential backoff (5 min base, 6 h cap) until inference returns;
+  trivial turns are marked even with the model down. The agent never
+  blocks on a model that's down.
 
 The agent does *not* have to summarize, schedule, retry, or worry
 about which model owns which row. Ragger records the conversing model
 on the turn and on its L2 summary, and records the summarizing model
-on L3 (and L4 when it lands) — so you can always answer "who said
-this?" vs "who wrote this summary?".
+on each episode — so you can always answer "who said this?" vs "who
+wrote this summary?".
 
 ## Recommended agent flow
 
@@ -90,9 +92,9 @@ Shipped recipes:
 
 | Name             | Intent                                                                 |
 |------------------|------------------------------------------------------------------------|
-| `natural_fading` | Default. Recent verbatim → turn summaries → session → project → decisions. |
+| `natural_fading` | Default. Recent verbatim → turn summaries → episodes → decisions. |
 | `reconnect`      | Quick resume after a restart. Tiny token budget; just the gist.        |
-| `deep_recall`    | Cross-session: project summaries, multiple sessions, decisions.        |
+| `deep_recall`    | Cross-session: episodes, multiple sessions, decisions.                   |
 | `tldr`           | Summary-heavy, low-token. No raw turns; pure rollups.                  |
 | `raw_only`       | Debugging baseline. The session's raw turns, no summaries.             |
 

@@ -257,11 +257,6 @@ bool RaggerMemory::update_decision_embedding(int decision_id,
     return backend_->update_decision_embedding(decision_id, emb);
 }
 
-bool RaggerMemory::update_summary_embedding(int summary_id,
-                                            const std::vector<float>& emb) {
-    return backend_->update_summary_embedding(summary_id, emb);
-}
-
 bool RaggerMemory::update_turn_embedding(int turn_id,
                                          const std::vector<float>& emb) {
     return backend_->update_turn_embedding(turn_id, emb);
@@ -271,23 +266,18 @@ int RaggerMemory::cleanup_old_conversations(float max_age_hours) {
     return backend_->cleanup_old_conversations(max_age_hours);
 }
 
-int RaggerMemory::store_summary(const std::string& text, const std::string& level,
-                                const std::string& model_name,
-                                const std::string& session_guid,
-                                const std::string& source_timestamp,
-                                const std::string& tags) {
-    return backend_->store_summary(text, level, model_name, session_guid,
-                                   source_timestamp, tags);
-}
-
-bool RaggerMemory::update_summary_text(int summary_id, const std::string& text,
-                                       const std::string& model_name) {
-    return backend_->update_summary_text(summary_id, text, model_name);
-}
-
-std::vector<std::string> RaggerMemory::recent_summaries(const std::string& level,
-                                                        int limit) {
-    return backend_->recent_summaries(level, limit);
+int RaggerMemory::store_note(const std::string& text, const std::string& tags,
+                             const std::string& source_timestamp,
+                             const std::string& model_name,
+                             const std::string& session_guid) {
+    KnowledgeInput in;
+    in.kind = "note";
+    in.text = text;
+    in.tags = tags.empty() ? "imported" : tags + ",imported";
+    in.source_timestamp = source_timestamp;
+    in.model_name = model_name;
+    in.session_guid = session_guid;
+    return backend_->store_knowledge(in).id;
 }
 
 std::vector<std::string> RaggerMemory::current_decisions(int limit) {
@@ -302,8 +292,8 @@ std::vector<std::string> RaggerMemory::decisions_by_status(const std::string& st
     return backend_->decisions_by_status(status, limit);
 }
 
-bool RaggerMemory::summary_exists_exact(const std::string& text, const std::string& created_at) {
-    return backend_->summary_exists_exact(text, created_at);
+bool RaggerMemory::note_exists_exact(const std::string& text, const std::string& created_at) {
+    return backend_->note_exists_exact(text, created_at);
 }
 
 bool RaggerMemory::decision_exists_exact(const std::string& text, const std::string& created_at) {
@@ -324,10 +314,7 @@ bool RaggerMemory::update_turn_meta(int turn_id, const std::string& timestamp,
     return backend_->update_turn_meta(turn_id, timestamp, session_guid);
 }
 
-bool RaggerMemory::update_text(int memory_id, const std::string& text, json metadata,
-                                bool defer_embedding) {
-    return backend_->update_text(memory_id, text, std::move(metadata), defer_embedding);
-}
+// PHASE8: update_text is gone (text is never rewritten in place).
 
 SearchResponse RaggerMemory::search(const std::string& query,
                                     int limit,

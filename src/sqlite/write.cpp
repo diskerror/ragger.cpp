@@ -158,71 +158,79 @@ static std::string tags_from_metadata(const json& metadata) {
 
     // ---- public API ---------------------------------------------------
 
-    // v2: the generic store API writes a summary (L2/L3/L4). A memory-only
-    // install records agent memories here. `level`/`status` come from
-    // metadata when supplied; defaults suit a settled session-level note.
-    // collection/category and the free-form metadata blob are gone in v2 —
-    // metadata fields are either promoted to columns or dropped. FTS5 sync
-    // triggers index the row, so there is no explicit BM25 step.
+    // v2: the generic store API (behind /store, MCP `store`, CLI `ragger
+    // store`). PHASE8: it writes a knowledge row of kind='note' — the
+    // summaries table is gone. Caller fields map onto the note:
+    //   status   <- metadata["status"] (default current; must be creatable)
+    //   tags     <- metadata["tags"] (+ keep/bad flag folding, as ever)
+    //   level    <- metadata["level"]: the column no longer exists, but
+    //               nothing a caller sent is discarded — a level other than
+    //               "note" is appended as a `level:<value>` tag
+    //   created  <- metadata["timestamp"] (historical imports)
+    //   session  <- metadata["session"] GUID, lookup only (unknown -> NULL)
+    //   model    <- metadata["model"]
+    // The returned id is a knowledge_id (string, as before).
     std::string Backend::Impl::store(const std::string& raw_text, json metadata, bool defer_embedding) {
         if (metadata.is_null()) metadata = json::object();
 
-        std::string level  = metadata.value("level",  std::string("session"));
-
-        // Optional historical timestamp override (imports of past
-        // conversations). Must be an ISO-8601 UTC string; else falls to now.
-        std::string ts_override;
-        if (metadata.contains("timestamp") && metadata["timestamp"].is_string()) {
-            ts_override = metadata["timestamp"].get<std::string>();
+        std::string status = metadata.value("status", std::string("current"));
+        {
+            bool ok = false;
+            for (auto sv : status::kCreatable) if (status == sv) ok = true;
+            if (!ok)
+                throw std::invalid_argument(
+                    "status must be one of: current, provisional, pending");
         }
 
         // tags: accept a JSON array or a plain string. `keep`/`bad` are
         // flag-tags folded into the tags column — a row tagged "keep" is
-        // protected from delete/update (see delete_memory / update_text).
+        // protected from deletion (see delete_memory).
         std::string tags_str = tags_from_metadata(metadata);
+        const std::string level = metadata.value("level", std::string());
+        if (!level.empty() && level != "note") {
+            if (!tags_str.empty()) tags_str += ",";
+            tags_str += "level:" + level;
+        }
+
+        // Optional historical timestamp override (imports of past
+        // conversations). Must be an ISO-8601 UTC string; else falls to now.
+        std::string ts_override;
+        if (metadata.contains("timestamp") && metadata["timestamp"].is_string())
+            ts_override = metadata["timestamp"].get<std::string>();
+
+        // Session provenance by GUID, lookup only — never create a session
+        // from here (same rule as store_knowledge).
+        std::optional<int> session_id;
+        const std::string guid = metadata.value("session", std::string());
+        if (!guid.empty()) {
+            Stmt st(db, "SELECT session_id FROM sessions WHERE guid = ?");
+            st.bind(1, guid);
+            if (st.step()) session_id = st.column_int(0);
+        }
 
         std::string text = normalize_path(raw_text);
+        if (text.empty())
+            throw std::invalid_argument("note text is required");
 
         std::vector<float> emb;
-        if (!defer_embedding) {
-            emb = require_embedder().encode(text);
-        }
+        if (!defer_embedding)
+            emb = require_embedder().encode(text);   // trigger NULL -> text
 
-        auto ts = resolve_epoch(ts_override);
+        std::optional<int> model_id;
+        const std::string model_name = metadata.value("model", std::string());
+        if (!model_name.empty())
+            model_id = get_or_create_model(model_name);
 
-        // Every summary should record the model that produced it. Callers pass
-        // the live model via metadata["model"]; empty → 0 → NULL (the raw-turn
-        // sentinel), which a non-turn summary should never be. get_or_create_model
-        // interns the name in the models table.
-        std::string model_name = metadata.value("model", std::string(""));
-        int model_id = get_or_create_model(model_name);
-
-        // Custom text index (v0.16): index_record() below tokenizes text and
-        // maintains terms/*_terms/count columns — no FTS5 triggers involved.
-        Stmt s(db,
-            "INSERT INTO summaries (text, embedding_version, embedding, level, tags, created_at, model_id, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?)");
-
-        s.bind(1, text);
-        if (defer_embedding) {
-            s.bind_null(2);
-            s.bind_null(3);
-        } else {
-            bind_embedding_version(s.raw(), 2, emb);
-            bind_embedding(s.raw(), 3, emb);
-        }
-        s.bind(4, level).bind(5, tags_str).bind(6, ts);
-        if (model_id) s.bind(7, model_id); else s.bind_null(7);
-        s.bind(8, ts);  // updated_at == created_at on insert
-
-        if (!s.exec()) {
-            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-        }
-
-        int summary_id = static_cast<int>(sqlite3_last_insert_rowid(db));
-        invalidate_cache();
-        text_index_->index_record("summaries", summary_id, text);
-        return std::to_string(summary_id);
+        Transaction txn(db);
+        const int id = insert_knowledge_row(
+            "note", text, status, tags_str,
+            /*trigger=*/"", /*rationale=*/"", /*scope=*/"",
+            /*supersedes=*/std::nullopt, session_id, model_id,
+            resolve_epoch(ts_override), emb, defer_embedding);
+        text_index_->index_record("knowledge", id, text);
+        txn.commit();
+        invalidate_knowledge_cache();
+        return std::to_string(id);
     }
 
 
@@ -677,44 +685,9 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // ---- summaries (L2/L3) pipeline primitives (issue #22) ------------
-    // Insert a summary row. level: 'turn' (L2) | 'session' (L3) | 'project'.
-    // Embeds text, records model.
-    // source_timestamp (non-empty) overrides the row's timestamp: L2 turn
-    // summaries inherit the source turn's timestamp so the (session_id,
-    // timestamp) pair links a turn to its summary (no FK column needed) and
-    // stays stable across embedding-model changes.
-    int Backend::Impl::store_summary(const std::string& text, const std::string& level,
-                      const std::string& model_name,
-                      const std::string& session_guid,
-                      const std::string& source_timestamp,
-                      const std::string& tags) {
-        std::string t = normalize_path(text);
-        int model_id   = get_or_create_model(model_name);
-        int session_id = get_or_create_session(session_guid);
-        auto emb = require_embedder().encode(t);
-
-        Stmt s(db,
-            "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, level, tags, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)");
-        if (model_id) s.bind(1, model_id); else s.bind_null(1);
-        if (session_id) s.bind(2, session_id); else s.bind_null(2);
-        s.bind(3, t);
-        bind_embedding_version(s.raw(), 4, emb);
-        bind_embedding(s.raw(), 5, emb);
-        s.bind(6, level).bind(7, tags);
-        {
-            const int64_t ts = resolve_epoch(source_timestamp);
-            s.bind(8, ts);
-            s.bind(9, ts);  // updated_at == created_at on insert
-        }
-        if (!s.exec())
-            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-        invalidate_cache();
-        int sid = static_cast<int>(sqlite3_last_insert_rowid(db));
-        text_index_->index_record("summaries", sid, t);
-        return sid;
-    }
+    // PHASE8: the old summary-store entry point is gone — importers write rows of
+    // kind='note' through store_knowledge (caller tags + `imported`); the
+    // generic store() above covers the free-text path.
 
 
     // Shared INSERT for both write paths (PHASE7 B.3): the structured path
@@ -881,7 +854,7 @@ static std::string tags_from_metadata(const json& metadata) {
                 trim(in.scope), in.supersedes, session_id,
                 in.model_name.empty() ? std::optional<int>{}
                                       : std::optional<int>(get_or_create_model(in.model_name)),
-                resolve_epoch(""), emb, /*defer=*/false);
+                resolve_epoch(in.source_timestamp), emb, /*defer=*/false);
 
             if (in.supersedes) {
                 Stmt up(db, "UPDATE knowledge SET status = 'superseded' WHERE knowledge_id = ?");
@@ -1463,27 +1436,27 @@ static std::string tags_from_metadata(const json& metadata) {
 
 
     // Exact-match existence check for import idempotency: same text +
-    // same created_at timestamp already present in summaries. Used by
-    // `ragger import conversations`/`import summaries` so re-running an
-    // import (or feeding overlapping exports) doesn't duplicate rows.
-    // Normalizes `text` the same way store_summary() does before storing
-    // (absolute home-dir paths -> "~/") — otherwise a chunk containing
+    // same created_at timestamp already present among knowledge notes.
+    // Used by the importers so re-running an import (or feeding overlapping
+    // exports) doesn't duplicate rows. Normalizes `text` the same way the
+    // note write path does (strip the Decision/Design-number label, trim,
+    // then absolute home-dir paths -> "~/") — otherwise a chunk containing
     // e.g. "/Users/reid/..." never matches what's actually in the table
     // (already normalized to "~/...") and gets re-inserted on every run.
-    bool Backend::Impl::summary_exists_exact(const std::string& text, const std::string& created_at) {
-        std::string t = normalize_path(text);
+    bool Backend::Impl::note_exists_exact(const std::string& text, const std::string& created_at) {
+        std::string t = normalize_path(strip_decision_number_prefix(text));
         // created_at is an INTEGER epoch; binding the "%F %T" string never
         // matched (SQLite does no implicit conversion), so the probe was
         // always false and every re-import duplicated rows. Use the same
         // resolve_epoch the store path uses, so probe and insert agree.
-        Stmt s(db, "SELECT 1 FROM summaries WHERE text = ? AND created_at = ? LIMIT 1");
+        Stmt s(db, "SELECT 1 FROM knowledge WHERE kind = 'note' AND text = ? AND created_at = ? LIMIT 1");
         s.bind(1, t);
         s.bind(2, resolve_epoch(created_at));
         return s.step();
     }
 
 
-    // Mirrors summary_exists_exact for the decisions table (same
+    // Mirrors note_exists_exact for the decisions table (same
     // normalize-before-compare fix applies here too — plus the
     // decision-number-prefix strip, since store_decision() strips that
     // before storing too).
@@ -1491,7 +1464,7 @@ static std::string tags_from_metadata(const json& metadata) {
         std::string t = normalize_path(strip_decision_number_prefix(text));
         Stmt s(db, "SELECT 1 FROM knowledge WHERE kind = 'decision' AND text = ? AND created_at = ? LIMIT 1");
         s.bind(1, t);
-        s.bind(2, resolve_epoch(created_at));  // INTEGER epoch, see summary_exists_exact
+        s.bind(2, resolve_epoch(created_at));  // INTEGER epoch, see note_exists_exact
         return s.step();
     }
 
@@ -1638,24 +1611,10 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // Recipe ingredients (issue #23): recent summaries of a given level, and
-    // current decisions — fetched by recency (not semantic search) for the
-    // default tiered payload. Returned newest-first.
-    std::vector<std::string> Backend::Impl::recent_summaries(const std::string& level, int limit) {
-        std::vector<std::string> out;
-        if (limit <= 0) return out;
-        Stmt s(db,
-            "SELECT text FROM summaries WHERE level = ? "
-            "ORDER BY created_at DESC, summary_id DESC LIMIT ?");
-        s.bind(1, level).bind(2, limit);
-        while (s.step()) {
-            auto text = s.column_text(0);
-            if (!text.empty()) out.push_back(std::move(text));
-        }
-        return out;
-    }
-
-
+    // Recipe ingredients (issue #23): current decisions — fetched by recency
+    // (not semantic search) for the default tiered payload. Returned
+    // newest-first. (PHASE8: the old recent-summary fetch is gone with its
+    // table; recipes read episodes since PHASE5.)
     std::vector<std::string> Backend::Impl::current_decisions(int limit) {
         std::vector<std::string> out;
         if (limit <= 0) return out;
@@ -1703,81 +1662,10 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // Replace a summary's text + embedding, update its model. False if absent.
-    bool Backend::Impl::update_summary_text(int summary_id, const std::string& text,
-                             const std::string& model_name) {
-        std::string t = normalize_path(text);
-        int model_id  = get_or_create_model(model_name);
-        auto emb = require_embedder().encode(t);
-
-        Stmt s(db,
-            "UPDATE summaries SET text = ?, embedding_version = ?, embedding = ?, "
-            "model_id = COALESCE(?, model_id) WHERE summary_id = ?");
-        s.bind(1, t);
-        bind_embedding_version(s.raw(), 2, emb);
-        bind_embedding(s.raw(), 3, emb);
-        if (model_id) s.bind(4, model_id); else s.bind_null(4);
-        s.bind(5, summary_id);
-        bool ok = s.exec() && sqlite3_changes(db) > 0;
-        if (ok) {
-            invalidate_cache();
-            text_index_->index_record("summaries", summary_id, t);
-        }
-        return ok;
-    }
-
-
-    // Replace a summary's tags column. Used by the summarizer to clear
-    // "draft" once a row has been rewritten with a real summary.
-    bool Backend::Impl::set_summary_tags(int summary_id, const std::string& tags) {
-        Stmt s(db,
-            "UPDATE summaries SET tags = ? WHERE summary_id = ?");
-        s.bind(1, tags).bind(2, summary_id);
-        return s.exec() && sqlite3_changes(db) > 0;
-    }
-
-
-    bool Backend::Impl::update_text(int memory_id, const std::string& raw_text, json metadata, bool defer_embedding) {
-        if (metadata.is_null()) metadata = json::object();
-
-        // Refuse to mutate protected rows for parity with delete_memory.
-        Stmt check_stmt(db, "SELECT tags FROM summaries WHERE summary_id = ?");
-        check_stmt.bind(1, memory_id);
-        if (!check_stmt.step()) return false;  // row not found
-        if (check_stmt.column_text(0).find("keep") != std::string::npos) return false;
-
-        // Lean v2 summaries: only text/embedding/tags are mutable here.
-        // keep/bad flags fold into tags (parity with store()).
-        std::string tags_str = tags_from_metadata(metadata);
-
-        std::string text = normalize_path(raw_text);
-        std::vector<float> emb;
-        if (!defer_embedding) {
-            emb = require_embedder().encode(text);
-        }
-
-        // Custom index: re-tokenize the record on the new text (v0.16).
-        Stmt stmt(db,
-            "UPDATE summaries SET text = ?, embedding_version = ?, embedding = ?, tags = ? "
-            "WHERE summary_id = ?");
-
-        stmt.bind(1, text);
-        if (defer_embedding) {
-            stmt.bind_null(2);
-            stmt.bind_null(3);
-        } else {
-            bind_embedding_version(stmt.raw(), 2, emb);
-            bind_embedding(stmt.raw(), 3, emb);
-        }
-        stmt.bind(4, tags_str);
-        stmt.bind(5, memory_id);
-
-        if (!stmt.exec()) return false;
-
-        invalidate_cache();
-        text_index_->index_record("summaries", memory_id, text);
-        return true;
-    }
-
+    // PHASE8: the old summary text/tag update paths are gone.
+    // Their only live callers were the draft path (removed in PHASE5) and the
+    // public facade; honest history wins — text is never rewritten in place
+    // (store a new row with supersedes), and tags/status change through
+    // agent_update on knowledge:<id>.
 
 } // namespace ragger::sqlite

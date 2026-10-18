@@ -91,19 +91,11 @@ public:
     /// Write back a single row's embedding for any embedded context table.
     bool update_decision_embedding(int decision_id,
                                    const std::vector<float>& emb) override;
-    bool update_summary_embedding(int summary_id,
-                                  const std::vector<float>& emb) override;
     bool update_turn_embedding(int turn_id,
                                const std::vector<float>& emb) override;
 
-    // --- summaries (L2/L3) pipeline (issue #22) ---
-    int store_summary(const std::string& text, const std::string& level,
-                      const std::string& model_name = "",
-                      const std::string& session_guid = "",
-                      const std::string& source_timestamp = "",
-                      const std::string& tags = "") override;
-    bool summary_exists_exact(const std::string& text,
-                              const std::string& created_at) override;
+    bool note_exists_exact(const std::string& text,
+                           const std::string& created_at) override;
     bool decision_exists_exact(const std::string& text,
                                const std::string& created_at) override;
     bool turn_exists_fuzzy(const std::string& user_text,
@@ -114,10 +106,6 @@ public:
     bool update_turn_meta(int turn_id,
                           const std::string& timestamp = "",
                           const std::string& session_guid = "") override;
-    bool update_summary_text(int summary_id, const std::string& text,
-                             const std::string& model_name = "") override;
-    bool set_summary_tags(int summary_id, const std::string& tags) override;
-    std::vector<std::string> recent_summaries(const std::string& level, int limit) override;
     std::vector<std::string> current_decisions(int limit) override;
     bool set_decision_status(int decision_id, const std::string& status) override;
     std::vector<std::string> decisions_by_status(const std::string& status, int limit) override;
@@ -144,15 +132,11 @@ public:
     std::vector<SummaryRecord> episodes_by_session_desc(
         const std::string& session_guid, int limit = 0) override;
 
-    /// Replace text + metadata of an existing row.
-    bool update_text(int memory_id,
-                     const std::string& text,
-                     json metadata = {},
-                     bool defer_embedding = false) override;
+    // PHASE8: update_text is gone (text is never rewritten in place).
 
-    /// Hybrid search over summaries: vector cosine blended with FTS5 keyword
-    /// relevance. (`collections` is currently a no-op — lean v2 summaries has
-    /// no collection column; kept for API compat.)
+    /// Hybrid search across the four corpora: vector cosine blended with the
+    /// custom terms-index keyword relevance. (`collections` is currently a
+    /// no-op; kept for API compat.)
     SearchResponse search(const std::string& query,
                           int limit = 5,
                           float min_score = 0.0f,

@@ -58,7 +58,7 @@ a `phon` column) in favor of a small, fully custom, hand-rolled index —
   bigram, literal (stemmed) or metaphone, no type/flag column. They
   self-filter: a real word and its phonetic code never collide as strings.
 - **`<table>_terms`** — one join table per text table (`turns_terms`,
-  `turn_summaries_terms`, `summaries_terms`, `episodes_terms`,
+  `turn_summaries_terms`, `episodes_terms`,
   `knowledge_terms`, `documents_terms`), each `(record_id, term_id, count)`.
 - **Tokenization pipeline:** normalize → expand negated contractions
   (`isn't` → `is not`, keeping the negation) → stopword-filter the raw word
@@ -245,12 +245,10 @@ docling myfile.pdf -o myfile.md
 ragger import-docs myfile.md --tags docs
 ```
 
-> **Important:** Imported document chunks (L5) are **not** returned by
-> `ragger search` or the `/search` HTTP endpoint. The `search()` method
-> queries the `summaries` table only; the `documents` table has its own
-> `documents_terms` index but is not yet merged into general search. Document search
-> via a recipe layer is planned for a future release. Use `store` (not
-> `import-docs`) if you need your content to appear in regular `search` results.
+> **Note:** `ragger search` and the `/search` HTTP endpoint cover all
+> four searchable corpora: documents (L5), knowledge (decisions,
+> insights, notes), turn summaries, and episodes. Each result's
+> `metadata.source` names its corpus.
 
 ## Performance Characteristics
 

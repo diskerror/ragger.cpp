@@ -32,6 +32,7 @@ struct KnowledgeInput {
     std::optional<int> supersedes;    ///< decision_id this replaces
     std::string session_guid;         ///< source session GUID ("" = none)
     std::string model_name;           ///< producing model ("" = NULL model_id)
+    std::string source_timestamp;     ///< historical created_at ("" = now)
     std::vector<int> evidence;        ///< turn_summary_ids backing the row
 };
 

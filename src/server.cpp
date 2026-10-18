@@ -270,7 +270,7 @@ struct Server::Impl {
             }
         }
 
-        // 2. Catch up unsummarized turns and draft summaries.
+        // 2. Catch up unsummarized turns.
         if (summarizer_) {
             summarizer_->enqueue_catch_up();
         }
@@ -550,8 +550,9 @@ struct Server::Impl {
             metadata["source"] = user.username;
         auto& mem = _get_memory(user.username);
 
-        // Route curated decisions to knowledge(kind='decision'); everything else
-        // (fact/preference/lesson/unspecified) lands in summaries via store().
+        // Route curated decisions to knowledge(kind='decision'); everything
+        // else (fact/preference/lesson/unspecified) lands in
+        // knowledge(kind='note') via store().
         std::string category = metadata.value("category", "");
         if (category == "decision") {
             std::string tags = metadata.value("tags", "");
@@ -605,7 +606,7 @@ struct Server::Impl {
 
     // POST /memory/note — agent note (agent API Phase 3).
     // Body: {text, tags?, evidence?}. Stores via store(), so the row lands
-    // where ragger_store notes land today (summaries). The response carries
+    // where ragger_store notes land (knowledge kind='note'). The response carries
     // possible_supersedes exactly like /decision — compared against current
     // decisions, hint only, nothing is changed.
     // Phase 5 step 6: `evidence: [turn_summary_id]` routes the write to

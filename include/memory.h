@@ -107,25 +107,22 @@ public:
 
     /// Per-row embedding write-back for the remaining context tables.
     bool update_decision_embedding(int decision_id, const std::vector<float>& emb);
-    bool update_summary_embedding(int summary_id, const std::vector<float>& emb);
     bool update_turn_embedding(int turn_id, const std::vector<float>& emb);
 
     /// Purge conversation turns older than max_age_hours. Returns rows deleted.
     int cleanup_old_conversations(float max_age_hours);
 
-    // --- summaries (L2/L3) pipeline (issue #22) ---
-    /// `source_timestamp` (non-empty) overrides the row's timestamp — L2
-    /// inherits the source turn's timestamp so the (session_id, timestamp)
-    /// pair links a turn to its summary (no FK column). `tags`="draft" marks
-    /// a heuristic-fallback summary that should be re-summarized later.
-    int store_summary(const std::string& text, const std::string& level,
-                      const std::string& model_name = "",
-                      const std::string& session_guid = "",
-                      const std::string& source_timestamp = "",
-                      const std::string& tags = "");
-    bool update_summary_text(int summary_id, const std::string& text,
-                             const std::string& model_name = "");
-    std::vector<std::string> recent_summaries(const std::string& level, int limit);
+    // PHASE8: the old summary-store / text-update / recent-list wrappers are gone
+    // with the `summaries` table. Importers write knowledge notes instead.
+    /// Insert a knowledge note (kind='note'): the importer-facing shorthand
+    /// over store_knowledge. `source_timestamp` (non-empty) sets the row's
+    /// created_at (historical imports); `tags` = caller tags with `imported`
+    /// folded in (TODO Q4); `model_name`/`session_guid` carry provenance when
+    /// the importer has them.
+    int store_note(const std::string& text, const std::string& tags = "",
+                   const std::string& source_timestamp = "",
+                   const std::string& model_name = "",
+                   const std::string& session_guid = "");
     std::vector<std::string> current_decisions(int limit);
 
     /// Set a decision's status (e.g. promote "roadmap" -> "current" once
@@ -138,12 +135,12 @@ public:
     /// e.g. status="roadmap" to list planned/future work explicitly.
     std::vector<std::string> decisions_by_status(const std::string& status, int limit);
 
-    /// Exact-match idempotency check for bulk importers: does a summaries
-    /// row already exist with this text and created_at timestamp?
-    bool summary_exists_exact(const std::string& text, const std::string& created_at);
+    /// Exact-match idempotency check for bulk importers: does a knowledge
+    /// note already exist with this text and created_at timestamp?
+    bool note_exists_exact(const std::string& text, const std::string& created_at);
 
-    /// Exact-match idempotency check for the decisions table. Mirrors
-    /// summary_exists_exact.
+    /// Exact-match idempotency check for decision rows. Mirrors
+    /// note_exists_exact.
     bool decision_exists_exact(const std::string& text, const std::string& created_at);
 
     /// Fuzzy overlap check for conversation importers: does a live-captured
@@ -161,11 +158,7 @@ public:
                           const std::string& timestamp = "",
                           const std::string& session_guid = "");
 
-    /// Replace text + metadata of an existing memory (re-embeds unless
-    /// `defer_embedding`, FTS5 triggers reindex, preserves id and original
-    /// timestamp). Returns false if the row is missing or has the keep tag.
-    bool update_text(int memory_id, const std::string& text, json metadata = {},
-                     bool defer_embedding = false);
+    // PHASE8: update_text is gone (text is never rewritten in place).
 
     /// Search. Returns results from the single configured DB.
     SearchResponse search(const std::string& query,

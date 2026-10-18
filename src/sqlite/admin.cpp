@@ -294,15 +294,8 @@ namespace fs = std::filesystem;
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM episodes
         )");
-        view("summaries_view", R"(
-            SELECT summary_id, text, level, tags, session_id, model_id,
-                   datetime(created_at, 'unixepoch', 'localtime') AS created_at,
-                   datetime(updated_at, 'unixepoch', 'localtime') AS updated_at,
-                   unigram_count, bigram_count,
-                   embedding_version,
-                   CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
-            FROM summaries
-        )");
+        // the old summaries view is gone with its table (PHASE8); knowledge_view
+        // covers notes now.
         // knowledge_view (PHASE7): replaces decisions_view + insights_view.
         // No *_evidence_view: the old evidence tables never had one (same
         // convention kept for knowledge_turn_evidence / _document_evidence).

@@ -135,8 +135,8 @@ void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
 
 
     // ---- cache --------------------------------------------------------
-    void Backend::Impl::invalidate_cache() { summary_cache_.valid = false; }
-
+    // PHASE8: the old summaries vector cache (member + ensure/invalidate) is
+    // gone with its table; notes ride knowledge_cache_.
     void Backend::Impl::invalidate_doc_cache() { doc_cache_.valid = false; }
 
     void Backend::Impl::invalidate_knowledge_cache() { knowledge_cache_.valid = false; }
@@ -184,26 +184,8 @@ void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
     }
 
 
-    void Backend::Impl::ensure_cache() {
-        if (summary_cache_.valid) return;
-        load_cache(summary_cache_, "summaries",
-            "SELECT summary_id, text, embedding, level, tags, "
-            "       datetime(created_at,'unixepoch','localtime') "
-            "FROM summaries WHERE level != 'episode'",
-            // PHASE5 B.3: episodes moved to their own table (episode_cache_);
-            // the filter is belt-and-braces for any pre-move row.
-            [](Stmt& s, json& meta) {
-                // Lean v2 summaries: surface level/tags as metadata so the
-                // generic API and keep-protection (via tags) have what they
-                // need.
-                meta["source"] = "summary";
-                meta["level"]  = s.column_text(3);
-                std::string tags = s.column_text(4);
-                if (!tags.empty()) meta["tags"] = tags;
-            });
-        summary_cache_.valid = true;
-    }
-
+    // PHASE8: the old summaries loader is gone; the four loaders below
+    // cover every corpus.
 
     void Backend::Impl::ensure_doc_cache() {
         if (doc_cache_.valid) return;

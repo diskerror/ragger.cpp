@@ -117,6 +117,11 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
         if (l == "decision" || l == "insight") {
             want_layers.insert("knowledge");
             kind_filter.insert(l);
+        } else if (l == "summary") {
+            // PHASE8: the summary layer is gone; notes are knowledge rows.
+            throw std::invalid_argument(
+                "layer 'summary' no longer exists — notes are knowledge "
+                "rows, use layers:[\"knowledge\"] with kinds:[\"note\"]");
         } else if (!is_known_agent_layer(l)) {
             throw std::invalid_argument("unknown layer: '" + l + "'");
         } else want_layers.insert(l);
@@ -254,8 +259,6 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
     if (sess_id || excl_id) {
         fill_owning(session_of, "turn_summary",
                     "SELECT turn_summary_id, session_id FROM turn_summaries WHERE turn_summary_id");
-        fill_owning(session_of, "summary",
-                    "SELECT summary_id, session_id FROM summaries WHERE summary_id");
         fill_owning(session_of, "knowledge",
                     "SELECT knowledge_id, session_id FROM knowledge WHERE knowledge_id");
     }
@@ -328,8 +331,6 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
             auto it = kno_trigger.find(r.id);
             if (it != kno_trigger.end() && !it->second.empty())
                 h.extra["trigger"] = it->second;
-        } else if (layer == "summary") {
-            h.extra = json{{"level", r.metadata.value("level", "")}};
         } else if (layer == "turn_summary") {
             h.extra = json::object();
             if (r.metadata.contains("turn_id"))
@@ -598,9 +599,13 @@ json Backend::Impl::agent_get(const AgentGetQuery& q) {
         json items = json::array();
         for (const auto& handle : q.ids) {
             // PHASE7 (TODO Q3 default): typed handles decision:N / insight:N
-            // are rejected — knowledge:N is the only form.
+            // are rejected — knowledge:N is the only form. PHASE8: summary:N
+            // too (notes are knowledge rows).
             if (is_legacy_knowledge_handle(handle))
                 throw std::invalid_argument("use knowledge:<id>");
+            if (is_legacy_summary_handle(handle))
+                throw std::invalid_argument(
+                    "use knowledge:<id> (notes are knowledge rows)");
             std::string layer;
             int rowid = 0;
             if (!parse_agent_handle(handle, layer, rowid)) {
@@ -681,25 +686,9 @@ json Backend::Impl::agent_get(const AgentGetQuery& q) {
                     c.bind(1, rowid);
                     while (c.step())
                         expanded.push_back(fetch_agent_row(db, "turn_summary", c.column_int(0)));
-                } else if (layer == "summary") {
-                    // The turn_summaries in its session within its span.
-                    // Episodes/turn_summaries only — never depends on session
-                    // summaries existing (design §10.2.5).
-                    Stmt c(db, "SELECT turn_summary_id FROM turn_summaries ts "
-                               "WHERE ts.session_id = ("
-                               "  SELECT session_id FROM summaries WHERE summary_id = ?) "
-                               "  AND ts.session_id IS NOT NULL "
-                               "  AND ts.text != '' "
-                               "  AND ts.turn_datetime BETWEEN "
-                               "    (SELECT created_at FROM summaries WHERE summary_id = ?) "
-                               "    AND (SELECT updated_at FROM summaries WHERE summary_id = ?) "
-                               "ORDER BY ts.turn_datetime");
-                    c.bind(1, rowid);
-                    c.bind(2, rowid);
-                    c.bind(3, rowid);
-                    while (c.step())
-                        expanded.push_back(fetch_agent_row(db, "turn_summary", c.column_int(0)));
                 }
+                // PHASE8: the old `summary` expand branch is gone with the
+                // layer; notes carry their evidence links like any knowledge row.
                 if (!expanded.empty()) item["expanded"] = std::move(expanded);
             } else if (q.expand == "chain" && layer == "knowledge") {
                 // Full supersede lineage oldest -> newest: walk `supersedes`

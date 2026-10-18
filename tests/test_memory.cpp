@@ -6,6 +6,7 @@
 #include "config.h"
 #include "config_access.h"
 #include "embedder.h"
+#include "import.h"
 #include "memory.h"
 #include "sqlite/backend.h"
 #include "test_env.h"
@@ -220,6 +221,58 @@ void p5_recipe_context(const std::string& model_dir) {
 }
 
 
+// PHASE8 D.4: the summary importer writes knowledge notes tagged
+// `imported` + caller tags; re-importing the same JSONL skips both.
+void p8_import_notes() {
+    std::println("  p8_import_notes...");
+    cleanup_all();
+    const std::string jsonl = "/tmp/ragger_test_mem1_notes.jsonl";
+    {
+        std::ofstream f(jsonl);
+        f << R"({"text":"Imported note one.","tags":"hand","timestamp":"2026-05-01 10:00:00"})" << "\n";
+        f << R"({"text":"Imported note two.","tags":"hand,second","timestamp":"2026-05-02 10:00:00"})" << "\n";
+    }
+
+    ragger::RaggerMemory mem(TEMP_DB1);
+    const auto items = ragger::load_summary_jsonl(jsonl);
+    assert(items.size() == 2);
+
+    int n = 0, n_skip = 0;
+    auto run_import = [&]() {
+        for (const auto& s : items) {
+            if (!s.timestamp.empty() && mem.note_exists_exact(s.text, s.timestamp)) { ++n_skip; continue; }
+            mem.store_note(s.text, s.tags, s.timestamp);
+            ++n;
+        }
+    };
+    run_import();
+    assert(n == 2 && n_skip == 0);
+    n = 0;
+    run_import();
+    assert(n == 0 && n_skip == 2);   // idempotent re-import
+
+    sqlite3* raw = nullptr;
+    assert(sqlite3_open(TEMP_DB1.c_str(), &raw) == SQLITE_OK);
+    sqlite3_stmt* st = nullptr;
+    auto scalar_text = [&](const std::string& sql) -> std::string {
+        assert(sqlite3_prepare_v2(raw, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        assert(sqlite3_step(st) == SQLITE_ROW);
+        std::string v = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+        sqlite3_finalize(st); st = nullptr;
+        return v;
+    };
+    assert(scalar_text("SELECT COUNT(*) FROM knowledge WHERE kind='note'") == "2");
+    assert(scalar_text("SELECT tags FROM knowledge WHERE text='Imported note one.'") == "hand,imported");
+    assert(scalar_text("SELECT tags FROM knowledge WHERE text='Imported note two.'") == "hand,second,imported");
+    sqlite3_close(raw);
+
+    fs::remove(jsonl);
+    mem.close();
+    cleanup_all();
+    std::println(" OK");
+}
+
+
 int main() {
     TestEnv env("memory");  // must be first: isolates from ~/.ragger
     auto model_dir = env.model_dir();
@@ -232,6 +285,7 @@ int main() {
 
     std::println("Running memory facade tests:");
     p5_recipe_context(model_dir);
+    p8_import_notes();
 
     test_store_and_search();
     test_store_with_tags();

@@ -245,8 +245,8 @@ static nlohmann::json tools_list() {
              "What happened recently, as a deterministic newest-first list (no "
              "search ranking). granularity 'turn' = per-exchange summaries "
              "(falling back to raw user text), 'episode' = episode summaries "
-             "(default), 'session' = per session its session summary or newest "
-             "episode. Filters: session GUID, since/until ('YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', "
+             "(default), 'session' = one row per session (guid, name, turn "
+             "span, episode count, newest episode text). Filters: session GUID, since/until ('YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', "
              "or relative '30d'/'12h'). Page through with the returned "
              "next_cursor; null means the end."},
             {"inputSchema", {
@@ -471,9 +471,9 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         }
 
     } else if (tool_name == "memory_note") {
-        // Notes land in summaries via store(); evidence present => stored
-        // as an insight instead (see HTTP /memory/note for the shared
-        // contract).
+        // Notes land in knowledge (kind='note') via store(); evidence
+        // present => stored as an insight instead (see HTTP /memory/note for
+        // the shared contract).
         const auto text = arguments.value("text", "");
         if (text.empty())
             return error_result(ragger::lang::ERR_MCP_TEXT_REQUIRED);

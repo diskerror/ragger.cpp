@@ -151,11 +151,12 @@ model quality matters far less than model speed.
   summarizer never runs concurrent requests, so there is no benefit to
   parallel slots — and each slot you add divides the KV budget.
 
-**Fallback behaviour.** When the endpoint is unreachable, the worker
-writes a heuristic *draft* L2 (a trimmed `User: … | Assistant: …`
-concatenation, tagged `draft`) so the chronology stays intact. A
-housekeeping pass re-summarizes drafts the next time inference is
-available — no manual catch-up needed.
+**Fallback behaviour.** When the endpoint is unreachable, the turn
+simply stays unsummarized. The worker retries with exponential backoff
+(5 min base, doubling, capped at 6 h) and the housekeeping catch-up
+pass resumes the backlog automatically once inference is available —
+no manual catch-up needed. Trivial turns are marked even while
+inference is down, so they never enter the backlog.
 
 ## `[housekeeping]`
 
@@ -165,11 +166,11 @@ available — no manual catch-up needed.
 | `housekeeping_interval` | `60`    | Seconds between background passes. `0` disables; values under 10 are clamped to 10.|
 | `episode_idle_minutes`  | `15`    | Idle gap (minutes) that closes an episode of work within a session, and drives session/project rollups. Any positive integer. |
 | `summary_pause_minutes` | `20`    | Deprecated alias for `episode_idle_minutes` — honored only when `episode_idle_minutes` is unset. |
-| `catch_up_batch_size`   | `10`    | Per-tick cap on unsummarized turns (and, separately, draft-tagged retries) enqueued at once. Keeps a manual resummarize (nulling `model_id` on a batch of `summaries` rows via direct SQL) to a small, deliberate slice per housekeeping tick instead of redoing hundreds of inference calls at once. Any positive integer. |
+| `catch_up_batch_size`   | `10`    | Per-tick cap on unsummarized turns enqueued at once. Keeps a manual resummarize (nulling `summary_model_id` on a batch of `turn_summaries` rows via direct SQL) to a small, deliberate slice per housekeeping tick instead of redoing hundreds of inference calls at once. Any positive integer. |
 
 The same housekeeping loop catches turns that landed without a
-summary (e.g. captured via MCP while the daemon was down) and rewrites
-draft L2 rows when inference comes back.
+summary (e.g. captured via MCP while the daemon was down) and resumes
+the summarizer's backoff-deferred retries when inference comes back.
 
 ## `[embed]`
 

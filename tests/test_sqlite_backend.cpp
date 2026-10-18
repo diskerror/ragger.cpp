@@ -64,9 +64,8 @@ void test_store_with_metadata(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
 
-    // Lean v2 summaries: tags (comma-joined) + level round-trip.
-    // status was removed from summaries in v0.12.0; any status key in
-    // metadata is silently dropped.
+    // PHASE8: notes are knowledge rows; a level other than "note" becomes
+    // a `level:<value>` tag (there is no level column any more).
     ragger::json meta = {
         {"level", "session"},
         {"tags", {"test", "unit"}}
@@ -76,9 +75,10 @@ void test_store_with_metadata(ragger::Embedder& emb) {
 
     auto all = db.load_all();
     CHECK(all.size() == 1);
-    CHECK(all[0].metadata["level"] == "session");
-    // Tags stored as comma-separated string in the tags column.
-    CHECK(all[0].metadata["tags"] == "test,unit");
+    // Tags stored as comma-separated string in the tags column, with the
+    // level folded in.
+    CHECK(all[0].metadata["tags"] == "test,unit,level:session");
+    CHECK(all[0].metadata["kind"] == "note");
 
     db.close();
     cleanup();
@@ -407,10 +407,11 @@ void test_search_by_metadata(ragger::Embedder& emb) {
     db.store("Banana note.", {{"level", "turn"},    {"tags", {"fruit", "tropical"}}});
     db.store("Car note.",    {{"level", "session"}, {"tags", {"vehicle"}}});
 
-    // Filter by level
+    // Filter by level (PHASE8: level lives as a `level:<value>` tag)
     auto results = db.search_by_metadata({{"level", "turn"}});
     CHECK(results.size() == 2);
-    for (auto& r : results) CHECK(r.metadata["level"] == "turn");
+    for (auto& r : results)
+        CHECK(r.metadata["tags"].get<std::string>().find("level:turn") != std::string::npos);
 
     // Filter by tag (LIKE on the tags column)
     results = db.search_by_metadata({{"tags", "vehicle"}});
@@ -547,16 +548,14 @@ void test_timestamp_format(ragger::Embedder& emb) {
     auto all = db.load_all();
     CHECK(all.size() == 1);
 
-    // `summaries.created_at` is now an INTEGER epoch (v0.12.0 migration),
-    // not the old "YYYY-MM-DD HH:MM:SS" TEXT format. load_all() reads the
-    // column via column_text() on a raw INTEGER, which SQLite renders back
-    // as plain base-10 digits (no separators) -- confirm that shape and
-    // that it's a plausible "recent" epoch value, rather than asserting the
-    // old fixed-19-char formatted-string length.
+    // PHASE8: load_all renders knowledge.created_at as local
+    // "YYYY-MM-DD HH:MM:SS" (same rendering as every other read path).
     auto& ts = all[0].timestamp;
     CHECK(!ts.empty());
-    CHECK(ts.find_first_not_of("0123456789") == std::string::npos);
-    int64_t epoch_val = std::stoll(ts);
+    std::tm tm{};
+    CHECK(strptime(ts.c_str(), "%Y-%m-%d %H:%M:%S", &tm) != nullptr);
+    tm.tm_isdst = -1;   // let mktime resolve DST (strptime leaves it 0)
+    int64_t epoch_val = static_cast<int64_t>(mktime(&tm));
     int64_t now_epoch = static_cast<int64_t>(std::time(nullptr));
     CHECK(epoch_val > 0);
     CHECK(epoch_val <= now_epoch + 5);       // not in the future
@@ -566,10 +565,10 @@ void test_timestamp_format(ragger::Embedder& emb) {
     cleanup();
 }
 
-// Guards the v2 read-path wiring: the generic store/read API operates on the
-// lean `summaries` table (issue #33 split), not the dropped pre-v2 `memories`
-// table. level/tags round-trip; there is no metadata blob.
-// status was removed from summaries in v0.12.0.
+// Guards the read-path wiring: the generic store/read API operates on the
+// unified `knowledge` table as notes (PHASE8; formerly the lean `summaries`
+// table), not the dropped pre-v2 `memories` table. tags round-trip with the
+// level folded in as a tag; there is no metadata blob.
 void test_v2_summaries_backing(ragger::Embedder& emb) {
     cleanup();
     {
@@ -579,18 +578,18 @@ void test_v2_summaries_backing(ragger::Embedder& emb) {
 
         auto all = db.load_all();
         CHECK(all.size() == 1);
-        CHECK(all[0].metadata["level"] == "session");
-        CHECK(all[0].metadata["tags"] == "note");
+        CHECK(all[0].metadata["kind"] == "note");
+        CHECK(all[0].metadata["tags"] == "note,level:session");
         db.close();
     }
 
-    // Inspect the raw DB: the row must be in `summaries`, and the legacy
-    // `memories` table must not exist in a fresh v2 database.
+    // Inspect the raw DB: the row must be in `knowledge`, and the legacy
+    // `memories` table must not exist in a fresh database.
     sqlite3* raw = nullptr;
     CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
 
     sqlite3_stmt* st = nullptr;
-    sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM summaries", -1, &st, nullptr);
+    sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM knowledge WHERE kind='note'", -1, &st, nullptr);
     CHECK(sqlite3_step(st) == SQLITE_ROW);
     CHECK(sqlite3_column_int(st, 0) == 1);
     sqlite3_finalize(st);
@@ -1210,57 +1209,64 @@ void test_reset_abandoned_turn_summaries(ragger::Embedder& emb) {
 }
 
 
-// Summary primitives (issue #22): store_summary, update_summary_text —
-// the deterministic backbone the summarization pipeline drives.
-// current_session_summary and set_summary_status were removed when
-// summaries.status was dropped (v0.12.0 boundary-detection rework).
-void test_summary_primitives(ragger::Embedder& emb) {
+// PHASE8 note primitives: store() writes knowledge notes (kind='note').
+// A level other than "note" becomes a `level:<value>` tag; two stores of
+// the same text are two rows (dedup is the importers' job); a non-creatable
+// status is rejected.
+void test_note_primitives(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
 
-    int l2 = db.store_summary("User asked about France; capital is Paris.",
-                              "turn", "memo-model");
-    CHECK(l2 > 0);
-
-    int l3 = db.store_summary("Discussed European capitals.",
-                              "session", "memo-model");
-    CHECK(l3 > 0);
-
-    CHECK(db.update_summary_text(l3, "Discussed European capitals, focus France.",
-                                  "memo-model"));
-
-    int l3b = db.store_summary("Switched to cooking techniques.",
-                               "session", "memo-model");
-    CHECK(l3b > 0);
+    const std::string id1 = db.store("First note.", {{"level", "session"}});
+    const std::string id2 = db.store("Second note.", {{"tags", "a,b"}});
+    CHECK(!id1.empty() && !id2.empty());
 
     sqlite3* raw = nullptr;
     CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
     sqlite3_stmt* st = nullptr;
-    sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM summaries WHERE level='turn'",
-                       -1, &st, nullptr);
-    CHECK(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1);
-    sqlite3_finalize(st);
-    sqlite3_prepare_v2(raw,
-        "SELECT COUNT(*) FROM summaries WHERE level='session'",
-        -1, &st, nullptr);
-    CHECK(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 2);
-    sqlite3_finalize(st);
-    sqlite3_prepare_v2(raw,
-        "SELECT COUNT(*) FROM summaries s JOIN models m ON m.model_id=s.model_id "
-        "WHERE m.name='memo-model'", -1, &st, nullptr);
-    CHECK(sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 3);
-    sqlite3_finalize(st);
+    auto scalar_int = [&](const std::string& sql) -> long long {
+        sqlite3_prepare_v2(raw, sql.c_str(), -1, &st, nullptr);
+        if (st == nullptr) {
+            std::println("  note_primitives PREPARE FAILED: {} ({})", sql, sqlite3_errmsg(raw));
+            CHECK(false);
+            return -1;
+        }
+        long long v = (sqlite3_step(st) == SQLITE_ROW) ? sqlite3_column_int64(st, 0) : -1;
+        sqlite3_finalize(st); st = nullptr;
+        return v;
+    };
+    auto scalar_text = [&](const std::string& sql) -> std::string {
+        sqlite3_prepare_v2(raw, sql.c_str(), -1, &st, nullptr);
+        if (st == nullptr) {
+            std::println("  note_primitives PREPARE FAILED: {} ({})", sql, sqlite3_errmsg(raw));
+            CHECK(false);
+            return {};
+        }
+        std::string v = (sqlite3_step(st) == SQLITE_ROW)
+            ? reinterpret_cast<const char*>(sqlite3_column_text(st, 0)) : std::string("<none>");
+        sqlite3_finalize(st); st = nullptr;
+        return v;
+    };
+
+    CHECK(scalar_int("SELECT COUNT(*) FROM knowledge WHERE kind='note'") == 2);
+    CHECK(scalar_text("SELECT tags FROM knowledge WHERE knowledge_id=" + id1)
+          == "level:session");
+    CHECK(scalar_text("SELECT tags FROM knowledge WHERE knowledge_id=" + id2) == "a,b");
+    CHECK(scalar_text("SELECT status FROM knowledge WHERE knowledge_id=" + id1)
+          == "current");
+
+    // Same text twice: two rows (no dedup on the store path).
+    db.store("First note.", {});   // no metadata: still a note
+    CHECK(scalar_int("SELECT COUNT(*) FROM knowledge WHERE kind='note'") == 3);
+
     sqlite3_close(raw);
 
-    CHECK(!db.update_summary_text(99999, "x", "memo-model"));
+    // 'retired' is not creatable.
+    bool threw = false;
+    try { db.store("Bad status note.", {{"status", "retired"}}); }
+    catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
 
-    // Recipe ingredients (issue #23): recency-based fetch.
-    auto turns = db.recent_summaries("turn", 5);
-    CHECK(turns.size() == 1);
-    auto sessions = db.recent_summaries("session", 5);
-    CHECK(sessions.size() == 2);
-    CHECK(db.recent_summaries("project", 5).empty());
-    CHECK(db.recent_summaries("turn", 0).empty());
     CHECK(db.current_decisions(5).empty());      // none created
 
     db.close();
@@ -1333,7 +1339,8 @@ void test_search_merges_three_corpora(ragger::Embedder& emb) {
             return resp.results[0].metadata.value("source", std::string());
         };
 
-        CHECK(source_of("interstellar spacecraft golden record") == "summary");
+        // PHASE8: the note corpus shares the "knowledge" source tag.
+        CHECK(source_of("interstellar spacecraft golden record") == "knowledge");
         CHECK(source_of("how plants make energy from light")     == "document");
         CHECK(source_of("plan to switch to PostgreSQL database")  == "knowledge");
 
@@ -1711,6 +1718,11 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
                 ('guid-a', 'A', 'test'), ('guid-b', NULL, NULL);
             INSERT INTO turns (user_text, session_id, created_at) VALUES
                 ('t1', 1, 1700000500), ('t2', 1, 1700000100), ('t3', 1, 1700000300);
+            CREATE TABLE models (
+                model_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at INTEGER NOT NULL DEFAULT (unixepoch()));
+            INSERT INTO models (model_id, name) VALUES (1, 'summarizer-x');
             CREATE TABLE summaries (
                 summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 text TEXT NOT NULL, level TEXT NOT NULL,
@@ -1722,13 +1734,19 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
                 bigram_count INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER, embedding BLOB);
             -- Two episodes with OVERLAPPING wall-clock spans, one per
-            -- session: the backfill must never cross-assign.
-            INSERT INTO summaries (text, level, tags, session_id, unigram_count,
-                                   created_at, updated_at) VALUES
-                ('episode one', 'episode', '', 1, 7, 1700000100, 1700000300),
-                ('episode two', 'episode', '', 2, 5, 1700000150, 1700000250),
-                ('note two',    'session', 'x', 2, 3, 1700000200, 1700000200),
-                ('legacy proj', 'project', '', 1, 4, 1700000200, 1700000200);
+            -- session: the backfill must never cross-assign. The five
+            -- session/project rows cover every PHASE8 §4b classification
+            -- case (rollup vs imported vs hand-written vs project).
+            INSERT INTO summaries (text, level, tags, session_id, model_id,
+                                   unigram_count, created_at, updated_at,
+                                   embedding_version, embedding) VALUES
+                ('episode one',  'episode', '',          1, NULL, 7, 1700000100, 1700000300, NULL, NULL),
+                ('episode two',  'episode', '',          2, NULL, 5, 1700000150, 1700000250, NULL, NULL),
+                ('rollup one',   'session', 'a,b',       1, 1,    3, 1700000200, 1700000200, 1, X'01'),
+                ('imported one', 'session', 'imported',  NULL, 1,  2, 1700000210, 1700000210, NULL, NULL),
+                ('hand one',     'session', '',          NULL, NULL, 1, 1700000220, 1700000220, NULL, NULL),
+                ('proj in',      'project', 'imported',  NULL, NULL, 1, 1700000230, 1700000230, NULL, NULL),
+                ('legacy proj',  'project', '',          1, NULL, 4, 1700000200, 1700000200, NULL, NULL);
             CREATE TABLE turn_summaries (
                 turn_summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 text TEXT,
@@ -1775,9 +1793,8 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
     CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('knowledge') WHERE cid = 5") == "trigger");
     CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('knowledge') WHERE cid = 11") == "created_at");
     CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('knowledge') WHERE cid = 1") == "kind");
-    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('summaries') WHERE cid = 6") == "created_at");
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_table_info('knowledge') WHERE name = 'project_id'") == 0);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_table_info('summaries') WHERE name = 'project_id'") == 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_table_info('knowledge') WHERE name = 'level'") == 0);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'project_id'") == 0);
     // sessions gains the derived span columns (PHASE4).
     CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('sessions') WHERE cid = 4") == "started_on");
@@ -1797,10 +1814,10 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
     // knowledge_document_evidence FKs: document_id SET NULL, knowledge_id CASCADE.
     CHECK(p1_scalar_text(raw, "SELECT on_delete FROM pragma_foreign_key_list('knowledge_document_evidence') WHERE \"table\" = 'documents'") == "SET NULL");
     CHECK(p1_scalar_text(raw, "SELECT on_delete FROM pragma_foreign_key_list('knowledge_document_evidence') WHERE \"table\" = 'knowledge'") == "CASCADE");
-    // PHASE5: episodes MOVED out of summaries (ids preserved, span = old
-    // created_at/updated_at); only the session/project rollups remain.
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM summaries") == 2);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM summaries WHERE level = 'episode'") == 0);
+    // PHASE8: summaries is GONE — dropped with its junction and view.
+    // Everything moved: episodes to `episodes` (PHASE5), session/project
+    // rows to knowledge notes (§4b).
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('summaries','summaries_terms','summaries_view')") == 0);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM episodes") == 2);
     CHECK(p1_scalar_text(raw, "SELECT episode_id || '|' || span_start || '-' || span_end || '|' || unigram_count "
                               "FROM episodes WHERE text = 'episode one'") == "1|1700000100-1700000300|2");  // count recomputed by the leg's final reindex
@@ -1838,19 +1855,46 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
     // §4a: ids preserved across the gap, all kind='decision'. Unknown status
     // words (fact/lesson) moved into tags with status 'current'; roadmap and
     // deprecated are vocabulary and stay. New columns start NULL.
-    CHECK(p1_scalar_text(raw, "SELECT group_concat(knowledge_id) FROM knowledge") == "1,3,5,7,9");
+    CHECK(p1_scalar_text(raw, "SELECT group_concat(knowledge_id) FROM knowledge WHERE kind='decision'") == "1,3,5,7,9");
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge WHERE kind = 'decision'") == 5);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge WHERE status NOT IN ('current','roadmap','deprecated')") == 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge WHERE kind='decision' AND status NOT IN ('current','roadmap','deprecated')") == 0);
     CHECK(p1_scalar_text(raw, "SELECT tags FROM knowledge WHERE text = 'a fact'") == "fact");
     CHECK(p1_scalar_text(raw, "SELECT tags FROM knowledge WHERE text = 'a lesson'") == "x,lesson");
     CHECK(p1_scalar_text(raw, "SELECT status FROM knowledge WHERE text = 'roadmap ruling'") == "roadmap");
     CHECK(p1_scalar_text(raw, "SELECT status FROM knowledge WHERE text = 'deprecated ruling'") == "deprecated");
     CHECK(p1_scalar_int(raw, "SELECT unigram_count FROM knowledge WHERE text = 'first ruling'") == 2);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge WHERE trigger IS NULL AND rationale IS NULL AND scope IS NULL AND supersedes IS NULL AND session_id IS NULL AND model_id IS NULL") == 5);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge WHERE kind='decision' AND trigger IS NULL AND rationale IS NULL AND scope IS NULL AND supersedes IS NULL AND session_id IS NULL AND model_id IS NULL") == 5);
     // sqlite_sequence: knowledge seq >= max migrated id (AUTOINCREMENT floor).
     CHECK(p1_scalar_int(raw, "SELECT seq >= 9 FROM sqlite_sequence WHERE name = 'knowledge'") == 1);
-    // The leg's final reindex indexed knowledge.
+    // §4b (PHASE8): every non-episode summaries row became a knowledge
+    // note. Ids continue above the highest decision id (9), ascending in
+    // old summary_id order: rollup one=10, imported one=11, hand one=12,
+    // proj in=13, legacy proj=14.
+    CHECK(p1_scalar_text(raw, "SELECT group_concat(knowledge_id) FROM knowledge WHERE kind='note'")
+          == "10,11,12,13,14");
+    CHECK(p1_scalar_text(raw, "SELECT status || '|' || tags FROM knowledge WHERE text='rollup one'")
+          == "retired|a,b,legacy_session");
+    CHECK(p1_scalar_text(raw, "SELECT status || '|' || tags FROM knowledge WHERE text='imported one'")
+          == "current|imported,legacy_note");
+    CHECK(p1_scalar_text(raw, "SELECT status || '|' || tags FROM knowledge WHERE text='hand one'")
+          == "current|legacy_note");
+    CHECK(p1_scalar_text(raw, "SELECT status || '|' || tags FROM knowledge WHERE text='proj in'")
+          == "current|imported,legacy_project");
+    CHECK(p1_scalar_text(raw, "SELECT status || '|' || tags FROM knowledge WHERE text='legacy proj'")
+          == "retired|legacy_project");
+    // session_id / model_id / created_at carried across (unigram_count is
+    // recomputed by the leg's final reindex, like episodes above).
+    CHECK(p1_scalar_text(raw, "SELECT ifnull(session_id,'N') || '-' || ifnull(model_id,'N') || '-' "
+                              "|| created_at || '-' || unigram_count FROM knowledge WHERE text='rollup one'")
+          == "1-1-1700000200-2");
+    CHECK(p1_scalar_text(raw, "SELECT embedding_version || '-' || hex(embedding) FROM knowledge WHERE text='rollup one'")
+          == "1-01");
+    // knowledge row count = decisions + non-episode summaries rows (5 + 5).
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge") == 10);
+    // The leg's final reindex indexed knowledge: every row is covered.
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge_terms") > 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge WHERE knowledge_id NOT IN "
+                             "(SELECT knowledge_id FROM knowledge_terms)") == 0);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'protect_orphan_turn_summaries'") == 1);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_foreign_key_check") == 0);
     sqlite3_close(raw);
@@ -2430,6 +2474,88 @@ void test_p7_legacy_handles_rejected(ragger::Embedder& emb) {
     CHECK(got["items"].size() == 2);
     CHECK(got["items"][0].contains("error"));
     CHECK(got["items"][1].contains("error"));
+
+    db.close();
+    cleanup();
+}
+
+// PHASE8 D.5: delete_batch deletes plain notes; refuses a keep-tagged note,
+// a note another row supersedes, and a decision id; returns the true count.
+void test_p8_delete_batch(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    const int plain1 = std::stoi(db.store("Batch delete me one."));
+    const int plain2 = std::stoi(db.store("Batch delete me two."));
+    const int kept   = std::stoi(db.store("Keep me.", {{"tags", "keep"}}));
+
+    ragger::KnowledgeInput target;
+    target.kind = "note";
+    target.text = "Superseded note (delete_batch refuses).";
+    const int target_id = db.store_knowledge(target).id;
+    ragger::KnowledgeInput sup;
+    sup.kind = "note";
+    sup.text = "Superseding note.";
+    sup.supersedes = target_id;
+    db.store_knowledge(sup);
+
+    ragger::KnowledgeInput dec;
+    dec.kind = "decision";
+    dec.text = "Batch ruling (delete_batch refuses).";
+    dec.trigger = "Use when testing delete_batch guards";
+    const int dec_id = db.store_knowledge(dec).id;
+
+    const int deleted = db.delete_batch({plain1, plain2, kept, target_id, dec_id});
+    CHECK(deleted == 2);
+
+    sqlite3* raw = p1_open_raw();
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge WHERE knowledge_id IN ("
+                              + std::to_string(plain1) + "," + std::to_string(plain2) + ")") == 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge WHERE knowledge_id IN ("
+                              + std::to_string(kept) + "," + std::to_string(target_id) + ","
+                              + std::to_string(dec_id) + ")") == 3);
+    sqlite3_close(raw);
+
+    db.close();
+    cleanup();
+}
+
+// PHASE8 D.6: notes are found via layers ["knowledge"] + kinds ["note"];
+// layers ["summary"] is rejected with a message pointing at knowledge;
+// agent_get on a `summary:<id>` handle is rejected.
+void test_p8_summary_layer_gone(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    const int note_id = std::stoi(db.store("The bakery sells sourdough loaves daily."));
+
+    ragger::AgentSearchQuery q;
+    q.query = "sourdough loaves";
+    q.layers = {"knowledge"};
+    q.kinds = {"note"};
+    bool found = false;
+    for (const auto& h : db.agent_search(q))
+        if (h.id == "knowledge:" + std::to_string(note_id)) found = true;
+    CHECK(found);
+
+    q.layers = {"summary"};
+    bool threw = false;
+    try { db.agent_search(q); }
+    catch (const std::invalid_argument& e) {
+        threw = true;
+        CHECK(std::string(e.what()).find("knowledge") != std::string::npos);
+    }
+    CHECK(threw);
+
+    ragger::AgentGetQuery g;
+    g.ids = {"summary:" + std::to_string(note_id)};
+    threw = false;
+    try { db.agent_get(g); }
+    catch (const std::invalid_argument& e) {
+        threw = true;
+        CHECK(std::string(e.what()).find("knowledge") != std::string::npos);
+    }
+    CHECK(threw);
 
     db.close();
     cleanup();
@@ -3103,30 +3229,27 @@ void test_p4_update_rules(ragger::Embedder& emb) {
         CHECK(throws_invalid(r));
     }
 
-    // Rule 3: agent note (model_id NULL) editable; rollup rejected.
+    // Rule 3 (PHASE8): notes are knowledge rows. The legacy `summary:<id>`
+    // handle is rejected with a pointed message; `knowledge:<id>` edits work.
     const std::string note_id = db.store("A note to curate.", {{"level", "session"}});
     {
         ragger::UpdateRequest r;
         r.id = "summary:" + note_id;
+        r.tags = "curated,keep2";
+        CHECK(throws_invalid(r));
+    }
+    {
+        ragger::UpdateRequest r;
+        r.id = "knowledge:" + note_id;
         r.tags = "curated,keep2";
         auto row = db.agent_update(r);
         CHECK(row["tags"].get<std::string>() == "curated,keep2");
     }
     {
         sqlite3* raw = p1_open_raw();
-        CHECK(p1_scalar_text(raw, "SELECT tags FROM summaries WHERE summary_id = " + note_id)
+        CHECK(p1_scalar_text(raw, "SELECT tags FROM knowledge WHERE knowledge_id = " + note_id)
               == "curated,keep2");
         sqlite3_close(raw);
-    }
-    {   // rollup (model_id set) rejected
-        int rollup = db.store_summary("Rollup text", "episode", "summarizer-model",
-                                      "p4u-roll", "2026-04-01 08:00:00");
-        ragger::UpdateRequest r; r.id = "summary:" + std::to_string(rollup); r.tags = "nope";
-        CHECK(throws_invalid(r));
-    }
-    {   // summaries have no status
-        ragger::UpdateRequest r; r.id = "summary:" + note_id; r.status = "current";
-        CHECK(throws_invalid(r));
     }
 
     // Rule 4: transition table.
@@ -3419,12 +3542,15 @@ void p1t_test_import_probes(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
 
-    // summary: store with explicit source_timestamp, probe must find it.
-    int sid = db.store_summary("Probe summary text.", "session", "model-x", "",
-                               "2026-04-15 09:30:00");
-    CHECK(sid > 0);
-    CHECK(db.summary_exists_exact("Probe summary text.", "2026-04-15 09:30:00"));
-    CHECK(!db.summary_exists_exact("Probe summary text.", "2026-04-15 09:30:01"));
+    // note (PHASE8): store with explicit source_timestamp, probe must find it.
+    ragger::KnowledgeInput nin;
+    nin.kind = "note";
+    nin.text = "Probe note text.";
+    nin.source_timestamp = "2026-04-15 09:30:00";
+    int nid = db.store_knowledge(nin).id;
+    CHECK(nid > 0);
+    CHECK(db.note_exists_exact("Probe note text.", "2026-04-15 09:30:00"));
+    CHECK(!db.note_exists_exact("Probe note text.", "2026-04-15 09:30:01"));
 
     // decision: same contract.
     int did = db.store_decision("Probe decision text.", "current", "", "2026-04-15 09:30:00");
@@ -3457,15 +3583,15 @@ void p1t_test_import_probes(ragger::Embedder& emb) {
     // search_by_metadata: after/before bracket the stored row and the
     // returned created_at renders datetime-shaped (intentional change from
     // the raw epoch string).
-    auto results = db.search_by_metadata({{"level", "session"}}, 0,
+    auto results = db.search_by_metadata({{"kind", "note"}}, 0,
                                          "2026-04-15 09:00:00", "2026-04-15 10:00:00");
     CHECK(results.size() == 1);
-    CHECK(results[0].text == "Probe summary text.");
+    CHECK(results[0].text == "Probe note text.");
     const std::string& ts = results[0].timestamp;
     std::regex dt_re(R"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)");
     CHECK(std::regex_match(ts, dt_re));
     // Outside the bracket → empty.
-    CHECK(db.search_by_metadata({{"level", "session"}}, 0,
+    CHECK(db.search_by_metadata({{"kind", "note"}}, 0,
                                 "2026-04-15 09:31:00", "2026-04-15 10:00:00").empty());
     sqlite3_close(raw);
 
@@ -3489,14 +3615,14 @@ void p1_test_embedder_swap(ragger::Embedder& emb, const std::string& model_dir) 
         const int dims = ragger::config().embedding_dimensions;
         db.store("F16 width probe.");
         sqlite3* raw = p1_open_raw();
-        CHECK(p1_scalar_int(raw, "SELECT length(embedding) FROM summaries "
+        CHECK(p1_scalar_int(raw, "SELECT length(embedding) FROM knowledge "
                                   "WHERE text = 'F16 width probe.'") == 2 * dims);
         sqlite3_close(raw);
 
         db.set_vector_type(ragger::vector_codec::VectorType::F32);
         db.store("F32 width probe.");
         raw = p1_open_raw();
-        CHECK(p1_scalar_int(raw, "SELECT length(embedding) FROM summaries "
+        CHECK(p1_scalar_int(raw, "SELECT length(embedding) FROM knowledge "
                                   "WHERE text = 'F32 width probe.'") == 4 * dims);
         sqlite3_close(raw);
         db.close();
@@ -3687,11 +3813,12 @@ void p2_test_db_version_gate(ragger::Embedder& emb) {
 }
 
 // PHASE3 Step 3: the agent-layer set derived from the registry must remain
-// exactly the layers agent_search validates today (PHASE5 adds `episode`).
+// exactly the layers agent_search validates today (PHASE5 adds `episode`;
+// PHASE8 removes `summary` with the summaries table).
 void p3_test_known_layers() {
     std::println("  p3_test_known_layers...");
     const std::set<std::string> expected = {
-        "turn", "turn_summary", "summary", "document", "knowledge", "episode"};
+        "turn", "turn_summary", "document", "knowledge", "episode"};
     std::set<std::string> got;
     for (const auto& t : ragger::sqlite::kTextTables)
         if (t.layer && *t.layer) got.insert(t.layer);
@@ -3818,12 +3945,11 @@ void p3_cache_pin(ragger::Embedder& emb) {
         std::println("    {} x{} [{}]", src, count_by_source[src], joined);
     }
 
-    // Pinned pre-refactor (five hand-written loaders, one row each).
-    CHECK(count_by_source["summary"] == 1);
+    // Pinned (PHASE8: the note rides the knowledge corpus — one row each of
+    // note, decision, insight land under "knowledge").
     CHECK(count_by_source["document"] == 1);
-    CHECK(count_by_source["knowledge"] == 2);
+    CHECK(count_by_source["knowledge"] == 3);
     CHECK(count_by_source["turn_summary"] == 1);
-    CHECK(keys_by_source["summary"] == std::set<std::string>({"source", "level"}));
     CHECK(keys_by_source["document"] == std::set<std::string>({"source", "title"}));
     CHECK(keys_by_source["knowledge"] == std::set<std::string>({"source", "kind", "status"}));
     CHECK(keys_by_source["turn_summary"] ==
@@ -4362,7 +4488,7 @@ int main() {
     test_unsummarized_turns_excludes_summarized(emb);
     test_mark_turn_summarized_trivial_turn(emb);
     test_reset_abandoned_turn_summaries(emb);
-    test_summary_primitives(emb);
+    test_note_primitives(emb);
     test_path_normalization(emb);
     test_structured_decision_basic(emb);
     test_structured_decision_rebuild_is_stable(emb);
@@ -4382,6 +4508,8 @@ int main() {
     test_p7_cross_kind_supersedes(emb);
     test_p7_kinds_filter(emb);
     test_p7_legacy_handles_rejected(emb);
+    test_p8_delete_batch(emb);
+    test_p8_summary_layer_gone(emb);
     test_p4_timeline_order_and_paging(emb);
     test_p4_timeline_session_fallback(emb);
     test_p4_timeline_turn_fallback(emb);

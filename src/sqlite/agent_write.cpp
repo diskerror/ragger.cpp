@@ -36,6 +36,9 @@ json Backend::Impl::agent_update(const UpdateRequest& req) {
     int rowid = 0;
     if (is_legacy_knowledge_handle(req.id))
         throw std::invalid_argument("use knowledge:<id>");
+    if (is_legacy_summary_handle(req.id))
+        throw std::invalid_argument(
+            "use knowledge:<id> (notes are knowledge rows)");
     if (!parse_agent_handle(req.id, layer, rowid))
         throw std::invalid_argument("bad handle: '" + req.id + "'");
 
@@ -46,35 +49,10 @@ json Backend::Impl::agent_update(const UpdateRequest& req) {
         throw std::invalid_argument(
             layer + " rows are not agent-editable");
 
-    if (layer == "summary") {
-        // Rule 3: only agent-written notes (no model_id) are editable;
-        // summarizer rollups carry the summarizer's model and are history.
-        Stmt f(db, "SELECT model_id FROM summaries WHERE summary_id = ?");
-        f.bind(1, rowid);
-        if (!f.step())
-            throw std::invalid_argument("summary " + std::to_string(rowid) + " not found");
-        if (!f.is_null(0))
-            throw std::invalid_argument(
-                "summary rows written by the summarizer are not editable; only agent notes are");
-        if (req.status.has_value())
-            throw std::invalid_argument("summaries have no status");
-
-        std::string set;
-        if (req.tags.has_value())
-            set += "tags = ?, ";
-        if (set.empty())
-            throw std::invalid_argument("nothing to update");
-        set.erase(set.end() - 2, set.end());   // trailing ", "
-        Stmt u(db, "UPDATE summaries SET " + set +
-                   ", updated_at = unixepoch() WHERE summary_id = ?");
-        int b = 1;
-        if (req.tags.has_value()) u.bind(b++, *req.tags);
-        u.bind(b, rowid);
-        if (!u.exec())
-            throw std::runtime_error(std::format("agent_update summaries (id {}): {}",
-                                                 rowid, sqlite3_errmsg(db)));
-        invalidate_cache();
-    } else if (layer == "knowledge") {
+    // PHASE8: the old `summary` branch is gone — notes are knowledge rows
+    // and update through the knowledge path below (tags/status/scope; never
+    // text).
+    if (layer == "knowledge") {
         // Rule 4: status transitions per the table; tags free. PHASE7: one
         // branch for all kinds (the transition table was always shared).
         Stmt f(db, "SELECT status FROM knowledge WHERE knowledge_id = ?");

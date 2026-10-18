@@ -14,7 +14,7 @@ namespace {
 // PHASE3 Step 1: registry self-consistency.
 void p3_registry_checks() {
     using namespace ragger::sqlite;
-    CHECK(kTextTableCount == 6);  // PHASE7: decisions + insights unified into knowledge
+    CHECK(kTextTableCount == 5);  // PHASE8: summaries gone (turns, turn_summaries, episodes, knowledge, documents)
     for (const auto& t : kTextTables) {
         CHECK(std::string(t.junction) == std::string(t.table) + "_terms");
         CHECK(find_text_table(t.table) == &t);
@@ -72,9 +72,6 @@ void p3_insert_row(sqlite3* db, const std::string& table, int id,
     else if (table == "episodes")
         sql = "INSERT INTO episodes(episode_id, text) VALUES ("
               + i + ", '" + text + "')";
-    else if (table == "summaries")
-        sql = "INSERT INTO summaries(summary_id, text) VALUES ("
-              + i + ", '" + text + "')";
     else if (table == "knowledge")
         sql = "INSERT INTO knowledge(knowledge_id, kind, text) VALUES ("
               + i + ", 'note', '" + text + "')";
@@ -108,8 +105,6 @@ void p3_pin_all_tables() {
         "CREATE TABLE turn_summaries (turn_summary_id INTEGER PRIMARY KEY, text TEXT,"
         "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
         "CREATE TABLE episodes (episode_id INTEGER PRIMARY KEY, text TEXT,"
-        "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
-        "CREATE TABLE summaries (summary_id INTEGER PRIMARY KEY, text TEXT,"
         "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
         "CREATE TABLE knowledge (knowledge_id INTEGER PRIMARY KEY, kind TEXT, text TEXT, trigger TEXT,"
         "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"

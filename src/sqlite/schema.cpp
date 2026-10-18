@@ -293,30 +293,10 @@ void rebuild_table_column_order(Impl& self,
             )
         )");
 
-        // summaries (L2/L3/L4) — as of db_version 0.12, level is only ever
-        // 'episode' | 'session' | 'project'; turn-level rows moved to the
-        // dedicated turn_summaries table below.
-        // created_at = insert/create time; updated_at = last regenerate time
-        // for running rows (session/project) and span-end for episode rows.
-        // Both NOT NULL (updated_at = created_at on first insert).
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS summaries (
-                summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                text       TEXT NOT NULL,
-                level      TEXT NOT NULL,
-                tags       TEXT NOT NULL DEFAULT '',
-                session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
-                model_id   INTEGER REFERENCES models(model_id),
-                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                unigram_count  INTEGER NOT NULL DEFAULT 0,
-                bigram_count   INTEGER NOT NULL DEFAULT 0,
-                embedding_version INTEGER,
-                embedding  BLOB
-            )
-        )");
-        exec("CREATE INDEX IF NOT EXISTS idx_summaries_level      ON summaries(level)");
-        // idx_summaries_created_at created after migration (see note above).
+        // summaries is GONE in 0.17 (PHASE8): its rows moved to episodes
+        // (§2) and knowledge kind='note' (§4b) by the 0.16 -> 0.17 leg; a
+        // fresh DB never creates it. The legacy ALTERs below stay guarded on
+        // table_exists() for pre-0.16 DBs that still have it at open time.
 
         // turn_summaries (L2) -- NEW at db_version 0.12. One row per
         // summarized turn, split out of `summaries`. turn_id is a real FK,
@@ -334,11 +314,12 @@ void rebuild_table_column_order(Impl& self,
         if (!column_exists("turns", "session_id"))
             exec("ALTER TABLE turns ADD COLUMN session_id "
                  "INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL");
-        if (!column_exists("summaries", "session_id"))
+        if (table_exists("summaries") && !column_exists("summaries", "session_id"))
             exec("ALTER TABLE summaries ADD COLUMN session_id "
                  "INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL");
         exec("CREATE INDEX IF NOT EXISTS idx_turns_session     ON turns(session_id)");
-        exec("CREATE INDEX IF NOT EXISTS idx_summaries_session ON summaries(session_id)");
+        if (table_exists("summaries"))
+            exec("CREATE INDEX IF NOT EXISTS idx_summaries_session ON summaries(session_id)");
 
         // document_sources (L5 metadata) — one row per curated document.
         // Holds title/path/year/tags/imported_at once, instead of repeating
@@ -383,7 +364,7 @@ void rebuild_table_column_order(Impl& self,
         // (mirrors a NULL embedding) until backfilled/re-embedded.
         if (!column_exists("turns", "embedding_version"))
             exec("ALTER TABLE turns ADD COLUMN embedding_version INTEGER");
-        if (!column_exists("summaries", "embedding_version"))
+        if (table_exists("summaries") && !column_exists("summaries", "embedding_version"))
             exec("ALTER TABLE summaries ADD COLUMN embedding_version INTEGER");
         if (!column_exists("turn_summaries", "embedding_version"))
             exec("ALTER TABLE turn_summaries ADD COLUMN embedding_version INTEGER");
@@ -402,9 +383,9 @@ void rebuild_table_column_order(Impl& self,
             exec("ALTER TABLE turns ADD COLUMN unigram_count INTEGER NOT NULL DEFAULT 0");
         if (!column_exists("turns", "bigram_count"))
             exec("ALTER TABLE turns ADD COLUMN bigram_count INTEGER NOT NULL DEFAULT 0");
-        if (!column_exists("summaries", "unigram_count"))
+        if (table_exists("summaries") && !column_exists("summaries", "unigram_count"))
             exec("ALTER TABLE summaries ADD COLUMN unigram_count INTEGER NOT NULL DEFAULT 0");
-        if (!column_exists("summaries", "bigram_count"))
+        if (table_exists("summaries") && !column_exists("summaries", "bigram_count"))
             exec("ALTER TABLE summaries ADD COLUMN bigram_count INTEGER NOT NULL DEFAULT 0");
         if (!column_exists("turn_summaries", "unigram_count"))
             exec("ALTER TABLE turn_summaries ADD COLUMN unigram_count INTEGER NOT NULL DEFAULT 0");
@@ -494,9 +475,6 @@ void rebuild_table_column_order(Impl& self,
         // DBs all converge to the same set.
         exec("CREATE INDEX IF NOT EXISTS idx_turns_created_at      ON turns(created_at)");
         exec("CREATE INDEX IF NOT EXISTS idx_turns_session         ON turns(session_id)");
-        exec("CREATE INDEX IF NOT EXISTS idx_summaries_level       ON summaries(level)");
-        exec("CREATE INDEX IF NOT EXISTS idx_summaries_created_at  ON summaries(created_at)");
-        exec("CREATE INDEX IF NOT EXISTS idx_summaries_session     ON summaries(session_id)");
         // A document is identified by its path (0.17): the same file cannot
         // be imported twice. NULL/empty paths from old DBs are given a unique
         // value by migrate_0_16_to_0_17() before this index is built.
@@ -1458,6 +1436,8 @@ void rebuild_table_column_order(Impl& self,
     ///   - knowledge (§4/§4a, PHASE7): the table + evidence tables are created,
     ///     decisions rows move in with kind='decision' and ids PRESERVED;
     ///     the old decisions/insights objects are dropped.
+    ///   - notes (§4b, PHASE8): the remaining summaries rows move in with
+    ///     kind='note'; `summaries` + `summaries_terms` are dropped.
     ///   - sessions rebuilt with started_on/ended_on (PHASE4; "project" is
     ///     a tag now — no projects table, no project_id anywhere).
     /// (Developed as three internal steps; released as one schema version.)
@@ -1573,13 +1553,10 @@ void rebuild_table_column_order(Impl& self,
                 FROM summaries WHERE level = 'episode' ORDER BY summary_id
             )");
             exec(ddl::episodes_indexes());
-            // PHASE-8: remove — both statements exist only while `summaries`
-            // still lives. The rows MOVED to episodes; FK actions do not fire
-            // inside the leg (foreign_keys OFF), so the junction orphans are
-            // deleted explicitly.
-            exec("DELETE FROM summaries WHERE level = 'episode'");
-            exec("DELETE FROM summaries_terms WHERE summary_id NOT IN "
-                 "(SELECT summary_id FROM summaries)");
+            // PHASE8: no surgical delete here — `summaries` itself is dropped
+            // below (§6). The rows MOVED to episodes; FK actions do not fire
+            // inside the leg (foreign_keys OFF), and the junction is dropped
+            // with the table, so nothing is left to orphan.
 
             // ---- turn_summaries rebuild (PHASE5; §3) ---------------------
             // Adds episode_id (recorded membership) in canonical column
@@ -1646,12 +1623,43 @@ void rebuild_table_column_order(Impl& self,
                 Diskerror::Logger::info(std::format(
                     "  knowledge: moved {} decision(s) (ids preserved)", n));
 
+            // §4b: remaining summaries rows (level session|project) ->
+            // kind='note'. NOTHING is erased. Classification is by
+            // session_id + the `imported` tag, NOT by model_id (the rollup
+            // pipeline always sets session_id on its level='session' rows;
+            // rows with NULL session_id are hand-written or imported notes,
+            // whether or not they carry an importer model name). knowledge_id
+            // is omitted -> AUTOINCREMENT continues above the highest moved
+            // decision id, in old summary_id order.
+            // FROM summaries — 0.16 source table.
+            exec(R"(
+                INSERT INTO knowledge (kind, text, status, tags, session_id, model_id,
+                                       created_at, unigram_count, bigram_count,
+                                       embedding_version, embedding)
+                SELECT 'note', text,
+                       CASE WHEN level = 'session' AND session_id IS NULL THEN 'current'
+                            WHEN level = 'project' AND tags LIKE '%imported%' THEN 'current'
+                            ELSE 'retired' END,
+                       CASE WHEN tags = '' THEN '' ELSE tags || ',' END ||
+                       CASE WHEN level = 'session' AND session_id IS NULL THEN 'legacy_note'
+                            WHEN level = 'session' THEN 'legacy_session'
+                            ELSE 'legacy_project' END,
+                       session_id, model_id, created_at,
+                       unigram_count, bigram_count, embedding_version, embedding
+                FROM summaries WHERE level IN ('session', 'project') ORDER BY summary_id
+            )");
+            if (int n = sqlite3_changes(db); n > 0)
+                Diskerror::Logger::info(std::format(
+                    "  knowledge: moved {} note(s) from old summaries", n));
+
             // Drop the old objects. decisions/decisions_terms exist in every
             // migrated DB; the insights/evidence/junction objects exist only
             // in dev DBs that ran an earlier 0.17 leg — IF EXISTS for safety.
             // (0.16 source tables — removal code, gone-list exception.)
             exec("DROP TABLE decisions");
+            exec("DROP TABLE summaries");
             exec("DROP TABLE IF EXISTS decisions_terms");
+            exec("DROP TABLE IF EXISTS summaries_terms");
             exec("DROP TABLE IF EXISTS insights");
             exec("DROP TABLE IF EXISTS insights_terms");
             exec("DROP TABLE IF EXISTS decision_evidence");

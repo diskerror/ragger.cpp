@@ -52,6 +52,17 @@ bool is_legacy_knowledge_handle(const std::string& handle) {
     return false;
 }
 
+// PHASE8: `summary:<n>` joins the rejected legacy handles — notes are
+// knowledge rows now. Same strict suffix rule as above.
+bool is_legacy_summary_handle(const std::string& handle) {
+    constexpr size_t len = 8;  // strlen("summary:")
+    if (handle.size() <= len || !handle.starts_with("summary:")) return false;
+    if (handle[len] == '0') return false;
+    for (size_t i = len; i < handle.size(); ++i)
+        if (handle[i] < '0' || handle[i] > '9') return false;
+    return true;
+}
+
 
 
 // ---- snippet -----------------------------------------------------------
@@ -179,25 +190,8 @@ json fetch_agent_row(sqlite3* db, const std::string& layer, int rowid) {
             {"session", s.column_text(3)},
         };
     }
-    if (layer == "summary") {
-        Stmt s(db, "SELECT text, level, tags, "
-                   "datetime(created_at,'unixepoch','localtime'), "
-                   "datetime(updated_at,'unixepoch','localtime'), "
-                   "COALESCE((SELECT guid FROM sessions WHERE session_id = summaries.session_id), '') "
-                   "FROM summaries WHERE summary_id = ?");
-        s.bind(1, rowid);
-        if (!s.step()) return json(nullptr);
-        return {
-            {"id",      std::format("summary:{}", rowid)},
-            {"layer",   "summary"},
-            {"text",    s.column_text(0)},
-            {"level",   s.column_text(1)},
-            {"tags",    s.column_text(2)},
-            {"created", s.column_text(3)},
-            {"updated", s.column_text(4)},
-            {"session", s.column_text(5)},
-        };
-    }
+    // PHASE8: the `summary` layer is gone (notes are knowledge rows; see
+    // is_legacy_summary_handle for the pointed rejection).
     if (layer == "episode") {
         Stmt s(db, "SELECT text, "
                    "datetime(created_at,'unixepoch','localtime'), "

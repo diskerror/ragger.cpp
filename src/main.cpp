@@ -729,18 +729,14 @@ int main(int argc, char **argv) {
                 int n = 0, n_skip = 0;
                 for (const auto& s : items) {
                     std::string ts = to_db_ts(s.timestamp);
-                    if (!ts.empty() && memory.summary_exists_exact(s.text, ts)) {
+                    if (!ts.empty() && memory.note_exists_exact(s.text, ts)) {
                         ++n_skip;
                         continue;
                     }
-                    memory.store_summary(s.text, "project",
-                                         /*model_name=*/"",
-                                         /*session_guid=*/"",
-                                         /*source_timestamp=*/ts,
-                                         /*tags=*/s.tags);
+                    memory.store_note(s.text, s.tags, ts);
                     ++n;
                 }
-                std::println("Imported {} L4 summaries ({} duplicates skipped).", n, n_skip);
+                std::println("Imported {} notes ({} duplicates skipped).", n, n_skip);
                 return 0;
             }
 
@@ -783,17 +779,14 @@ int main(int argc, char **argv) {
                                 memory.store_decision(c.text, "current", "flat-memory-import", ts);
                                 ++n_dec;
                             } else {
-                                if (memory.summary_exists_exact(c.text, ts)) { ++n_sum_skip; continue; }
-                                memory.store_summary(c.text, "session",
-                                                     /*model_name=*/"", /*session_guid=*/"",
-                                                     /*source_timestamp=*/ts,
-                                                     /*tags=*/"flat-memory-import");
+                                if (memory.note_exists_exact(c.text, ts)) { ++n_sum_skip; continue; }
+                                memory.store_note(c.text, "flat-memory-import", ts);
                                 ++n_sum;
                             }
                         }
                     }
                     std::println(
-                        "Imported {} Markdown memory files: {} session summaries ({} duplicates "
+                        "Imported {} Markdown memory files: {} notes ({} duplicates "
                         "skipped), {} decisions ({} duplicates skipped).",
                         n_files, n_sum, n_sum_skip, n_dec, n_dec_skip);
                     return 0;
@@ -818,16 +811,13 @@ int main(int argc, char **argv) {
                         memory.store_decision(c.text, "current", "flat-memory-import", ts);
                         ++n_dec;
                     } else {
-                        if (memory.summary_exists_exact(c.text, ts)) { ++n_sum_skip; continue; }
-                        memory.store_summary(c.text, "session",
-                                             /*model_name=*/"", /*session_guid=*/"",
-                                             /*source_timestamp=*/ts,
-                                             /*tags=*/"flat-memory-import");
+                        if (memory.note_exists_exact(c.text, ts)) { ++n_sum_skip; continue; }
+                        memory.store_note(c.text, "flat-memory-import", ts);
                         ++n_sum;
                     }
                 }
                 std::println(
-                    "Imported {} session summaries ({} duplicates skipped), "
+                    "Imported {} notes ({} duplicates skipped), "
                     "{} decisions ({} duplicates skipped).",
                     n_sum, n_sum_skip, n_dec, n_dec_skip);
                 return 0;
@@ -1066,16 +1056,13 @@ int main(int argc, char **argv) {
                     std::string sid = conv.value("uuid", "");
                     std::string ts = to_db_ts(conv.value("created_at", ""));
                     if (summary.empty() || ts.empty()) continue;
-                    if (memory.summary_exists_exact(summary, ts)) { ++n_sessions_skip; continue; }
-                    memory.store_summary(summary, "session",
-                                         /*model_name=*/"claude",
-                                         /*session_guid=*/sid,
-                                         /*source_timestamp=*/ts,
-                                         /*tags=*/"session");
+                    if (memory.note_exists_exact(summary, ts)) { ++n_sessions_skip; continue; }
+                    memory.store_note(summary, "session", ts,
+                                      /*model_name=*/"claude", /*session_guid=*/sid);
                     ++n_sessions;
                 }
                 if (n_sessions || n_sessions_skip) {
-                    std::println("Imported {} session summaries ({} duplicates skipped).",
+                    std::println("Imported {} notes ({} duplicates skipped).",
                                  n_sessions, n_sessions_skip);
                 }
             }
@@ -1134,16 +1121,13 @@ int main(int argc, char **argv) {
                     std::string ts = to_db_ts(pdoc.value("created_at", ""));
                     if (name.empty() || ts.empty()) continue;
                     std::string text = desc.empty() ? name : (name + "\n\n" + desc);
-                    if (memory.summary_exists_exact(text, ts)) { ++n_proj_skip; continue; }
-                    memory.store_summary(text, "project",
-                                         /*model_name=*/"claude",
-                                         /*session_guid=*/"",
-                                         /*source_timestamp=*/ts,
-                                         /*tags=*/"claude-project");
+                    if (memory.note_exists_exact(text, ts)) { ++n_proj_skip; continue; }
+                    memory.store_note(text, "claude-project", ts,
+                                      /*model_name=*/"claude");
                     ++n_proj;
                 }
                 if (n_proj || n_proj_skip) {
-                    std::println("Imported {} project summaries ({} duplicates skipped).",
+                    std::println("Imported {} notes ({} duplicates skipped).",
                                  n_proj, n_proj_skip);
                 }
             }

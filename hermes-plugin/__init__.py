@@ -347,8 +347,8 @@ MEMORY_TIMELINE_SCHEMA = {
         "What happened recently, as a deterministic newest-first list (no "
         "search ranking). granularity 'turn' = per-exchange summaries "
         "(falling back to raw user text), 'episode' = episode summaries "
-        "(default), 'session' = per session its session summary or newest "
-        "episode. Filters: session GUID ('current' = this conversation), since/until "
+        "(default), 'session' = one row per session (guid, name, turn span, "
+        "episode count, newest episode text). Filters: session GUID ('current' = this conversation), since/until "
         "('YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or relative '30d'/'12h'). "
         "Page through with the returned next_cursor; null means the end."
     ),
@@ -418,7 +418,7 @@ MEMORY_SEARCH_SCHEMA = {
     "name": "memory_search",
     "description": (
         "Layered search across all memory corpora (turns, turn summaries, "
-        "episodes, session/project summaries, documents, knowledge). Returns typed handles "
+        "episodes, documents, knowledge). Returns typed handles "
         "+ snippets only -- call memory_get with chosen handles for full text. "
         "`layers` narrows by layer; omit for all. `kinds` narrows knowledge "
         "hits (decision, insight, note). Pass session='current' to search "

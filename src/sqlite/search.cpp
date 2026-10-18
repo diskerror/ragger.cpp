@@ -42,37 +42,31 @@ using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 
-    // Hybrid search over summaries: vector cosine (cached embeddings) blended
-    // with the custom TF-IDF text index (literal + metaphone, v0.16). Both are
-    // min-max normalized and combined with vector_weight/bm25_weight (bm25_weight
-    // is now the single text-index blend weight; the old separate phon_weight
-    // signal is folded into score_query() itself via fts_w_metaphone).
+    // Hybrid search across the four corpora: vector cosine (cached
+    // embeddings) blended with the custom TF-IDF text index (literal +
+    // metaphone, v0.16). Both are min-max normalized and combined with
+    // vector_weight/bm25_weight (bm25_weight is now the single text-index
+    // blend weight; the old separate phon_weight signal is folded into
+    // score_query() itself via fts_w_metaphone).
     //
-    // NOTE: the lean v2 summaries table has no collection column, so the
-    // `collections` filter is currently a no-op (kept for API/source compat).
-    // Documents (L5) and decisions (L6) ARE merged into search: parallel passes
-    // (ensure_doc_cache / ensure_dec_cache + a text_index_->score_query() pass)
-    // are scored identically and merged with the summaries results into the
-    // single ranked top-k returned here. Each SearchResult's metadata["source"]
-    // is "summary", "document", "knowledge", "turn_summary" or "episode"
-    // apart.
+    // PHASE8: the summaries corpus is gone (notes ride the knowledge
+    // corpus). Each SearchResult's metadata["source"] is "turn_summary",
+    // "document", "knowledge" or "episode".
     SearchResponse Backend::Impl::search(const std::string& query, int limit,
                           float min_score,
                           std::vector<std::string> /*collections*/) {
         using clock = std::chrono::high_resolution_clock;
         auto t_start = clock::now();
 
-        ensure_cache();
         ensure_doc_cache();
         ensure_knowledge_cache();
         ensure_turn_cache();
         ensure_episode_cache();
-        int n_sum = static_cast<int>(summary_cache_.ids.size());
         int n_doc = static_cast<int>(doc_cache_.ids.size());
         int n_kno = static_cast<int>(knowledge_cache_.ids.size());
         int n_turn = static_cast<int>(turn_cache_.ids.size());
         int n_ep  = static_cast<int>(episode_cache_.ids.size());
-        if (n_sum == 0 && n_doc == 0 && n_kno == 0 && n_turn == 0 && n_ep == 0)
+        if (n_doc == 0 && n_kno == 0 && n_turn == 0 && n_ep == 0)
             return {{}, {{"corpus_size", 0}}};
 
         // Push the current tunable weights into the engine once per search
@@ -102,7 +96,7 @@ namespace fs = std::filesystem;
             SearchResult result;
         };
         std::vector<Candidate> candidates;
-        candidates.reserve(static_cast<size_t>(n_sum + n_doc + n_kno + n_turn + n_ep));
+        candidates.reserve(static_cast<size_t>(n_doc + n_kno + n_turn + n_ep));
 
         // Score one corpus: vector cosine blended with the custom text-index
         // TF-IDF signal (literal + metaphone folded together by score_query()).
@@ -181,8 +175,6 @@ namespace fs = std::filesystem;
         };
         auto no_scores = std::unordered_map<int, float>{};
         bool bm25_on = config().bm25_enabled;
-        score_corpus(summary_cache_,
-                     bm25_on ? to_map(text_index_->score_query("summaries", query)) : no_scores);
         score_corpus(doc_cache_,
                      bm25_on ? to_map(text_index_->score_query("documents", query)) : no_scores);
         score_corpus(knowledge_cache_,
@@ -225,7 +217,7 @@ namespace fs = std::filesystem;
             {"embedding_ms", ms(t_embed_start, t_embed_end)},
             {"search_ms",    ms(t_search_start, t_search_end)},
             {"total_ms",     ms(t_start, clock::now())},
-            {"corpus_size",  n_sum + n_doc + n_kno + n_turn + n_ep}
+            {"corpus_size",  n_doc + n_kno + n_turn + n_ep}
         };
         return {std::move(results), std::move(timing)};
     }
@@ -278,9 +270,6 @@ namespace fs = std::filesystem;
             }
         };
 
-        // Summaries
-        score_text_corpus("summaries", "summary_id", "text", "summary",
-                          "datetime(created_at,'unixepoch','localtime')");
         // Documents (imported_at lives on document_sources, joined via
         // document_source_id — pre-existing bug fixed while rewiring this
         // corpus for v0.16: the old code referenced documents.imported_at,

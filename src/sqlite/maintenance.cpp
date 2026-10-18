@@ -42,8 +42,11 @@ using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 
+    // PHASE8 semantic shift: the old count() counted summaries only; notes
+    // now live in `knowledge`, so count() is every knowledge row (decisions,
+    // insights, notes). Same value table_row_counts() reports for knowledge.
     int Backend::Impl::count() const {
-        Stmt s(db, "SELECT COUNT(*) FROM summaries");
+        Stmt s(db, "SELECT COUNT(*) FROM knowledge");
         int c = 0;
         if (s.step())
             c = s.column_int(0);
@@ -54,8 +57,8 @@ namespace fs = std::filesystem;
     std::vector<std::pair<std::string, int64_t>> Backend::Impl::table_row_counts() const {
         // User-facing tables for the dashboard status pane, in display order.
         static const char* kTables[] = {
-            "turns", "summaries", "turn_summaries", "sessions",
-            "documents", "decisions", "insights", "statements", "models",
+            "turns", "turn_summaries", "episodes", "knowledge", "sessions",
+            "documents", "models",
         };
         std::vector<std::pair<std::string, int64_t>> out;
         for (const char* t : kTables) {
@@ -104,23 +107,26 @@ namespace fs = std::filesystem;
 
 
     // Lean v2 summaries have no collection column; the `collection` argument
-    // is ignored (kept for API compat). Returns every summary, score 0.
+    // is ignored (kept for API compat). PHASE8: returns every knowledge row
+    // (kind/status/tags in metadata), score 0.
     std::vector<SearchResult> Backend::Impl::load_all(const std::string& /*collection*/) {
         std::vector<SearchResult> results;
         Stmt s(db,
-            "SELECT summary_id, text, level, tags, created_at "
-            "FROM summaries ORDER BY summary_id");
+            "SELECT knowledge_id, text, kind, status, tags, created_at "
+            "FROM knowledge ORDER BY knowledge_id");
 
         while (s.step()) {
             int id        = s.column_int(0);
             auto text     = s.column_text(1);
-            auto lvl      = s.column_text(2);
-            auto tag      = s.column_text(3);
-            auto ts       = s.column_text(4);
+            auto kind     = s.column_text(2);
+            auto status   = s.column_text(3);
+            auto tag      = s.column_text(4);
+            auto ts       = db_timestamp(static_cast<std::time_t>(s.column_int64(5)));
 
             json meta = json::object();
-            if (!lvl.empty()) meta["level"]  = lvl;
-            if (!tag.empty()) meta["tags"]   = tag;
+            if (!kind.empty())   meta["kind"]   = kind;
+            if (!status.empty()) meta["status"] = status;
+            if (!tag.empty())    meta["tags"]   = tag;
 
             results.push_back({id, std::move(text), 0.0f, std::move(meta), std::move(ts)});
         }
@@ -381,14 +387,13 @@ namespace fs = std::filesystem;
     // PHASE3 Step 6: one embedding write-back. The four public
     // update_*_embedding entry points forward here; the UPDATE shape and the
     // cache invalidation live in one place. `turns` invalidates nothing:
-    // turns are not in the summaries cache (the old invalidate_cache() there
+    // turns are not in a summaries cache (the old one there
     // was the wrong table), and the turn cache holds text rows, not vectors
     // (B §1.6). Insights share the decision write-back path (no separate
     // insight update existed pre-0.17; the switch covers it for symmetry).
     void Backend::Impl::invalidate_cache_for(const TextTable& t) {
         const std::string_view name = t.table;
-        if (name == "summaries")            invalidate_cache();
-        else if (name == "documents")       invalidate_doc_cache();
+        if (name == "documents")            invalidate_doc_cache();
         else if (name == "knowledge")       invalidate_knowledge_cache();
         else if (name == "episodes")        invalidate_episode_cache();
         // turns / turn_summaries: no vector cache keyed on these blobs.
@@ -416,16 +421,14 @@ namespace fs = std::filesystem;
         return update_embedding(*find_text_table("knowledge"), decision_id, emb);
     }
 
-    bool Backend::Impl::update_summary_embedding(int summary_id, const std::vector<float>& emb) {
-        return update_embedding(*find_text_table("summaries"), summary_id, emb);
-    }
+    // PHASE8: the old summary embedding write-back is gone with its table;
+    // re-embedding goes through update_embedding(knowledge).
 
     bool Backend::Impl::update_turn_embedding(int turn_id, const std::vector<float>& emb) {
         return update_embedding(*find_text_table("turns"), turn_id, emb);
     }
 
     void Backend::Impl::invalidate_all_caches() {
-        invalidate_cache();
         invalidate_doc_cache();
         invalidate_knowledge_cache();
         invalidate_turn_cache();
@@ -440,23 +443,29 @@ namespace fs = std::filesystem;
     }
 
 
-    // Returns true if the summaries row exists and has a "keep" tag.
-    bool Backend::Impl::has_keep_tag(int summary_id) {
-        Stmt s(db, "SELECT tags FROM summaries WHERE summary_id = ?");
-        s.bind(1, summary_id);
+    // True if the knowledge row exists and has a "keep" tag.
+    bool Backend::Impl::has_keep_tag(int knowledge_id) {
+        Stmt s(db, "SELECT tags FROM knowledge WHERE knowledge_id = ?");
+        s.bind(1, knowledge_id);
         if (!s.step()) return false;
         return s.column_text(0).find("keep") != std::string::npos;
     }
 
 
+    // PHASE8: HARD deletes (Phase 11 removes these from the HTTP/MCP
+    // surface, TODO Q2). Restricted to kind='note' rows that no other row
+    // `supersedes` — deleting a superseded parent would dangle the chain —
+    // and that carry no `keep` tag. Returns whether a row was deleted.
     bool Backend::Impl::delete_memory(int memory_id) {
-        if (has_keep_tag(memory_id)) return false;
-        Stmt stmt(db, "DELETE FROM summaries WHERE summary_id = ?");
+        Stmt stmt(db,
+            "DELETE FROM knowledge WHERE knowledge_id = ? AND kind = 'note'"
+            "  AND (tags IS NULL OR tags NOT LIKE '%keep%')"
+            "  AND NOT EXISTS (SELECT 1 FROM knowledge c WHERE c.supersedes = knowledge.knowledge_id)");
         stmt.bind(1, memory_id);
         stmt.step();
         int changes = sqlite3_changes(db);
         if (changes > 0) {
-            invalidate_cache();
+            invalidate_knowledge_cache();
             return true;
         }
         return false;
@@ -465,17 +474,20 @@ namespace fs = std::filesystem;
 
     int Backend::Impl::delete_batch(const std::vector<int>& memory_ids) {
         if (memory_ids.empty()) return 0;
-        // Single atomic DELETE filtered by keep-tag, entirely in SQL.
-        std::string sql = "DELETE FROM summaries WHERE summary_id IN (";
+        // Single atomic DELETE filtered by kind/keep/supersedes, entirely in
+        // SQL. RAII: a throw between BEGIN and COMMIT used to leave the
+        // connection inside an open transaction.
+        std::string sql = "DELETE FROM knowledge WHERE kind = 'note'"
+                          "  AND (tags IS NULL OR tags NOT LIKE '%keep%')"
+                          "  AND NOT EXISTS (SELECT 1 FROM knowledge c WHERE c.supersedes = knowledge.knowledge_id)"
+                          "  AND knowledge_id IN (";
         for (size_t i = 0; i < memory_ids.size(); ++i) {
             if (i > 0) sql += ",";
             sql += "?";
         }
-        sql += ") AND (tags IS NULL OR tags NOT LIKE '%keep%')";
+        sql += ")";
         int changes = 0;
         {
-            // RAII: a throw between BEGIN and COMMIT used to leave the
-            // connection inside an open transaction.
             Transaction tx(db);
             Stmt stmt(db, sql);
             for (size_t i = 0; i < memory_ids.size(); ++i)
@@ -484,7 +496,7 @@ namespace fs = std::filesystem;
             changes = sqlite3_changes(db);
             tx.commit();
         }
-        if (changes > 0) invalidate_cache();
+        if (changes > 0) invalidate_knowledge_cache();
         return changes;
     }
 
@@ -494,17 +506,18 @@ namespace fs = std::filesystem;
                                                  const std::string& before) {
         std::vector<SearchResult> results;
 
-        // Lean v2 summaries expose level / tags / timestamp. Filter
-        // on those columns; any other requested key matches nothing (there is
-        // no free-form metadata blob in the lean schema).
+        // PHASE8: knowledge rows expose kind / status / tags. Filter on
+        // those columns; any other requested key matches nothing (there is
+        // no free-form metadata blob in the lean schema). The old `level`
+        // key matches the `level:<value>` tag store() appends for callers
+        // that still send a level.
         // created_at is an INTEGER epoch: after/before arrive as "%F %T"
         // strings and must be resolved to ints (raw-string comparison never
-        // matched — same bug class as summary_exists_exact). The returned
-        // timestamp renders as a datetime string like every other read
-        // (intentional behavior change: this used to return the raw epoch).
-        std::string sql = "SELECT summary_id, text, level, tags, "
+        // matched — same bug class as note_exists_exact). The returned
+        // timestamp renders as a datetime string like every other read.
+        std::string sql = "SELECT knowledge_id, text, kind, status, tags, "
                           "datetime(created_at,'unixepoch','localtime') "
-                          "FROM summaries";
+                          "FROM knowledge";
         std::string where;
         std::vector<std::string> binds;
         std::vector<int64_t> epoch_binds;
@@ -512,6 +525,12 @@ namespace fs = std::filesystem;
         for (auto it = metadata_filter.begin(); it != metadata_filter.end(); ++it) {
             const std::string& k = it.key();
             if (k == "level") {
+                where += (where.empty() ? " WHERE " : " AND ") + std::string("tags LIKE ?");
+                binds.push_back("%level:" + it.value().get<std::string>() + "%");
+            } else if (k == "kind") {
+                where += (where.empty() ? " WHERE " : " AND ") + k + " = ?";
+                binds.push_back(it.value().get<std::string>());
+            } else if (k == "status") {
                 where += (where.empty() ? " WHERE " : " AND ") + k + " = ?";
                 binds.push_back(it.value().get<std::string>());
             } else if (k == "tags") {
@@ -548,13 +567,15 @@ namespace fs = std::filesystem;
         while (stmt.step()) {
             int id        = stmt.column_int(0);
             auto text     = stmt.column_text(1);
-            auto lvl      = stmt.column_text(2);
-            auto tag      = stmt.column_text(3);
-            auto ts       = stmt.column_text(4);
+            auto kind     = stmt.column_text(2);
+            auto status   = stmt.column_text(3);
+            auto tag      = stmt.column_text(4);
+            auto ts       = stmt.column_text(5);
 
             json metadata = json::object();
-            if (!lvl.empty()) metadata["level"]  = lvl;
-            if (!tag.empty()) metadata["tags"]   = tag;
+            if (!kind.empty())   metadata["kind"]   = kind;
+            if (!status.empty()) metadata["status"] = status;
+            if (!tag.empty())    metadata["tags"]   = tag;
 
             results.push_back({id, std::move(text), 0.0f, std::move(metadata), std::move(ts)});
         }

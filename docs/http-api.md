@@ -214,7 +214,7 @@ accepted by the `capture_turn` MCP tool. Requires `[server] capture_turns = true
 otherwise the call is accepted but a no-op (`status: "disabled"`).
 
 Body fields: `user` (required), `assistant`, `model`, `session_id` (groups turns
-for session summaries). Response: `{ "status": "captured" | "disabled", "turn_id": <int> }`.
+into a session). Response: `{ "status": "captured" | "disabled", "turn_id": <int> }`.
 
 ```bash
 curl -X POST http://localhost:8432/turn \
@@ -257,9 +257,9 @@ Response shape:
 }
 ```
 
-`kind` is one of `raw_turn`, `turn_summary`, `session_summary`,
-`project_summary`, `decision`. `timestamp` is the source-row timestamp
-(empty for cross-session items like project summaries).
+`kind` is one of `raw_turn`, `turn_summary`, `episode`, `decision`.
+`timestamp` is the source-row timestamp (empty for cross-session
+items).
 
 ```bash
 curl http://localhost:8432/session/sess-abc-123

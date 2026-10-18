@@ -68,19 +68,11 @@ bool Backend::finalize_turn(int turn_id, const std::string& assistant_text,
     return pImpl->finalize_turn(turn_id, assistant_text, model_name);
 }
 
-int Backend::store_summary(const std::string& text, const std::string& level,
-                                 const std::string& model_name,
-                                 const std::string& session_guid,
-                                 const std::string& source_timestamp,
-                                 const std::string& tags) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->store_summary(text, level, model_name, session_guid,
-                                source_timestamp, tags);
-}
+// PHASE8: the old summary-store forwarder is gone with its table.
 
-bool Backend::summary_exists_exact(const std::string& text, const std::string& created_at) {
+bool Backend::note_exists_exact(const std::string& text, const std::string& created_at) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->summary_exists_exact(text, created_at);
+    return pImpl->note_exists_exact(text, created_at);
 }
 
 bool Backend::decision_exists_exact(const std::string& text, const std::string& created_at) {
@@ -105,11 +97,7 @@ bool Backend::update_turn_meta(int turn_id, const std::string& timestamp,
     return pImpl->update_turn_meta(turn_id, timestamp, session_guid);
 }
 
-bool Backend::update_summary_text(int summary_id, const std::string& text,
-                                        const std::string& model_name) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->update_summary_text(summary_id, text, model_name);
-}
+// PHASE8: the old summary text-update forwarder is gone.
 
 bool Backend::turn_summary_exists(int turn_id) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
@@ -132,16 +120,7 @@ int Backend::reset_abandoned_turn_summaries(int limit) {
     return pImpl->reset_abandoned_turn_summaries(limit);
 }
 
-bool Backend::set_summary_tags(int summary_id, const std::string& tags) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->set_summary_tags(summary_id, tags);
-}
-
-std::vector<std::string> Backend::recent_summaries(const std::string& level,
-                                                         int limit) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->recent_summaries(level, limit);
-}
+// PHASE8: the old summary tag-setter / recent-list forwarders are gone.
 
 std::vector<std::string> Backend::current_decisions(int limit) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
@@ -210,10 +189,7 @@ Backend::episodes_by_session_desc(
     return pImpl->episodes_by_session_desc(session_guid, limit);
 }
 
-bool Backend::update_text(int memory_id, const std::string& text, json metadata, bool defer_embedding) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->update_text(memory_id, text, std::move(metadata), defer_embedding);
-}
+// PHASE8: update_text forwarder is gone (text is never rewritten in place).
 
 SearchResponse Backend::search(const std::string& query, int limit,
                                      float min_score,
@@ -363,11 +339,7 @@ bool Backend::update_decision_embedding(int decision_id,
     return pImpl->update_decision_embedding(decision_id, emb);
 }
 
-bool Backend::update_summary_embedding(int summary_id,
-                                             const std::vector<float>& emb) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->update_summary_embedding(summary_id, emb);
-}
+// PHASE8: the old summary embedding write-back forwarder is gone.
 
 bool Backend::update_turn_embedding(int turn_id,
                                           const std::vector<float>& emb) {

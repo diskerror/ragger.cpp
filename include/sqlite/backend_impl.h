@@ -91,7 +91,7 @@ struct Backend::Impl {
         std::vector<std::string>    timestamps;
     };
 
-    EmbeddingCache summary_cache_;   // summaries (L2/L3)
+    // PHASE8: the old summaries vector cache member is gone with its table.
     EmbeddingCache doc_cache_;       // documents (L5)
     EmbeddingCache knowledge_cache_; // knowledge (L6; PHASE7 replaces dec+ins)
     EmbeddingCache turn_cache_;      // turn_summaries (L2)
@@ -309,14 +309,13 @@ struct Backend::Impl {
     static int64_t resolve_epoch(const std::string& caller_ts);
 
     // ---- cache --------------------------------------------------------
-    void invalidate_cache();
     void invalidate_doc_cache();
     void invalidate_knowledge_cache();
     void invalidate_turn_cache();
     void invalidate_episode_cache();
-    /// Drop all six warm caches (summaries, documents, decisions, insights,
-    /// turns). Use after any write that can change rows across several tables
-    /// (embedding backfill/rebuild) so no table's stale rows survive.
+    /// Drop all four warm caches (documents, knowledge, turn_summaries,
+    /// episodes). Use after any write that can change rows across several
+    /// tables (embedding backfill/rebuild) so no table's stale rows survive.
     void invalidate_all_caches();
 
     // Shared body of all five ensure_*_cache() loaders (PHASE3 Step 5):
@@ -328,14 +327,10 @@ struct Backend::Impl {
                     const std::string& sql,
                     const std::function<void(Stmt&, nlohmann::json&)>& fill_meta);
 
-    // Loads the summaries table into the vector cache. Keyword scores come
-    // from FTS5 (summaries_fts) at query time — see keyword_scores().
-    void ensure_cache();
-
-    // Loads the documents (L5) table into the parallel vector cache. Mirrors
-    // ensure_cache(): vector scores come from here, keyword scores from FTS5
-    // (documents_fts) at query time. Metadata carries source="document" plus
-    // the title so search() consumers can distinguish documents from summaries.
+    // Loads the documents (L5) table into the vector cache: vector scores
+    // come from here, keyword scores from the custom terms index at query
+    // time. Metadata carries source="document" plus the title so search()
+    // consumers can distinguish documents from other corpora.
     void ensure_doc_cache();
 
     // knowledge cache (PHASE7): loads active knowledge rows; metadata
@@ -478,21 +473,11 @@ struct Backend::Impl {
     bool finalize_turn(int turn_id, const std::string& assistant_text,
                        const std::string& model_name);
 
-    // ---- summaries (L2/L3) pipeline primitives (issue #22) ------------
-    // Insert a summary row. level: 'turn' (L2) | 'session' (L3) | 'project'.
-    // Embeds text, records model.
-    // source_timestamp (non-empty) overrides the row's timestamp: L2 turn
-    // summaries inherit the source turn's timestamp so the (session_id,
-    // timestamp) pair links a turn to its summary (no FK column needed) and
-    // stays stable across embedding-model changes.
-    int store_summary(const std::string& text, const std::string& level,
-                      const std::string& model_name,
-                      const std::string& session_guid,
-                      const std::string& source_timestamp,
-                      const std::string& tags);
+    // PHASE8: the old summary-store entry point is gone — importers write notes via
+    // store_knowledge (kind='note'); store() covers the generic path.
 
     // ---- store_decision: write Level 6 curated decision/lesson ----------
-    // Mirrors store_summary but the decisions table has no level/model/session
+    // Mirrors the old summary-store but the decisions table has no level/model/session
     // columns — just text/embedding/status/tags/timestamp. defer_embedding
     // leaves embedding NULL for a later backfill pass.
     int store_decision(const std::string& text, const std::string& status,
@@ -636,16 +621,16 @@ struct Backend::Impl {
 
 
     // Exact-match existence check for import idempotency: same text +
-    // same created_at timestamp already present in summaries. Used by
-    // `ragger import conversations`/`import summaries` so re-running an
-    // import (or feeding overlapping exports) doesn't duplicate rows.
-    // Normalizes `text` the same way store_summary() does before storing
-    // (absolute home-dir paths -> "~/") — otherwise a chunk containing
-    // e.g. "/Users/reid/..." never matches what's actually in the table
-    // (already normalized to "~/...") and gets re-inserted on every run.
-    bool summary_exists_exact(const std::string& text, const std::string& created_at);
+    // same created_at timestamp already present among knowledge notes
+    // (PHASE8; formerly the summaries-table probe). Used by the
+    // importers so re-running an import (or feeding overlapping exports)
+    // doesn't duplicate rows. Normalizes `text` the same way the note write
+    // path does (Decision/Design-number strip + home-dir "~/" collapse) —
+    // otherwise a chunk containing e.g. "/Users/reid/..." never matches what
+    // is actually in the table and gets re-inserted on every run.
+    bool note_exists_exact(const std::string& text, const std::string& created_at);
 
-    // Mirrors summary_exists_exact for the decisions table (same
+    // Mirrors note_exists_exact for the decisions table (same
     // normalize-before-compare fix applies here too — plus the
     // decision-number-prefix strip, since store_decision() strips that
     // before storing too).
@@ -676,11 +661,10 @@ struct Backend::Impl {
     bool update_turn_meta(int turn_id, const std::string& timestamp,
                           const std::string& session_guid);
 
-    // Recipe ingredients (issue #23): recent summaries of a given level, and
-    // current decisions — fetched by recency (not semantic search) for the
-    // default tiered payload. Returned newest-first.
-    std::vector<std::string> recent_summaries(const std::string& level, int limit);
-
+    // Recipe ingredients (issue #23): current decisions — fetched by recency
+    // (not semantic search) for the default tiered payload. Returned
+    // newest-first. (PHASE8: the old recent-summary fetch is gone with its
+    // table.)
     std::vector<std::string> current_decisions(int limit);
 
     // Set a decision's status (e.g. "roadmap" -> "current" once planned
@@ -694,15 +678,8 @@ struct Backend::Impl {
     // session's context).
     std::vector<std::string> decisions_by_status(const std::string& status, int limit);
 
-    // Replace a summary's text + embedding, update its model. False if absent.
-    bool update_summary_text(int summary_id, const std::string& text,
-                             const std::string& model_name);
-
-    // Replace a summary's tags column. Used by the summarizer to clear
-    // "draft" once a row has been rewritten with a real summary.
-    bool set_summary_tags(int summary_id, const std::string& tags);
-
-    bool update_text(int memory_id, const std::string& raw_text, json metadata, bool defer_embedding);
+    // PHASE8: the old summary text-update / tag-setter / generic update_text are gone
+    // (text is never rewritten in place; tags/status change via agent_update).
 
     // --- search ---
 
@@ -813,14 +790,12 @@ struct Backend::Impl {
     // backs its table's vector search.
     bool update_decision_embedding(int decision_id, const std::vector<float>& emb);
 
-    bool update_summary_embedding(int summary_id, const std::vector<float>& emb);
-
     bool update_turn_embedding(int turn_id, const std::vector<float>& emb);
 
     std::vector<std::string> collections() const;
 
-    // Returns true if the summaries row exists and has a "keep" tag.
-    bool has_keep_tag(int summary_id);
+    // Returns true if the knowledge row exists and has a "keep" tag.
+    bool has_keep_tag(int knowledge_id);
 
     bool delete_memory(int memory_id);
 
