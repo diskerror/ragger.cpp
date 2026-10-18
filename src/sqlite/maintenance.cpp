@@ -389,8 +389,7 @@ namespace fs = std::filesystem;
         const std::string_view name = t.table;
         if (name == "summaries")            invalidate_cache();
         else if (name == "documents")       invalidate_doc_cache();
-        else if (name == "decisions")       invalidate_dec_cache();
-        else if (name == "insights")        invalidate_ins_cache();
+        else if (name == "knowledge")       invalidate_knowledge_cache();
         else if (name == "episodes")        invalidate_episode_cache();
         // turns / turn_summaries: no vector cache keyed on these blobs.
     }
@@ -414,7 +413,7 @@ namespace fs = std::filesystem;
     }
 
     bool Backend::Impl::update_decision_embedding(int decision_id, const std::vector<float>& emb) {
-        return update_embedding(*find_text_table("decisions"), decision_id, emb);
+        return update_embedding(*find_text_table("knowledge"), decision_id, emb);
     }
 
     bool Backend::Impl::update_summary_embedding(int summary_id, const std::vector<float>& emb) {
@@ -428,8 +427,7 @@ namespace fs = std::filesystem;
     void Backend::Impl::invalidate_all_caches() {
         invalidate_cache();
         invalidate_doc_cache();
-        invalidate_dec_cache();
-        invalidate_ins_cache();
+        invalidate_knowledge_cache();
         invalidate_turn_cache();
         invalidate_episode_cache();
     }

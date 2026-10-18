@@ -125,11 +125,11 @@ static nlohmann::json tools_list() {
                                     return a; }()},
                                     {"description", "Default current. provisional = agreed, not yet proven."}}},
                     {"supersedes", {{"type", "integer"},
-                                    {"description", "decision_id this replaces."}}},
+                                    {"description", "knowledge_id this replaces (any kind)."}}},
                     {"session",    {{"type", "string"},
                                     {"description", "Current session GUID, for provenance."}}},
                     {"evidence",   {{"type", "array"}, {"items", {{"type", "integer"}}},
-                                    {"description", "turn_summary ids this decision rests on."}}},
+                                    {"description", "turn_summary ids this decision rests on (optional for decisions)."}}},
                 }},
                 {"required", nlohmann::json::array({"text", "trigger"})}
             }}
@@ -157,9 +157,11 @@ static nlohmann::json tools_list() {
             {"name", "memory_search"},
             {"description",
              "Layered search across all memory corpora. Returns handles + snippets only — "
-             "call memory_get with chosen handles for full text. `layers` narrows by kind "
-             "(turn, turn_summary, summary, document, decision, insight); empty = all. "
-             "status: 'active' (default) hides superseded/retired decisions, 'any' includes them. "
+             "call memory_get with chosen handles for full text. `layers` narrows by layer "
+             "(turn, turn_summary, episode, summary, document, knowledge); empty = all. "
+             "`kinds` narrows knowledge hits (decision, insight, note). Legacy layer names "
+             "'decision'/'insight' are accepted and mean knowledge restricted to that kind. "
+             "status: 'active' (default) hides superseded/retired knowledge, 'any' includes them. "
              "since/until: 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or relative ('30d', '12h'). "
              "For conversation history use memory_get(session=..., after_turn=...)."},
             {"inputSchema", {
@@ -194,7 +196,7 @@ static nlohmann::json tools_list() {
              "through one session's conversation history. Exactly one mode per call: ids, or "
              "session (+optional after_turn/before_turn/limit). expand: none | context "
              "(neighbouring turns/chunks) | sources (evidence / constituent summaries) | chain "
-             "(decision/insight supersede lineage, oldest to newest)."},
+             "(knowledge supersede lineage, oldest to newest; may cross kinds)."},
             {"inputSchema", {
                 {"type", "object"},
                 {"properties", {
@@ -269,9 +271,9 @@ static nlohmann::json tools_list() {
         {
             {"name", "memory_update"},
             {"description",
-             "Curate one row's METADATA by typed handle: decision status "
+             "Curate one row's METADATA by typed handle: knowledge status "
              "(legal transitions only; 'superseded' is set only by storing a "
-             "superseding decision), tags (replaces the whole set). Agent notes "
+             "superseding row), tags (replaces the whole set). Agent notes "
              "(summaries without a model) accept tags; summarizer rollups and turn / "
              "turn_summary / document rows are not editable. Text is NEVER "
              "edited in place — to change what something says, store a new "
@@ -283,7 +285,7 @@ static nlohmann::json tools_list() {
                     {"id",     {{"type", "string"},
                                 {"description", "Typed handle '<layer>:<rowid>'."}}},
                     {"status", {{"type", "string"},
-                                {"description", "Decision status: current | provisional | pending | roadmap | retired."}}},
+                                {"description", "Knowledge status: current | provisional | pending | roadmap | retired."}}},
                     {"tags",   {{"type", "string"},
                                 {"description", "Replacement tag string (comma-separated)."}}},
                 }},
@@ -293,12 +295,11 @@ static nlohmann::json tools_list() {
         {
             {"name", "memory_review"},
             {"description",
-             "The pending queue. action 'list' returns pending decisions and "
-             "insights oldest first (handle + trigger + snippet); 'approve' "
+             "The pending queue. action 'list' returns pending knowledge rows "
+             "of any kind oldest first (handle + trigger + snippet); 'approve' "
              "moves each id pending→current; 'reject' moves each id "
-             "pending→retired. ids accept 'decision:<id>' / 'insight:<id>' "
-             "handles or bare integers (decision); a non-pending id fails only "
-             "that entry."},
+             "pending→retired. ids accept 'knowledge:<id>' handles or bare "
+             "integers; a non-pending id fails only that entry."},
             {"inputSchema", {
                 {"type", "object"},
                 {"properties", {
@@ -375,8 +376,8 @@ static nlohmann::json tools_list() {
             {"description", "Assemble a session's context as recipe-shaped chunks "
                            "(oldest first). The default recipe walks back from the "
                            "latest prompt: a few raw turns, then turn summaries, then "
-                           "the session and project summaries, then pertinent "
-                           "decisions."},
+                           "recent episodes, then pertinent "
+                           "knowledge."},
             {"inputSchema", {
                 {"type", "object"},
                 {"properties", {
@@ -429,11 +430,11 @@ static nlohmann::json tool_call(RaggerMemory& memory,
     } else if (tool_name == "memory_decision") {
         // Shared with HTTP POST /decision via parse_decision_input (tags
         // accept array or string form).
-        DecisionInput in = parse_decision_input(arguments);
+        KnowledgeInput in = parse_decision_input(arguments);
         try {
-            const auto r = memory.store_structured_decision(in);
+            const auto r = memory.store_knowledge(in);
             return text_result(nlohmann::json({
-                {"id", r.id}, {"status", "stored"},
+                {"id", r.id}, {"kind", r.kind}, {"status", "stored"},
                 {"superseded", r.superseded ? nlohmann::json(*r.superseded)
                                             : nlohmann::json(nullptr)},
                 {"possible_supersedes", supersedes_json(r.possible_supersedes)}}).dump());
@@ -482,9 +483,9 @@ static nlohmann::json tool_call(RaggerMemory& memory,
             metadata["tags"] = arguments["tags"];
         try {
             if (arguments.contains("evidence") && arguments["evidence"].is_array()) {
-                DecisionInput in = parse_note_insight(arguments, text);
-                const auto r = memory.store_insight(in);
-                return text_result(json({{"id", r.id}, {"table", "insights"},
+                KnowledgeInput in = parse_note_insight(arguments, text);
+                const auto r = memory.store_knowledge(in);
+                return text_result(json({{"id", r.id}, {"kind", r.kind},
                                          {"status", "stored"},
                                          {"superseded", r.superseded ? json(*r.superseded) : json(nullptr)},
                                          {"possible_supersedes", supersedes_json(r.possible_supersedes)}}).dump());

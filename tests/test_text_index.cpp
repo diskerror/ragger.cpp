@@ -14,7 +14,7 @@ namespace {
 // PHASE3 Step 1: registry self-consistency.
 void p3_registry_checks() {
     using namespace ragger::sqlite;
-    CHECK(kTextTableCount == 7);  // PHASE5: episodes joins the registry
+    CHECK(kTextTableCount == 6);  // PHASE7: decisions + insights unified into knowledge
     for (const auto& t : kTextTables) {
         CHECK(std::string(t.junction) == std::string(t.table) + "_terms");
         CHECK(find_text_table(t.table) == &t);
@@ -75,12 +75,9 @@ void p3_insert_row(sqlite3* db, const std::string& table, int id,
     else if (table == "summaries")
         sql = "INSERT INTO summaries(summary_id, text) VALUES ("
               + i + ", '" + text + "')";
-    else if (table == "decisions")
-        sql = "INSERT INTO decisions(decision_id, text) VALUES ("
-              + i + ", '" + text + "')";
-    else if (table == "insights")
-        sql = "INSERT INTO insights(insight_id, text) VALUES ("
-              + i + ", '" + text + "')";
+    else if (table == "knowledge")
+        sql = "INSERT INTO knowledge(knowledge_id, kind, text) VALUES ("
+              + i + ", 'note', '" + text + "')";
     else if (table == "documents") {
         // The real store path always creates a document_sources row; the
         // doc text formula's subquery needs one (no row => NULL fold).
@@ -114,9 +111,7 @@ void p3_pin_all_tables() {
         "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
         "CREATE TABLE summaries (summary_id INTEGER PRIMARY KEY, text TEXT,"
         "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
-        "CREATE TABLE decisions (decision_id INTEGER PRIMARY KEY, text TEXT, trigger TEXT,"
-        "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
-        "CREATE TABLE insights (insight_id INTEGER PRIMARY KEY, text TEXT, trigger TEXT,"
+        "CREATE TABLE knowledge (knowledge_id INTEGER PRIMARY KEY, kind TEXT, text TEXT, trigger TEXT,"
         "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
         "CREATE TABLE documents (document_id INTEGER PRIMARY KEY, text TEXT,"
         "  document_source_id INTEGER,"
@@ -168,20 +163,21 @@ int main() {
     sqlite3* db = nullptr;
     CHECK(sqlite3_open(":memory:", &db) == SQLITE_OK);
 
-    // Minimal decisions table (id + text + count columns the index writes).
+    // Minimal knowledge table (id + text + count columns the index writes).
     const char* ddl =
-        "CREATE TABLE decisions ("
-        "  decision_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "CREATE TABLE knowledge ("
+        "  knowledge_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  kind TEXT,"
         "  text TEXT,"
         "  trigger TEXT,"   /* db 0.17: TextIndex reads trigger + text */
         "  unigram_count INTEGER NOT NULL DEFAULT 0,"
         "  bigram_count  INTEGER NOT NULL DEFAULT 0);";
     CHECK(sqlite3_exec(db, ddl, nullptr, nullptr, nullptr) == SQLITE_OK);
     CHECK(sqlite3_exec(db,
-        "INSERT INTO decisions(text) VALUES "
-        "('The quick brown fox jumps'),"
-        "('A lazy brown dog sleeps'),"
-        "('Nothing about animals here');",
+        "INSERT INTO knowledge(kind, text) VALUES "
+        "('note', 'The quick brown fox jumps'),"
+        "('note', 'A lazy brown dog sleeps'),"
+        "('note', 'Nothing about animals here');",
         nullptr, nullptr, nullptr) == SQLITE_OK);
 
     ragger::sqlite::TextIndex idx(db);
@@ -199,13 +195,13 @@ int main() {
     }
 
     // Full reindex: all 3 records processed.
-    int n = idx.reindex_table("decisions");
+    int n = idx.reindex_table("knowledge");
     CHECK(n == 3);
 
-    // decisions_terms must be populated and idempotent on a second pass.
+    // knowledge_terms must be populated and idempotent on a second pass.
     auto term_rows = [&]() {
         sqlite3_stmt* s = nullptr;
-        sqlite3_prepare_v2(db, "SELECT count(*) FROM decisions_terms", -1, &s, nullptr);
+        sqlite3_prepare_v2(db, "SELECT count(*) FROM knowledge_terms", -1, &s, nullptr);
         sqlite3_step(s);
         int c = sqlite3_column_int(s, 0);
         sqlite3_finalize(s);
@@ -213,13 +209,13 @@ int main() {
     };
     int rows1 = term_rows();
     CHECK(rows1 > 0);
-    int n2 = idx.reindex_table("decisions");
+    int n2 = idx.reindex_table("knowledge");
     CHECK(n2 == 3);
     CHECK(term_rows() == rows1);  // idempotent: no doubling
 
     // Scoring: "brown" appears in rows 1 and 2 -> both should score > 0,
     // and row 3 (no shared terms) should be absent.
-    auto scores = idx.score_query("decisions", "brown fox");
+    auto scores = idx.score_query("knowledge", "brown fox");
     bool saw1 = false, saw2 = false, saw3 = false;
     for (const auto& r : scores) {
         if (r.id == 1) saw1 = (r.score > 0.0f);

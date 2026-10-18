@@ -340,57 +340,6 @@ void rebuild_table_column_order(Impl& self,
         exec("CREATE INDEX IF NOT EXISTS idx_turns_session     ON turns(session_id)");
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_session ON summaries(session_id)");
 
-        // decisions (L6). Column order: keys/data, created_at, counts, embedding.
-        // trigger..session_id added at db 0.17 (agent API Phase 1). See
-        // Phase 9: one DDL function per table (shared with the migration leg).
-        // status is deliberately NOT CHECK-constrained: the vocabulary grows
-        // (current|provisional|pending|superseded|retired, + legacy roadmap/
-        // deprecated) and a CHECK would need a table rebuild to extend.
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS decisions (
-                decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                text        TEXT NOT NULL,
-                status      TEXT NOT NULL,
-                tags        TEXT NOT NULL DEFAULT '',
-                trigger     TEXT,
-                rationale   TEXT,
-                scope       TEXT,
-                supersedes  INTEGER REFERENCES decisions(decision_id),
-                session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
-                created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
-                unigram_count  INTEGER NOT NULL DEFAULT 0,
-                bigram_count   INTEGER NOT NULL DEFAULT 0,
-                embedding_version INTEGER,
-                embedding   BLOB
-            )
-        )");
-        exec("CREATE INDEX IF NOT EXISTS idx_decisions_status ON decisions(status)");
-
-        // insights (db 0.17, agent API Phase 5) — synthesized knowledge
-        // ("these things relate"), distinct from decisions ("always do Y").
-        // Same shape as decisions; trigger is OPTIONAL here (a note with
-        // evidence becomes an insight even without one). Created BEFORE
-        // create_terms_schema() so the insights_terms junction can reference
-        // it. status vocabulary mirrors decisions; no CHECK (it must grow).
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS insights (
-                insight_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-                text        TEXT NOT NULL,
-                status      TEXT NOT NULL DEFAULT 'current',
-                tags        TEXT NOT NULL DEFAULT '',
-                trigger     TEXT,
-                rationale   TEXT,
-                scope       TEXT,
-                supersedes  INTEGER REFERENCES insights(insight_id),
-                session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
-                created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
-                unigram_count  INTEGER NOT NULL DEFAULT 0,
-                bigram_count   INTEGER NOT NULL DEFAULT 0,
-                embedding_version INTEGER,
-                embedding   BLOB
-            )
-        )");
-
         // document_sources (L5 metadata) — one row per curated document.
         // Holds title/path/year/tags/imported_at once, instead of repeating
         // them on every chunk. document_source_id gives a document a stable
@@ -438,7 +387,7 @@ void rebuild_table_column_order(Impl& self,
             exec("ALTER TABLE summaries ADD COLUMN embedding_version INTEGER");
         if (!column_exists("turn_summaries", "embedding_version"))
             exec("ALTER TABLE turn_summaries ADD COLUMN embedding_version INTEGER");
-        if (!column_exists("decisions", "embedding_version"))
+        if (table_exists("decisions") && !column_exists("decisions", "embedding_version"))
             exec("ALTER TABLE decisions ADD COLUMN embedding_version INTEGER");
         if (!column_exists("documents", "embedding_version"))
             exec("ALTER TABLE documents ADD COLUMN embedding_version INTEGER");
@@ -461,9 +410,9 @@ void rebuild_table_column_order(Impl& self,
             exec("ALTER TABLE turn_summaries ADD COLUMN unigram_count INTEGER NOT NULL DEFAULT 0");
         if (!column_exists("turn_summaries", "bigram_count"))
             exec("ALTER TABLE turn_summaries ADD COLUMN bigram_count INTEGER NOT NULL DEFAULT 0");
-        if (!column_exists("decisions", "unigram_count"))
+        if (table_exists("decisions") && !column_exists("decisions", "unigram_count"))
             exec("ALTER TABLE decisions ADD COLUMN unigram_count INTEGER NOT NULL DEFAULT 0");
-        if (!column_exists("decisions", "bigram_count"))
+        if (table_exists("decisions") && !column_exists("decisions", "bigram_count"))
             exec("ALTER TABLE decisions ADD COLUMN bigram_count INTEGER NOT NULL DEFAULT 0");
         if (!column_exists("documents", "unigram_count"))
             exec("ALTER TABLE documents ADD COLUMN unigram_count INTEGER NOT NULL DEFAULT 0");
@@ -548,49 +497,23 @@ void rebuild_table_column_order(Impl& self,
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_level       ON summaries(level)");
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_created_at  ON summaries(created_at)");
         exec("CREATE INDEX IF NOT EXISTS idx_summaries_session     ON summaries(session_id)");
-        exec("CREATE INDEX IF NOT EXISTS idx_decisions_status      ON decisions(status)");
-        exec("CREATE INDEX IF NOT EXISTS idx_decisions_supersedes  ON decisions(supersedes)");
         // A document is identified by its path (0.17): the same file cannot
         // be imported twice. NULL/empty paths from old DBs are given a unique
         // value by migrate_0_16_to_0_17() before this index is built.
         exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_document_sources_path ON document_sources(path)");
         exec("CREATE INDEX IF NOT EXISTS idx_sessions_name          ON sessions(name)");
-        exec("CREATE INDEX IF NOT EXISTS idx_insights_status        ON insights(status)");
-        exec("CREATE INDEX IF NOT EXISTS idx_insights_supersedes    ON insights(supersedes)");
 
-        // decision_evidence (db 0.17) -- many-to-many: which turn_summaries a
-        // decision rests on. Real FKs (design §10.4: integrity lives in the
-        // schema). CASCADE on the decision side (an operator prune of a
-        // decision takes its links with it); RESTRICT on the turn_summary side
-        // so evidence can't vanish from under a claim. Created here, AFTER
-        // migrations, so it never takes part in the decisions table rebuild.
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS decision_evidence (
-                decision_id     INTEGER NOT NULL
-                    REFERENCES decisions(decision_id) ON DELETE CASCADE,
-                turn_summary_id INTEGER NOT NULL
-                    REFERENCES turn_summaries(turn_summary_id) ON DELETE RESTRICT,
-                PRIMARY KEY (decision_id, turn_summary_id)
-            )
-        )");
-        exec("CREATE INDEX IF NOT EXISTS idx_decision_evidence_ts "
-             "ON decision_evidence(turn_summary_id)");
-
-        // insight_evidence (db 0.17) -- same shape/semantics as
-        // decision_evidence: which turn_summaries an insight rests on. An
-        // insight without evidence is just a note, so store_insight requires
-        // at least one link; the schema only enforces referential integrity.
-        exec(R"(
-            CREATE TABLE IF NOT EXISTS insight_evidence (
-                insight_id      INTEGER NOT NULL
-                    REFERENCES insights(insight_id) ON DELETE CASCADE,
-                turn_summary_id INTEGER NOT NULL
-                    REFERENCES turn_summaries(turn_summary_id) ON DELETE RESTRICT,
-                PRIMARY KEY (insight_id, turn_summary_id)
-            )
-        )");
-        exec("CREATE INDEX IF NOT EXISTS idx_insight_evidence_ts "
-             "ON insight_evidence(turn_summary_id)");
+        // knowledge (PHASE7) — ONE table for decision | insight | note,
+        // replacing decisions + insights + their evidence tables (dropped by
+        // the 0.16 -> 0.17 leg; a fresh DB never creates the old ones).
+        // Created BEFORE create_terms_schema() so knowledge_terms can
+        // reference it, and AFTER migrations so it never takes part in a
+        // rebuild dance.
+        exec(ddl::if_not_exists(ddl::knowledge()));
+        exec(ddl::if_not_exists(ddl::knowledge_indexes()));
+        exec(ddl::if_not_exists(ddl::knowledge_turn_evidence()));
+        exec(ddl::if_not_exists(ddl::knowledge_document_evidence()));
+        exec(ddl::if_not_exists(ddl::knowledge_document_evidence_indexes()));
 
         // episodes (PHASE5) — narrative segments. Created AFTER migrations
         // (like the evidence tables) so it never takes part in a rebuild
@@ -1532,11 +1455,11 @@ void rebuild_table_column_order(Impl& self,
 
 
     /// 0.16 -> 0.17 migration (the whole agent API schema in one step):
-    ///   - decisions rebuilt with trigger/rationale/scope/supersedes/
-    ///     session_id, plus decision_evidence,
+    ///   - knowledge (§4/§4a, PHASE7): the table + evidence tables are created,
+    ///     decisions rows move in with kind='decision' and ids PRESERVED;
+    ///     the old decisions/insights objects are dropped.
     ///   - sessions rebuilt with started_on/ended_on (PHASE4; "project" is
-    ///     a tag now — no projects table, no project_id anywhere),
-    ///   - insights + insight_evidence.
+    ///     a tag now — no projects table, no project_id anywhere).
     /// (Developed as three internal steps; released as one schema version.)
     /// Same pragma dance as migrate_0_15_to_0_16() and for the same reasons:
     /// foreign_keys OFF (decisions_terms has ON DELETE CASCADE into decisions;
@@ -1544,7 +1467,7 @@ void rebuild_table_column_order(Impl& self,
     /// RENAME from repointing other tables' REFERENCES at "decisions_rebuild").
     /// Both must be set OUTSIDE the transaction.
     void Backend::Impl::migrate_0_16_to_0_17() {
-        Diskerror::Logger::info("Migrating DB 0.16 -> 0.17 (agent API: decisions, sessions span, insights)...");
+        Diskerror::Logger::info("Migrating DB 0.16 -> 0.17 (sessions span, episodes, knowledge)...");
 
         const bool fk_was_on = pragma_bool(*this, "foreign_keys");
         exec("PRAGMA foreign_keys = OFF");
@@ -1691,71 +1614,48 @@ void rebuild_table_column_order(Impl& self,
             // trigger (SQL file's ts_rest): recreate both.
             exec(ddl::turn_summaries_indexes_and_trigger());
 
-            // Counts ARE carried over (unlike 0.16): they are valid, and
-            // decisions_terms rows still point at the same decision_ids, so no
-            // reindex is needed. New columns start NULL.
-            rebuild_table_column_order(*this, "decisions", R"(
-                CREATE TABLE decisions_rebuild (
-                    decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    text        TEXT NOT NULL,
-                    status      TEXT NOT NULL,
-                    tags        TEXT NOT NULL DEFAULT '',
-                    trigger     TEXT,
-                    rationale   TEXT,
-                    scope       TEXT,
-                    supersedes  INTEGER REFERENCES decisions(decision_id),
-                    session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
-                    created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
-                    unigram_count  INTEGER NOT NULL DEFAULT 0,
-                    bigram_count   INTEGER NOT NULL DEFAULT 0,
-                    embedding_version INTEGER,
-                    embedding   BLOB
-                ))",
-                "decision_id, text, status, tags, created_at, unigram_count, "
-                "bigram_count, embedding_version, embedding");
+            // ---- knowledge (PHASE7; migrate-0.16-to-0.17.sql §4 + §4a) ----
+            // The table + both evidence tables are created EMPTY (a real
+            // 0.16 DB has no evidence rows; §4b notes arrive in Phase 8).
+            exec(ddl::knowledge());
+            exec(ddl::knowledge_indexes());
+            exec(ddl::knowledge_turn_evidence());
+            exec(ddl::knowledge_document_evidence());
+            exec(ddl::knowledge_document_evidence_indexes());
 
-            // Category words that leaked into status (old ragger_store callers
-            // passed category as status). Keep the word -- append it to tags --
-            // and set status to 'current'. Nothing is discarded.
-            exec(std::string(R"(
-                UPDATE decisions
-                SET tags = CASE WHEN tags = '' THEN status ELSE tags || ',' || status END,
-                    status = 'current'
-                WHERE status NOT IN ()") + status::in_list_sql(status::kMigrationKnown) + ")");
+            // §4a: decisions -> kind='decision', ids PRESERVED. A status
+            // outside the vocabulary (old callers put a category word there)
+            // moves to tags and status becomes 'current'. roadmap/deprecated
+            // stay as stored. trigger/rationale/scope/supersedes/session_id/
+            // model_id start NULL (0.16 had none of those columns).
+            // FROM decisions — 0.16 source table.
+            {
+                const std::string known = status::in_list_sql(status::kMigrationKnown);
+                exec("INSERT INTO knowledge (knowledge_id, kind, text, status, tags, created_at,"
+                     " unigram_count, bigram_count, embedding_version, embedding)"
+                     " SELECT decision_id, 'decision', text,"
+                     "        CASE WHEN status IN (" + known + ")"
+                     "             THEN status ELSE 'current' END,"
+                     "        CASE WHEN status IN (" + known + ")"
+                     "             THEN tags"
+                     "             WHEN tags = '' THEN status ELSE tags || ',' || status END,"
+                     "        created_at, unigram_count, bigram_count, embedding_version, embedding"
+                     " FROM decisions ORDER BY decision_id");
+            }
             if (int n = sqlite3_changes(db); n > 0)
                 Diskerror::Logger::info(std::format(
-                    "  decisions: moved {} non-status value(s) from status into tags", n));
+                    "  knowledge: moved {} decision(s) (ids preserved)", n));
 
-            // insights + insight_evidence: brand-new tables. create_schema()
-            // already ran the same CREATE ... IF NOT EXISTS before this leg,
-            // so this is defensive-only; no rebuild, no data step.
-            exec(R"(
-                CREATE TABLE IF NOT EXISTS insights (
-                    insight_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-                    text        TEXT NOT NULL,
-                    status      TEXT NOT NULL DEFAULT 'current',
-                    tags        TEXT NOT NULL DEFAULT '',
-                    trigger     TEXT,
-                    rationale   TEXT,
-                    scope       TEXT,
-                    supersedes  INTEGER REFERENCES insights(insight_id),
-                    session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
-                    created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
-                    unigram_count  INTEGER NOT NULL DEFAULT 0,
-                    bigram_count   INTEGER NOT NULL DEFAULT 0,
-                    embedding_version INTEGER,
-                    embedding   BLOB
-                )
-            )");
-            exec(R"(
-                CREATE TABLE IF NOT EXISTS insight_evidence (
-                    insight_id      INTEGER NOT NULL
-                        REFERENCES insights(insight_id) ON DELETE CASCADE,
-                    turn_summary_id INTEGER NOT NULL
-                        REFERENCES turn_summaries(turn_summary_id) ON DELETE RESTRICT,
-                    PRIMARY KEY (insight_id, turn_summary_id)
-                )
-            )");
+            // Drop the old objects. decisions/decisions_terms exist in every
+            // migrated DB; the insights/evidence/junction objects exist only
+            // in dev DBs that ran an earlier 0.17 leg — IF EXISTS for safety.
+            // (0.16 source tables — removal code, gone-list exception.)
+            exec("DROP TABLE decisions");
+            exec("DROP TABLE IF EXISTS decisions_terms");
+            exec("DROP TABLE IF EXISTS insights");
+            exec("DROP TABLE IF EXISTS insights_terms");
+            exec("DROP TABLE IF EXISTS decision_evidence");
+            exec("DROP TABLE IF EXISTS insight_evidence");
 
             // PHASE5: the boundary-watermark machinery is deleted with the
             // session/project rollups; drop their settings rows (§7).

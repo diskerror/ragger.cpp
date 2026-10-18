@@ -39,6 +39,8 @@ AgentSearchQuery parse_agent_search_query(const json& a) {
     q.max_tokens      = a.value("max_tokens", 0);
     if (a.contains("layers"))
         q.layers = a["layers"].get<std::vector<std::string>>();
+    if (a.contains("kinds"))
+        q.kinds = a["kinds"].get<std::vector<std::string>>();
     return q;
 }
 
@@ -80,8 +82,9 @@ UpdateRequest parse_update_request(const json& a) {
     return u;
 }
 
-DecisionInput parse_decision_input(const json& a) {
-    DecisionInput in;
+KnowledgeInput parse_decision_input(const json& a) {
+    KnowledgeInput in;
+    in.kind         = "decision";
     in.text         = a.value("text", "");
     in.trigger      = a.value("trigger", "");
     in.rationale    = a.value("rationale", "");
@@ -96,8 +99,9 @@ DecisionInput parse_decision_input(const json& a) {
     return in;
 }
 
-DecisionInput parse_note_insight(const json& a, const std::string& text) {
-    DecisionInput in;
+KnowledgeInput parse_note_insight(const json& a, const std::string& text) {
+    KnowledgeInput in;
+    in.kind     = "insight";
     in.text     = text;
     in.evidence = a["evidence"].get<std::vector<int>>();
     in.tags     = tags_to_comma_string(a);

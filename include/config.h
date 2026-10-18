@@ -88,7 +88,7 @@ struct Config {
     float default_min_score    = 0.6f;
     // Agent API Phase 2: cosine threshold above which a newly stored decision
     // flags other active decisions it may be replacing (possible_supersedes
-    // hint on StructuredDecisionResult). Flag only — never merges.
+    // hint on KnowledgeResult). Flag only — never merges.
     float decision_supersede_threshold = 0.80f;
     bool  bm25_enabled         = true;
     float bm25_weight          = 4.0f;

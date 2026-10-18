@@ -1,6 +1,7 @@
 // Agent API shared helpers — definitions moved verbatim from agent_read.cpp
 // by review 5A so the read surface and the write surface share one copy.
 #include "sqlite/agent_common.h"
+#include <cstring>
 
 #include "sqlite/tables.h"
 #include "util/sqlite.h"
@@ -34,6 +35,21 @@ const std::set<std::string> kKnownLayers = [] {
 
 bool is_known_agent_layer(const std::string& layer) {
     return kKnownLayers.count(layer) > 0;
+}
+
+// PHASE7: legacy typed handles. Strict suffix (digits, no leading zero) so
+// only well-formed old handles get the pointed rejection; junk stays "not
+// found".
+bool is_legacy_knowledge_handle(const std::string& handle) {
+    for (const char* pfx : {"decision:", "insight:"}) {
+        const size_t len = std::strlen(pfx);
+        if (handle.size() <= len || !handle.starts_with(pfx)) continue;
+        if (handle[len] == '0') return false;
+        for (size_t i = len; i < handle.size(); ++i)
+            if (handle[i] < '0' || handle[i] > '9') return false;
+        return true;
+    }
+    return false;
 }
 
 
@@ -83,34 +99,39 @@ bool parse_agent_handle(const std::string& handle, std::string& layer, int& rowi
     return true;
 }
 
-// Shared fetch for the two structured layers (decisions, insights): identical
-// columns, identical evidence-join pattern, differing only in table/pk/
-// evidence-table/layer names (review 2A; mirrors store_structured_row's
-// StructuredRowSpec decomposition). The evidence table's FK column is always
-// the same pk name as its base table's.
-json fetch_structured_row(sqlite3* db, const char* table, const char* pk,
-                          const char* evidence_table, const char* layer,
-                          int rowid) {
-    Stmt s(db, std::format("SELECT text, status, tags, trigger, rationale, scope, supersedes, "
-                           "datetime(created_at,'unixepoch','localtime') "
-                           "FROM {} WHERE {} = ?", table, pk));
+// Fetch for the knowledge layer (PHASE7: one branch replaces the old
+// decision + insight copies of this function). Fields per PHASE7 C.4:
+// id, layer:"knowledge", kind, text, status, tags, trigger, rationale,
+// scope, supersedes, session (guid/name), model (name), created, evidence.
+json fetch_knowledge_row(sqlite3* db, int rowid) {
+    Stmt s(db, "SELECT k.kind, k.text, k.status, k.tags, k.trigger, k.rationale, k.scope, "
+               "k.supersedes, "
+               "datetime(k.created_at,'unixepoch','localtime'), "
+               "COALESCE((SELECT guid FROM sessions ss WHERE ss.session_id = k.session_id), ''), "
+               "COALESCE((SELECT name FROM sessions ss WHERE ss.session_id = k.session_id), ''), "
+               "COALESCE((SELECT name FROM models m WHERE m.model_id = k.model_id), '') "
+               "FROM knowledge k WHERE knowledge_id = ?");
     s.bind(1, rowid);
     if (!s.step()) return json(nullptr);
     json item = {
-        {"id",      std::format("{}:{}", layer, rowid)},
-        {"layer",   layer},
-        {"text",    s.column_text(0)},
-        {"status",  s.column_text(1)},
-        {"tags",    s.column_text(2)},
-        {"trigger", s.is_null(3) ? json(nullptr) : json(s.column_text(3))},
-        {"rationale", s.is_null(4) ? json(nullptr) : json(s.column_text(4))},
-        {"scope",   s.is_null(5) ? json(nullptr) : json(s.column_text(5))},
-        {"supersedes", s.is_null(6) ? json(nullptr) : json(s.column_int(6))},
-        {"created", s.column_text(7)},
+        {"id",      std::format("knowledge:{}", rowid)},
+        {"layer",   "knowledge"},
+        {"kind",    s.column_text(0)},
+        {"text",    s.column_text(1)},
+        {"status",  s.column_text(2)},
+        {"tags",    s.column_text(3)},
+        {"trigger", s.is_null(4) ? json(nullptr) : json(s.column_text(4))},
+        {"rationale", s.is_null(5) ? json(nullptr) : json(s.column_text(5))},
+        {"scope",   s.is_null(6) ? json(nullptr) : json(s.column_text(6))},
+        {"supersedes", s.is_null(7) ? json(nullptr) : json(s.column_int(7))},
+        {"created", s.column_text(8)},
     };
+    if (!s.is_null(9)) item["session"] = s.column_text(9);
+    if (!s.is_null(10)) item["session_name"] = s.column_text(10);
+    if (!s.is_null(11)) item["model"] = s.column_text(11);
     json ev = json::array();
-    Stmt e(db, std::format("SELECT turn_summary_id FROM {} WHERE {} = ? "
-                           "ORDER BY turn_summary_id", evidence_table, pk));
+    Stmt e(db, "SELECT turn_summary_id FROM knowledge_turn_evidence "
+               "WHERE knowledge_id = ? ORDER BY turn_summary_id");
     e.bind(1, rowid);
     while (e.step()) ev.push_back(e.column_int(0));
     item["evidence"] = std::move(ev);
@@ -121,12 +142,8 @@ json fetch_structured_row(sqlite3* db, const char* table, const char* pk,
 // does not exist. Shapes follow PHASE2-STEPS step 4: id/layer/text/created
 // plus the layer's own columns.
 json fetch_agent_row(sqlite3* db, const std::string& layer, int rowid) {
-    if (layer == "decision")
-        return fetch_structured_row(db, "decisions", "decision_id",
-                                    "decision_evidence", "decision", rowid);
-    if (layer == "insight")
-        return fetch_structured_row(db, "insights", "insight_id",
-                                    "insight_evidence", "insight", rowid);
+    if (layer == "knowledge")
+        return fetch_knowledge_row(db, rowid);
     if (layer == "turn") {
         Stmt s(db, "SELECT user_text, assistant_text, "
                    "datetime(created_at,'unixepoch','localtime'), "

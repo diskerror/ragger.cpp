@@ -19,7 +19,10 @@ using json = nlohmann::json;
 
 /// Input for a structured (skill-shaped) decision — agent API Phase 1.
 /// text + trigger are required; everything else is optional.
-struct DecisionInput {
+/// Input to store_knowledge (PHASE7): one row of knowledge(kind). Formerly
+/// DecisionInput for store_structured_decision/store_insight.
+struct KnowledgeInput {
+    std::string kind;                 ///< decision | insight | note (see status::kKinds)
     std::string text;                 ///< the ruling itself
     std::string trigger;              ///< "Use when ..." — future-query vocabulary
     std::string rationale;            ///< why; alternatives rejected ("" = NULL)
@@ -28,7 +31,8 @@ struct DecisionInput {
     std::string status = "current";   ///< current | provisional | pending
     std::optional<int> supersedes;    ///< decision_id this replaces
     std::string session_guid;         ///< source session GUID ("" = none)
-    std::vector<int> evidence;        ///< turn_summary_ids backing the decision
+    std::string model_name;           ///< producing model ("" = NULL model_id)
+    std::vector<int> evidence;        ///< turn_summary_ids backing the row
 };
 
 /// Input to store_episode_close (db 0.17, PHASE5 B.1): one closed episode —
@@ -44,12 +48,13 @@ struct EpisodeClose {
     std::vector<int> member_turn_summary_ids;
 };
 
-struct StructuredDecisionResult {
-    int id = 0;                       ///< new decision_id
-    std::optional<int> superseded;    ///< decision_id flipped to 'superseded'
-    /// Flag-only hint (Phase 2 step 5): up to 3 OTHER active decisions whose
-    /// embedding cosine with the new row is >= decision_supersede_threshold.
-    /// Never a merge — the caller decides what to do with them.
+struct KnowledgeResult {
+    int id = 0;                       ///< new knowledge_id
+    std::string kind;                 ///< echoed kind of the stored row
+    std::optional<int> superseded;    ///< knowledge_id flipped to 'superseded'
+    /// Flag-only hint (Phase 2 step 5): up to 3 OTHER active knowledge rows
+    /// (kind decision|insight) whose embedding cosine with the new row is
+    /// >= decision_supersede_threshold. Never a merge — the caller decides.
     std::vector<std::pair<int,float>> possible_supersedes;
 };
 
@@ -101,10 +106,14 @@ struct SearchResponse {
 /// memory_search request (agent API Phase 2). Empty vectors/strings = no filter.
 struct AgentSearchQuery {
     std::string query;
-    std::vector<std::string> layers;   ///< subset of turn|turn_summary|episode|summary|document|decision; empty = all
+    std::vector<std::string> layers;   ///< subset of turn|turn_summary|episode|summary|document|knowledge;
+                                       ///  input aliases decision|insight accepted (PHASE7) = knowledge
+                                       ///  restricted to that kind; empty = all
+    std::vector<std::string> kinds;    ///< knowledge kinds filter (decision|insight|note); empty = all;
+                                       ///  unknown kind -> invalid_argument
     std::string since;                 ///< "YYYY-MM-DD", "YYYY-MM-DD HH:MM:SS", or relative "30d"/"12h"; "" = none
     std::string until;                 ///< same formats; "" = none
-    std::string status = "active";     ///< decisions only: "active" (current+provisional) | "any" | one exact status
+    std::string status = "active";     ///< knowledge only: "active" (current+provisional) | "any" | one exact status
     std::string session;               ///< only this session GUID
     std::string exclude_session;       ///< drop this session GUID
     int limit = 10;

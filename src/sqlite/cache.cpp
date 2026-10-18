@@ -139,9 +139,7 @@ void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
 
     void Backend::Impl::invalidate_doc_cache() { doc_cache_.valid = false; }
 
-    void Backend::Impl::invalidate_dec_cache() { dec_cache_.valid = false; }
-
-    void Backend::Impl::invalidate_ins_cache() { ins_cache_.valid = false; }
+    void Backend::Impl::invalidate_knowledge_cache() { knowledge_cache_.valid = false; }
 
     void Backend::Impl::invalidate_turn_cache() { turn_cache_.valid = false; }
 
@@ -226,13 +224,18 @@ void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
     }
 
 
-    void Backend::Impl::ensure_dec_cache() {
-        if (dec_cache_.valid) return;
-        load_cache(dec_cache_, "decisions",
-            "SELECT decision_id, text, embedding, status, tags, "
+    // knowledge (PHASE7 B.2): ONE corpus replacing dec_cache_ + ins_cache_.
+    // Consequence (TODO Q10): retired and superseded rows are NOT in the
+    // semantic cache (same as superseded always was); the 0.16 rollups that
+    // arrive as retired notes in Phase 8 are therefore invisible to semantic
+    // search — the lexical path and memory_get still reach them.
+    void Backend::Impl::ensure_knowledge_cache() {
+        if (knowledge_cache_.valid) return;
+        load_cache(knowledge_cache_, "knowledge",
+            "SELECT knowledge_id, text, embedding, status, tags, "
             "       datetime(created_at,'unixepoch','localtime'), "
-            "       ifnull(trigger,'') "
-            "FROM decisions "
+            "       ifnull(trigger,''), session_id, kind "
+            "FROM knowledge "
             // db 0.17: superseded / retired / pending rows are history or
             // unreviewed drafts -- kept in the table, hidden from search.
             // Allow-list, not deny-list, so a future status stays hidden
@@ -240,34 +243,16 @@ void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
             // pre-0.17 visibility.
             "WHERE status IN (" + status::in_list_sql(status::kCacheLoaded) + ")",
             [](Stmt& s, json& meta) {
-                meta["source"] = "decision";
+                meta["source"] = "knowledge";
+                meta["kind"] = s.column_text(8);
                 meta["status"] = s.column_text(3);
                 std::string tags = s.column_text(4);
                 if (!tags.empty()) meta["tags"] = tags;
                 std::string trig = s.column_text(6);
                 if (!trig.empty()) meta["trigger"] = trig;
+                if (!s.is_null(7)) meta["session_id"] = s.column_int(7);
             });
-        dec_cache_.valid = true;
-    }
-
-
-    void Backend::Impl::ensure_ins_cache() {
-        if (ins_cache_.valid) return;
-        load_cache(ins_cache_, "insights",
-            "SELECT insight_id, text, embedding, status, tags, "
-            "       datetime(created_at,'unixepoch','localtime'), "
-            "       ifnull(trigger,'') "
-            "FROM insights "
-            "WHERE status IN (" + status::in_list_sql(status::kCacheLoaded) + ")",
-            [](Stmt& s, json& meta) {
-                meta["source"] = "insight";
-                meta["status"] = s.column_text(3);
-                std::string tags = s.column_text(4);
-                if (!tags.empty()) meta["tags"] = tags;
-                std::string trig = s.column_text(6);
-                if (!trig.empty()) meta["trigger"] = trig;
-            });
-        ins_cache_.valid = true;
+        knowledge_cache_.valid = true;
     }
 
 

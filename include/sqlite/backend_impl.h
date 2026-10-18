@@ -93,8 +93,7 @@ struct Backend::Impl {
 
     EmbeddingCache summary_cache_;   // summaries (L2/L3)
     EmbeddingCache doc_cache_;       // documents (L5)
-    EmbeddingCache dec_cache_;       // decisions (L6)
-    EmbeddingCache ins_cache_;       // insights (db 0.17)
+    EmbeddingCache knowledge_cache_; // knowledge (L6; PHASE7 replaces dec+ins)
     EmbeddingCache turn_cache_;      // turn_summaries (L2)
     EmbeddingCache episode_cache_;   // episodes (db 0.17, PHASE5 B.3)
 
@@ -312,8 +311,7 @@ struct Backend::Impl {
     // ---- cache --------------------------------------------------------
     void invalidate_cache();
     void invalidate_doc_cache();
-    void invalidate_dec_cache();
-    void invalidate_ins_cache();
+    void invalidate_knowledge_cache();
     void invalidate_turn_cache();
     void invalidate_episode_cache();
     /// Drop all six warm caches (summaries, documents, decisions, insights,
@@ -340,17 +338,9 @@ struct Backend::Impl {
     // the title so search() consumers can distinguish documents from summaries.
     void ensure_doc_cache();
 
-    // Loads the decisions (L6) table into the parallel vector cache. Mirrors
-    // ensure_cache(): vector scores come from here, keyword scores from FTS5
-    // (decisions_fts) at query time. Metadata carries source="decision" plus
-    // the status so search() consumers can distinguish decisions from the
-    // other corpora.
-    void ensure_dec_cache();
-
-    // Loads the insights table into the parallel vector cache. Mirrors
-    // ensure_dec_cache() (same status allow-list); metadata carries
-    // source="insight" plus the status/trigger.
-    void ensure_ins_cache();
+    // knowledge cache (PHASE7): loads active knowledge rows; metadata
+    // carries kind, status, trigger, tags, session_id.
+    void ensure_knowledge_cache();
 
     // Loads the turn_summaries (L2) table into the parallel vector cache.
     // Mirrors ensure_dec_cache(): vector scores come from here, keyword
@@ -510,45 +500,45 @@ struct Backend::Impl {
                        const std::string& source_timestamp,
                        bool defer_embedding);
 
-    // ---- store_structured_decision: agent API Phase 1 (db 0.17) ---------
-    // Validates, embeds trigger+text, then in ONE transaction inserts the
-    // row, flips the superseded row (if any) to 'superseded', and links the
-    // evidence turn_summaries. Throws std::invalid_argument on bad input.
-    StructuredDecisionResult store_structured_decision(const DecisionInput& in);
+    // ---- store_knowledge: the ONE structured write path (PHASE7) ---------
+    // Replaces store_structured_decision + store_insight + StructuredRowSpec:
+    // kind selects the rules (status::kKinds) — decision requires a trigger,
+    // insight requires >=1 evidence, note neither. supersedes may point at
+    // ANY kind (insight -> decision promotion). Validates, embeds
+    // trigger+text, then in ONE transaction inserts the row, flips the
+    // superseded row (if any) to 'superseded', and links the evidence
+    // turn_summaries. Throws std::invalid_argument on bad input.
+    KnowledgeResult store_knowledge(const KnowledgeInput& in);
 
-    // ---- store_insight: agent API Phase 5 (db 0.17) ----------------------
-    // decisions and insights share ONE write path (store_structured_row);
-    // only the table names, the error-message noun, and which field is
-    // required differ:
-    //   decisions: trigger REQUIRED, evidence optional.
-    //   insights:  trigger optional, evidence REQUIRED — an insight with no
-    //              sources is just a note (Phase 5 step 3).
-    // Reuses DecisionInput / StructuredDecisionResult verbatim (P5 doc:
-    // "Reuse the struct; it already has every field").
-    struct StructuredRowSpec {
-        const char* table;           // "decisions" | "insights"
-        const char* pk;              // "decision_id" | "insight_id"
-        const char* evidence_table;  // "decision_evidence" | "insight_evidence"
-        const char* noun;            // word used in validation errors
-        bool trigger_required;
-        bool evidence_required;
-        bool decisions_cache;        // invalidate_dec_cache() vs _ins_cache()
-    };
-    StructuredDecisionResult store_structured_row(const DecisionInput& in,
-                                                  const StructuredRowSpec& spec);
-    StructuredDecisionResult store_insight(const DecisionInput& in);
+    // Shared INSERT used by store_knowledge and the legacy store_decision
+    // wrapper (PHASE7 B.3). No validation here — callers own the rules.
+    // created_at is explicit (unixepoch() at the call site for "now").
+    int insert_knowledge_row(const std::string& kind,
+                             const std::string& text,
+                             const std::string& status,
+                             const std::string& tags,
+                             const std::string& trigger,
+                             const std::string& rationale,
+                             const std::string& scope,
+                             std::optional<int> supersedes,
+                             std::optional<int> session_id,
+                             std::optional<int> model_id,
+                             int64_t created_at,
+                             const std::vector<float>& emb,
+                             bool defer_embedding);
 
     // Document source by unique path (null json when absent).
     json find_document_source(const std::string& path);
     json list_document_sources();
     json delete_document_source(int document_source_id);
 
-    // Cosine near-duplicate scan over active rows of one structured table
-    // (possible_supersedes hint; Phase 2 step 5). Shared with the Phase 3
-    // note path and, since Phase 5, the insights table.
+    // Cosine near-duplicate scan over active knowledge rows (possible_
+    // supersedes hint; Phase 2 step 5, PHASE7: one table). `kind_filter` is
+    // an optional SQL fragment restricting kinds (e.g.
+    // "kind IN ('decision','insight')"); nullptr = all kinds.
     std::vector<std::pair<int,float>> supersede_hints(
         const std::vector<float>& emb, const std::vector<int>& exclude_ids,
-        const char* table = "decisions", const char* pk = "decision_id");
+        const char* kind_filter = nullptr);
 
     // Embed `text` (when the embedder is usable) and run supersede_hints
     // over it. Used by the Phase 3 note surface, where the stored row is a

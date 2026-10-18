@@ -211,8 +211,8 @@ int RaggerMemory::store_decision(const std::string& text,
     return backend_->store_decision(text, status, tags, source_timestamp, defer_embedding);
 }
 
-StructuredDecisionResult RaggerMemory::store_structured_decision(const DecisionInput& in) {
-    return backend_->store_structured_decision(in);
+KnowledgeResult RaggerMemory::store_knowledge(const KnowledgeInput& in) {
+    return backend_->store_knowledge(in);
 }
 
 json RaggerMemory::list_document_sources() {
@@ -226,11 +226,6 @@ json RaggerMemory::delete_document_source(int document_source_id) {
 json RaggerMemory::find_document_source(const std::string& path) {
     return backend_->find_document_source(path);
 }
-
-StructuredDecisionResult RaggerMemory::store_insight(const DecisionInput& in) {
-    return backend_->store_insight(in);
-}
-
 std::vector<AgentHit> RaggerMemory::agent_search(const AgentSearchQuery& q) {
     return backend_->agent_search(q);
 }

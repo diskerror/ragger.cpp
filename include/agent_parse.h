@@ -41,14 +41,15 @@ TimelineQuery parse_timeline_query(const nlohmann::json& a);
 /// canonical "store a new row with supersedes" message.
 UpdateRequest parse_update_request(const nlohmann::json& a);
 
-/// POST /decision body / memory_decision arguments -> DecisionInput.
-DecisionInput parse_decision_input(const nlohmann::json& a);
+/// POST /decision body / memory_decision arguments -> KnowledgeInput
+/// (kind="decision").
+KnowledgeInput parse_decision_input(const nlohmann::json& a);
 
-/// /memory/note insight routing (Phase 5): the evidence-array branch of
-/// the note body -> DecisionInput for store_insight. `text` comes from the
-/// caller (the note body shares it with the plain-store branch).
-DecisionInput parse_note_insight(const nlohmann::json& a,
-                                 const std::string& text);
+/// /memory/note insight routing (Phase 5; PHASE7 kind="insight"): the
+/// evidence-array branch of the note body. `text` comes from the caller
+/// (the note body shares it with the plain-store branch).
+KnowledgeInput parse_note_insight(const nlohmann::json& a,
+                                  const std::string& text);
 
 /// possible_supersedes hint list -> the shared response shape
 /// [{"id":N,"score":f}...].

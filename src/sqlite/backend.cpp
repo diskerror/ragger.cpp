@@ -298,9 +298,9 @@ int Backend::store_decision(const std::string& text,
     return pImpl->store_decision(text, status, tags, source_timestamp, defer_embedding);
 }
 
-StructuredDecisionResult Backend::store_structured_decision(const DecisionInput& in) {
+KnowledgeResult Backend::store_knowledge(const KnowledgeInput& in) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->store_structured_decision(in);
+    return pImpl->store_knowledge(in);
 }
 
 void Backend::invalidate_all_caches() {
@@ -323,10 +323,7 @@ json Backend::find_document_source(const std::string& path) {
     return pImpl->find_document_source(path);
 }
 
-StructuredDecisionResult Backend::store_insight(const DecisionInput& in) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->store_insight(in);
-}
+
 
 std::vector<AgentHit> Backend::agent_search(const AgentSearchQuery& q) {
     std::lock_guard<std::mutex> lk(pImpl->mu);

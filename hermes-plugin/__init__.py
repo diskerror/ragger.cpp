@@ -307,7 +307,7 @@ DECISION_SCHEMA = {
             "tags": {"type": "array", "items": {"type": "string"}},
             "status": {"type": "string", "enum": ["current", "provisional", "pending"],
                        "description": "Default current. provisional = agreed, not yet proven."},
-            "supersedes": {"type": "integer", "description": "decision id this replaces."},
+            "supersedes": {"type": "integer", "description": "knowledge id this replaces (any kind)."},
             "evidence": {"type": "array", "items": {"type": "integer"},
                          "description": "turn_summary ids (from search results) this rests on."},
         },
@@ -334,7 +334,7 @@ MEMORY_NOTE_SCHEMA = {
             "tags": {"type": "array", "items": {"type": "string"},
                      "description": "Optional tags (use `project:<name>` to scope)."},
             "evidence": {"type": "array", "items": {"type": "integer"},
-                         "description": "turn_summary ids this note synthesizes. When present the note is stored as an insight (response carries \"table\":\"insights\") instead of a plain note."},
+                         "description": "turn_summary ids this note synthesizes. When present the note is stored as an insight (response carries \"kind\":\"insight\") instead of a plain note."},
         },
         "required": ["text"],
     },
@@ -370,9 +370,9 @@ MEMORY_TIMELINE_SCHEMA = {
 MEMORY_UPDATE_SCHEMA = {
     "name": "memory_update",
     "description": (
-        "Curate one row's METADATA by typed handle: decision status (legal "
+        "Curate one row's METADATA by typed handle: knowledge status (legal "
         "transitions only; 'superseded' is set only by storing a superseding "
-        "decision), tags (replaces the whole set). Agent notes accept tags; "
+        "row), tags (replaces the whole set). Agent notes accept tags; "
         "summarizer rollups and turn / turn_summary / document rows are not "
         "editable. Text is "
         "NEVER edited in place -- to change what something says, store a new "
@@ -384,7 +384,7 @@ MEMORY_UPDATE_SCHEMA = {
         "properties": {
             "id": {"type": "string", "description": "Typed handle '<layer>:<rowid>'."},
             "status": {"type": "string",
-                       "description": "Decision status: current | provisional | pending | roadmap | retired."},
+                       "description": "Knowledge status: current | provisional | pending | roadmap | retired."},
             "tags": {"type": "string", "description": "Replacement tag string (comma-separated)."},
         },
         "required": ["id"],
@@ -395,10 +395,10 @@ MEMORY_UPDATE_SCHEMA = {
 MEMORY_REVIEW_SCHEMA = {
     "name": "memory_review",
     "description": (
-        "The pending queue. action 'list' returns pending decisions and "
-        "insights oldest first (handle + trigger + snippet); 'approve' moves each id "
+        "The pending queue. action 'list' returns pending knowledge rows of "
+        "any kind oldest first (handle + trigger + snippet); 'approve' moves each id "
         "pending->current; 'reject' moves each id pending->retired. ids accept "
-        "'decision:<id>' / 'insight:<id>' handles or bare integers (decision); "
+        "'knowledge:<id>' handles or bare integers; "
         "a non-pending id fails only that entry."
     ),
     "parameters": {
@@ -418,11 +418,12 @@ MEMORY_SEARCH_SCHEMA = {
     "name": "memory_search",
     "description": (
         "Layered search across all memory corpora (turns, turn summaries, "
-        "session/episode summaries, documents, decisions, insights). Returns typed handles "
+        "episodes, session/project summaries, documents, knowledge). Returns typed handles "
         "+ snippets only -- call memory_get with chosen handles for full text. "
-        "`layers` narrows by kind; omit for all. Pass session='current' to search "
+        "`layers` narrows by layer; omit for all. `kinds` narrows knowledge "
+        "hits (decision, insight, note). Pass session='current' to search "
         "only this conversation, or exclude_session='current' to skip it. "
-        "status: 'active' (default) hides superseded/retired decisions; 'any' "
+        "status: 'active' (default) hides superseded/retired knowledge; 'any' "
         "includes them. since/until: 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or "
         "relative ('30d', '12h')."
     ),
@@ -431,11 +432,13 @@ MEMORY_SEARCH_SCHEMA = {
         "properties": {
             "query": {"type": "string", "description": "What to search for."},
             "layers": {"type": "array", "items": {"type": "string"},
-                       "description": "Subset of: turn, turn_summary, summary, document, decision, insight."},
+                       "description": "Subset of: turn, turn_summary, episode, summary, document, knowledge. Legacy 'decision'/'insight' are accepted and mean knowledge of that kind."},
+            "kinds": {"type": "array", "items": {"type": "string"},
+                      "description": "Narrow knowledge hits: decision, insight, note."},
             "since": {"type": "string", "description": "Only results at/after this time."},
             "until": {"type": "string", "description": "Only results at/before this time."},
             "status": {"type": "string",
-                       "description": "Decisions only: active (default) | any | one exact status."},
+                       "description": "Knowledge only: active (default) | any | one exact status."},
             "session": {"type": "string",
                         "description": "Only this session GUID ('current' = this session)."},
             "exclude_session": {"type": "string",
@@ -455,9 +458,10 @@ MEMORY_GET_SCHEMA = {
         "Read full memory rows by typed handles (from memory_search), or page "
         "through one session's conversation history. Exactly one mode per call: "
         "ids, or session (+optional after_turn/before_turn/limit). expand: none | "
-        "context (neighbouring turns/chunks) | sources (a decision's or "
-        "insight's evidence, a summary's constituent turn summaries) | chain "
-        "(a decision's or insight's full supersede lineage, oldest to newest). Pass session='current' for this conversation."
+        "context (neighbouring turns/chunks) | sources (a knowledge row's "
+        "evidence, a summary's constituent turn summaries) | chain "
+        "(a knowledge row's full supersede lineage, oldest to newest; may "
+        "cross kinds). Pass session='current' for this conversation."
     ),
     "parameters": {
         "type": "object",
@@ -932,6 +936,8 @@ class RaggerMemoryProvider(MemoryProvider):
                     payload[key] = str(args[key])
             if args.get("layers"):
                 payload["layers"] = [str(x) for x in args["layers"]]
+            if args.get("kinds"):
+                payload["kinds"] = [str(x) for x in args["kinds"]]
             # 'current' resolves to this Hermes session before posting.
             if args.get("session"):
                 s = str(args["session"])

@@ -108,9 +108,33 @@ std::string resolve_agent_time_bound(const std::string& s, bool end_of_day) {
 // =======================================================================
 std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
     // ---- 1. validate ----------------------------------------------------
-    for (const auto& l : q.layers)
-        if (!is_known_agent_layer(l))
+    // PHASE7 input aliases: a layers entry "decision"/"insight" is accepted
+    // and means knowledge restricted to that kind (existing agents keep
+    // working; hits always report layer:"knowledge" + a kind).
+    std::set<std::string> want_layers;
+    std::set<std::string> kind_filter;
+    for (const auto& l : q.layers) {
+        if (l == "decision" || l == "insight") {
+            want_layers.insert("knowledge");
+            kind_filter.insert(l);
+        } else if (!is_known_agent_layer(l)) {
             throw std::invalid_argument("unknown layer: '" + l + "'");
+        } else want_layers.insert(l);
+    }
+    for (const auto& k : q.kinds)
+        if (!status::find_kind(k))
+            throw std::invalid_argument("unknown kind: '" + k + "'");
+    if (!q.kinds.empty()) {
+        if (kind_filter.empty()) kind_filter.insert(q.kinds.begin(), q.kinds.end());
+        else {
+            // explicit kinds intersect the alias set when both are given
+            std::set<std::string> inter;
+            for (const auto& k : q.kinds)
+                if (kind_filter.count(k)) inter.insert(k);
+            kind_filter = inter;
+        }
+        want_layers.insert("knowledge");
+    }
     const std::string since_b = q.since.empty() ? "" : resolve_agent_time_bound(q.since, false);
     const std::string until_b = q.until.empty() ? "" : resolve_agent_time_bound(q.until, true);
     const int limit = std::clamp(q.limit, 1, 50);
@@ -125,16 +149,16 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
     else
         cands = search_text_only(q.query, pool).results;
 
-    // Decision/insight status comes from the rows, never from cache
+    // Knowledge status comes from the rows, never from cache
     // metadata: the hybrid cache only holds active rows and the text-only
     // path carries no status at all, so one authoritative batched read per
     // structured layer keeps every path consistent (see below).
 
     // 'active' / exact-status needs rows the hybrid cache deliberately hides
-    // (superseded/retired/pending). SEPARATE query path — ensure_dec_cache()
-    // / ensure_ins_cache() keep their narrow allow-lists for normal search.
+    // (superseded/retired/pending). SEPARATE query path — ensure_knowledge_cache()
+    // keeps its narrow allow-list for normal search.
     // Lexical-only signal; ids already scored by the hybrid pass are not
-    // duplicated. Applied to both structured corpora (decisions, insights).
+    // duplicated.
     if (q.status != "active") {
         text_index_->set_weights({config().fts_w_unigram, config().fts_w_bigram,
                                   config().fts_w_metaphone, config().fts_literal_enabled});
@@ -163,8 +187,7 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
                 cands.push_back(std::move(sr));
             }
         };
-        supplement("decisions", "decision_id", "decision");
-        supplement("insights", "insight_id", "insight");
+        supplement("knowledge", "knowledge_id", "knowledge");
     }
 
     // ---- session filter helpers ------------------------------------------
@@ -199,24 +222,22 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
         return out;
     };
 
-    // status + trigger for the structured layers (the trigger read was the
-    // same N+1 pattern as the status read).
-    std::unordered_map<int, std::string> dec_status, dec_trigger, ins_status, ins_trigger;
-    auto fill_structured = [&](const char* layer, const char* table, const char* pk,
-                               std::unordered_map<int, std::string>& status,
-                               std::unordered_map<int, std::string>& trigger) {
-        auto it = ids_by_layer.find(layer);
-        if (it == ids_by_layer.end() || it->second.empty()) return;
-        Stmt s(db, std::format(
-            "SELECT {}, status, ifnull(trigger,'') FROM {} WHERE {} IN ({})",
-            pk, table, pk, in_clause(it->second)));
-        while (s.step()) {
-            status[s.column_int(0)]  = s.column_text(1);
-            trigger[s.column_int(0)] = s.column_text(2);
+    // kind + status + trigger for the knowledge corpus (the trigger read was
+    // the same N+1 pattern as the status read).
+    std::unordered_map<int, std::string> kno_kind, kno_status, kno_trigger;
+    {
+        auto it = ids_by_layer.find("knowledge");
+        if (it != ids_by_layer.end() && !it->second.empty()) {
+            Stmt s(db, std::format(
+                "SELECT knowledge_id, kind, status, ifnull(trigger,'') "
+                "FROM knowledge WHERE knowledge_id IN ({})", in_clause(it->second)));
+            while (s.step()) {
+                kno_kind[s.column_int(0)]    = s.column_text(1);
+                kno_status[s.column_int(0)]  = s.column_text(2);
+                kno_trigger[s.column_int(0)] = s.column_text(3);
+            }
         }
-    };
-    fill_structured("decision", "decisions", "decision_id", dec_status, dec_trigger);
-    fill_structured("insight",  "insights",  "insight_id",  ins_status, ins_trigger);
+    }
 
     // Owning session per layer (documents have neither; the turn layer is
     // never produced by the search corpora). Only fetched when a session
@@ -235,10 +256,8 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
                     "SELECT turn_summary_id, session_id FROM turn_summaries WHERE turn_summary_id");
         fill_owning(session_of, "summary",
                     "SELECT summary_id, session_id FROM summaries WHERE summary_id");
-        fill_owning(session_of, "decision",
-                    "SELECT decision_id, session_id FROM decisions WHERE decision_id");
-        fill_owning(session_of, "insight",
-                    "SELECT insight_id, session_id FROM insights WHERE insight_id");
+        fill_owning(session_of, "knowledge",
+                    "SELECT knowledge_id, session_id FROM knowledge WHERE knowledge_id");
     }
     // Session GUIDs for turn_summary extras — one query for the whole pool.
     std::unordered_map<int, std::string> guid_of_session;
@@ -260,17 +279,18 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
     std::vector<AgentHit> hits;
     for (const auto& r : cands) {
         const std::string layer = r.metadata.value("source", "");
-        if (!q.layers.empty() &&
-            std::find(q.layers.begin(), q.layers.end(), layer) == q.layers.end())
+        if (!want_layers.empty() && !want_layers.count(layer))
             continue;
 
-        std::string row_status;
-        if (layer == "decision" || layer == "insight") {
-            auto& smap = layer == "decision" ? dec_status : ins_status;
-            auto it = smap.find(r.id);
-            if (it == smap.end() || it->second.empty())
+        std::string row_status, row_kind;
+        if (layer == "knowledge") {
+            auto it = kno_status.find(r.id);
+            if (it == kno_status.end() || it->second.empty())
                 continue;                   // row vanished mid-search
             row_status = it->second;
+            row_kind   = kno_kind[r.id];
+            if (!kind_filter.empty() && !kind_filter.count(row_kind))
+                continue;
             if (q.status == "active") {
                 // NOTE: deliberately narrower than the search cache's
                 // allow-list: 'roadmap' is planned work, not an active ruling.
@@ -303,11 +323,10 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
         else                                                h.matched_by = "vector";
         h.created = r.timestamp;
         h.snippet = agent_snippet(r.text);
-        if (layer == "decision" || layer == "insight") {
-            auto& tmap = layer == "decision" ? dec_trigger : ins_trigger;
-            h.extra = json{{"status", row_status}};
-            auto it = tmap.find(r.id);
-            if (it != tmap.end() && !it->second.empty())
+        if (layer == "knowledge") {
+            h.extra = json{{"kind", row_kind}, {"status", row_status}};
+            auto it = kno_trigger.find(r.id);
+            if (it != kno_trigger.end() && !it->second.empty())
                 h.extra["trigger"] = it->second;
         } else if (layer == "summary") {
             h.extra = json{{"level", r.metadata.value("level", "")}};
@@ -578,6 +597,10 @@ json Backend::Impl::agent_get(const AgentGetQuery& q) {
     if (has_ids) {
         json items = json::array();
         for (const auto& handle : q.ids) {
+            // PHASE7 (TODO Q3 default): typed handles decision:N / insight:N
+            // are rejected — knowledge:N is the only form.
+            if (is_legacy_knowledge_handle(handle))
+                throw std::invalid_argument("use knowledge:<id>");
             std::string layer;
             int rowid = 0;
             if (!parse_agent_handle(handle, layer, rowid)) {
@@ -636,18 +659,15 @@ json Backend::Impl::agent_get(const AgentGetQuery& q) {
                 if (!expanded.empty()) item["expanded"] = std::move(expanded);
             } else if (q.expand == "sources") {
                 json expanded = json::array();
-                if (layer == "decision" || layer == "insight") {
+                if (layer == "knowledge") {
                     // Its evidence turn_summaries, full rows. The join filter
                     // keeps done-marker rows (text='') out of expansion even
                     // if a source turn was later abandoned (RULES 6).
-                    const bool is_dec = layer == "decision";
-                    Stmt e(db, std::format(
-                        "SELECT de.turn_summary_id FROM {} de "
+                    Stmt e(db,
+                        "SELECT de.turn_summary_id FROM knowledge_turn_evidence de "
                         "JOIN turn_summaries ts ON ts.turn_summary_id = de.turn_summary_id "
-                        "WHERE de.{} = ? AND ts.text != '' "
-                        "ORDER BY de.turn_summary_id",
-                        is_dec ? "decision_evidence" : "insight_evidence",
-                        is_dec ? "decision_id" : "insight_id"));
+                        "WHERE de.knowledge_id = ? AND ts.text != '' "
+                        "ORDER BY de.turn_summary_id");
                     e.bind(1, rowid);
                     while (e.step())
                         expanded.push_back(fetch_agent_row(db, "turn_summary", e.column_int(0)));
@@ -681,22 +701,18 @@ json Backend::Impl::agent_get(const AgentGetQuery& q) {
                         expanded.push_back(fetch_agent_row(db, "turn_summary", c.column_int(0)));
                 }
                 if (!expanded.empty()) item["expanded"] = std::move(expanded);
-            } else if (q.expand == "chain" &&
-                       (layer == "decision" || layer == "insight")) {
+            } else if (q.expand == "chain" && layer == "knowledge") {
                 // Full supersede lineage oldest -> newest: walk `supersedes`
                 // backwards to the root, then forwards from the anchor. The
-                // visited set makes a corrupt cycle terminate.
-                const bool is_dec = layer == "decision";
-                const char* table = is_dec ? "decisions" : "insights";
-                const char* pk    = is_dec ? "decision_id" : "insight_id";
+                // visited set makes a corrupt cycle terminate. PHASE7: the
+                // chain may cross kinds (insight -> decision promotion).
                 std::vector<int> chain_ids;
                 std::unordered_set<int> visited{rowid};
                 {
                     std::vector<int> up;
                     int cur = rowid;
                     while (true) {
-                        Stmt p(db, std::format("SELECT supersedes FROM {} WHERE {} = ?",
-                                               table, pk));
+                        Stmt p(db, "SELECT supersedes FROM knowledge WHERE knowledge_id = ?");
                         p.bind(1, cur);
                         if (!p.step() || p.is_null(0)) break;
                         int parent = p.column_int(0);
@@ -714,8 +730,8 @@ json Backend::Impl::agent_get(const AgentGetQuery& q) {
                     while (!queue.empty()) {
                         std::vector<int> next;
                         for (int cur : queue) {
-                            Stmt c(db, std::format("SELECT {} FROM {} WHERE supersedes = ? "
-                                                   "ORDER BY {}", pk, table, pk));
+                            Stmt c(db, "SELECT knowledge_id FROM knowledge WHERE supersedes = ? "
+                                       "ORDER BY knowledge_id");
                             c.bind(1, cur);
                             while (c.step()) {
                                 int child = c.column_int(0);

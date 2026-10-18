@@ -54,7 +54,7 @@ namespace fs = std::filesystem;
     // (ensure_doc_cache / ensure_dec_cache + a text_index_->score_query() pass)
     // are scored identically and merged with the summaries results into the
     // single ranked top-k returned here. Each SearchResult's metadata["source"]
-    // is "summary", "document", or "decision" so callers can tell the corpora
+    // is "summary", "document", "knowledge", "turn_summary" or "episode"
     // apart.
     SearchResponse Backend::Impl::search(const std::string& query, int limit,
                           float min_score,
@@ -64,17 +64,15 @@ namespace fs = std::filesystem;
 
         ensure_cache();
         ensure_doc_cache();
-        ensure_dec_cache();
-        ensure_ins_cache();
+        ensure_knowledge_cache();
         ensure_turn_cache();
         ensure_episode_cache();
         int n_sum = static_cast<int>(summary_cache_.ids.size());
         int n_doc = static_cast<int>(doc_cache_.ids.size());
-        int n_dec = static_cast<int>(dec_cache_.ids.size());
-        int n_ins = static_cast<int>(ins_cache_.ids.size());
+        int n_kno = static_cast<int>(knowledge_cache_.ids.size());
         int n_turn = static_cast<int>(turn_cache_.ids.size());
         int n_ep  = static_cast<int>(episode_cache_.ids.size());
-        if (n_sum == 0 && n_doc == 0 && n_dec == 0 && n_ins == 0 && n_turn == 0 && n_ep == 0)
+        if (n_sum == 0 && n_doc == 0 && n_kno == 0 && n_turn == 0 && n_ep == 0)
             return {{}, {{"corpus_size", 0}}};
 
         // Push the current tunable weights into the engine once per search
@@ -104,7 +102,7 @@ namespace fs = std::filesystem;
             SearchResult result;
         };
         std::vector<Candidate> candidates;
-        candidates.reserve(static_cast<size_t>(n_sum + n_doc + n_dec + n_ins + n_turn + n_ep));
+        candidates.reserve(static_cast<size_t>(n_sum + n_doc + n_kno + n_turn + n_ep));
 
         // Score one corpus: vector cosine blended with the custom text-index
         // TF-IDF signal (literal + metaphone folded together by score_query()).
@@ -187,10 +185,8 @@ namespace fs = std::filesystem;
                      bm25_on ? to_map(text_index_->score_query("summaries", query)) : no_scores);
         score_corpus(doc_cache_,
                      bm25_on ? to_map(text_index_->score_query("documents", query)) : no_scores);
-        score_corpus(dec_cache_,
-                     bm25_on ? to_map(text_index_->score_query("decisions", query)) : no_scores);
-        score_corpus(ins_cache_,
-                     bm25_on ? to_map(text_index_->score_query("insights", query)) : no_scores);
+        score_corpus(knowledge_cache_,
+                     bm25_on ? to_map(text_index_->score_query("knowledge", query)) : no_scores);
         score_corpus(turn_cache_,
                      bm25_on ? to_map(text_index_->score_query("turn_summaries", query)) : no_scores);
         score_corpus(episode_cache_,
@@ -229,7 +225,7 @@ namespace fs = std::filesystem;
             {"embedding_ms", ms(t_embed_start, t_embed_end)},
             {"search_ms",    ms(t_search_start, t_search_end)},
             {"total_ms",     ms(t_start, clock::now())},
-            {"corpus_size",  n_sum + n_doc + n_dec + n_ins + n_turn + n_ep}
+            {"corpus_size",  n_sum + n_doc + n_kno + n_turn + n_ep}
         };
         return {std::move(results), std::move(timing)};
     }
@@ -313,15 +309,12 @@ namespace fs = std::filesystem;
                 candidates.push_back({hit.score, std::move(sr)});
             }
         }
-        // Decisions. Same status allow-list as ensure_dec_cache(): superseded /
-        // retired / pending rows are history or unreviewed drafts — they must
-        // stay hidden here too, or degraded (text-only) search leaks them while
+        // Knowledge (PHASE7: one corpus replaces decisions + insights). Same
+        // status allow-list as ensure_knowledge_cache(): superseded / retired /
+        // pending rows are history or unreviewed drafts — they must stay
+        // hidden here too, or degraded (text-only) search leaks them while
         // normal search hides them.
-        score_text_corpus("decisions", "decision_id", "text", "decision",
-                          "datetime(created_at,'unixepoch','localtime')",
-                          (" AND status IN (" + status::in_list_sql(status::kCacheLoaded) + ")").c_str());
-        // Insights (db 0.17). Same allow-list as the decisions corpus above.
-        score_text_corpus("insights", "insight_id", "text", "insight",
+        score_text_corpus("knowledge", "knowledge_id", "text", "knowledge",
                           "datetime(created_at,'unixepoch','localtime')",
                           (" AND status IN (" + status::in_list_sql(status::kCacheLoaded) + ")").c_str());
         // Turn summaries. NOTE: this table has no created_at — an L2 summary

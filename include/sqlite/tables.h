@@ -40,11 +40,11 @@ namespace ragger::sqlite {
 // reference them, and text_index.h includes tables.h (not the reverse), so
 // there is no include cycle.
 
-// decisions/insights embed/index text (db 0.17): `trigger + '\n' + text`
-// when a trigger is present, else text alone (pre-0.17 rows). Trigger first
-// on purpose: it is phrased in the future query's vocabulary (design doc
-// §5.3a).
-inline constexpr const char* kDecisionEmbedTextSQL =
+// knowledge embed/index text (db 0.17, PHASE7): `trigger + '\n' + text`
+// when a trigger is present, else text alone (pre-0.17 rows; formerly
+// kDecisionEmbedTextSQL for decisions/insights). Trigger first on purpose:
+// it is phrased in the future query's vocabulary (design doc §5.3a).
+inline constexpr const char* kKnowledgeEmbedTextSQL =
     "CASE WHEN ifnull(trigger,'') = '' THEN text "
     "ELSE trigger || char(10) || text END";
 
@@ -68,11 +68,10 @@ struct TextTable {
 inline constexpr TextTable kTextTables[] = {
     {"turns",          "turn_id",         "turns_terms",          "turn",         nullptr},
     {"summaries",      "summary_id",      "summaries_terms",      "summary",      nullptr},
-    {"decisions",      "decision_id",     "decisions_terms",      "decision",     kDecisionEmbedTextSQL},
+    {"knowledge",      "knowledge_id",    "knowledge_terms",      "knowledge",    kKnowledgeEmbedTextSQL},
     {"documents",      "document_id",     "documents_terms",      "document",     kDocEmbedTextSQL},
     {"turn_summaries", "turn_summary_id", "turn_summaries_terms", "turn_summary", nullptr},
     {"episodes",       "episode_id",      "episodes_terms",       "episode",      nullptr},
-    {"insights",       "insight_id",      "insights_terms",       "insight",      kDecisionEmbedTextSQL},
 };
 
 inline constexpr std::size_t kTextTableCount = std::size(kTextTables);

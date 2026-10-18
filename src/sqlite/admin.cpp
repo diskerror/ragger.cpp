@@ -303,23 +303,17 @@ namespace fs = std::filesystem;
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM summaries
         )");
-        view("decisions_view", R"(
-            SELECT decision_id, text, status, tags,
-                   trigger, rationale, scope, supersedes, session_id,
+        // knowledge_view (PHASE7): replaces decisions_view + insights_view.
+        // No *_evidence_view: the old evidence tables never had one (same
+        // convention kept for knowledge_turn_evidence / _document_evidence).
+        view("knowledge_view", R"(
+            SELECT knowledge_id, kind, text, status, tags,
+                   trigger, rationale, scope, supersedes, session_id, model_id,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
                    unigram_count, bigram_count,
                    embedding_version,
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
-            FROM decisions
-        )");
-        view("insights_view", R"(
-            SELECT insight_id, text, status, tags,
-                   trigger, rationale, scope, supersedes, session_id,
-                   datetime(created_at, 'unixepoch', 'localtime') AS created_at,
-                   unigram_count, bigram_count,
-                   embedding_version,
-                   CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
-            FROM insights
+            FROM knowledge
         )");
         view("document_sources_view", R"(
             SELECT document_source_id, title, path, year, tags,

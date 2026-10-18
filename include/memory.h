@@ -75,11 +75,11 @@ public:
 
     /// Store a structured decision (agent API Phase 1). Throws
     /// std::invalid_argument on validation failure.
-    StructuredDecisionResult store_structured_decision(const DecisionInput& in);
+    KnowledgeResult store_knowledge(const KnowledgeInput& in);
 
     /// Store an insight (agent API Phase 5). Trigger optional, evidence
     /// required. Throws std::invalid_argument on validation failure.
-    StructuredDecisionResult store_insight(const DecisionInput& in);
+
 
     /// Document source for `path`, or null json if that path was never imported.
     json find_document_source(const std::string& path);

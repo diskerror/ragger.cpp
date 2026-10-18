@@ -141,7 +141,8 @@ ways:
 active development to derive per-section dates from the accompanying
 `conversations.json` (topically matching narrative chunks to the
 conversations they describe). For now the whole blob is stored as a single
-`decisions` row (L5/L6, `tags=claude-memory`), dated by the file's mtime.
+`knowledge` row (`kind='decision'`, `tags=claude-memory`), dated by the
+file's mtime.
 `--fdate`/`--date=` are **ignored** in this path (the file's own mtime is
 used automatically) — they only apply to the standalone case below.
 
@@ -161,7 +162,7 @@ Without one of these two flags, a standalone `memories.json` is rejected
 with an explanatory error rather than guessed at. Re-running either form is
 idempotent — the same (text, timestamp) pair is not inserted twice.
 
-If you'd rather not import memories.json as a `decisions` row at all,
+If you'd rather not import memories.json as a `knowledge` row at all,
 `ragger import-docs` will happily chunk it as a plain document instead
 (see [Importing documents](#) — but note `import-docs` does **not**
 special-case JSON; convert it to Markdown first with a script or a tool
@@ -192,7 +193,7 @@ get the list with `ls ~/.claude/projects/<slug>/`.
   on a huge archive, import in batches with `--since`/`--until`, or stop the
   daemon first (`ragger stop`) so the importer has the DB to itself.
 - **memories.json splitting is a work in progress.** Today it lands as one
-  undifferentiated `decisions` row per file. A finer per-section split
+  undifferentiated `knowledge` row per file. A finer per-section split
   (with per-chunk dates derived from topically-matched conversations) is
   planned but not yet wired into the live import path.
 

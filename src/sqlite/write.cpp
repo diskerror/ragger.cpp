@@ -717,55 +717,89 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // ---- store_decision: write Level 6 curated decision/lesson ----------
-    // Mirrors store_summary but the decisions table has no level/model/session
-    // columns — just text/embedding/status/tags/timestamp. defer_embedding
-    // leaves embedding NULL for a later backfill pass.
+    // Shared INSERT for both write paths (PHASE7 B.3): the structured path
+    // (store_knowledge) and the legacy store_decision wrapper. Returns the new
+    // knowledge_id. `trigger` NULL for the legacy path — the trigger-required
+    // rule lives in store_knowledge's validation, NOT here, exactly as the
+    // old store_decision bypassed store_structured_row's checks.
+    int Backend::Impl::insert_knowledge_row(const std::string& kind,
+                                            const std::string& text,
+                                            const std::string& status,
+                                            const std::string& tags,
+                                            const std::string& trigger,
+                                            const std::string& rationale,
+                                            const std::string& scope,
+                                            std::optional<int> supersedes,
+                                            std::optional<int> session_id,
+                                            std::optional<int> model_id,
+                                            int64_t created_at,
+                                            const std::vector<float>& emb,
+                                            bool defer_embedding) {
+        Stmt ins(db,
+            "INSERT INTO knowledge (kind, text, status, tags, trigger, rationale, scope,"
+            " supersedes, session_id, model_id, created_at, embedding_version, embedding)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?, ?,?)");
+        ins.bind(1, kind);
+        ins.bind(2, text);
+        ins.bind(3, status);
+        ins.bind(4, tags);
+        if (trigger.empty()) ins.bind_null(5); else ins.bind(5, trigger);
+        if (rationale.empty()) ins.bind_null(6); else ins.bind(6, rationale);
+        if (scope.empty())     ins.bind_null(7); else ins.bind(7, scope);
+        if (supersedes)  ins.bind(8, *supersedes); else ins.bind_null(8);
+        if (session_id)  ins.bind(9, *session_id); else ins.bind_null(9);
+        if (model_id)    ins.bind(10, *model_id);  else ins.bind_null(10);
+        ins.bind(11, created_at);
+        if (defer_embedding) {
+            ins.bind_null(12);
+            ins.bind_null(13);
+        } else {
+            bind_embedding_version(ins.raw(), 12, emb);
+            bind_embedding(ins.raw(), 13, emb);
+        }
+        if (!ins.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+        return static_cast<int>(sqlite3_last_insert_rowid(db));
+    }
+
+
+    // ---- store_decision: legacy Level 6 curated decision/lesson ----------
+    // Thin wrapper over knowledge(kind='decision') WITHOUT the trigger rule
+    // (used by /store category=decision, the CLI, and importers — none of
+    // which ever supplied a trigger). defer_embedding leaves embedding NULL.
     int Backend::Impl::store_decision(const std::string& text, const std::string& status,
                        const std::string& tags,
                        const std::string& source_timestamp,
                        bool defer_embedding) {
         std::string t = normalize_path(strip_decision_number_prefix(text));
-
-        Stmt s(db,
-            "INSERT INTO decisions (text, embedding_version, embedding, status, tags, created_at) "
-            "VALUES (?,?,?,?,?,?)");
-        s.bind(1, t);
-        if (defer_embedding) {
-            s.bind_null(2);
-            s.bind_null(3);
-        } else {
-            auto emb = require_embedder().encode(t);
-            bind_embedding_version(s.raw(), 2, emb);
-            bind_embedding(s.raw(), 3, emb);
-        }
-        s.bind(4, status.empty() ? "current" : status);
-        s.bind(5, tags);
-        s.bind(6, resolve_epoch(source_timestamp));
-        if (!s.exec())
-            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-        invalidate_dec_cache();
-        int did = static_cast<int>(sqlite3_last_insert_rowid(db));
-        text_index_->index_record("decisions", did, t);
+        std::vector<float> emb;
+        if (!defer_embedding) emb = require_embedder().encode(t);
+        const int did = insert_knowledge_row(
+            "decision", t, status.empty() ? "current" : status, tags,
+            /*trigger=*/"", /*rationale=*/"", /*scope=*/"",
+            /*supersedes=*/std::nullopt, /*session_id=*/std::nullopt,
+            /*model_id=*/std::nullopt, resolve_epoch(source_timestamp),
+            emb, defer_embedding);
+        invalidate_knowledge_cache();
+        text_index_->index_record("knowledge", did, t);
         return did;
     }
 
 
-    // ---- store_structured_decision / store_insight: shared write path ----
-    // Phase 1 built this for decisions; Phase 5 step 3 factored the body into
-    // store_structured_row so insights reuse it (doc: "one templated or
-    // parameterized helper, not two copies"). The only behavioral differences
-    // live in the spec: table/pk/evidence-table names, the error noun, and
-    // which of trigger/evidence is required.
-    // Order matters (EXACTLY as written):
+    // ---- store_knowledge: the ONE structured write path (PHASE7 B.1) ------
+    // Replaces store_structured_decision + store_insight (and their
+    // StructuredRowSpec): kind selects the rules via status::kKinds —
+    // decision requires a trigger, insight requires evidence, note neither.
+    // supersedes may point at ANY kind (insight -> decision promotion).
+    // Order matters (EXACTLY as the old path):
     //   1. validate everything that can be checked without writing,
     //   2. embed OUTSIDE the transaction (the embedder can take 100+ ms and
     //      we must not hold a write lock across it),
-    //   3. BEGIN; insert; flip the superseded row; link evidence; index; COMMIT.
+    //   3. Transaction: INSERT; flip the superseded row; link evidence;
+    //      index; commit().
     // Any throw inside step 3 rolls back, so a failed evidence link never
     // leaves a half-written row or an orphaned 'superseded' flip.
-    StructuredDecisionResult Backend::Impl::store_structured_row(
-            const DecisionInput& in, const StructuredRowSpec& spec) {
+    KnowledgeResult Backend::Impl::store_knowledge(const KnowledgeInput& in) {
         auto trim = [](const std::string& s) {
             size_t a = s.find_first_not_of(" \t\r\n");
             if (a == std::string::npos) return std::string();
@@ -777,41 +811,44 @@ static std::string tags_from_metadata(const json& metadata) {
         const std::string status  = in.status.empty() ? "current" : in.status;
 
         // ---- 1. validate ----------------------------------------------
+        const status::KindRule* rule = status::find_kind(in.kind);
+        if (!rule)
+            throw std::invalid_argument("kind must be one of: decision, insight, note");
+        const std::string_view noun = rule->noun;
         if (text.empty())
-            throw std::invalid_argument(std::format("{} text is required", spec.noun));
-        if (spec.trigger_required && trigger.empty())
-            throw std::invalid_argument(std::format("{} trigger is required", spec.noun));
-        if (spec.evidence_required && in.evidence.empty())
+            throw std::invalid_argument(std::format("{} text is required", noun));
+        if (rule->trigger_required && trigger.empty())
+            throw std::invalid_argument(std::format("{} trigger is required", noun));
+        if (rule->evidence_required && in.evidence.empty())
             throw std::invalid_argument(std::format(
-                "{} requires at least one evidence turn_summary_id", spec.noun));
+                "{} requires at least one evidence turn_summary_id", noun));
         // Statuses a NEW row may start in. 'superseded' and 'retired' are
         // reached only by curation, never on create.
         {
             bool ok = false;
-            for (auto s : ragger::sqlite::status::kCreatable) if (status == s) ok = true;
+            for (auto sv : ragger::sqlite::status::kCreatable) if (status == sv) ok = true;
             if (!ok)
                 throw std::invalid_argument(
                     "status must be one of: current, provisional, pending");
         }
 
         if (in.supersedes) {
-            Stmt s(db, std::format("SELECT status FROM {} WHERE {} = ?",
-                                   spec.table, spec.pk));
-            s.bind(1, *in.supersedes);
-            if (!s.step())
+            Stmt st(db, "SELECT status FROM knowledge WHERE knowledge_id = ?");
+            st.bind(1, *in.supersedes);
+            if (!st.step())
                 throw std::invalid_argument(std::format(
-                    "supersedes: {} {} does not exist", spec.noun, *in.supersedes));
-            const std::string old_status = s.column_text(0);
+                    "supersedes: knowledge {} does not exist", *in.supersedes));
+            const std::string old_status = st.column_text(0);
             if (old_status == "superseded" || old_status == "retired")
                 throw std::invalid_argument(std::format(
-                    "supersedes: {} {} is already {}", spec.noun, *in.supersedes, old_status));
+                    "supersedes: knowledge {} is already {}", *in.supersedes, old_status));
         }
 
         for (int ts_id : in.evidence) {
-            Stmt s(db, "SELECT 1 FROM turn_summaries "
-                       "WHERE turn_summary_id = ? AND text != ''");
-            s.bind(1, ts_id);
-            if (!s.step())
+            Stmt st(db, "SELECT 1 FROM turn_summaries "
+                        "WHERE turn_summary_id = ? AND text != ''");
+            st.bind(1, ts_id);
+            if (!st.step())
                 throw std::invalid_argument(std::format(
                     "evidence: turn_summary {} does not exist or is empty", ts_id));
         }
@@ -820,48 +857,34 @@ static std::string tags_from_metadata(const json& metadata) {
         if (!in.session_guid.empty()) {
             // Look up only -- never create a session from here. An unknown
             // GUID just means no provenance link (NULL), not an error.
-            Stmt s(db, "SELECT session_id FROM sessions WHERE guid = ?");
-            s.bind(1, in.session_guid);
-            if (s.step()) session_id = s.column_int(0);
+            Stmt st(db, "SELECT session_id FROM sessions WHERE guid = ?");
+            st.bind(1, in.session_guid);
+            if (st.step()) session_id = st.column_int(0);
         }
 
         // ---- 2. embed (outside the transaction) ------------------------
-        // MUST equal kDecisionEmbedTextSQL's result for this row, so a
+        // MUST equal kKnowledgeEmbedTextSQL's result for this row, so a
         // housekeeping re-embed produces the same vector. (The SQL CASE
         // collapses to bare `text` when trigger is NULL/empty — insights
-        // allow that; decisions never reach the empty branch.)
+        // and notes allow that; decisions never reach the empty branch.)
         const std::string embed_text =
             trigger.empty() ? text : trigger + "\n" + text;
         auto emb = require_embedder().encode(embed_text);
 
         // ---- 3. write ---------------------------------------------------
-        StructuredDecisionResult out;
-        Stmt(db, "BEGIN").exec();
-        try {
-            Stmt ins(db, std::format(
-                "INSERT INTO {} (text, status, tags, trigger, rationale, scope, "
-                "supersedes, session_id, created_at, embedding_version, embedding) "
-                "VALUES (?,?,?,?,?,?,?, ?,unixepoch(),?,?)", spec.table));
-            ins.bind(1, text);
-            ins.bind(2, status);
-            ins.bind(3, in.tags);
-            if (trigger.empty()) ins.bind_null(4); else ins.bind(4, trigger);
-            const std::string rationale = trim(in.rationale);
-            const std::string scope     = trim(in.scope);
-            if (rationale.empty()) ins.bind_null(5); else ins.bind(5, rationale);
-            if (scope.empty())     ins.bind_null(6); else ins.bind(6, scope);
-            if (in.supersedes)     ins.bind(7, *in.supersedes); else ins.bind_null(7);
-            if (session_id)        ins.bind(8, *session_id);    else ins.bind_null(8);
-            bind_embedding_version(ins.raw(), 9, emb);
-            bind_embedding(ins.raw(), 10, emb);
-            if (!ins.exec())
-                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-            out.id = static_cast<int>(sqlite3_last_insert_rowid(db));
+        KnowledgeResult out;
+        out.kind = in.kind;
+        {
+            Transaction txn(db);
+            out.id = insert_knowledge_row(
+                in.kind, text, status, in.tags, trigger, trim(in.rationale),
+                trim(in.scope), in.supersedes, session_id,
+                in.model_name.empty() ? std::optional<int>{}
+                                      : std::optional<int>(get_or_create_model(in.model_name)),
+                resolve_epoch(""), emb, /*defer=*/false);
 
             if (in.supersedes) {
-                Stmt up(db, std::format(
-                    "UPDATE {} SET status = 'superseded' WHERE {} = ?",
-                    spec.table, spec.pk));
+                Stmt up(db, "UPDATE knowledge SET status = 'superseded' WHERE knowledge_id = ?");
                 up.bind(1, *in.supersedes);
                 if (!up.exec())
                     throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
@@ -870,58 +893,36 @@ static std::string tags_from_metadata(const json& metadata) {
 
             for (int ts_id : in.evidence) {
                 // OR IGNORE: a caller listing the same id twice is harmless.
-                Stmt ev(db, std::format(
-                    "INSERT OR IGNORE INTO {} ({}, turn_summary_id) VALUES (?,?)",
-                    spec.evidence_table, spec.pk));
+                Stmt ev(db, "INSERT OR IGNORE INTO knowledge_turn_evidence "
+                            "(knowledge_id, turn_summary_id) VALUES (?,?)");
                 ev.bind(1, out.id);
                 ev.bind(2, ts_id);
                 if (!ev.exec())
                     throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
             }
 
-            text_index_->index_record(spec.table, out.id, embed_text);
-            Stmt(db, "COMMIT").exec();
-        } catch (...) {
-            Stmt(db, "ROLLBACK").exec();
-            throw;
+            text_index_->index_record("knowledge", out.id, embed_text);
+            txn.commit();
         }
-        if (spec.decisions_cache) invalidate_dec_cache();
-        else                      invalidate_ins_cache();
+        invalidate_knowledge_cache();
 
         // ---- possible_supersedes hint (Phase 2 step 5) -------------------
-        // Flag only: up to 3 OTHER active rows of the SAME table whose
-        // embedding cosine with the new row reaches
-        // decision_supersede_threshold. The row the call already superseded
-        // is skipped (it's in out.superseded). NO row is ever changed here —
-        // the caller decides what to do with the hint.
-        {
+        // Flag only: up to 3 OTHER active rows of kind decision|insight (a
+        // note is never a hint target) whose embedding cosine with the new
+        // row reaches decision_supersede_threshold. The row the call already
+        // superseded is skipped. NO row is ever changed here.
+        if (in.kind != "note") {
             std::vector<int> exclude{out.id};
-            if (out.superseded) exclude.push_back(*out.superseded);
-            out.possible_supersedes =
-                supersede_hints(emb, exclude, spec.table, spec.pk);
+            if (out.superseded) exclude.push_back(*in.supersedes);
+            out.possible_supersedes = supersede_hints(
+                emb, exclude, "kind IN ('decision','insight')");
         }
         return out;
     }
 
 
-    StructuredDecisionResult Backend::Impl::store_structured_decision(const DecisionInput& in) {
-        return store_structured_row(in, {
-            "decisions", "decision_id", "decision_evidence", "decision",
-            /*trigger_required=*/true, /*evidence_required=*/false,
-            /*decisions_cache=*/true });
-    }
-
-
-    StructuredDecisionResult Backend::Impl::store_insight(const DecisionInput& in) {
-        return store_structured_row(in, {
-            "insights", "insight_id", "insight_evidence", "insight",
-            /*trigger_required=*/false, /*evidence_required=*/true,
-            /*decisions_cache=*/false });
-    }
-
-
-    // Cosine near-duplicate scan over active rows of one structured table
-    // (Phase 2 step 5, reused by Phase 3 notes and Phase 5 insights). Purely
+    // Cosine near-duplicate scan over active knowledge rows (Phase 2 step 5;
+    // PHASE7: one table, optional kind restriction). Purely
     // vector-based on purpose: a near-duplicate ruling is exactly what this
     // looks like in embedding space, and lexical overlap is already guaranteed
     // by the shared trigger vocabulary. Returns up to 3 (id, cosine) pairs at
@@ -929,7 +930,7 @@ static std::string tags_from_metadata(const json& metadata) {
     std::vector<std::pair<int,float>> Backend::Impl::supersede_hints(
             const std::vector<float>& emb,
             const std::vector<int>& exclude_ids,
-            const char* table, const char* pk) {
+            const char* kind_filter) {
         std::vector<std::pair<int,float>> scored;
         if (emb.empty()) return scored;
         Eigen::Map<const Eigen::VectorXf> v(emb.data(), static_cast<int>(emb.size()));
@@ -939,10 +940,11 @@ static std::string tags_from_metadata(const json& metadata) {
         const int expected_dims = config().embedding_dimensions;
         bool blob_warned = false;
         std::string sql =
-            std::format("SELECT {}, embedding FROM {} WHERE status IN ({}) ",
-                        pk, table, status::in_list_sql(status::kSearchActive));
+            "SELECT knowledge_id, embedding FROM knowledge WHERE status IN (" +
+            status::in_list_sql(status::kSearchActive) + ") ";
+        if (kind_filter) sql += std::format("  AND ({}) ", kind_filter);
         for (size_t i = 0; i < exclude_ids.size(); ++i)
-            sql += std::format("  AND {} != ? ", pk);
+            sql += std::format("  AND knowledge_id != ? ");
         sql += "  AND embedding IS NOT NULL";
         Stmt s(db, sql);
         for (size_t i = 0; i < exclude_ids.size(); ++i)
@@ -950,7 +952,7 @@ static std::string tags_from_metadata(const json& metadata) {
         while (s.step()) {
             std::vector<float> other = decode_embedding_blob(
                 s.column_blob(1), s.column_bytes(1), expected_dims,
-                table, s.column_int(0), blob_warned);
+                "knowledge", s.column_int(0), blob_warned);
             if (static_cast<int>(other.size()) != expected_dims) continue;
             Eigen::Map<Eigen::VectorXf> o(other.data(), expected_dims);
             float onorm = o.norm();
@@ -1487,7 +1489,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // before storing too).
     bool Backend::Impl::decision_exists_exact(const std::string& text, const std::string& created_at) {
         std::string t = normalize_path(strip_decision_number_prefix(text));
-        Stmt s(db, "SELECT 1 FROM decisions WHERE text = ? AND created_at = ? LIMIT 1");
+        Stmt s(db, "SELECT 1 FROM knowledge WHERE kind = 'decision' AND text = ? AND created_at = ? LIMIT 1");
         s.bind(1, t);
         s.bind(2, resolve_epoch(created_at));  // INTEGER epoch, see summary_exists_exact
         return s.step();
@@ -1658,8 +1660,8 @@ static std::string tags_from_metadata(const json& metadata) {
         std::vector<std::string> out;
         if (limit <= 0) return out;
         Stmt s(db,
-            "SELECT text FROM decisions WHERE status = 'current' "
-            "ORDER BY created_at DESC, decision_id DESC LIMIT ?");
+            "SELECT text FROM knowledge WHERE kind = 'decision' AND status = 'current' "
+            "ORDER BY created_at DESC, knowledge_id DESC LIMIT ?");
         s.bind(1, limit);
         while (s.step()) {
             auto text = s.column_text(0);
@@ -1672,10 +1674,10 @@ static std::string tags_from_metadata(const json& metadata) {
     // Set a decision's status (e.g. "roadmap" -> "current" once planned
     // work is done, or -> "superseded"/"deprecated" once stale).
     bool Backend::Impl::set_decision_status(int decision_id, const std::string& status) {
-        Stmt s(db, "UPDATE decisions SET status = ? WHERE decision_id = ?");
+        Stmt s(db, "UPDATE knowledge SET status = ? WHERE kind = 'decision' AND knowledge_id = ?");
         s.bind(1, status).bind(2, decision_id);
         bool ok = s.exec() && sqlite3_changes(db) > 0;
-        if (ok) invalidate_dec_cache();
+        if (ok) invalidate_knowledge_cache();
         return ok;
     }
 
@@ -1689,8 +1691,8 @@ static std::string tags_from_metadata(const json& metadata) {
         std::vector<std::string> out;
         if (limit <= 0) return out;
         Stmt s(db,
-            "SELECT text FROM decisions WHERE status = ? "
-            "ORDER BY created_at DESC, decision_id DESC LIMIT ?");
+            "SELECT text FROM knowledge WHERE kind = 'decision' AND status = ? "
+            "ORDER BY created_at DESC, knowledge_id DESC LIMIT ?");
         s.bind(1, status);
         s.bind(2, limit);
         while (s.step()) {

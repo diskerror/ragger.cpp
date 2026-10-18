@@ -152,7 +152,7 @@ public:
     /// Store a structured decision (agent API Phase 1, db 0.17). Throws
     /// std::invalid_argument on validation failure (empty text/trigger,
     /// bad status, unknown or inactive supersedes target, unknown evidence id).
-    virtual StructuredDecisionResult store_structured_decision(const DecisionInput& in) = 0;
+    virtual KnowledgeResult store_knowledge(const KnowledgeInput& in) = 0;
 
     /// Look up a document source by its (unique) path. Returns null when no
     /// document has that path, else {"id","title","imported_at"}. Used by the
@@ -178,8 +178,6 @@ public:
     /// Store an insight (agent API Phase 5, db 0.17). Same shape as a
     /// structured decision; trigger is optional and evidence is REQUIRED
     /// (an insight with no sources is just a note). Throws
-    /// std::invalid_argument on validation failure.
-    virtual StructuredDecisionResult store_insight(const DecisionInput& in) = 0;
 
     // --- Agent API (typed handles; see PHASE2/3/4/5-STEPS.md) -----------
 

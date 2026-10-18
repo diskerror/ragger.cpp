@@ -106,8 +106,9 @@ overrides win.
 Treat decisions as first-class. Don't bury "we chose cpp-httplib for
 SSE support" inside a session summary — call `store` for it
 explicitly, with enough context that the entry is useful in
-isolation. Decisions have their own (`level='decision'`) table and
-their own recipe layer; they outlive any single session.
+isolation. Decisions live in the unified `knowledge` table
+(`kind='decision'`) and have their own recipe layer; they outlive any
+single session.
 
 A good `store` entry:
 

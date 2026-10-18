@@ -44,6 +44,71 @@ inline std::string sessions(const std::string& name) {
             ))", name);
 }
 
+// knowledge (PHASE7) — ONE table for decision | insight | note, replacing
+// decisions + insights. kind has no CHECK (the vocabulary may grow).
+// supersedes is self-referential and MAY cross kinds (insight -> decision
+// promotion). Column order is the canonical §4 order (migration test pins
+// it). Text matches schema-0.17.ddl.sql / migrate-0.16-to-0.17.sql §4.
+inline std::string knowledge(const std::string& name = "knowledge") {
+    return std::format(R"(CREATE TABLE {} (
+                knowledge_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind        TEXT NOT NULL,            -- decision | insight | note (no CHECK)
+                text        TEXT NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'current',
+                tags        TEXT NOT NULL DEFAULT '',
+                trigger     TEXT,
+                rationale   TEXT,
+                scope       TEXT,
+                supersedes  INTEGER REFERENCES knowledge(knowledge_id),
+                session_id  INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
+                model_id    INTEGER REFERENCES models(model_id),
+                created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                unigram_count INTEGER NOT NULL DEFAULT 0,
+                bigram_count  INTEGER NOT NULL DEFAULT 0,
+                embedding_version INTEGER,
+                embedding   BLOB
+            ))", name);
+}
+
+inline std::string knowledge_indexes(const std::string& name = "knowledge") {
+    return std::format(R"(
+        CREATE INDEX idx_{}_kind       ON {}(kind);
+        CREATE INDEX idx_{}_status     ON {}(status);
+        CREATE INDEX idx_{}_supersedes ON {}(supersedes);
+        CREATE INDEX idx_{}_session    ON {}(session_id);
+        CREATE INDEX idx_{}_created_at ON {}(created_at);
+        CREATE INDEX idx_{}_embedding_version ON {}(embedding_version);
+    )", name, name, name, name, name, name, name, name, name, name, name, name);
+}
+
+// Evidence at turn-summary level: CASCADE on the knowledge side, RESTRICT on
+// the turn_summary side (evidence cannot vanish from under a claim).
+inline std::string knowledge_turn_evidence() {
+    return R"(CREATE TABLE knowledge_turn_evidence (
+                knowledge_id    INTEGER NOT NULL REFERENCES knowledge(knowledge_id) ON DELETE CASCADE,
+                turn_summary_id INTEGER NOT NULL REFERENCES turn_summaries(turn_summary_id) ON DELETE RESTRICT,
+                PRIMARY KEY (knowledge_id, turn_summary_id)
+            ))";
+}
+
+// Evidence at document-chunk level (written from Phase 11; exists now so the
+// FK target and the SET NULL semantics are testable). document_id SET NULL
+// keeps the breadcrumb (document_source_path) alive after delete-doc.
+inline std::string knowledge_document_evidence() {
+    return R"(CREATE TABLE knowledge_document_evidence (
+                evidence_id          INTEGER PRIMARY KEY,
+                knowledge_id         INTEGER NOT NULL REFERENCES knowledge(knowledge_id) ON DELETE CASCADE,
+                document_id          INTEGER REFERENCES documents(document_id) ON DELETE SET NULL,
+                document_source_path TEXT NOT NULL,   -- breadcrumb: survives delete-doc
+                chunk_index          INTEGER,         -- breadcrumb hint for relink
+                UNIQUE (knowledge_id, document_id)
+            ))";
+}
+
+inline std::string knowledge_document_evidence_indexes() {
+    return R"(CREATE INDEX idx_knowledge_document_evidence_doc ON knowledge_document_evidence(document_id))";
+}
+
 // episodes (PHASE5) — narrative segments over consecutive turn summaries.
 // New at 0.17 (never rebuilt), so no name parameter; the supersedes FK is
 // self-referential. span_start/span_end are epoch seconds of first/last

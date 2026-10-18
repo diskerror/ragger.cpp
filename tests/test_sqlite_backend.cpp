@@ -1307,16 +1307,16 @@ void test_search_merges_three_corpora(ragger::Embedder& emb) {
         doc.path  = "/tmp/botany.md";
         db.store_document(doc);
 
-        // (3) Decision inserted directly into the L6 table with NO embedding,
-        // mirroring how the external summarizer writes decisions. backfill
-        // then embeds it and must invalidate the decision cache.
+        // (3) Knowledge row inserted directly into the table with NO embedding,
+        // mirroring how the external summarizer used to write decisions.
+        // backfill then embeds it and must invalidate the knowledge cache.
         {
             sqlite3* raw = nullptr;
             CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
             const char* sql =
-                "INSERT INTO decisions (text, status, tags, created_at) "
-                "VALUES ('We will migrate the database to PostgreSQL next quarter.', "
-                "'current', '', '2026-01-01T00:00:00Z')";
+                "INSERT INTO knowledge (kind, text, status, tags, created_at) "
+                "VALUES ('decision', 'We will migrate the database to PostgreSQL next quarter.', "
+                "'current', '', 1767225600)";
             char* err = nullptr;
             CHECK(sqlite3_exec(raw, sql, nullptr, nullptr, &err) == SQLITE_OK);
             sqlite3_close(raw);
@@ -1335,7 +1335,7 @@ void test_search_merges_three_corpora(ragger::Embedder& emb) {
 
         CHECK(source_of("interstellar spacecraft golden record") == "summary");
         CHECK(source_of("how plants make energy from light")     == "document");
-        CHECK(source_of("plan to switch to PostgreSQL database")  == "decision");
+        CHECK(source_of("plan to switch to PostgreSQL database")  == "knowledge");
 
         // corpus_size in the timing payload reflects all three tables.
         auto resp = db.search("database", 5, 0.0f, {});
@@ -1408,7 +1408,10 @@ static sqlite3* p1_open_raw() {
 }
 static long long p1_scalar_int(sqlite3* raw, const std::string& sql) {
     sqlite3_stmt* st = nullptr;
-    CHECK(sqlite3_prepare_v2(raw, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+    if (sqlite3_prepare_v2(raw, sql.c_str(), -1, &st, nullptr) != SQLITE_OK) {
+        std::println("  p1_scalar_int PREPARE FAILED: {} ({})", sql, sqlite3_errmsg(raw));
+        CHECK(false);
+    }
     CHECK(sqlite3_step(st) == SQLITE_ROW);
     long long v = sqlite3_column_int64(st, 0);
     sqlite3_finalize(st);
@@ -1446,8 +1449,8 @@ static long long p5_epoch(const std::string& ts) {
     return static_cast<long long>(mktime(&tm));   // localtime, like resolve_epoch
 }
 
-static bool p1_throws_invalid(ragger::sqlite::Backend& db, const ragger::DecisionInput& in) {
-    try { db.store_structured_decision(in); }
+static bool p1_throws_invalid(ragger::sqlite::Backend& db, const ragger::KnowledgeInput& in) {
+    try { db.store_knowledge(in); }
     catch (const std::invalid_argument&) { return true; }
     return false;
 }
@@ -1455,17 +1458,18 @@ static bool p1_throws_invalid(ragger::sqlite::Backend& db, const ragger::Decisio
 void test_structured_decision_basic(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
-    ragger::DecisionInput in;
+    ragger::KnowledgeInput in;
+    in.kind = "decision";
     in.text      = "  Use a custom inverted index, not FTS5.  ";
     in.trigger   = "Use when choosing a full-text index strategy";
     in.rationale = "FTS5 MATCH is AND-only without query rewriting.";
     in.tags      = "search,sqlite";
-    auto r = db.store_structured_decision(in);
+    auto r = db.store_knowledge(in);
     CHECK(r.id > 0);
     CHECK(!r.superseded.has_value());
 
     sqlite3* raw = p1_open_raw();
-    const std::string w = std::format(" FROM decisions WHERE decision_id = {}", r.id);
+    const std::string w = std::format(" FROM knowledge WHERE knowledge_id = {}", r.id);
     CHECK(p1_scalar_text(raw, "SELECT text" + w) == "Use a custom inverted index, not FTS5.");
     CHECK(p1_scalar_text(raw, "SELECT trigger" + w) == "Use when choosing a full-text index strategy");
     CHECK(p1_scalar_text(raw, "SELECT rationale" + w) == "FTS5 MATCH is AND-only without query rewriting.");
@@ -1480,7 +1484,7 @@ void test_structured_decision_basic(ragger::Embedder& emb) {
     auto resp = db.search("full-text index strategy", 5, 0.0f);
     bool found = false;
     for (const auto& h : resp.results)
-        if (h.metadata.value("source", "") == "decision" &&
+        if (h.metadata.value("source", "") == "knowledge" &&
             h.metadata.value("trigger", "") == in.trigger) found = true;
     CHECK(found);
 
@@ -1494,20 +1498,21 @@ void test_structured_decision_basic(ragger::Embedder& emb) {
 void test_structured_decision_rebuild_is_stable(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
-    ragger::DecisionInput in;
+    ragger::KnowledgeInput in;
+    in.kind = "decision";
     in.text    = "Keep 'current' as the active decision status.";
     in.trigger = "Use when choosing decision status values";
-    int id = db.store_structured_decision(in).id;
+    int id = db.store_knowledge(in).id;
 
     sqlite3* raw = p1_open_raw();
-    const std::string w = std::format(" FROM decisions WHERE decision_id = {}", id);
+    const std::string w = std::format(" FROM knowledge WHERE knowledge_id = {}", id);
     const std::string blob_before = p1_scalar_text(raw, "SELECT hex(embedding)" + w);
     const long long   uni_before  = p1_scalar_int(raw, "SELECT unigram_count" + w);
     const long long   bi_before   = p1_scalar_int(raw, "SELECT bigram_count" + w);
     sqlite3_close(raw);
 
-    db.rebuild_embeddings(emb, false, "decisions");
-    db.reindex_table("decisions", false);
+    db.rebuild_embeddings(emb, false, "knowledge");
+    db.reindex_table("knowledge", false);
 
     raw = p1_open_raw();
     CHECK(p1_scalar_text(raw, "SELECT hex(embedding)" + w) == blob_before);
@@ -1521,7 +1526,8 @@ void test_structured_decision_rebuild_is_stable(ragger::Embedder& emb) {
 void test_structured_decision_validation(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
-    ragger::DecisionInput ok;
+    ragger::KnowledgeInput ok;
+    ok.kind = "decision";
     ok.text = "Valid ruling.";
     ok.trigger = "Use when testing validation";
 
@@ -1539,14 +1545,14 @@ void test_structured_decision_validation(ragger::Embedder& emb) {
     CHECK(p1_throws_invalid(db, bad));
 
     sqlite3* raw = p1_open_raw();
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM decisions") == 0);   // nothing written
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge WHERE kind = 'decision'") == 0);   // nothing written
     sqlite3_close(raw);
 
     // provisional and pending are valid starting statuses.
     auto p = ok; p.status = "provisional";
-    CHECK(db.store_structured_decision(p).id > 0);
+    CHECK(db.store_knowledge(p).id > 0);
     p.status = "pending";
-    CHECK(db.store_structured_decision(p).id > 0);
+    CHECK(db.store_knowledge(p).id > 0);
     db.close();
     cleanup();
 }
@@ -1554,33 +1560,35 @@ void test_structured_decision_validation(ragger::Embedder& emb) {
 void test_structured_decision_supersedes(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
-    ragger::DecisionInput a;
+    ragger::KnowledgeInput a;
+    a.kind = "decision";
     a.text = "Embed decisions as text only.";
     a.trigger = "Use when choosing what to embed for a decision";
-    int a_id = db.store_structured_decision(a).id;
+    int a_id = db.store_knowledge(a).id;
 
-    ragger::DecisionInput b;
+    ragger::KnowledgeInput b;
+    b.kind = "decision";
     b.text = "Embed decisions as trigger then text.";
     b.trigger = a.trigger;
     b.supersedes = a_id;
-    auto rb = db.store_structured_decision(b);
+    auto rb = db.store_knowledge(b);
     CHECK(rb.superseded.has_value() && *rb.superseded == a_id);
 
     sqlite3* raw = p1_open_raw();
     CHECK(p1_scalar_text(raw, std::format(
-        "SELECT status FROM decisions WHERE decision_id = {}", a_id)) == "superseded");
+        "SELECT status FROM knowledge WHERE knowledge_id = {}", a_id)) == "superseded");
     CHECK(p1_scalar_int(raw, std::format(
-        "SELECT supersedes FROM decisions WHERE decision_id = {}", rb.id)) == a_id);
+        "SELECT supersedes FROM knowledge WHERE knowledge_id = {}", rb.id)) == a_id);
     // Old row is kept, text untouched (honest history).
     CHECK(p1_scalar_text(raw, std::format(
-        "SELECT text FROM decisions WHERE decision_id = {}", a_id)) == "Embed decisions as text only.");
+        "SELECT text FROM knowledge WHERE knowledge_id = {}", a_id)) == "Embed decisions as text only.");
     sqlite3_close(raw);
 
     // Search no longer surfaces the superseded row; it does surface the new one.
     auto resp = db.search("Embed decisions as text only", 10, 0.0f);
     bool saw_old = false, saw_new = false;
     for (const auto& h : resp.results) {
-        if (h.metadata.value("source", "") != "decision") continue;
+        if (h.metadata.value("source", "") != "knowledge") continue;
         if (h.id == a_id)  saw_old = true;
         if (h.id == rb.id) saw_new = true;
     }
@@ -1588,7 +1596,7 @@ void test_structured_decision_supersedes(ragger::Embedder& emb) {
     CHECK(saw_new);
 
     // A superseded row can't be superseded again.
-    ragger::DecisionInput c = b;
+    ragger::KnowledgeInput c = b;
     c.supersedes = a_id;
     CHECK(p1_throws_invalid(db, c));
     db.close();
@@ -1601,15 +1609,16 @@ void test_structured_decision_evidence(ragger::Embedder& emb) {
     int ts1 = p1_make_turn_summary(db, "evidence one");
     int ts2 = p1_make_turn_summary(db, "evidence two");
 
-    ragger::DecisionInput in;
+    ragger::KnowledgeInput in;
+    in.kind = "decision";
     in.text = "Link decisions to turn summaries.";
     in.trigger = "Use when recording why a decision was made";
     in.evidence = {ts1, ts2, ts1};   // duplicate is ignored
-    int id = db.store_structured_decision(in).id;
+    int id = db.store_knowledge(in).id;
 
     sqlite3* raw = p1_open_raw();
     CHECK(p1_scalar_int(raw, std::format(
-        "SELECT COUNT(*) FROM decision_evidence WHERE decision_id = {}", id)) == 2);
+        "SELECT COUNT(*) FROM knowledge_turn_evidence WHERE knowledge_id = {}", id)) == 2);
     // RESTRICT: a turn summary that is evidence cannot be deleted.
     int rc = sqlite3_exec(raw, std::format(
         "DELETE FROM turn_summaries WHERE turn_summary_id = {}", ts1).c_str(),
@@ -1617,9 +1626,9 @@ void test_structured_decision_evidence(ragger::Embedder& emb) {
     CHECK(rc != SQLITE_OK);
     // CASCADE: deleting the decision removes its links.
     CHECK(sqlite3_exec(raw, std::format(
-        "DELETE FROM decisions WHERE decision_id = {}", id).c_str(),
+        "DELETE FROM knowledge WHERE knowledge_id = {}", id).c_str(),
         nullptr, nullptr, nullptr) == SQLITE_OK);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM decision_evidence") == 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge_turn_evidence") == 0);
     sqlite3_close(raw);
     db.close();
     cleanup();
@@ -1688,10 +1697,12 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
                 unigram_count INTEGER NOT NULL DEFAULT 0,
                 bigram_count INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER, embedding BLOB);
-            INSERT INTO decisions (text, status, tags, unigram_count) VALUES
-                ('first ruling', 'current', '', 2),
-                ('a fact',       'fact',    '', 2),
-                ('a lesson',     'lesson',  'x', 2);
+            INSERT INTO decisions (decision_id, text, status, tags, unigram_count) VALUES
+                (1, 'first ruling',     'current',    '',  2),
+                (3, 'a fact',           'fact',       '',  2),
+                (5, 'a lesson',         'lesson',     'x', 2),
+                (7, 'roadmap ruling',   'roadmap',    '',  2),
+                (9, 'deprecated ruling','deprecated', '',  2);
             CREATE TABLE sessions (
                 session_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guid TEXT NOT NULL UNIQUE, name TEXT, name_source TEXT,
@@ -1761,10 +1772,11 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
     sqlite3* raw = p1_open_raw();
     CHECK(p1_scalar_text(raw, "SELECT value FROM settings WHERE key='db_version'") == "0.17");
     // Canonical (fresh-install) column order: no project_id anywhere.
-    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('decisions') WHERE cid = 4") == "trigger");
-    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('decisions') WHERE cid = 9") == "created_at");
+    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('knowledge') WHERE cid = 5") == "trigger");
+    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('knowledge') WHERE cid = 11") == "created_at");
+    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('knowledge') WHERE cid = 1") == "kind");
     CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('summaries') WHERE cid = 6") == "created_at");
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_table_info('decisions') WHERE name = 'project_id'") == 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_table_info('knowledge') WHERE name = 'project_id'") == 0);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_table_info('summaries') WHERE name = 'project_id'") == 0);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'project_id'") == 0);
     // sessions gains the derived span columns (PHASE4).
@@ -1775,11 +1787,16 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
     CHECK(p1_scalar_text(raw, "SELECT ifnull(started_on,'NULL') || '-' || ifnull(ended_on,'NULL') FROM sessions WHERE guid = 'guid-b'") == "NULL-NULL");
     // The AUTOINCREMENT counter survives the rebuild.
     CHECK(p1_scalar_int(raw, "SELECT seq FROM sqlite_sequence WHERE name = 'sessions'") == 2);
-    // Insights and their links exist; the projects table is GONE.
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('insights','insight_evidence','insights_terms')") == 3);
+    // PHASE7: the projects table AND every pre-unification decisions/insights
+    // object are GONE; the unified knowledge tables + view exist instead.
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = 'projects'") == 0);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='insights_view'") == 1);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_insights_status'") == 1);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('decisions','decisions_terms','decision_evidence','insights','insight_evidence','insights_terms')") == 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name IN ('decisions_view','insights_view')") == 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='knowledge_view'") == 1);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('knowledge_turn_evidence','knowledge_document_evidence')") == 2);
+    // knowledge_document_evidence FKs: document_id SET NULL, knowledge_id CASCADE.
+    CHECK(p1_scalar_text(raw, "SELECT on_delete FROM pragma_foreign_key_list('knowledge_document_evidence') WHERE \"table\" = 'documents'") == "SET NULL");
+    CHECK(p1_scalar_text(raw, "SELECT on_delete FROM pragma_foreign_key_list('knowledge_document_evidence') WHERE \"table\" = 'knowledge'") == "CASCADE");
     // PHASE5: episodes MOVED out of summaries (ids preserved, span = old
     // created_at/updated_at); only the session/project rollups remain.
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM summaries") == 2);
@@ -1818,12 +1835,22 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
     CHECK(p1_scalar_text(raw, "SELECT path FROM document_sources WHERE title = 'Doc'") == "~/doc.md");
     CHECK(p1_scalar_text(raw, "SELECT path FROM document_sources WHERE title = 'Pathless'") == "2");
     CHECK(p1_scalar_text(raw, "SELECT path FROM document_sources WHERE title = 'Empty'") == "3");
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM decisions") == 3);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM decisions WHERE status != 'current'") == 0);
-    CHECK(p1_scalar_text(raw, "SELECT tags FROM decisions WHERE text = 'a fact'") == "fact");
-    CHECK(p1_scalar_text(raw, "SELECT tags FROM decisions WHERE text = 'a lesson'") == "x,lesson");
-    CHECK(p1_scalar_int(raw, "SELECT unigram_count FROM decisions WHERE text = 'first ruling'") == 2);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'decision_evidence'") == 1);
+    // §4a: ids preserved across the gap, all kind='decision'. Unknown status
+    // words (fact/lesson) moved into tags with status 'current'; roadmap and
+    // deprecated are vocabulary and stay. New columns start NULL.
+    CHECK(p1_scalar_text(raw, "SELECT group_concat(knowledge_id) FROM knowledge") == "1,3,5,7,9");
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge WHERE kind = 'decision'") == 5);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge WHERE status NOT IN ('current','roadmap','deprecated')") == 0);
+    CHECK(p1_scalar_text(raw, "SELECT tags FROM knowledge WHERE text = 'a fact'") == "fact");
+    CHECK(p1_scalar_text(raw, "SELECT tags FROM knowledge WHERE text = 'a lesson'") == "x,lesson");
+    CHECK(p1_scalar_text(raw, "SELECT status FROM knowledge WHERE text = 'roadmap ruling'") == "roadmap");
+    CHECK(p1_scalar_text(raw, "SELECT status FROM knowledge WHERE text = 'deprecated ruling'") == "deprecated");
+    CHECK(p1_scalar_int(raw, "SELECT unigram_count FROM knowledge WHERE text = 'first ruling'") == 2);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge WHERE trigger IS NULL AND rationale IS NULL AND scope IS NULL AND supersedes IS NULL AND session_id IS NULL AND model_id IS NULL") == 5);
+    // sqlite_sequence: knowledge seq >= max migrated id (AUTOINCREMENT floor).
+    CHECK(p1_scalar_int(raw, "SELECT seq >= 9 FROM sqlite_sequence WHERE name = 'knowledge'") == 1);
+    // The leg's final reindex indexed knowledge.
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge_terms") > 0);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'protect_orphan_turn_summaries'") == 1);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_foreign_key_check") == 0);
     sqlite3_close(raw);
@@ -1962,8 +1989,8 @@ void test_invalidate_all_caches(ragger::Embedder& emb) {
 
 // ---- Phase 5 steps 2+3: insights write path + search integration --------
 static bool p5_throws_invalid_insight(ragger::sqlite::Backend& db,
-                                      const ragger::DecisionInput& in) {
-    try { db.store_insight(in); }
+                                      const ragger::KnowledgeInput& in) {
+    try { db.store_knowledge(in); }
     catch (const std::invalid_argument&) { return true; }
     return false;
 }
@@ -1976,16 +2003,17 @@ void test_p5_insight_basic(ragger::Embedder& emb) {
     int ts1 = p1_make_turn_summary(db, "insight evidence one");
     int ts2 = p1_make_turn_summary(db, "insight evidence two");
 
-    ragger::DecisionInput in;
+    ragger::KnowledgeInput in;
+    in.kind = "insight";
     in.text      = "The embed-table lists must stay in sync by hand.";
     in.rationale = "Nothing enforces kAllTables vs count_embeddable_rows.";
     in.tags      = "maintenance";
     in.evidence  = {ts1, ts2, ts1};   // duplicate is ignored
-    int id = db.store_insight(in).id;
+    int id = db.store_knowledge(in).id;
     CHECK(id > 0);
 
     sqlite3* raw = p1_open_raw();
-    const std::string w = std::format(" FROM insights WHERE insight_id = {}", id);
+    const std::string w = std::format(" FROM knowledge WHERE knowledge_id = {}", id);
     CHECK(p1_scalar_text(raw, "SELECT text" + w) == "The embed-table lists must stay in sync by hand.");
     CHECK(p1_scalar_text(raw, "SELECT trigger" + w) == "<NULL>");   // optional -> NULL
     CHECK(p1_scalar_text(raw, "SELECT status" + w) == "current");
@@ -1993,14 +2021,14 @@ void test_p5_insight_basic(ragger::Embedder& emb) {
     CHECK(p1_scalar_int(raw, "SELECT embedding IS NOT NULL" + w) == 1);
     CHECK(p1_scalar_int(raw, "SELECT unigram_count > 0" + w) == 1);
     CHECK(p1_scalar_int(raw, std::format(
-        "SELECT COUNT(*) FROM insight_evidence WHERE insight_id = {}", id)) == 2);
+        "SELECT COUNT(*) FROM knowledge_turn_evidence WHERE knowledge_id = {}", id)) == 2);
     sqlite3_close(raw);
 
     // Search finds it tagged as an insight.
     auto resp = db.search("embed table lists sync by hand", 10, 0.0f);
     bool found = false;
     for (const auto& h : resp.results)
-        if (h.metadata.value("source", "") == "insight" && h.id == id) found = true;
+        if (h.metadata.value("source", "") == "knowledge" && h.id == id) found = true;
     CHECK(found);
 
     // RESTRICT (same semantics as decision_evidence): evidence summaries
@@ -2024,7 +2052,8 @@ void test_p5_insight_validation(ragger::Embedder& emb) {
     ragger::sqlite::Backend db(emb, TEMP_DB);
     int ts = p1_make_turn_summary(db, "validation evidence");
 
-    ragger::DecisionInput ok;
+    ragger::KnowledgeInput ok;
+    ok.kind = "insight";
     ok.text = "Insights always cite their sources.";
     ok.evidence = {ts};
 
@@ -2040,29 +2069,29 @@ void test_p5_insight_validation(ragger::Embedder& emb) {
     CHECK(p5_throws_invalid_insight(db, bad));
 
     sqlite3* raw = p1_open_raw();
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM insights") == 0);   // nothing written
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge WHERE kind = 'insight'") == 0);   // nothing written
     sqlite3_close(raw);
 
     // supersedes: old row flips to 'superseded', keeps its text (honest
     // history), and disappears from search.
-    int a_id = db.store_insight(ok).id;
-    ragger::DecisionInput b = ok;
+    int a_id = db.store_knowledge(ok).id;
+    ragger::KnowledgeInput b = ok;
     b.text = "Insights cite turn summaries, never raw turns.";
     b.supersedes = a_id;
-    auto rb = db.store_insight(b);
+    auto rb = db.store_knowledge(b);
     CHECK(rb.superseded.has_value() && *rb.superseded == a_id);
 
     raw = p1_open_raw();
     CHECK(p1_scalar_text(raw, std::format(
-        "SELECT status FROM insights WHERE insight_id = {}", a_id)) == "superseded");
+        "SELECT status FROM knowledge WHERE knowledge_id = {}", a_id)) == "superseded");
     CHECK(p1_scalar_int(raw, std::format(
-        "SELECT supersedes FROM insights WHERE insight_id = {}", rb.id)) == a_id);
+        "SELECT supersedes FROM knowledge WHERE knowledge_id = {}", rb.id)) == a_id);
     sqlite3_close(raw);
 
     auto resp = db.search("Insights always cite their sources", 10, 0.0f);
     bool saw_old = false, saw_new = false;
     for (const auto& h : resp.results) {
-        if (h.metadata.value("source", "") != "insight") continue;
+        if (h.metadata.value("source", "") != "knowledge") continue;
         if (h.id == a_id)  saw_old = true;
         if (h.id == rb.id) saw_new = true;
     }
@@ -2086,20 +2115,22 @@ void test_p5_insight_rebuild_is_stable(ragger::Embedder& emb) {
     ragger::sqlite::Backend db(emb, TEMP_DB);
     int ts = p1_make_turn_summary(db, "rebuild evidence");
 
-    ragger::DecisionInput a;
+    ragger::KnowledgeInput a;
+    a.kind = "insight";
     a.text = "Supersede rather than rewrite when the old wording mattered.";
     a.trigger = "Use when retiring an insight";
     a.evidence = {ts};
-    int a_id = db.store_insight(a).id;
+    int a_id = db.store_knowledge(a).id;
 
-    ragger::DecisionInput b;
+    ragger::KnowledgeInput b;
+    b.kind = "insight";
     b.text = "Migration legs are defensive CREATEs; no rebuild needed.";
     b.evidence = {ts};                       // no trigger
-    int b_id = db.store_insight(b).id;
+    int b_id = db.store_knowledge(b).id;
 
     sqlite3* raw = p1_open_raw();
-    const std::string wa = std::format(" FROM insights WHERE insight_id = {}", a_id);
-    const std::string wb = std::format(" FROM insights WHERE insight_id = {}", b_id);
+    const std::string wa = std::format(" FROM knowledge WHERE knowledge_id = {}", a_id);
+    const std::string wb = std::format(" FROM knowledge WHERE knowledge_id = {}", b_id);
     const std::string blob_a = p1_scalar_text(raw, "SELECT hex(embedding)" + wa);
     const std::string blob_b = p1_scalar_text(raw, "SELECT hex(embedding)" + wb);
     const long long uni_a = p1_scalar_int(raw, "SELECT unigram_count" + wa);
@@ -2108,8 +2139,8 @@ void test_p5_insight_rebuild_is_stable(ragger::Embedder& emb) {
     const long long bi_b  = p1_scalar_int(raw, "SELECT bigram_count" + wb);
     sqlite3_close(raw);
 
-    db.rebuild_embeddings(emb, false, "insights");
-    db.reindex_table("insights", false);
+    db.rebuild_embeddings(emb, false, "knowledge");
+    db.reindex_table("knowledge", false);
 
     raw = p1_open_raw();
     CHECK(p1_scalar_text(raw, "SELECT hex(embedding)" + wa) == blob_a);
@@ -2133,11 +2164,12 @@ void test_p5_insight_layer(ragger::Embedder& emb) {
 
     int ts = p1_make_turn_summary(db, "layer evidence");
 
-    ragger::DecisionInput a;
+    ragger::KnowledgeInput a;
+    a.kind = "insight";
     a.text     = "P5gizmo flange insight: casting follows machining.";
     a.trigger  = "Use when inspecting gizmo flanges";
     a.evidence = {ts};
-    int a_id = db.store_insight(a).id;
+    int a_id = db.store_knowledge(a).id;
 
     // ---- agent_search with layers=["insight"]
     ragger::AgentSearchQuery q;
@@ -2145,8 +2177,8 @@ void test_p5_insight_layer(ragger::Embedder& emb) {
     q.layers = {"insight"};
     bool found = false;
     for (const auto& h : db.agent_search(q)) {
-        CHECK(h.layer == "insight");
-        if (h.id == "insight:" + std::to_string(a_id)) {
+        CHECK(h.layer == "knowledge");
+        if (h.id == "knowledge:" + std::to_string(a_id)) {
             found = true;
             CHECK(h.extra.value("status", "") == "current");
             CHECK(h.extra.value("trigger", "") == a.trigger);
@@ -2156,28 +2188,28 @@ void test_p5_insight_layer(ragger::Embedder& emb) {
 
     // ---- agent_get expand=sources -> the evidence turn_summary
     ragger::AgentGetQuery g;
-    g.ids = {"insight:" + std::to_string(a_id)};
+    g.ids = {"knowledge:" + std::to_string(a_id)};
     g.expand = "sources";
     auto got = db.agent_get(g);
     CHECK(!got["items"][0]["expanded"].empty());
     CHECK(got["items"][0]["expanded"][0]["layer"] == "turn_summary");
 
     // ---- agent_get expand=chain -> supersede lineage oldest -> newest
-    ragger::DecisionInput b = a;
+    ragger::KnowledgeInput b = a;
     b.text = "P5gizmo flange insight two: machining follows casting.";
     b.supersedes = a_id;
-    int b_id = db.store_insight(b).id;
-    g.ids = {"insight:" + std::to_string(b_id)};
+    int b_id = db.store_knowledge(b).id;
+    g.ids = {"knowledge:" + std::to_string(b_id)};
     g.expand = "chain";
     got = db.agent_get(g);
     const auto& exp = got["items"][0]["expanded"];
     CHECK(exp.size() == 2);
-    CHECK(exp[0]["id"] == "insight:" + std::to_string(a_id));
-    CHECK(exp[1]["id"] == "insight:" + std::to_string(b_id));
+    CHECK(exp[0]["id"] == "knowledge:" + std::to_string(a_id));
+    CHECK(exp[1]["id"] == "knowledge:" + std::to_string(b_id));
 
     // ---- agent_update: tags free; illegal transition rejected
     ragger::UpdateRequest u;
-    u.id = "insight:" + std::to_string(b_id);
+    u.id = "knowledge:" + std::to_string(b_id);
     u.tags = "flange";
     auto row = db.agent_update(u);
     CHECK(row["tags"] == "flange");
@@ -2188,42 +2220,217 @@ void test_p5_insight_layer(ragger::Embedder& emb) {
     CHECK(threw);
 
     // ---- review: pending insights listed, approvable through the handle
-    ragger::DecisionInput p;
+    ragger::KnowledgeInput p;
+    p.kind = "insight";
     p.text = "P5 pending insight: torque to spec.";
     p.evidence = {ts};
     p.status = "pending";
-    int p_id = db.store_insight(p).id;
+    int p_id = db.store_knowledge(p).id;
     auto listed = db.agent_review("list", {});
     bool saw_ins = false;
     for (const auto& item : listed["pending"])
-        if (item["id"] == "insight:" + std::to_string(p_id)) saw_ins = true;
+        if (item["id"] == "knowledge:" + std::to_string(p_id)) saw_ins = true;
     CHECK(saw_ins);
-    auto done = db.agent_review("approve", {"insight:" + std::to_string(p_id)});
+    auto done = db.agent_review("approve", {"knowledge:" + std::to_string(p_id)});
     CHECK(done["done"].size() == 1);
     CHECK(done["failed"].empty());
 
     // ---- reject through an insight handle (review 7): pending -> retired,
     // and the queue no longer lists it.
-    ragger::DecisionInput rj;
+    ragger::KnowledgeInput rj;
+    rj.kind = "insight";
     rj.text = "P5 pending insight to reject.";
     rj.evidence = {ts};
     rj.status = "pending";
-    int rj_id = db.store_insight(rj).id;
-    auto rej = db.agent_review("reject", {"insight:" + std::to_string(rj_id)});
+    int rj_id = db.store_knowledge(rj).id;
+    auto rej = db.agent_review("reject", {"knowledge:" + std::to_string(rj_id)});
     CHECK(rej["done"].size() == 1);
     CHECK(rej["failed"].empty());
     {
         ragger::AgentGetQuery g;
-        g.ids = {"insight:" + std::to_string(rj_id)};
+        g.ids = {"knowledge:" + std::to_string(rj_id)};
         auto got = db.agent_get(g);
         CHECK(got["items"][0]["status"] == "retired");
     }
     bool still_listed = false;
     for (const auto& item : db.agent_review("list", {})["pending"])
-        if (item["id"] == "insight:" + std::to_string(rj_id)) still_listed = true;
+        if (item["id"] == "knowledge:" + std::to_string(rj_id)) still_listed = true;
     CHECK(!still_listed);
 
     (void)a_id; (void)b_id;
+    db.close();
+    cleanup();
+}
+
+// ---- PHASE7: unified knowledge table ----------------------------------
+// kind rules: decision requires a trigger; insight requires >=1 evidence;
+// note requires neither. kind is reported by agent_get.
+void test_p7_knowledge_kinds(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    auto throws_invalid = [&db](ragger::KnowledgeInput in) {
+        try { db.store_knowledge(in); }
+        catch (const std::invalid_argument&) { return true; }
+        return false;
+    };
+
+    // note: no trigger, no evidence -> fine.
+    ragger::KnowledgeInput n;
+    n.kind = "note";
+    n.text = "P7 note: the rehearsal room key lives under the mat.";
+    int n_id = db.store_knowledge(n).id;
+    CHECK(n_id > 0);
+
+    // decision without trigger -> rejected; with trigger -> stored.
+    ragger::KnowledgeInput d;
+    d.kind = "decision";
+    d.text = "P7 decision: always rehearse bars 40-52 slowly.";
+    CHECK(throws_invalid(d));
+    d.trigger = "Use when scheduling rehearsal time";
+    int d_id = db.store_knowledge(d).id;
+    CHECK(d_id > 0);
+
+    // insight without evidence -> rejected; with evidence -> stored.
+    int ts = p1_make_turn_summary(db, "P7 insight evidence");
+    ragger::KnowledgeInput i;
+    i.kind = "insight";
+    i.text = "P7 insight: slow practice transfers to tempo.";
+    CHECK(throws_invalid(i));
+    i.evidence = {ts};
+    int i_id = db.store_knowledge(i).id;
+    CHECK(i_id > 0);
+
+    // Unknown kind -> rejected (vocabulary may grow, but only via code).
+    ragger::KnowledgeInput u;
+    u.kind = "wisdom";
+    u.text = "P7 nonsense kind row.";
+    CHECK(throws_invalid(u));
+
+    // agent_get reports kind.
+    ragger::AgentGetQuery g;
+    g.ids = {"knowledge:" + std::to_string(n_id),
+             "knowledge:" + std::to_string(d_id),
+             "knowledge:" + std::to_string(i_id)};
+    auto got = db.agent_get(g);
+    CHECK(got["items"][0]["kind"] == "note");
+    CHECK(got["items"][1]["kind"] == "decision");
+    CHECK(got["items"][2]["kind"] == "insight");
+
+    db.close();
+    cleanup();
+}
+
+// supersedes crosses kinds: a decision may retire the insight it promotes.
+void test_p7_cross_kind_supersedes(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    int ts = p1_make_turn_summary(db, "P7 promotion evidence");
+
+    ragger::KnowledgeInput i;
+    i.kind = "insight";
+    i.text = "P7 insight before promotion: damp the reed first.";
+    i.evidence = {ts};
+    int i_id = db.store_knowledge(i).id;
+
+    ragger::KnowledgeInput d;
+    d.kind = "decision";
+    d.text = "P7 promoted decision: damp the reed before every reed scrape.";
+    d.trigger = "Use when scraping a reed";
+    d.supersedes = i_id;
+    auto r = db.store_knowledge(d);
+    CHECK(r.superseded.has_value() && *r.superseded == i_id);
+
+    sqlite3* raw = p1_open_raw();
+    CHECK(p1_scalar_text(raw, std::format(
+        "SELECT status FROM knowledge WHERE knowledge_id = {}", i_id)) == "superseded");
+    CHECK(p1_scalar_text(raw, std::format(
+        "SELECT kind FROM knowledge WHERE knowledge_id = {}", r.id)) == "decision");
+    sqlite3_close(raw);
+
+    // Chain expansion crosses kinds, oldest first.
+    ragger::AgentGetQuery g;
+    g.ids = {"knowledge:" + std::to_string(r.id)};
+    g.expand = "chain";
+    const auto exp = db.agent_get(g)["items"][0]["expanded"];
+    CHECK(exp.size() == 2);
+    CHECK(exp[0]["id"] == "knowledge:" + std::to_string(i_id));
+    CHECK(exp[0]["kind"] == "insight");
+    CHECK(exp[1]["kind"] == "decision");
+
+    db.close();
+    cleanup();
+}
+
+// agent_search `kinds` narrows knowledge hits; the legacy layer aliases
+// 'decision'/'insight' mean the same thing (covered in insight_layer test).
+void test_p7_kinds_filter(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    int ts = p1_make_turn_summary(db, "P7 filter evidence");
+
+    ragger::KnowledgeInput d;
+    d.kind = "decision";
+    d.text = "P7 filter decision: oboe reeds bend northward.";
+    d.trigger = "Use when filtering P7 knowledge by kind";
+    int d_id = db.store_knowledge(d).id;
+
+    ragger::KnowledgeInput n;
+    n.kind = "note";
+    n.text = "P7 filter note: oboe reeds bend northward, allegedly.";
+    int n_id = db.store_knowledge(n).id;
+
+    ragger::AgentSearchQuery q;
+    q.query = "oboe reeds bend northward";
+    q.kinds = {"decision"};
+    bool saw_d = false, saw_n = false;
+    for (const auto& h : db.agent_search(q)) {
+        CHECK(h.layer == "knowledge");
+        if (h.id == "knowledge:" + std::to_string(d_id)) saw_d = true;
+        if (h.id == "knowledge:" + std::to_string(n_id)) saw_n = true;
+    }
+    CHECK(saw_d);
+    CHECK(!saw_n);
+
+    db.close();
+    cleanup();
+}
+
+// Legacy typed handles are rejected with a pointer, not silently mapped.
+void test_p7_legacy_handles_rejected(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    ragger::KnowledgeInput n;
+    n.kind = "note";
+    n.text = "P7 legacy handle target.";
+    int n_id = db.store_knowledge(n).id;
+
+    ragger::AgentGetQuery g;
+    g.ids = {"decision:" + std::to_string(n_id)};
+    bool threw = false;
+    try { db.agent_get(g); }
+    catch (const std::invalid_argument& e) {
+        threw = true;
+        CHECK(std::string(e.what()) == "use knowledge:<id>");
+    }
+    CHECK(threw);
+
+    ragger::UpdateRequest u;
+    u.id = "insight:" + std::to_string(n_id);
+    u.tags = "x";
+    threw = false;
+    try { db.agent_update(u); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+
+    // Looser junk stays a per-item 'not found', not a throw.
+    ragger::AgentGetQuery m;
+    m.ids = {"decision:", "insight:-2"};
+    const auto got = db.agent_get(m);
+    CHECK(got["items"].size() == 2);
+    CHECK(got["items"][0].contains("error"));
+    CHECK(got["items"][1].contains("error"));
+
     db.close();
     cleanup();
 }
@@ -2234,23 +2441,25 @@ void test_p2_text_only_hides_superseded(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
 
-    ragger::DecisionInput a;
+    ragger::KnowledgeInput a;
+    a.kind = "decision";
     a.text = "Prefer WAL checkpointing before archiving the database.";
     a.trigger = "Use when archiving a live SQLite database";
-    int a_id = db.store_structured_decision(a).id;
+    int a_id = db.store_knowledge(a).id;
 
-    ragger::DecisionInput b;
+    ragger::KnowledgeInput b;
+    b.kind = "decision";
     b.text = "Checkpoint in TRUNCATE mode without closing the connection.";
     b.trigger = "Use when archiving a live SQLite database";
     b.supersedes = a_id;
-    auto rb = db.store_structured_decision(b);
+    auto rb = db.store_knowledge(b);
     CHECK(rb.superseded.has_value() && *rb.superseded == a_id);
 
     // Text-only path with A's exact words: A must not appear, B must.
     auto resp = db.search_text_only("Prefer WAL checkpointing before archiving the database.", 10);
     bool saw_old = false, saw_new = false;
     for (const auto& h : resp.results) {
-        if (h.metadata.value("source", "") != "decision") continue;
+        if (h.metadata.value("source", "") != "knowledge") continue;
         if (h.id == a_id)  saw_old = true;
         if (h.id == rb.id) saw_new = true;
     }
@@ -2278,10 +2487,11 @@ void test_p2_search_layers(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
 
-    ragger::DecisionInput d;
+    ragger::KnowledgeInput d;
+    d.kind = "decision";
     d.text = "Zephyr protocol ruling: always use zephyr gates for imports.";
     d.trigger = "Use when gating zephyr imports";
-    int did = db.store_structured_decision(d).id;
+    int did = db.store_knowledge(d).id;
     db.store("Zephyr protocol note: zephyr gates were tested in the lab.",
              {{"level", "session"}});
 
@@ -2291,14 +2501,14 @@ void test_p2_search_layers(ragger::Embedder& emb) {
     auto hits = db.agent_search(q);
     CHECK(!hits.empty());
     for (const auto& h : hits) {
-        CHECK(h.layer == "decision");
+        CHECK(h.layer == "knowledge");
         // Handle format: "<layer>:<rowid>"
-        CHECK(h.id == "decision:" + std::to_string(did) ||
-              h.id.starts_with("decision:"));
+        CHECK(h.id == "knowledge:" + std::to_string(did) ||
+              h.id.starts_with("knowledge:"));
     }
     bool found = false;
     for (const auto& h : hits)
-        if (h.id == "decision:" + std::to_string(did)) found = true;
+        if (h.id == "knowledge:" + std::to_string(did)) found = true;
     CHECK(found);
 
     // Unknown layer -> invalid_argument.
@@ -2320,32 +2530,34 @@ void test_p2_search_status(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
 
-    ragger::DecisionInput a;
+    ragger::KnowledgeInput a;
+    a.kind = "decision";
     a.text = "Quoll exports must run through the nightly validator.";
     a.trigger = "Use when exporting quoll data";
-    int a_id = db.store_structured_decision(a).id;
+    int a_id = db.store_knowledge(a).id;
 
-    ragger::DecisionInput b;
+    ragger::KnowledgeInput b;
+    b.kind = "decision";
     b.text = "Quoll exports now stream directly; skip the nightly validator.";
     b.trigger = "Use when exporting quoll data";
     b.supersedes = a_id;
-    int b_id = db.store_structured_decision(b).id;
+    int b_id = db.store_knowledge(b).id;
 
     ragger::AgentSearchQuery q;
     q.query = "quoll exports validator";
     q.status = "active";
     auto hits = db.agent_search(q);
     for (const auto& h : hits) {
-        if (h.layer != "decision") continue;
-        CHECK(h.id != "decision:" + std::to_string(a_id));
+        if (h.layer != "knowledge") continue;
+        CHECK(h.id != "knowledge:" + std::to_string(a_id));
     }
 
     q.status = "any";
     auto any_hits = db.agent_search(q);
     bool saw_old = false, saw_new = false;
     for (const auto& h : any_hits) {
-        if (h.id == "decision:" + std::to_string(a_id)) { saw_old = true; CHECK(h.extra["status"] == "superseded"); }
-        if (h.id == "decision:" + std::to_string(b_id)) saw_new = true;
+        if (h.id == "knowledge:" + std::to_string(a_id)) { saw_old = true; CHECK(h.extra["status"] == "superseded"); }
+        if (h.id == "knowledge:" + std::to_string(b_id)) saw_new = true;
     }
     CHECK(saw_old);
     CHECK(saw_new);
@@ -2434,21 +2646,22 @@ void test_p2_get_decision(ragger::Embedder& emb) {
     int ts1 = p1_make_turn_summary(db, "alpha");
     int ts2 = p1_make_turn_summary(db, "beta");
 
-    ragger::DecisionInput d;
+    ragger::KnowledgeInput d;
+    d.kind = "decision";
     d.text = "Always cite the failing test when filing a bug.";
     d.trigger = "Use when filing a bug report";
     d.rationale = "Reproducible failures need receipts.";
     d.scope = "Not needed for feature requests.";
     d.evidence = {ts1, ts2};
-    int did = db.store_structured_decision(d).id;
+    int did = db.store_knowledge(d).id;
 
     ragger::AgentGetQuery q;
-    q.ids = {"decision:" + std::to_string(did)};
+    q.ids = {"knowledge:" + std::to_string(did)};
     auto got = db.agent_get(q);
     CHECK(got["items"].size() == 1);
     const auto& item = got["items"][0];
     CHECK(!item.contains("error"));
-    CHECK(item["layer"] == "decision");
+    CHECK(item["layer"] == "knowledge");
     CHECK(item["trigger"] == "Use when filing a bug report");
     CHECK(item["rationale"] == "Reproducible failures need receipts.");
     CHECK(item["evidence"].size() == 2);
@@ -2457,7 +2670,7 @@ void test_p2_get_decision(ragger::Embedder& emb) {
 
     // Unknown id -> per-item error, not a throw.
     ragger::AgentGetQuery bad;
-    bad.ids = {"decision:999999"};
+    bad.ids = {"knowledge:999999"};
     auto bad_got = db.agent_get(bad);
     CHECK(bad_got["items"].size() == 1);
     CHECK(bad_got["items"][0].contains("error"));
@@ -2479,32 +2692,35 @@ void test_p2_get_chain(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
 
-    ragger::DecisionInput a;
+    ragger::KnowledgeInput a;
+    a.kind = "decision";
     a.text = "Chain link one: use plan alpha for the widget.";
     a.trigger = "Use when planning the widget";
-    int a_id = db.store_structured_decision(a).id;
+    int a_id = db.store_knowledge(a).id;
 
-    ragger::DecisionInput b;
+    ragger::KnowledgeInput b;
+    b.kind = "decision";
     b.text = "Chain link two: use plan beta for the widget.";
     b.trigger = "Use when planning the widget";
     b.supersedes = a_id;
-    int b_id = db.store_structured_decision(b).id;
+    int b_id = db.store_knowledge(b).id;
 
-    ragger::DecisionInput c;
+    ragger::KnowledgeInput c;
+    c.kind = "decision";
     c.text = "Chain link three: use plan gamma for the widget.";
     c.trigger = "Use when planning the widget";
     c.supersedes = b_id;
-    int c_id = db.store_structured_decision(c).id;
+    int c_id = db.store_knowledge(c).id;
 
     ragger::AgentGetQuery q;
-    q.ids = {"decision:" + std::to_string(b_id)};
+    q.ids = {"knowledge:" + std::to_string(b_id)};
     q.expand = "chain";
     auto got = db.agent_get(q);
     const auto& exp = got["items"][0]["expanded"];
     CHECK(exp.size() == 3);
-    CHECK(exp[0]["id"] == "decision:" + std::to_string(a_id));
-    CHECK(exp[1]["id"] == "decision:" + std::to_string(b_id));
-    CHECK(exp[2]["id"] == "decision:" + std::to_string(c_id));
+    CHECK(exp[0]["id"] == "knowledge:" + std::to_string(a_id));
+    CHECK(exp[1]["id"] == "knowledge:" + std::to_string(b_id));
+    CHECK(exp[2]["id"] == "knowledge:" + std::to_string(c_id));
 
     db.close();
     cleanup();
@@ -2581,7 +2797,7 @@ void test_p2_get_mode_exclusive(ragger::Embedder& emb) {
 
     bool threw_both = false, threw_neither = false;
     ragger::AgentGetQuery both;
-    both.ids = {"decision:1"};
+    both.ids = {"knowledge:1"};
     both.session = "some-guid";
     try { db.agent_get(both); }
     catch (const std::invalid_argument&) { threw_both = true; }
@@ -2603,16 +2819,18 @@ void test_p2_possible_supersedes(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
 
-    ragger::DecisionInput a;
+    ragger::KnowledgeInput a;
+    a.kind = "decision";
     a.text = "Always run the full test suite before tagging a release.";
     a.trigger = "Use when preparing a release tag";
-    int a_id = db.store_structured_decision(a).id;
+    int a_id = db.store_knowledge(a).id;
 
     // Near-duplicate: same ruling reworded, same trigger.
-    ragger::DecisionInput b;
+    ragger::KnowledgeInput b;
+    b.kind = "decision";
     b.text = "Run the complete test suite before every release tag.";
     b.trigger = "Use when preparing a release tag";
-    auto rb = db.store_structured_decision(b);
+    auto rb = db.store_knowledge(b);
     bool flags_a = false;
     for (const auto& [id, score] : rb.possible_supersedes) {
         CHECK(score >= 0.80f);
@@ -2623,10 +2841,11 @@ void test_p2_possible_supersedes(ragger::Embedder& emb) {
     CHECK(!rb.superseded.has_value());
 
     // Unrelated text -> empty list.
-    ragger::DecisionInput c;
+    ragger::KnowledgeInput c;
+    c.kind = "decision";
     c.text = "The harpsichord was tuned in meantone temperament in 1742.";
     c.trigger = "Use when tuning baroque keyboard instruments";
-    auto rc = db.store_structured_decision(c);
+    auto rc = db.store_knowledge(c);
     CHECK(rc.possible_supersedes.empty());
 
     db.close();
@@ -2865,7 +3084,7 @@ void test_p4_update_rules(ragger::Embedder& emb) {
     // Rule 1: text present -> rejected with the exact message.
     {
         ragger::UpdateRequest r;
-        r.id = "decision:1";
+        r.id = "knowledge:1";
         r.text = "anything";
         bool threw = false;
         try { db.agent_update(r); }
@@ -2911,42 +3130,43 @@ void test_p4_update_rules(ragger::Embedder& emb) {
     }
 
     // Rule 4: transition table.
-    ragger::DecisionInput in;
+    ragger::KnowledgeInput in;
+    in.kind = "decision";
     in.text = "P4 transition target ruling.";
     in.trigger = "Use when testing transitions";
     in.status = "pending";
-    int pending_id = db.store_structured_decision(in).id;
+    int pending_id = db.store_knowledge(in).id;
     auto dec_status = [&db](int id) {
         sqlite3* raw = p1_open_raw();
-        std::string s = p1_scalar_text(raw, "SELECT status FROM decisions WHERE decision_id = "
+        std::string s = p1_scalar_text(raw, "SELECT status FROM knowledge WHERE knowledge_id = "
                                   + std::to_string(id));
         sqlite3_close(raw);
         return s;
     };
     {   // pending -> superseded rejected
-        ragger::UpdateRequest r; r.id = "decision:" + std::to_string(pending_id);
+        ragger::UpdateRequest r; r.id = "knowledge:" + std::to_string(pending_id);
         r.status = "superseded";
         CHECK(throws_invalid(r));
     }
     {   // pending -> current allowed
-        ragger::UpdateRequest r; r.id = "decision:" + std::to_string(pending_id);
+        ragger::UpdateRequest r; r.id = "knowledge:" + std::to_string(pending_id);
         r.status = "current";
         auto row = db.agent_update(r);
         CHECK(row["status"].get<std::string>() == "current");
         CHECK(dec_status(pending_id) == "current");
     }
     {   // current -> pending NOT allowed (table says no)
-        ragger::UpdateRequest r; r.id = "decision:" + std::to_string(pending_id);
+        ragger::UpdateRequest r; r.id = "knowledge:" + std::to_string(pending_id);
         r.status = "pending";
         CHECK(throws_invalid(r));
     }
     {   // current -> current not a listed transition either
-        ragger::UpdateRequest r; r.id = "decision:" + std::to_string(pending_id);
+        ragger::UpdateRequest r; r.id = "knowledge:" + std::to_string(pending_id);
         r.status = "current";
         CHECK(throws_invalid(r));
     }
     {   // current -> provisional -> retired allowed; retired -> anything rejected
-        ragger::UpdateRequest r; r.id = "decision:" + std::to_string(pending_id);
+        ragger::UpdateRequest r; r.id = "knowledge:" + std::to_string(pending_id);
         r.status = "provisional";
         db.agent_update(r);
         r.status = "retired";
@@ -2966,26 +3186,27 @@ void test_p4_update_cache_invalidation(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
 
-    ragger::DecisionInput in;
+    ragger::KnowledgeInput in;
+    in.kind = "decision";
     in.text = "Kestrel migrations run only on Wednesdays.";
     in.trigger = "Use when scheduling kestrel migrations";
     in.status = "pending";
-    int id = db.store_structured_decision(in).id;
+    int id = db.store_knowledge(in).id;
 
     // Pending is hidden from active search.
     ragger::AgentSearchQuery q;
     q.query = "kestrel migrations Wednesdays";
     q.layers = {"decision"};
     auto hits = db.agent_search(q);
-    for (const auto& h : hits) CHECK(h.id != "decision:" + std::to_string(id));
+    for (const auto& h : hits) CHECK(h.id != "knowledge:" + std::to_string(id));
 
-    ragger::UpdateRequest r; r.id = "decision:" + std::to_string(id); r.status = "current";
+    ragger::UpdateRequest r; r.id = "knowledge:" + std::to_string(id); r.status = "current";
     db.agent_update(r);
 
     hits = db.agent_search(q);
     bool found = false;
     for (const auto& h : hits)
-        if (h.id == "decision:" + std::to_string(id)) found = true;
+        if (h.id == "knowledge:" + std::to_string(id)) found = true;
     CHECK(found);
 
     db.close();
@@ -2997,21 +3218,23 @@ void test_p4_review(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
 
-    ragger::DecisionInput a;
+    ragger::KnowledgeInput a;
+    a.kind = "decision";
     a.text = "Review candidate alpha: wagons ship at dawn.";
     a.trigger = "Use when shipping wagons";
     a.status = "pending";
-    int a_id = db.store_structured_decision(a).id;
+    int a_id = db.store_knowledge(a).id;
 
-    ragger::DecisionInput b;
+    ragger::KnowledgeInput b;
+    b.kind = "decision";
     b.text = "Review candidate beta: kayaks ship at dusk.";
     b.trigger = "Use when shipping kayaks";
     b.status = "pending";
-    int b_id = db.store_structured_decision(b).id;
+    int b_id = db.store_knowledge(b).id;
 
     auto listed = db.agent_review("list", {});
     CHECK(listed["pending"].size() == 2);
-    CHECK(listed["pending"][0]["id"].get<std::string>() == "decision:" + std::to_string(a_id));
+    CHECK(listed["pending"][0]["id"].get<std::string>() == "knowledge:" + std::to_string(a_id));
     CHECK(!listed["pending"][0]["trigger"].get<std::string>().empty());
 
     // Approve alpha (bare integer accepted too).
@@ -3020,7 +3243,7 @@ void test_p4_review(ragger::Embedder& emb) {
     CHECK(done["failed"].empty());
     {
         sqlite3* raw = p1_open_raw();
-        CHECK(p1_scalar_text(raw, "SELECT status FROM decisions WHERE decision_id = "
+        CHECK(p1_scalar_text(raw, "SELECT status FROM knowledge WHERE knowledge_id = "
                                   + std::to_string(a_id)) == "current");
         sqlite3_close(raw);
     }
@@ -3030,31 +3253,31 @@ void test_p4_review(ragger::Embedder& emb) {
     q.layers = {"decision"};
     bool found = false;
     for (const auto& h : db.agent_search(q))
-        if (h.id == "decision:" + std::to_string(a_id)) found = true;
+        if (h.id == "knowledge:" + std::to_string(a_id)) found = true;
     CHECK(found);
 
     // Approving an already-current decision fails THAT id only.
     auto again = db.agent_review("approve", {
-        "decision:" + std::to_string(a_id),
-        "decision:" + std::to_string(b_id)});
+        "knowledge:" + std::to_string(a_id),
+        "knowledge:" + std::to_string(b_id)});
     CHECK(again["done"].size() == 1);
     CHECK(again["failed"].size() == 1);
-    CHECK(again["failed"][0]["id"].get<std::string>() == "decision:" + std::to_string(a_id));
+    CHECK(again["failed"][0]["id"].get<std::string>() == "knowledge:" + std::to_string(a_id));
 
     // Reject beta -> retired, invisible in search, row still present.
-    auto rej = db.agent_review("reject", {"decision:" + std::to_string(b_id)});
+    auto rej = db.agent_review("reject", {"knowledge:" + std::to_string(b_id)});
     CHECK(rej["done"].size() == 1);
     {
         sqlite3* raw = p1_open_raw();
-        CHECK(p1_scalar_text(raw, "SELECT status FROM decisions WHERE decision_id = "
+        CHECK(p1_scalar_text(raw, "SELECT status FROM knowledge WHERE knowledge_id = "
                                   + std::to_string(b_id)) == "retired");
-        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM decisions WHERE decision_id = "
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge WHERE knowledge_id = "
                                   + std::to_string(b_id)) == 1);
         sqlite3_close(raw);
     }
     q.query = "kayaks ship dusk";
     for (const auto& h : db.agent_search(q))
-        CHECK(h.id != "decision:" + std::to_string(b_id));
+        CHECK(h.id != "knowledge:" + std::to_string(b_id));
 
     // Queue is empty now.
     CHECK(db.agent_review("list", {})["pending"].empty());
@@ -3468,8 +3691,7 @@ void p2_test_db_version_gate(ragger::Embedder& emb) {
 void p3_test_known_layers() {
     std::println("  p3_test_known_layers...");
     const std::set<std::string> expected = {
-        "turn", "turn_summary", "summary", "document", "decision", "insight",
-        "episode"};
+        "turn", "turn_summary", "summary", "document", "knowledge", "episode"};
     std::set<std::string> got;
     for (const auto& t : ragger::sqlite::kTextTables)
         if (t.layer && *t.layer) got.insert(t.layer);
@@ -3574,12 +3796,13 @@ void p3_cache_pin(ragger::Embedder& emb) {
     CHECK(t > 0);
     CHECK(db.finalize_turn_summary(t, "cachepin turn summary", "sum-model"));
 
-    ragger::DecisionInput in;
+    ragger::KnowledgeInput in;
+    in.kind = "insight";
     in.text     = "cachepin insight ruling";
     { sqlite3* raw = p1_open_raw();
       in.evidence = {static_cast<int>(p1_scalar_int(raw, "SELECT MAX(turn_summary_id) FROM turn_summaries"))};
       sqlite3_close(raw); }
-    db.store_insight(in);                                         // insights
+    db.store_knowledge(in);                                         // insights
 
     auto resp = db.search("cachepin", 50, 0.0f);
     std::map<std::string, std::set<std::string>> keys_by_source;
@@ -3598,13 +3821,11 @@ void p3_cache_pin(ragger::Embedder& emb) {
     // Pinned pre-refactor (five hand-written loaders, one row each).
     CHECK(count_by_source["summary"] == 1);
     CHECK(count_by_source["document"] == 1);
-    CHECK(count_by_source["decision"] == 1);
-    CHECK(count_by_source["insight"] == 1);
+    CHECK(count_by_source["knowledge"] == 2);
     CHECK(count_by_source["turn_summary"] == 1);
     CHECK(keys_by_source["summary"] == std::set<std::string>({"source", "level"}));
     CHECK(keys_by_source["document"] == std::set<std::string>({"source", "title"}));
-    CHECK(keys_by_source["decision"] == std::set<std::string>({"source", "status"}));
-    CHECK(keys_by_source["insight"] == std::set<std::string>({"source", "status"}));
+    CHECK(keys_by_source["knowledge"] == std::set<std::string>({"source", "kind", "status"}));
     CHECK(keys_by_source["turn_summary"] ==
           std::set<std::string>({"source", "turn_id", "session_id", "datetime"}));
     db.close();
@@ -3631,7 +3852,7 @@ void p3_test_update_embedding(ragger::Embedder& emb) {
     CHECK(!db.update_decision_embedding(d + 999, v));
     sqlite3* raw = p1_open_raw();
     CHECK(p1_scalar_int(raw, std::format(
-        "SELECT embedding IS NOT NULL FROM decisions WHERE decision_id = {}", d)) == 1);
+        "SELECT embedding IS NOT NULL FROM knowledge WHERE knowledge_id = {}", d)) == 1);
     sqlite3_close(raw);
     db.close();
     cleanup();
@@ -4157,6 +4378,10 @@ int main() {
     test_p5_insight_validation(emb);
     test_p5_insight_rebuild_is_stable(emb);
     test_p5_insight_layer(emb);
+    test_p7_knowledge_kinds(emb);
+    test_p7_cross_kind_supersedes(emb);
+    test_p7_kinds_filter(emb);
+    test_p7_legacy_handles_rejected(emb);
     test_p4_timeline_order_and_paging(emb);
     test_p4_timeline_session_fallback(emb);
     test_p4_timeline_turn_fallback(emb);

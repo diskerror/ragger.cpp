@@ -64,4 +64,20 @@ bool is_in(const std::string_view (&values)[N], std::string_view v) {
 // new decision, never here; 'retired' is terminal.
 bool transition_ok(std::string_view from, std::string_view to);
 
+// ---- knowledge kinds (PHASE7) --------------------------------------------
+// One row per knowledge(kind). The rules are exactly the old per-table ones:
+// decision requires a trigger; insight requires >=1 evidence; note needs
+// neither. `noun` builds the existing error messages verbatim.
+struct KindRule { std::string_view name; bool trigger_required; bool evidence_required; std::string_view noun; };
+inline constexpr KindRule kKinds[] = {
+    {"decision", true,  false, "decision"},
+    {"insight",  false, true,  "insight"},
+    {"note",     false, false, "note"},
+};
+inline constexpr const KindRule* find_kind(std::string_view kind) {
+    for (const auto& k : kKinds)
+        if (kind == k.name) return &k;
+    return nullptr;
+}
+
 } // namespace ragger::sqlite::status

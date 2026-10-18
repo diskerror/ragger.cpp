@@ -24,6 +24,12 @@ std::string agent_snippet(const std::string& text);
 /// Overflowing ids return false (never throw).
 bool parse_agent_handle(const std::string& handle, std::string& layer, int& rowid);
 
+// PHASE7: true for legacy 'decision:<n>' / 'insight:<n>' handles (strict
+// positive-integer suffix). agent_get/agent_update reject these with a
+// pointer to knowledge:<id>; anything looser ("decision:", "decision:-3")
+// stays an ordinary parse failure ("not found").
+bool is_legacy_knowledge_handle(const std::string& handle);
+
 /// True for the six searchable layer names (the typed-handle vocabulary).
 bool is_known_agent_layer(const std::string& layer);
 

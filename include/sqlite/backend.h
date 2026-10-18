@@ -68,8 +68,7 @@ public:
                        const std::string& source_timestamp = "",
                        bool defer_embedding = false) override;
 
-    StructuredDecisionResult store_structured_decision(const DecisionInput& in) override;
-    StructuredDecisionResult store_insight(const DecisionInput& in) override;
+    KnowledgeResult store_knowledge(const KnowledgeInput& in) override;
     json find_document_source(const std::string& path) override;
     json list_document_sources() override;
     void invalidate_all_caches() override;

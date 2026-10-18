@@ -550,7 +550,7 @@ struct Server::Impl {
             metadata["source"] = user.username;
         auto& mem = _get_memory(user.username);
 
-        // Route curated decisions to the L6 decisions table; everything else
+        // Route curated decisions to knowledge(kind='decision'); everything else
         // (fact/preference/lesson/unspecified) lands in summaries via store().
         std::string category = metadata.value("category", "");
         if (category == "decision") {
@@ -564,7 +564,7 @@ struct Server::Impl {
             Diskerror::Logger::debug("POST /store 200 (decision)");
             respond_json(res, json{{"id", std::to_string(did)},
                                  {"status", "stored"},
-                                 {"table", "decisions"}});
+                                 {"kind", "decision"}});
             return;
         }
 
@@ -586,13 +586,13 @@ struct Server::Impl {
         // Project (Phase 3): explicit name/path wins; otherwise infer from
         // cwd (longest-prefix match). No match leaves it empty — not an
         // error. Shared with the MCP surface via parse_decision_input.
-        DecisionInput in = parse_decision_input(body);
+        KnowledgeInput in = parse_decision_input(body);
         try {
-            auto r = mem.store_structured_decision(in);
+            auto r = mem.store_knowledge(in);
             Diskerror::Logger::debug("POST /decision 200");
             respond_json(res, json{
                 {"id", r.id},
-                {"table", "decisions"},
+                {"kind", r.kind},
                 {"status", "stored"},
                 {"superseded", r.superseded ? json(*r.superseded) : json(nullptr)},
                 {"possible_supersedes", supersedes_json(r.possible_supersedes)}});
@@ -609,8 +609,8 @@ struct Server::Impl {
     // possible_supersedes exactly like /decision — compared against current
     // decisions, hint only, nothing is changed.
     // Phase 5 step 6: `evidence: [turn_summary_id]` routes the write to
-    // store_insight instead — a synthesized insight linked to its sources,
-    // and the response says "table":"insights". Without evidence nothing
+    // store_knowledge(kind="insight") instead — a synthesized insight linked
+    // to its sources, and the response carries "kind":"insight". Without evidence nothing
     // changes.
     void handle_memory_note(const UserInfo& user, const httplib::Request& req,
                             httplib::Response& res) {
@@ -630,15 +630,15 @@ struct Server::Impl {
 
         auto& mem = _get_memory(user.username);
 
-        // ---- insight routing (Phase 5) ----------------------------------
+        // ---- insight routing (Phase 5; PHASE7 kind="insight") -----------
         if (body.contains("evidence") && body["evidence"].is_array()) {
-            DecisionInput in = parse_note_insight(body, text);
+            KnowledgeInput in = parse_note_insight(body, text);
             try {
-                auto r = mem.store_insight(in);
+                auto r = mem.store_knowledge(in);
                 Diskerror::Logger::debug("POST /memory/note 200 (insight)");
                 respond_json(res, json{
                     {"id", r.id},
-                    {"table", "insights"},
+                    {"kind", r.kind},
                     {"status", "stored"},
                     {"superseded", r.superseded ? json(*r.superseded) : json(nullptr)},
                     {"possible_supersedes", supersedes_json(r.possible_supersedes)}});
