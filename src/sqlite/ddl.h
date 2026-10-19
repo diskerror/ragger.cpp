@@ -105,6 +105,14 @@ inline std::string knowledge_document_evidence() {
             ))";
 }
 
+inline std::string knowledge_turn_evidence_indexes() {
+    // Reverse lookup (which knowledge cites a turn summary) and the
+    // ON DELETE RESTRICT FK probe both key on turn_summary_id; the PK
+    // (knowledge_id, turn_summary_id) cannot serve them. Part of the
+    // schema-0.17.ddl.sql contract.
+    return R"(CREATE INDEX idx_knowledge_turn_evidence_ts ON knowledge_turn_evidence(turn_summary_id))";
+}
+
 inline std::string knowledge_document_evidence_indexes() {
     return R"(CREATE INDEX idx_knowledge_document_evidence_doc ON knowledge_document_evidence(document_id))";
 }

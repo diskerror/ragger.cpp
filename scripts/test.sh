@@ -15,6 +15,7 @@ echo "=== Test pass 1/2: RAGGER_STATS=ON ==="
 cd build
 ctest --output-on-failure
 cd "$SCRIPT_DIR/.."
+"$SCRIPT_DIR/verify-schema-sql.sh"
 
 echo ""
 echo "=== Test pass 2/2: RAGGER_STATS=OFF ==="

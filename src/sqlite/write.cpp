@@ -404,6 +404,13 @@ static std::string tags_from_metadata(const json& metadata) {
         {
             Transaction tx(db);  // row + postings atomic (B §1.3)
             if (!s.exec()) {
+                // PHASE9: a (source, chunk_index) collision is a caller
+                // error with a pointed message, not an opaque store failure.
+                const int ext = sqlite3_extended_errcode(db);
+                if (ext == SQLITE_CONSTRAINT_UNIQUE || ext == SQLITE_CONSTRAINT_PRIMARYKEY)
+                    throw std::invalid_argument(std::format(
+                        "document chunk already exists: {} chunk {}",
+                        chunk.path, chunk.chunk_index));
                 throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
             }
             doc_id = static_cast<int>(sqlite3_last_insert_rowid(db));

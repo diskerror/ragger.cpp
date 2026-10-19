@@ -57,14 +57,6 @@ namespace {
 // argument deduction from *this inside a member function can. Every call
 // site passes Backend::Impl; nothing else can reach these.
 
-/// True iff a pre-migration backup/reopen (and, later, a post-migration
-/// VACUUM) should happen for `current_version`. Mirrors the guard
-/// conditions maybe_backup_before_migration() has always used: shared
-/// by that function and by the post-migration VACUUM decision so both
-/// stay in lockstep.
-template <class Impl>
-bool migration_pending(Impl& self, const std::string& current_version);
-
 /// Archive the raw DB file(s) before the first structural change of a
 /// migration run (see the definition for the checkpoint/close/fallback
 /// strategy).
@@ -317,9 +309,9 @@ void rebuild_table_column_order(Impl& self,
         if (table_exists("summaries") && !column_exists("summaries", "session_id"))
             exec("ALTER TABLE summaries ADD COLUMN session_id "
                  "INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL");
-        exec("CREATE INDEX IF NOT EXISTS idx_turns_session     ON turns(session_id)");
-        if (table_exists("summaries"))
-            exec("CREATE INDEX IF NOT EXISTS idx_summaries_session ON summaries(session_id)");
+        // PHASE9: no index creation here — every index is created once, in
+        // the post-migration section below, so fresh / migrated /
+        // already-current DBs converge from a single source of truth.
 
         // document_sources (L5 metadata) — one row per curated document.
         // Holds title/path/year/tags/imported_at once, instead of repeating
@@ -455,19 +447,8 @@ void rebuild_table_column_order(Impl& self,
             }
         }
 
-        // Post-migration reclaim: if a migration actually ran this session
-        // (same gating condition maybe_backup_before_migration used), the
-        // chain just dropped a lot of data (old FTS5 tables/triggers, phon
-        // columns, etc). Reclaim that space with a plain in-place VACUUM
-        // now that the DB is confirmed at kExpectedDbVersion. Skipped on a
-        // fresh install or a DB that was already current (no migration).
-        if (migration_pending(*this, pre_migration_version)) {
-            Diskerror::Logger::info(
-                "Post-migration VACUUM starting (reclaiming space from dropped "
-                "schema) -- this may take a while on a large DB.");
-            exec("VACUUM");
-            Diskerror::Logger::info("Post-migration VACUUM complete.");
-        }
+        // Post-migration reclaim moved BELOW, after the indexes and views
+        // are (re)built — "reclaim after everything" (review §3.6).
 
         // Indexes — (re)created here, after migration, so a table rebuild
         // (which drops the table and with it every index) can't leave them
@@ -490,6 +471,7 @@ void rebuild_table_column_order(Impl& self,
         exec(ddl::if_not_exists(ddl::knowledge()));
         exec(ddl::if_not_exists(ddl::knowledge_indexes()));
         exec(ddl::if_not_exists(ddl::knowledge_turn_evidence()));
+        exec(ddl::if_not_exists(ddl::knowledge_turn_evidence_indexes()));
         exec(ddl::if_not_exists(ddl::knowledge_document_evidence()));
         exec(ddl::if_not_exists(ddl::knowledge_document_evidence_indexes()));
 
@@ -509,6 +491,12 @@ void rebuild_table_column_order(Impl& self,
 
         exec("CREATE INDEX IF NOT EXISTS idx_document_sources_imported_at ON document_sources(imported_at)");
         exec("CREATE INDEX IF NOT EXISTS idx_documents_document_source_id ON documents(document_source_id)");
+        // PHASE9 (migrate-0.16-to-0.17.sql §5): (source, chunk_index) is the
+        // final chunk key — one row per position per document. NULL
+        // chunk_index rows are unconstrained (SQLite UNIQUE treats NULLs as
+        // distinct); the leg's pre-check excludes them for the same reason.
+        exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_source_chunk_uniq "
+             "ON documents(document_source_id, chunk_index)");
 
         // FTS5 — external-content virtual tables + sync triggers replace
         // the old hand-rolled bm25_* sidecars (issue #49).
@@ -519,6 +507,27 @@ void rebuild_table_column_order(Impl& self,
         // has_embedding booleans) mirroring scripts/schema_db0.12.sql
         // exactly. Always (re)created so fresh/migrated DBs converge.
         create_views();
+
+        // Post-migration reclaim (PHASE9): runs AFTER the indexes and views
+        // above — the migration is committed and the schema complete, so
+        // VACUUM reclaims everything the leg dropped. Gated exactly like the
+        // pre-migration backup: skipped on a fresh install or a DB that was
+        // already current. A failure (disk space: VACUUM needs ~2x the DB
+        // size) is a warning, never an error — the migration itself is done.
+        if (migration_pending(pre_migration_version)) {
+            try {
+                Diskerror::Logger::info(
+                    "Post-migration VACUUM starting (reclaiming space from dropped "
+                    "schema) -- this may take a while on a large DB.");
+                exec("VACUUM");
+                Diskerror::Logger::info("Post-migration VACUUM complete.");
+            } catch (const std::exception& e) {
+                Diskerror::Logger::warn(std::format(
+                    "Post-migration VACUUM failed ({}); the migration itself "
+                    "committed cleanly. Reclaim space later with a manual VACUUM.",
+                    e.what()));
+            }
+        }
     }
 
 
@@ -548,23 +557,18 @@ void rebuild_table_column_order(Impl& self,
     // and post-migration verification that aborts (rolls back) on any
     // inconsistency rather than silently shipping a corrupt index.
 
-    /// True iff a pre-migration backup/reopen (and, later, a post-migration
-    /// VACUUM) should happen for `current_version`. Mirrors the guard
-    /// conditions maybe_backup_before_migration() has always used: shared
-    /// by that function and by the post-migration VACUUM decision so both
-    /// stay in lockstep.
-    namespace {
-    template <class Impl>
-    bool migration_pending(Impl& self, const std::string& current_version) {
-        if (current_version.empty()) return false;               // fresh/pre-version DB
-        if (current_version == self.kExpectedDbVersion) return false;  // already current
-        // Only for versions we actually migrate FROM in-binary. An unknown
-        // version is rejected by the gate without mutation.
-        if (current_version != "0.12" && current_version != "0.15" &&
-            current_version != "0.16") return false;
-        return true;
+    /// PHASE9: true iff a pre-migration backup/reopen (and the
+    /// post-migration VACUUM) should happen for `current_version` — i.e. it
+    /// is a kLegs origin and not already current. Replaces the old
+    /// per-version if-chain; maybe_backup_before_migration() and the
+    /// VACUUM decision share this one predicate so they stay in lockstep.
+    bool Backend::Impl::migration_pending(const std::string& current_version) {
+        if (current_version.empty()) return false;                     // fresh/pre-version DB
+        if (current_version == kExpectedDbVersion) return false;       // already current
+        for (const auto& leg : kLegs)
+            if (current_version == leg.from) return true;
+        return false;  // unknown version: rejected by the gate without mutation
     }
-    } // anonymous namespace
 
 
     /// Archive the raw DB file(s) as "<db>_BACKUP_<timestamp>.tar.gz" (or
@@ -598,7 +602,9 @@ void rebuild_table_column_order(Impl& self,
     namespace {
     template <class Impl>
     void maybe_backup_before_migration(Impl& self, const std::string& current_version) {
-        if (!migration_pending(self, current_version)) return;
+        // Static member via the instance: the template parameter is deduced
+        // from *this, so this never has to NAME the private nested type.
+        if (!self.migration_pending(current_version)) return;
 
         Diskerror::Logger::info(std::format(
             "DB schema {} predates {} -- taking pre-migration backup",
@@ -714,23 +720,13 @@ void rebuild_table_column_order(Impl& self,
         // version. Legs are few; a handful of iterations is plenty.
         for (int guard = 0; guard < 8; ++guard) {
             if (v.empty() || v == kExpectedDbVersion) return;
-            if (v == "0.12") {
-                migrate_0_12_to_0_15();
-                v = db_version();
-                continue;
-            }
-            if (v == "0.15") {
-                migrate_0_15_to_0_16();
-                v = db_version();
-                continue;
-            }
-            if (v == "0.16") {
-                migrate_0_16_to_0_17();
-                v = db_version();
-                continue;
-            }
+            const Leg* leg = nullptr;
+            for (const auto& l : kLegs)
+                if (v == l.from) { leg = &l; break; }
             // No known leg from this version -> stop; the hard gate reports it.
-            return;
+            if (!leg) return;
+            (this->*leg->fn)();
+            v = db_version();
         }
     }
 
@@ -1173,6 +1169,11 @@ void rebuild_table_column_order(Impl& self,
 
     /// 0.15 -> 0.16 migration (FTS5 teardown + custom index backfill).
     ///
+    /// NOT RUNNABLE since 0.17 development (see TODO Q1): it names tables
+    /// the 0.17 registry no longer has (decisions) and expects the exact
+    /// 0.15-era shapes; it has never been exercised against a real 0.15 DB.
+    /// Kept only until the pre-0.16 support decision — do not "fix" it.
+    ///
     /// This is the big cutover:
     /// 1. Drop all FTS5 triggers (both text and phonetic)
     /// 2. Drop both FTS5 virtual tables
@@ -1292,8 +1293,11 @@ void rebuild_table_column_order(Impl& self,
             // remaining columns land in the canonical fresh-install order with the
             // narrow, readable ones ahead of the wide embedding blob.
             //
-            // The DDL below MUST stay in lockstep with create_schema()'s CREATE
-            // TABLE statements for these five tables.
+            // PHASE9: this normalization only ever runs against pre-0.15
+            // shapes (documents.path still present). For current tables the
+            // ddl:: functions are the single source of truth — one DDL
+            // function per table, shared by fresh installs and rebuilds —
+            // so this legacy DDL is frozen history, not a lockstep partner.
             Diskerror::Logger::info("Rebuilding text tables in canonical column order...");
             rebuild_table_column_order(*this, "turns", R"(
                 CREATE TABLE turns_rebuild (
@@ -1456,6 +1460,65 @@ void rebuild_table_column_order(Impl& self,
         try {
             Stmt(db, "BEGIN").exec();
 
+            // ---- PHASE9: pre-checks BEFORE any change (review: the old
+            // placement ran the duplicate-path check after the first
+            // rebuild, so its "nothing was changed" message was only true
+            // thanks to rollback). The placeholder-path UPDATE is idempotent
+            // and belongs to this group; a later failure rolls it back.
+
+            // document_sources.path becomes UNIQUE (0.17: a document is
+            // identified by its path). Old DBs may hold sources with no
+            // path; give each its own document_source_id as text so the
+            // unique index can be built (the value is a placeholder, not a
+            // file).
+            exec("UPDATE document_sources SET path = CAST(document_source_id AS TEXT) "
+                 "WHERE path IS NULL OR path = ''");
+            if (int n = sqlite3_changes(db); n > 0)
+                Diskerror::Logger::info(std::format(
+                    "  document_sources: gave {} pathless source(s) a placeholder path "
+                    "(their document_source_id)", n));
+            {
+                // Two sources with the same path cannot be merged safely
+                // here (different titles/tags); refuse with a clear message
+                // so the operator decides which to keep.
+                Stmt d(db, "SELECT path, COUNT(*) FROM document_sources "
+                           "GROUP BY path HAVING COUNT(*) > 1 LIMIT 1");
+                if (d.step())
+                    throw std::runtime_error(std::format(
+                        "0.16 -> 0.17 migration: {} document_sources rows share the "
+                        "path '{}' (paths must now be unique). Delete or fix the "
+                        "duplicates, then restart; nothing was changed.",
+                        d.column_int(1), d.column_text(0)));
+            }
+            {
+                // PHASE9 §5: (source, chunk_index) becomes the chunk key.
+                // NULL chunk_index rows stay unconstrained (UNIQUE treats
+                // NULLs distinct), so they are excluded here for exactly the
+                // semantics the index will have.
+                Stmt d(db, "SELECT document_source_id, chunk_index, COUNT(*) FROM documents "
+                           "WHERE chunk_index IS NOT NULL "
+                           "GROUP BY 1, 2 HAVING COUNT(*) > 1 LIMIT 1");
+                if (d.step())
+                    throw std::runtime_error(std::format(
+                        "0.16 -> 0.17 migration: {} chunks share (source {}, chunk_index {}). "
+                        "Delete or fix the duplicates, then restart; nothing was changed.",
+                        d.column_int(2), d.column_int64(0), d.column_int64(1)));
+            }
+            {
+                // episodes gain UNIQUE (session_id, span_start) WHERE
+                // supersedes IS NULL, and span_start = old created_at — two
+                // episode rows sharing (session, created_at) would collide.
+                Stmt d(db, "SELECT session_id, created_at, COUNT(*) FROM summaries "
+                           "WHERE level = 'episode' AND session_id IS NOT NULL "
+                           "GROUP BY 1, 2 HAVING COUNT(*) > 1 LIMIT 1");
+                if (d.step())
+                    throw std::runtime_error(std::format(
+                        "0.16 -> 0.17 migration: {} episodes share (session {}, created_at {}). "
+                        "Episode keys must be unique per (session, span_start). Delete or "
+                        "fix the duplicates, then restart; nothing was changed.",
+                        d.column_int(2), d.column_int64(0), d.column_int64(1)));
+            }
+
             auto fk_violations = [this]() {
                 std::multiset<std::string> out;
                 Stmt s(db, "PRAGMA foreign_key_check");
@@ -1477,40 +1540,17 @@ void rebuild_table_column_order(Impl& self,
             // be blamed on this leg (same lesson as migrate_0_15_to_0_16).
             const std::multiset<std::string> fk_before = fk_violations();
 
-            // Views naming a rebuilt table are dropped first. (It is
-            // RENAME / DROP COLUMN that SQLite refuses while a view names
-            // the table — not DROP TABLE — but dropping up front is needed
-            // for the rebuild dance regardless.) create_views() recreates
-            // them after migrations.
-            exec("DROP VIEW IF EXISTS sessions_view");
-            exec("DROP VIEW IF EXISTS summaries_view");
-            exec("DROP VIEW IF EXISTS turn_summaries_view");   // PHASE5 rebuild
-            exec("DROP VIEW IF EXISTS decisions_view");
-            exec("DROP VIEW IF EXISTS document_sources_view");
-            exec("DROP VIEW IF EXISTS documents_view");   // joins document_sources
-
-            // document_sources.path becomes UNIQUE (0.17: a document is
-            // identified by its path). Old DBs may hold sources with no path;
-            // give each its own document_source_id as text so the unique
-            // index can be built (the value is a placeholder, not a file).
-            exec("UPDATE document_sources SET path = CAST(document_source_id AS TEXT) "
-                 "WHERE path IS NULL OR path = ''");
-            if (int n = sqlite3_changes(db); n > 0)
-                Diskerror::Logger::info(std::format(
-                    "  document_sources: gave {} pathless source(s) a placeholder path "
-                    "(their document_source_id)", n));
+            // PHASE9: drop EVERY view up front (the rebuild dance and the
+            // §6 drops would strand them anyway; create_views() recreates
+            // the full set after the leg). Replaces the old explicit
+            // DROP VIEWs, which missed views added outside this function
+            // (e.g. summaries_terms_view).
             {
-                // Two sources with the same path cannot be merged safely
-                // here (different titles/tags); refuse with a clear message
-                // so the operator decides which to keep.
-                Stmt d(db, "SELECT path, COUNT(*) FROM document_sources "
-                           "GROUP BY path HAVING COUNT(*) > 1 LIMIT 1");
-                if (d.step())
-                    throw std::runtime_error(std::format(
-                        "0.16 -> 0.17 migration: {} document_sources rows share the "
-                        "path '{}' (paths must now be unique). Delete or fix the "
-                        "duplicates, then restart; nothing was changed.",
-                        d.column_int(1), d.column_text(0)));
+                std::vector<std::string> views;
+                Stmt v(db, "SELECT name FROM sqlite_master WHERE type = 'view' ORDER BY name");
+                while (v.step()) views.push_back(v.column_text(0));
+                for (const auto& name : views)
+                    exec("DROP VIEW IF EXISTS " + name);  // names from sqlite_master
             }
 
             // ---- sessions rebuild (PHASE4; migrate-0.16-to-0.17.sql §1,
@@ -1597,6 +1637,7 @@ void rebuild_table_column_order(Impl& self,
             exec(ddl::knowledge());
             exec(ddl::knowledge_indexes());
             exec(ddl::knowledge_turn_evidence());
+            exec(ddl::knowledge_turn_evidence_indexes());
             exec(ddl::knowledge_document_evidence());
             exec(ddl::knowledge_document_evidence_indexes());
 
@@ -1664,14 +1705,11 @@ void rebuild_table_column_order(Impl& self,
             exec("DROP TABLE IF EXISTS insights_terms");
             exec("DROP TABLE IF EXISTS decision_evidence");
             exec("DROP TABLE IF EXISTS insight_evidence");
-
-            // PHASE5: the boundary-watermark machinery is deleted with the
-            // session/project rollups; drop their settings rows (§7).
-            exec("DELETE FROM settings WHERE key IN "
-                 "('session_boundary_watermark_turn_id', "
-                 " 'project_boundary_watermark_turn_id')");
-
-            set_db_version("0.17");
+            // PHASE9: idx_turns_embedding_version (0.15/0.16 era) is not in
+            // the 0.17 design; turns is not rebuilt by this leg, so it would
+            // otherwise survive on real DBs while fresh DBs never have it.
+            // No 0.17 query filters turns by embedding_version.
+            exec("DROP INDEX IF EXISTS idx_turns_embedding_version");
 
             // PHASE5: all-table reindex as the LAST data step. The leg moved
             // episode rows and rebuilt turn_summaries; a full rebuild of the
@@ -1683,6 +1721,30 @@ void rebuild_table_column_order(Impl& self,
             reset_terms_table();
             for (const auto& t : kTextTables)
                 reindex_table(t.table, /*progress=*/true);
+
+            // ---- §7 (migrate-0.16-to-0.17.sql): settings cleanup, seq
+            // restore, version stamp — after the reindex, before the final
+            // FK diff (canonical order; PHASE9).
+
+            // PHASE5: the boundary-watermark machinery is deleted with the
+            // session/project rollups; drop their settings rows.
+            exec("DELETE FROM settings WHERE key IN "
+                 "('session_boundary_watermark_turn_id', "
+                 " 'project_boundary_watermark_turn_id')");
+
+            // Restore the saved AUTOINCREMENT counters (§0 restore; the
+            // rebuilds reset sqlite_sequence to MAX(id); the saved watermark
+            // is never lower). UPDATE, not INSERT OR REPLACE: sqlite_sequence
+            // has NO unique constraint on name, so an INSERT would append a
+            // duplicate row instead of replacing (the canonical §7 form).
+            // A table that was empty pre-migration has no row in seq_save
+            // and none after its rebuild — consistent, nothing to restore.
+            exec("UPDATE sqlite_sequence SET seq = "
+                 "(SELECT s.seq FROM seq_save s WHERE s.name = sqlite_sequence.name) "
+                 "WHERE name IN ('sessions','turn_summaries') "
+                 "AND (SELECT s.seq FROM seq_save s WHERE s.name = sqlite_sequence.name) > seq");
+
+            set_db_version("0.17");
 
             // Only NEW violations abort; pre-existing ones are carried
             // through and warned about (fk_before baseline above).
@@ -1706,18 +1768,6 @@ void rebuild_table_column_order(Impl& self,
                         fk_before.size(), *fk_before.begin()));
                 }
             }
-
-            // Restore the saved AUTOINCREMENT counters (§0 restore; the
-            // rebuilds reset sqlite_sequence to MAX(id); the saved watermark
-            // is never lower). UPDATE, not INSERT OR REPLACE: sqlite_sequence
-            // has NO unique constraint on name, so an INSERT would append a
-            // duplicate row instead of replacing (the canonical §7 form).
-            // A table that was empty pre-migration has no row in seq_save
-            // and none after its rebuild — consistent, nothing to restore.
-            exec("UPDATE sqlite_sequence SET seq = "
-                 "(SELECT s.seq FROM seq_save s WHERE s.name = sqlite_sequence.name) "
-                 "WHERE name IN ('sessions','turn_summaries') "
-                 "AND (SELECT s.seq FROM seq_save s WHERE s.name = sqlite_sequence.name) > seq");
 
             Stmt(db, "COMMIT").exec();
             exec("PRAGMA legacy_alter_table = OFF");

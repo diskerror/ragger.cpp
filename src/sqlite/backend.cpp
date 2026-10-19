@@ -31,6 +31,10 @@ Backend::Backend(const std::string& db_path, bool readonly)
 
 Backend::~Backend() = default;
 
+bool Backend::migration_pending(const std::string& version) {
+    return Impl::migration_pending(version);
+}
+
 std::string Backend::db_path() const { return pImpl->db_path; }
 
 std::string Backend::store(const std::string& text, json metadata, bool defer_embedding) {

@@ -98,18 +98,24 @@ void TextIndex::create_schema() {
 }
 
 std::string TextIndex::junction_ddl(const TextTable& t) {
+    // PHASE9: final shape — WITHOUT ROWID clustered on (term_id, <pk>).
+    // The read-hot path (score_query: term -> postings with count) is one
+    // contiguous range of the PK B-tree; the write path (delete-then-insert
+    // by <pk>) uses the secondary idx_<table>_terms_row index. One copy per
+    // posting instead of the 0.16 triple (rowid table + PK + term index).
     return std::format(
         "CREATE TABLE IF NOT EXISTS {} (\n"
-        "    {} INTEGER NOT NULL REFERENCES {}({}) ON DELETE CASCADE,\n"
         "    term_id INTEGER NOT NULL REFERENCES terms(term_id) ON DELETE CASCADE,\n"
+        "    {} INTEGER NOT NULL REFERENCES {}({}) ON DELETE CASCADE,\n"
         "    count   INTEGER NOT NULL DEFAULT 1,\n"
-        "    PRIMARY KEY ({}, term_id)\n)",
+        "    PRIMARY KEY (term_id, {})\n"
+        ") WITHOUT ROWID",
         t.junction, t.pk, t.table, t.pk, t.pk);
 }
 
 std::string TextIndex::junction_index_ddl(const TextTable& t) {
-    return std::format("CREATE INDEX IF NOT EXISTS idx_{}_term ON {}(term_id)",
-                       t.junction, t.junction);
+    return std::format("CREATE INDEX IF NOT EXISTS idx_{}_terms_row ON {}({})",
+                       t.table, t.junction, t.pk);
 }
 
 // ---- cached-statement plumbing --------------------------------------------

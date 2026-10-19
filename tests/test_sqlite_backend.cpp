@@ -1685,17 +1685,23 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
         sqlite3* raw = nullptr;
         CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
         const char* ddl = R"(
+            PRAGMA foreign_keys = OFF;
             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             INSERT INTO settings VALUES ('db_version', '0.16');
             INSERT INTO settings VALUES ('session_boundary_watermark_turn_id', '99');
             INSERT INTO settings VALUES ('project_boundary_watermark_turn_id', '98');
             CREATE TABLE turns (
                 turn_id INTEGER PRIMARY KEY AUTOINCREMENT, user_text TEXT NOT NULL,
-                assistant_text TEXT, model_id INTEGER, session_id INTEGER,
+                assistant_text TEXT,
+                model_id INTEGER REFERENCES models(model_id) ON DELETE SET NULL,
+                session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                 created_at INTEGER NOT NULL,
                 unigram_count INTEGER NOT NULL DEFAULT 0,
                 bigram_count INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER, embedding BLOB);
+            -- a real 0.16 DB carries this legacy index; the leg must drop it
+            -- (the fresh-vs-migrated equivalence check below guards that).
+            CREATE INDEX idx_turns_embedding_version ON turns(embedding_version);
             CREATE TABLE decisions (
                 decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 text TEXT NOT NULL, status TEXT NOT NULL,
@@ -1775,7 +1781,12 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
                        ('Pathless', NULL, NULL, '', 1760000001),
                        ('Empty',    '',   NULL, '', 1760000002);
         )";
-        CHECK(sqlite3_exec(raw, ddl, nullptr, nullptr, nullptr) == SQLITE_OK);
+        char* fixture_err = nullptr;
+        int fixture_rc = sqlite3_exec(raw, ddl, nullptr, nullptr, &fixture_err);
+        if (fixture_rc != SQLITE_OK)
+            std::println("    fixture DDL failed: {}", fixture_err ? fixture_err : "?");
+        sqlite3_free(fixture_err);
+        CHECK(fixture_rc == SQLITE_OK);
         // Seed the AUTOINCREMENT watermark ABOVE MAX(id): rows were deleted
         // in the fixture's "past life"; the rebuild must not restart below it.
         CHECK(sqlite3_exec(raw,
@@ -1899,10 +1910,270 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_foreign_key_check") == 0);
     sqlite3_close(raw);
 
+    // PHASE9: PERMANENT equivalence check — the migrated DB and a fresh DB
+    // built by this binary must agree on every schema object: per-table
+    // column shape, FK actions, index/trigger SQL (whitespace-normalized,
+    // sorted), and the view set. Zero differences allowed; the first
+    // differing object prints on failure. (This is what Hal verified by
+    // hand against the standalone SQL file; now it can never silently rot.)
+    {
+        const std::string fresh_db = TEMP_DB + "_fresh";
+        fs::remove(fresh_db);
+        fs::remove(fresh_db + "-wal");
+        fs::remove(fresh_db + "-shm");
+        { ragger::sqlite::Backend fresh(emb, fresh_db); }   // fresh 0.17 install
+
+        auto norm_ws = [](std::string s) {
+            std::string out;
+            bool space = false;
+            for (char c : s) {
+                if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { space = true; continue; }
+                if (space && !out.empty()) out += ' ';
+                space = false;
+                out += c;
+            }
+            return out;
+        };
+        sqlite3* mig = nullptr;
+        sqlite3* fre = nullptr;
+        CHECK(sqlite3_open(TEMP_DB.c_str(), &mig) == SQLITE_OK);
+        CHECK(sqlite3_open(fresh_db.c_str(), &fre) == SQLITE_OK);
+        auto rows = [](sqlite3* d, const std::string& sql) {
+            std::vector<std::string> out;
+            sqlite3_stmt* st = nullptr;
+            if (sqlite3_prepare_v2(d, sql.c_str(), -1, &st, nullptr) != SQLITE_OK) {
+                std::println("    equivalence prepare failed: {} ({})", sql, sqlite3_errmsg(d));
+                CHECK(false);
+            } else {
+                while (sqlite3_step(st) == SQLITE_ROW) {
+                    std::string r;
+                    for (int i = 0; i < sqlite3_column_count(st); ++i) {
+                        const unsigned char* t = sqlite3_column_text(st, i);
+                        r += (t ? reinterpret_cast<const char*>(t) : "<null>");
+                        r += '|';
+                    }
+                    out.push_back(r);
+                }
+                sqlite3_finalize(st);
+            }
+            return out;
+        };
+        auto compare = [&](const std::string& label, std::vector<std::string> a,
+                           std::vector<std::string> b) {
+            std::sort(a.begin(), a.end());
+            std::sort(b.begin(), b.end());
+            if (a != b) {
+                std::println("    EQUIVALENCE DIFF in {}:", label);
+                for (size_t i = 0; i < std::max(a.size(), b.size()); ++i) {
+                    const std::string& x = i < a.size() ? a[i] : "<missing in migrated>";
+                    const std::string& y = i < b.size() ? b[i] : "<missing in fresh>";
+                    if (x != y) {
+                        std::println("      migrated: {}", x);
+                        std::println("      fresh:    {}", y);
+                        break;
+                    }
+                }
+            }
+            CHECK(a == b);
+        };
+
+        const std::string tables_sql =
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name";
+        auto t_mig = rows(mig, tables_sql);
+        compare("table set", t_mig, rows(fre, tables_sql));
+        CHECK(t_mig.size() >= 15);
+
+        for (const auto& trow : t_mig) {
+            std::string t = trow;
+            t.pop_back();  // trailing '|' from rows()
+            compare("columns of " + t,
+                    rows(mig, "SELECT * FROM pragma_table_info('" + t + "')"),
+                    rows(fre, "SELECT * FROM pragma_table_info('" + t + "')"));
+            compare("foreign keys of " + t,
+                    rows(mig, "SELECT \"from\",\"table\",\"to\",on_delete FROM pragma_foreign_key_list('" + t + "')"),
+                    rows(fre, "SELECT \"from\",\"table\",\"to\",on_delete FROM pragma_foreign_key_list('" + t + "')"));
+        }
+
+        {
+            auto idx  = rows(mig, "SELECT type||'|'||name||'|'||COALESCE(sql,'<none>') "
+                                  "FROM sqlite_master WHERE type IN ('index','trigger')");
+            auto idxf = rows(fre, "SELECT type||'|'||name||'|'||COALESCE(sql,'<none>') "
+                                  "FROM sqlite_master WHERE type IN ('index','trigger')");
+            for (auto& s : idx)  s = norm_ws(s);
+            for (auto& s : idxf) s = norm_ws(s);
+            compare("indexes/triggers", idx, idxf);
+        }
+        compare("views",
+                rows(mig, "SELECT name FROM sqlite_master WHERE type = 'view'"),
+                rows(fre, "SELECT name FROM sqlite_master WHERE type = 'view'"));
+
+        sqlite3_close(mig);
+        sqlite3_close(fre);
+        fs::remove(fresh_db);
+        fs::remove(fresh_db + "-wal");
+        fs::remove(fresh_db + "-shm");
+    }
+
     // The pre-migration backup archive lands next to the DB; remove it.
     for (const auto& e : fs::directory_iterator(fs::path(TEMP_DB).parent_path()))
         if (e.path().filename().string().starts_with("ragger_test_backend_BACKUP_"))
             fs::remove(e.path());
+    cleanup();
+}
+
+// PHASE9: the leg's pre-checks run BEFORE any change and refuse duplicates
+// with a pointed message; the transaction rollback must leave the DB
+// exactly as it was (db_version still 0.16, placeholder paths not applied).
+void test_migrate_0_16_to_0_17_rejects(ragger::Embedder& emb) {
+    auto make_fixture = [&](bool dup_chunks, bool dup_episodes) {
+        cleanup();
+        sqlite3* raw = nullptr;
+        CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+        std::string ddl = R"(
+            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO settings VALUES ('db_version', '0.16');
+            CREATE TABLE turns (
+                turn_id INTEGER PRIMARY KEY AUTOINCREMENT, user_text TEXT NOT NULL,
+                assistant_text TEXT, model_id INTEGER, session_id INTEGER,
+                created_at INTEGER NOT NULL,
+                unigram_count INTEGER NOT NULL DEFAULT 0,
+                bigram_count INTEGER NOT NULL DEFAULT 0,
+                embedding_version INTEGER, embedding BLOB);
+            CREATE TABLE document_sources (
+                document_source_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT, path TEXT, year INTEGER,
+                tags TEXT NOT NULL DEFAULT '',
+                imported_at INTEGER NOT NULL);
+            INSERT INTO document_sources (title, path, year, tags, imported_at)
+                VALUES ('Doc', '/dup.md', 2026, '', 1760000000),
+                       ('Pathless', NULL, NULL, '', 1760000001);
+            CREATE TABLE documents (
+                document_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                text TEXT NOT NULL, tags TEXT NOT NULL DEFAULT '',
+                chunk_index INTEGER,
+                document_source_id INTEGER REFERENCES document_sources(document_source_id),
+                modified_on INTEGER,
+                embedding_version INTEGER, embedding BLOB);
+            CREATE TABLE summaries (
+                summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                text TEXT NOT NULL, level TEXT NOT NULL,
+                tags TEXT NOT NULL DEFAULT '',
+                session_id INTEGER, model_id INTEGER,
+                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                unigram_count INTEGER NOT NULL DEFAULT 0,
+                bigram_count INTEGER NOT NULL DEFAULT 0,
+                embedding_version INTEGER, embedding BLOB);
+        )";
+        if (dup_chunks)
+            ddl += "INSERT INTO documents (text, chunk_index, document_source_id, modified_on) "
+                   "VALUES ('dup a', 1, 1, 100), ('dup b', 1, 1, 101);";
+        else
+            ddl += "INSERT INTO documents (text, chunk_index, document_source_id, modified_on) "
+                   "VALUES ('ok', 1, 1, 100);";
+        if (dup_episodes)
+            ddl += "INSERT INTO summaries (text, level, session_id, created_at, updated_at) "
+                   "VALUES ('e1','episode',1,500,600), ('e2','episode',1,500,700);";
+        else
+            ddl += "INSERT INTO summaries (text, level, session_id, created_at, updated_at) "
+                   "VALUES ('e1','episode',1,500,600);";
+        CHECK(sqlite3_exec(raw, ddl.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(raw);
+    };
+
+    auto expect_refused = [&](const char* needle) {
+        bool threw = false;
+        try {
+            ragger::sqlite::Backend db(emb, TEMP_DB);
+            db.close();
+        } catch (const std::runtime_error& e) {
+            threw = true;
+            const std::string m = e.what();
+            CHECK(m.find(needle) != std::string::npos);
+            CHECK(m.find("nothing was changed") != std::string::npos);
+        }
+        CHECK(threw);
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_text(raw, "SELECT value FROM settings WHERE key = 'db_version'") == "0.16");
+        // The placeholder-path UPDATE that runs ahead of the checks must be
+        // rolled back with everything else.
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM document_sources WHERE path IS NULL") == 1);
+        sqlite3_close(raw);
+        for (const auto& e : fs::directory_iterator(fs::path(TEMP_DB).parent_path()))
+            if (e.path().filename().string().starts_with("ragger_test_backend_BACKUP_"))
+                fs::remove(e.path());
+        cleanup();
+    };
+
+    make_fixture(/*dup_chunks=*/true, /*dup_episodes=*/false);
+    expect_refused("2 chunks share (source 1, chunk_index 1)");
+
+    make_fixture(/*dup_chunks=*/false, /*dup_episodes=*/true);
+    expect_refused("2 episodes share (session 1, created_at 500)");
+}
+
+// PHASE9: final schema assembly — the kLegs predicate drives backup/VACUUM
+// gating; every table has a <table>_view except an explicit allow-list (a
+// future table without a view fails here); users_view never exposes hashes.
+void test_p9_schema_assembly(ragger::Embedder& emb) {
+    using ragger::sqlite::Backend;
+
+    // kLegs origins are pending; the target, fresh, and unknown are not.
+    CHECK(Backend::migration_pending("0.12"));
+    CHECK(Backend::migration_pending("0.15"));
+    CHECK(Backend::migration_pending("0.16"));
+    CHECK(!Backend::migration_pending("0.17"));
+    CHECK(!Backend::migration_pending(""));
+    CHECK(!Backend::migration_pending("0.11"));
+    CHECK(!Backend::migration_pending("0.99"));
+
+    cleanup();
+    Backend db(emb, TEMP_DB);
+
+    sqlite3* raw = p1_open_raw();
+    const std::set<std::string> allowed_no_view = {
+        "sqlite_sequence", "semqlite_config", "settings", "terms"};
+    std::vector<std::string> tables;
+    sqlite3_stmt* st = nullptr;
+    CHECK(sqlite3_prepare_v2(raw,
+        "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+        -1, &st, nullptr) == SQLITE_OK);
+    while (sqlite3_step(st) == SQLITE_ROW)
+        tables.push_back(reinterpret_cast<const char*>(sqlite3_column_text(st, 0)));
+    sqlite3_finalize(st);
+    CHECK(tables.size() >= 15);  // sanity: the full 0.17 table set
+    for (const auto& t : tables) {
+        if (allowed_no_view.count(t)) continue;
+        char* q = sqlite3_mprintf(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = '%q_view'",
+            t.c_str());
+        bool has = false;
+        if (sqlite3_prepare_v2(raw, q, -1, &st, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(st) == SQLITE_ROW) has = sqlite3_column_int(st, 0) == 1;
+            sqlite3_finalize(st);
+        }
+        sqlite3_free(q);
+        if (!has) std::println("    MISSING view for table {}", t);
+        CHECK(has);
+    }
+
+    // users_view must not expose hashes (inspection views are readable by
+    // anyone who can open the DB).
+    CHECK(sqlite3_prepare_v2(raw, "PRAGMA table_info(users_view)", -1, &st, nullptr) == SQLITE_OK);
+    int users_cols = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        std::string col = reinterpret_cast<const char*>(sqlite3_column_text(st, 1));
+        if (col.find("hash") != std::string::npos)
+            std::println("    users_view LEAKS column {}", col);
+        CHECK(col.find("hash") == std::string::npos);
+        ++users_cols;
+    }
+    sqlite3_finalize(st);
+    CHECK(users_cols == 4);  // id, username, created_at, updated_at
+
+    sqlite3_close(raw);
+    db.close();
     cleanup();
 }
 
@@ -1939,6 +2210,20 @@ void test_document_path_unique(ragger::Embedder& emb) {
     c.text = "No path."; c.title = "Pathless";
     bool threw = false;
     try { db.store_document(c); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+
+    // PHASE9: (source, chunk_index) is the chunk key — a second chunk at
+    // position 1 of the same document is a caller error with a pointed
+    // message.
+    ragger::DocumentChunk dup = a;
+    dup.text = "Different text, same slot.";
+    threw = false;
+    try { db.store_document(dup); }
+    catch (const std::invalid_argument& e) {
+        threw = true;
+        CHECK(std::string(e.what()).find("document chunk already exists: /tmp/u.md chunk 1")
+              != std::string::npos);
+    }
     CHECK(threw);
 
     db.close();
@@ -4497,6 +4782,8 @@ int main() {
     test_structured_decision_evidence(emb);
     test_orphan_turn_summary_protected(emb);
     test_migrate_0_16_to_0_17(emb);
+    test_migrate_0_16_to_0_17_rejects(emb);
+    test_p9_schema_assembly(emb);
     test_document_path_unique(emb);
     test_document_list_and_delete(emb);
     test_invalidate_all_caches(emb);

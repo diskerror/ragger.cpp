@@ -244,8 +244,12 @@ namespace fs = std::filesystem;
             exec(std::format("CREATE VIEW {} AS {}", name, body));
         };
 
+        // PHASE9: hashes are deliberately NOT exposed — these views exist
+        // for human inspection (semqlite), and a view that prints a
+        // token/password hash turns any casual read of the DB into a
+        // credential leak.
         view("users_view", R"(
-            SELECT id, username, token_hash, password_hash,
+            SELECT id, username,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
                    datetime(updated_at, 'unixepoch', 'localtime') AS updated_at
             FROM users
@@ -297,8 +301,10 @@ namespace fs = std::filesystem;
         // the old summaries view is gone with its table (PHASE8); knowledge_view
         // covers notes now.
         // knowledge_view (PHASE7): replaces decisions_view + insights_view.
-        // No *_evidence_view: the old evidence tables never had one (same
-        // convention kept for knowledge_turn_evidence / _document_evidence).
+        // PHASE9: the evidence tables get views too — every table must have
+        // a <table>_view (coverage test), so the old "no evidence views"
+        // convention is retired. Plain passthroughs: no timestamps to
+        // render, ids are already the readable values.
         view("knowledge_view", R"(
             SELECT knowledge_id, kind, text, status, tags,
                    trigger, rationale, scope, supersedes, session_id, model_id,
@@ -320,6 +326,13 @@ namespace fs = std::filesystem;
                    embedding_version,
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM documents
+        )");
+        view("knowledge_turn_evidence_view", R"(
+            SELECT knowledge_id, turn_summary_id FROM knowledge_turn_evidence
+        )");
+        view("knowledge_document_evidence_view", R"(
+            SELECT evidence_id, knowledge_id, document_id, document_source_path, chunk_index
+            FROM knowledge_document_evidence
         )");
 
         // Junction views (v0.16): the raw <t>_terms tables store term_id, which

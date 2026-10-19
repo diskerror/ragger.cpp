@@ -31,6 +31,11 @@ public:
     explicit Backend(const std::string& db_path, bool readonly = false);
     ~Backend() override;
 
+    /// PHASE9: true iff this binary migrates FROM `version` in-process
+    /// (a kLegs origin, not already current). Thin public window onto the
+    /// Impl::kLegs chain for tests and tooling.
+    static bool migration_pending(const std::string& version);
+
     /// Path to the database file.
     std::string db_path() const override;
 

@@ -3,6 +3,7 @@
 
 #include "check.h"
 #include <iostream>
+#include <print>
 #include <string>
 #include <vector>
 
@@ -151,8 +152,62 @@ void p3_pin_all_tables() {
 
 } // namespace
 
+// PHASE9 Step 1: the WITHOUT ROWID junction shape must give the hot paths
+// index-backed plans — term->postings and doc_freq ride the PK B-tree (no
+// SCAN of the junction), and delete-by-row uses the secondary
+// idx_<table>_terms_row index.
+void p9_junction_plans() {
+    std::println("  p9_junction_plans...");
+    sqlite3* db = nullptr;
+    CHECK(sqlite3_open(":memory:", &db) == SQLITE_OK);
+    CHECK(sqlite3_exec(db, "PRAGMA foreign_keys = ON", nullptr, nullptr, nullptr) == SQLITE_OK);
+    const char* ddl =
+        "CREATE TABLE knowledge (knowledge_id INTEGER PRIMARY KEY, text TEXT,"
+        "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);";
+    CHECK(sqlite3_exec(db, ddl, nullptr, nullptr, nullptr) == SQLITE_OK);
+    ragger::sqlite::TextIndex idx(db);
+    idx.create_schema();
+
+    auto plan_of = [&](const std::string& sql) {
+        sqlite3_stmt* st = nullptr;
+        const std::string eqp = "EXPLAIN QUERY PLAN " + sql;
+        if (sqlite3_prepare_v2(db, eqp.c_str(), -1, &st, nullptr) != SQLITE_OK) {
+            std::println("    plan prepare failed: {} ({})", eqp, sqlite3_errmsg(db));
+            CHECK(false);
+            return std::string();
+        }
+        std::string plan;
+        while (sqlite3_step(st) == SQLITE_ROW)
+            plan += std::string(reinterpret_cast<const char*>(sqlite3_column_text(st, 3))) + " | ";
+        sqlite3_finalize(st);
+        std::println("    {}", plan);
+        return plan;
+    };
+
+    // postings: term -> rows (the score_query hot path)
+    auto p = plan_of("SELECT j.knowledge_id, j.count, b.unigram_count, b.bigram_count "
+                     "FROM knowledge_terms j JOIN knowledge b ON b.knowledge_id = j.knowledge_id "
+                     "WHERE j.term_id = 1");
+    CHECK(p.find("PRIMARY KEY") != std::string::npos);
+    CHECK(p.find("SCAN knowledge_terms") == std::string::npos);
+
+    // delete by row id (write path)
+    p = plan_of("DELETE FROM knowledge_terms WHERE knowledge_id = 1");
+    CHECK(p.find("idx_knowledge_terms_row") != std::string::npos);
+    CHECK(p.find("SCAN knowledge_terms") == std::string::npos);
+
+    // doc_freq
+    p = plan_of("SELECT COUNT(*) FROM knowledge_terms WHERE term_id = 1");
+    CHECK(p.find("PRIMARY KEY") != std::string::npos || p.find("COVERING") != std::string::npos);
+
+    sqlite3_close(db);
+    std::println(" OK");
+}
+
+
 int main() {
     p3_registry_checks();
+    p9_junction_plans();
     p3_pin_all_tables();
 
     sqlite3* db = nullptr;

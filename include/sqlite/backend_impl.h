@@ -163,6 +163,22 @@ struct Backend::Impl {
     /// lands) under the single backup taken above.
     void run_pending_migrations(const std::string& from_version);
 
+    /// PHASE9: the in-binary migration legs — ONE source of truth used by
+    /// both migration_pending() and run_pending_migrations() (replaces the
+    /// two per-version if-chains). `to` documents the chain (asserted
+    /// by a p9 test); the chain loop still re-reads db_version() after each
+    /// leg rather than trusting `to`. 0.12/0.15 legs are NOT RUNNABLE since
+    /// 0.17 development (TODO Q1) but stay listed until the pre-0.16
+    /// support decision — migration_pending() must keep treating those
+    /// versions as "we claim to migrate them" exactly as before.
+    struct Leg { std::string_view from; std::string_view to; void (Impl::*fn)(); };
+
+    /// True iff `current_version` is a kLegs origin (a version this binary
+    /// migrates FROM in-process) and not already current. Fresh /
+    /// pre-version DBs ("") and unknown versions return false — those are
+    /// rejected by the hard gate without mutation.
+    static bool migration_pending(const std::string& current_version);
+
     /// 0.12 -> 0.15 migration (in-binary port of scripts/migrate_to_db0.15.sh).
     ///
     /// By the time this runs, create_schema() has ALREADY performed the
@@ -224,6 +240,13 @@ struct Backend::Impl {
     /// the orphan-protection trigger are created after migration in
     /// create_schema().
     void migrate_0_16_to_0_17();
+
+    /// PHASE9: the migration chain, declared after the leg methods it names.
+    static constexpr Leg kLegs[] = {
+        {"0.12", "0.15", &Impl::migrate_0_12_to_0_15},
+        {"0.15", "0.16", &Impl::migrate_0_15_to_0_16},
+        {"0.16", "0.17", &Impl::migrate_0_16_to_0_17},
+    };
 
     /// Custom terms index (v0.16) — replaces both FTS5 layers with a single
     /// flat term table + per-content-type junction tables. See
