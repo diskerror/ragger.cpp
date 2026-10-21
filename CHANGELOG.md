@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.16.2.5
+- Hermes plugin: hooks now actually register. `register()` used `@ctx.hook(...)`, which is not a Hermes API; it raised `AttributeError` on every load (logged as "Memory provider 'ragger' raised after registering (hook)") and left both hooks dead since they were written. They now use `ctx.register_hook(name, callback)`: `post_tool_call` forwards the built-in `memory` tool's add/replace calls to `/store`, and `post_turn_finalized` captures interrupted turns
+- `install-hermes.sh` patches Hermes core to fire `post_turn_finalized` from `finalize_turn()` (upstream has no hook that carries message text on an interrupted turn: hermes-agent#108808). Idempotent; re-run after every `hermes update`
+- `install-hermes.sh` restores the core patch that passes `model=` to `on_turn_start()`. Upstream never shipped it; the installer dropped it on a false belief that it had, and after a `hermes update` stashed the local edit (2026-09-15) every turn was stored with a NULL `model_id`. Handles both known call shapes
+- Dropped the pinned `CMAKE_OSX_DEPLOYMENT_TARGET` of 26.0 (it caused "built for newer macOS" link warnings on newer hosts)
+
 ## v0.16.2.4
 - Linux builds now prefer clang: when neither `CC`/`CXX` nor `-DCMAKE_CXX_COMPILER` is set, CMake picks `clang++`/`clang` (unversioned, then 21 down to 16 — Debian installs it as e.g. `clang++-19`). This matches c_lib, whose `WAVE.h` relies on a clang-accepted layout that GCC rejects, and matches macOS, where `gcc` is already Apple clang. No effect on macOS
 - Fixed ambiguous `Stmt::bind(int, long long)` overload errors on Linux, where `int64_t` is `long` (macOS: `long long`); `util/sqlite.h` gains a `long long` overload enabled only where the two differ

@@ -671,7 +671,10 @@ def register(ctx) -> None:
     provider = RaggerMemoryProvider()
     ctx.register_memory_provider(provider)
 
-    @ctx.hook("post_tool_call")
+    # NOTE: register_hook(name, callback) is the real API. The decorator form
+    # `@ctx.hook(...)` does not exist; it raised AttributeError on every load,
+    # which Hermes logged as "raised after registering (hook)" and which left
+    # BOTH hooks below unregistered.
     def _forward_memory_to_ragger(tool_name: str, args: dict, result: str, **kwargs) -> None:
         """Forward memory(action='add') calls to Ragger store."""
         if tool_name != "memory":
@@ -689,7 +692,8 @@ def register(ctx) -> None:
             {"text": content, "metadata": {"category": category, "source": "memory-tool"}},
         )
 
-    @ctx.hook("post_turn_finalized")
+    ctx.register_hook("post_tool_call", _forward_memory_to_ragger)
+
     def _capture_interrupted_turn(turn_data: Optional[dict] = None, **kwargs) -> None:
         """Capture turns that Hermes skips on interrupt (e.g. user /stop).
 
@@ -703,3 +707,8 @@ def register(ctx) -> None:
         if not turn_data or not turn_data.get("interrupted"):
             return
         provider.post_turn_finalized(turn_data)
+
+    # Not an upstream Hermes hook (hermes-agent#108808): it only fires once
+    # scripts/install-hermes.sh has patched Hermes core. Hermes warns about the
+    # unknown name at registration but still stores and dispatches the callback.
+    ctx.register_hook("post_turn_finalized", _capture_interrupted_turn)

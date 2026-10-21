@@ -16,11 +16,8 @@ if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CXX_COMPILER AND NOT DE
         endif()
     endforeach()
 endif()
-if(APPLE)
-    # Has compiled successfully with earlier versions of MacOS. Caveat emptor.
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0" CACHE STRING "Minimum macOS version")
-endif()
-project(ragger VERSION 0.16.2.4 LANGUAGES C CXX)
+
+project(ragger VERSION 0.16.2.5 LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 

@@ -242,6 +242,101 @@ if changed:
     print(f"[+]   updated {cfg_path}")
 PYEOF
 
+# --- Patch Hermes core to pass the live model name to memory providers ---
+#
+# Hermes core calls MemoryProvider.on_turn_start() from agent/turn_context.py
+# WITHOUT the model name (the provider docstring says kwargs "may include
+# model", but nothing sends it), so the plugin can't record which model is
+# conversing (turns.model_id stays NULL). We add model= to that call.
+#
+# This is NOT shipped upstream. `hermes update` autostashes local edits and
+# can fail to re-apply them when turn_context.py moves (it did on 2026-09-15,
+# which is when model_id capture silently stopped), so re-run this installer
+# after every Hermes update. Idempotent; handles both known call shapes.
+
+if command -v python3 >/dev/null 2>&1; then
+    python3 - << 'PYEOF'
+import pathlib, re, sys
+
+path = pathlib.Path.home() / ".hermes" / "hermes-agent" / "agent" / "turn_context.py"
+if not path.exists():
+    print(f"[!]   {path} not found — skipping core patch")
+    print("      (model name won't be recorded until this is patched by hand)")
+    sys.exit(0)
+
+src = path.read_text(encoding="utf-8")
+call = re.search(r"on_turn_start\(\s*agent\._user_turn_count,\s*(_query|_turn_msg)\s*(,[^)]*)?\)", src, re.S)
+if call is None:
+    print(f"[!]   on_turn_start call site not found in {path}")
+    print("      Hermes internals may have changed — patch model= by hand")
+elif "model=" in call.group(0):
+    print("[+]   core model patch already present — no change needed")
+else:
+    old = call.group(0)
+    arg = call.group(1)
+    new = old.replace(arg, arg + ', model=getattr(agent, "model", "") or ""', 1)
+    path.write_text(src.replace(old, new, 1), encoding="utf-8")
+    print(f"[+]   patched {path} (pass model= to on_turn_start)")
+PYEOF
+else
+    warn "python3 not found — cannot apply Hermes core model patch."
+    warn "Manually add 'model=getattr(agent, \"model\", \"\") or \"\"' to the on_turn_start call in"
+    warn "  ~/.hermes/hermes-agent/agent/turn_context.py"
+fi
+
+# --- Patch Hermes core to fire a post_turn_finalized hook ---
+#
+# The plugin captures INTERRUPTED turns (user /stop) through a
+# "post_turn_finalized" plugin hook, but Hermes core has no such hook: the
+# only hook that fires on an interrupted turn (on_session_end) carries no
+# message text. Tracking upstream: NousResearch/hermes-agent#108808. Until that
+# lands we add one call to agent/turn_finalizer.py, right after the external
+# memory sync in finalize_turn(). Idempotent. Like the model patch above, a
+# `hermes update` can undo it, so re-run this installer after every update.
+
+if command -v python3 >/dev/null 2>&1; then
+    python3 - << 'PYEOF'
+import pathlib, sys
+
+path = pathlib.Path.home() / ".hermes" / "hermes-agent" / "agent" / "turn_finalizer.py"
+if not path.exists():
+    print(f"[!]   {path} not found — skipping post_turn_finalized patch")
+    print("      (interrupted turns won't be captured until this is patched by hand)")
+    sys.exit(0)
+
+src = path.read_text(encoding="utf-8")
+marker = "post_turn_finalized"
+anchor = "    # Background memory/skill review runs AFTER delivery"
+patch = '''    # Plugin hook: post_turn_finalized (local patch from Ragger's install-hermes.sh;
+    # not an upstream hook, see hermes-agent#108808). Fires for EVERY turn,
+    # including interrupted ones, so a memory plugin can capture them.
+    _invoke_hook_safely(
+        "post_turn_finalized", logger,
+        turn_data={
+            "user": _summarize_user_message_for_log(original_user_message, sep="\\n") if original_user_message else "",
+            "assistant": final_response if isinstance(final_response, str) else "",
+            "model": getattr(agent, "model", "") or "",
+            "session_id": agent.session_id or "",
+            "interrupted": bool(interrupted),
+            "turn_id": turn_id,
+        },
+    )
+
+'''
+
+if marker in src:
+    print("[+]   post_turn_finalized patch already present — no change needed")
+elif src.count(anchor) == 1 and "_invoke_hook_safely" in src and "_summarize_user_message_for_log" in src:
+    path.write_text(src.replace(anchor, patch + anchor, 1), encoding="utf-8")
+    print(f"[+]   patched {path} (fire post_turn_finalized from finalize_turn)")
+else:
+    print(f"[!]   finalize_turn anchor not found in {path}")
+    print("      Hermes internals may have changed — patch post_turn_finalized by hand")
+PYEOF
+else
+    warn "python3 not found — cannot apply the Hermes core post_turn_finalized patch."
+fi
+
 # --- Done ---
 
 echo ""
