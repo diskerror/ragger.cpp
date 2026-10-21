@@ -1,9 +1,21 @@
 # Changelog
 
-## Unreleased
+## v0.16.2.5
+- Hermes plugin: hooks now actually register. `register()` used `@ctx.hook(...)`, which is not a Hermes API; it raised `AttributeError` on every load (logged as "Memory provider 'ragger' raised after registering (hook)") and left both hooks dead since they were written. They now use `ctx.register_hook(name, callback)`: `post_tool_call` forwards the built-in `memory` tool's add/replace calls to `/store`, and `post_turn_finalized` captures interrupted turns
+- `install-hermes.sh` patches Hermes core to fire `post_turn_finalized` from `finalize_turn()` (upstream has no hook that carries message text on an interrupted turn: hermes-agent#108808). Idempotent; re-run after every `hermes update`
+- `install-hermes.sh` restores the core patch that passes `model=` to `on_turn_start()`. Upstream never shipped it; the installer dropped it on a false belief that it had, and after a `hermes update` stashed the local edit (2026-09-15) every turn was stored with a NULL `model_id`. Handles both known call shapes
+- Dropped the pinned `CMAKE_OSX_DEPLOYMENT_TARGET` of 26.0 (it caused "built for newer macOS" link warnings on newer hosts)
+
+## v0.16.2.4
+- Linux builds now prefer clang: when neither `CC`/`CXX` nor `-DCMAKE_CXX_COMPILER` is set, CMake picks `clang++`/`clang` (unversioned, then 21 down to 16 — Debian installs it as e.g. `clang++-19`). This matches c_lib, whose `WAVE.h` relies on a clang-accepted layout that GCC rejects, and matches macOS, where `gcc` is already Apple clang. No effect on macOS
+- Fixed ambiguous `Stmt::bind(int, long long)` overload errors on Linux, where `int64_t` is `long` (macOS: `long long`); `util/sqlite.h` gains a `long long` overload enabled only where the two differ
+- Verified: full build + all 18 tests pass on Debian 13 (clang 19), both with c_lib fetched from GitHub and with a sibling `../c_lib`
 - Fetched dependencies are now pinned and cloned/downloaded at configure time instead of living in (or being silently missing from) the tree: `tokenizers-cpp` is fetched at the commit in `cmake/pins.cmake` (previously a git-ignored local copy, so a fresh clone could not build); c_lib's GitHub fallback is pinned the same way; ONNX Runtime archives are verified against pinned SHA-256 checksums
 - `-DDEPS_LATEST=ON` tracks each upstream's newest commit for development and records what it used in `build/deps-resolved.cmake`; `scripts/pin-deps.sh` writes those commits into `cmake/pins.cmake` before tagging; `update_deps` target refreshes on demand
 - README/getting-started corrected: tokenizers-cpp was documented as vendored in the repo
+
+## v0.16.2.3
+- README: clone `master` for the stable release (`dev` is the default branch)
 
 ## v0.16.2.2
 - SQLite now comes from c_lib's vendored build (`diskerror_sqlite3`, SQLite 3.54.0) with `SQLITE_DEFAULT_FOREIGN_KEYS=1` — FK rules are enforced on every connection by default; `PRAGMA foreign_keys = OFF` still works for migrations. `-DRAGGER_SYSTEM_SQLITE=ON` links the system library instead
