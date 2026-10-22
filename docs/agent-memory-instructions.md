@@ -14,7 +14,7 @@ Names vary by host. Use the ones you have:
 | Quick recall | `search` | `ragger_search` | `memory_search` |
 | Quick save | `store` | `ragger_store` | `memory_store` |
 | Layered search, read, recent history | `memory_search`, `memory_get`, `memory_timeline` | same | `memory_search`, `memory_get` |
-| Structured saves | `memory_decision`, `memory_note` | same | n/a |
+| Structured saves (decisions, notes, insights) | `memory_decision`, `memory_note` | same | n/a |
 | Curation | `memory_update`, `memory_review` | same | n/a |
 
 If you only have the quick pair, use it for everything below.
@@ -55,6 +55,16 @@ Pick the tool by the shape of the thing:
   facts `project:<name>`. If you are synthesizing something from earlier
   results, pass their turn_summary ids as `evidence` and it is stored as an
   insight linked to its sources.
+- **An insight**: a conclusion you drew by combining several earlier
+  memories (a pattern across sessions, a recurring cause, how two facts fit
+  together). Find the sources with `memory_search` or `memory_timeline`, then
+  `memory_note` with their **turn_summary ids** in `evidence`; it is stored
+  as `kind: "insight"` linked to those sources. Only write one when the
+  evidence supports it: state the conclusion, not a recap, and do not pass
+  evidence you did not actually read. Plain notes (no `evidence`) are for
+  things the user told you or you observed directly. Find insights later with
+  `memory_search` `kinds=["insight"]`; `memory_get` `expand="sources"` shows
+  what one rests on.
 - Both results may carry `possible_supersedes`: existing decisions this one
   might replace. It is a hint, nothing was changed. Look at them and, if one
   is really replaced, store again with `supersedes`.
