@@ -103,7 +103,12 @@ mkdir -p "$HOME/.ragger"
 if [ ! -f "$INSTR_SRC" ]; then
     warn "Instructions source missing at $INSTR_SRC — skipping (built-in fallback will be used)."
 elif [ -f "$INSTR_DST" ]; then
-    info "  kept existing $INSTR_DST (edit it to customize agent guidance)"
+    if cmp -s "$INSTR_SRC" "$INSTR_DST"; then
+        info "  $INSTR_DST is up to date"
+    else
+        cp "$INSTR_SRC" "$INSTR_DST.new"
+        warn "  kept your $INSTR_DST (differs from the shipped version); shipped copy at $INSTR_DST.new"
+    fi
 else
     cp "$INSTR_SRC" "$INSTR_DST"
     info "  installed $INSTR_DST"

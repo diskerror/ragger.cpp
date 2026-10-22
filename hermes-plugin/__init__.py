@@ -687,6 +687,15 @@ class RaggerMemoryProvider(MemoryProvider):
             self._model = model
 
     def system_prompt_block(self) -> str:
+        # The full usage guidance, read at call time so an edit to the file
+        # applies from the next session. Falls back to a short static block if
+        # the file is missing (installer not run).
+        try:
+            text = _INSTRUCTIONS_PATH.read_text(encoding="utf-8").strip()
+        except OSError:
+            text = ""
+        if text:
+            return text
         return (
             "# Ragger Memory\n"
             "Local semantic memory is active. Use ragger_search to recall past context, "
