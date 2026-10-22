@@ -5,6 +5,7 @@
 - The legacy `settings` stamp rows move over once, idempotently, whenever the user schema is created (not tied to `db_version`, so an already-stamped 0.17 file is fixed on next open). A stamp already present in `semqlite_config` wins. Nothing is published while embeddings are degraded
 - With an external engine the recorded identity model is the endpoint's own model name (`embedding_external_model`), so `semqlite_config.embedding_model` is usable by the http embedder
 - API keys are environment variables. `embedding_external_api_key` and `summarizer_api_key` settings are replaced by `embedding_api_key_env` and `summarizer_api_key_env`, which hold only the variable NAME (validated as an identifier, so a pasted key is rejected). The dashboard no longer sends a key, the daemon reads its own. A launchd daemon does not inherit the shell environment: set the variables in the plist. Import scripts read the same variable
+- Views: only the date-conversion views remain (9). Dropped the two `knowledge_*_evidence_view` passthroughs and the five `<table>_terms_view` junction views; they are dropped by name from existing files on open. The view-coverage test now checks every remaining view converts a date
 - Docs/tests: `semqlite_config` migration test (model-free), API-key environment test
 
 ## v0.16.2.5

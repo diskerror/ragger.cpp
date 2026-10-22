@@ -2132,8 +2132,14 @@ void test_p9_schema_assembly(ragger::Embedder& emb) {
     Backend db(emb, TEMP_DB);
 
     sqlite3* raw = p1_open_raw();
-    const std::set<std::string> allowed_no_view = {
-        "sqlite_sequence", "semqlite_config", "settings", "terms"};
+    // Views exist only to render date integers as date strings, so a table
+    // with no date column (evidence links, the terms index, the <t>_terms
+    // junctions, settings) has none.
+    std::set<std::string> allowed_no_view = {
+        "sqlite_sequence", "semqlite_config", "settings", "terms",
+        "knowledge_turn_evidence", "knowledge_document_evidence"};
+    for (const auto& tt : ragger::sqlite::kTextTables)
+        allowed_no_view.insert(tt.junction);
     std::vector<std::string> tables;
     sqlite3_stmt* st = nullptr;
     CHECK(sqlite3_prepare_v2(raw,
@@ -2156,6 +2162,28 @@ void test_p9_schema_assembly(ragger::Embedder& emb) {
         sqlite3_free(q);
         if (!has) std::println("    MISSING view for table {}", t);
         CHECK(has);
+    }
+
+    // Every remaining view converts a date integer; no evidence or term-junction
+    // view exists.
+    {
+        sqlite3_stmt* vs = nullptr;
+        CHECK(sqlite3_prepare_v2(raw,
+            "SELECT name, sql FROM sqlite_master WHERE type = 'view'",
+            -1, &vs, nullptr) == SQLITE_OK);
+        int nviews = 0;
+        while (sqlite3_step(vs) == SQLITE_ROW) {
+            ++nviews;
+            const std::string vname = reinterpret_cast<const char*>(sqlite3_column_text(vs, 0));
+            const std::string vsql  = reinterpret_cast<const char*>(sqlite3_column_text(vs, 1));
+            const bool retired = vname.ends_with("_terms_view") || vname.ends_with("_evidence_view");
+            if (retired || vsql.find("datetime(") == std::string::npos)
+                std::println("    unexpected view {}", vname);
+            CHECK(!retired);
+            CHECK(vsql.find("datetime(") != std::string::npos);
+        }
+        sqlite3_finalize(vs);
+        CHECK(nviews == 9);
     }
 
     // users_view must not expose hashes (inspection views are readable by

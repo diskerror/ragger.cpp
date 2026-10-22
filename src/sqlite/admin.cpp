@@ -298,10 +298,10 @@ namespace fs = std::filesystem;
     }
 
 
-    /// Convenience views: epoch ints rendered as local datetime, embedding
-    /// BLOBs collapsed to a has_embedding flag, and term_ids resolved to the
-    /// readable term. These exist purely for human inspection (sqlite3 CLI,
-    /// GUI browsers) -- no application code reads them.
+    /// Convenience views: epoch ints rendered as local datetime, and embedding
+    /// BLOBs collapsed to a has_embedding flag. One per table that holds a
+    /// date integer. These exist purely for human inspection (semqlite, GUI
+    /// browsers) -- no application code reads them.
     ///
     /// DROP-then-CREATE, deliberately NOT "CREATE VIEW IF NOT EXISTS". A view
     /// holds no data, so recreating is free -- and IF NOT EXISTS meant an
@@ -374,10 +374,6 @@ namespace fs = std::filesystem;
         // the old summaries view is gone with its table (PHASE8); knowledge_view
         // covers notes now.
         // knowledge_view (PHASE7): replaces decisions_view + insights_view.
-        // PHASE9: the evidence tables get views too — every table must have
-        // a <table>_view (coverage test), so the old "no evidence views"
-        // convention is retired. Plain passthroughs: no timestamps to
-        // render, ids are already the readable values.
         view("knowledge_view", R"(
             SELECT knowledge_id, kind, text, status, tags,
                    trigger, rationale, scope, supersedes, session_id, model_id,
@@ -400,28 +396,17 @@ namespace fs = std::filesystem;
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM documents
         )");
-        view("knowledge_turn_evidence_view", R"(
-            SELECT knowledge_id, turn_summary_id FROM knowledge_turn_evidence
-        )");
-        view("knowledge_document_evidence_view", R"(
-            SELECT evidence_id, knowledge_id, document_id, document_source_path, chunk_index
-            FROM knowledge_document_evidence
-        )");
 
-        // Junction views (v0.16): the raw <t>_terms tables store term_id, which
-        // is unreadable on inspection. Each view resolves it to the actual term
-        // string. An INNER JOIN is correct here -- the FK to terms(term_id) is
-        // NOT NULL, so a missing parent would be corruption, and surfacing zero
-        // rows for it is the right signal. Ordered most-frequent-first within a
-        // record, which is what you almost always want when eyeballing why
-        // something did or didn't match. Driven by the registry (PHASE3 Step 3).
-        for (const auto& t : kTextTables) {
-            view(std::string(t.junction) + "_view", std::format(
-                "SELECT j.{0} AS {0}, t.term, j.count "
-                "FROM {1} j JOIN terms t ON t.term_id = j.term_id "
-                "ORDER BY j.{0}, j.count DESC, t.term",
-                t.pk, t.junction));
-        }
+        // Retired: the evidence passthrough views and the <t>_terms junction
+        // views (term_id resolved to the term). Only the views that render a
+        // date integer as a date string remain; anything else is a join the
+        // inspector can write. They are dropped by NAME, never "every view not
+        // listed above", so a view a user made in their own copy survives.
+        for (const char* name : {"knowledge_turn_evidence_view",
+                                 "knowledge_document_evidence_view"})
+            exec(std::format("DROP VIEW IF EXISTS {}", name));
+        for (const auto& t : kTextTables)
+            exec(std::format("DROP VIEW IF EXISTS {}_view", t.junction));
     }
 
 
