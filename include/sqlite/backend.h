@@ -206,6 +206,8 @@ public:
     std::optional<UserInfo> get_user_by_token_hash(const std::string& token_hash) override;
     std::optional<std::string> get_setting(const std::string& key) override;
     void set_setting(const std::string& key, const std::string& value) override;
+    std::optional<std::string> get_semqlite_config(const std::string& key) override;
+    void set_semqlite_config(const std::string& key, const std::string& value) override;
 
     // --- Schema introspection ---
     std::vector<SchemaObject> list_schema_objects() override;

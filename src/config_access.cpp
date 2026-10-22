@@ -103,11 +103,11 @@ const std::unordered_map<std::string_view, std::string Config::*>& string_fields
         {"desired_embedding_engine",      &Config::desired_embedding_engine},
         {"embedding_engine",              &Config::embedding_engine},
         {"embedding_external_host",       &Config::embedding_external_host},
-        {"embedding_external_api_key",    &Config::embedding_external_api_key},
+        {"embedding_api_key_env",         &Config::embedding_api_key_env},
         {"embedding_external_model",      &Config::embedding_external_model},
         {"summarizer_model",      &Config::summarizer_model},
         {"summarizer_api_url",    &Config::summarizer_api_url},
-        {"summarizer_api_key",    &Config::summarizer_api_key},
+        {"summarizer_api_key_env", &Config::summarizer_api_key_env},
         {"summarizer_prompt",     &Config::summarizer_prompt},
         {"log_level",             &Config::log_level},
         {"default_recipe",        &Config::default_recipe},
@@ -292,6 +292,17 @@ std::expected<void, ConfigSetError> validate_config_value(std::string_view key,
             return std::unexpected(ConfigSetError::InvalidValue);
         }
         case CfgType::String:
+            // A credential must never be typed here: these keys name an
+            // environment variable. Accept only a valid identifier, so a
+            // pasted key (dashes, dots, long mixed text) is rejected.
+            if (key == "embedding_api_key_env" || key == "summarizer_api_key_env") {
+                const bool ident = !value.empty()
+                    && !std::isdigit(static_cast<unsigned char>(value[0]))
+                    && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+                           return std::isalnum(c) || c == '_'; });
+                if (!ident) return std::unexpected(ConfigSetError::InvalidValue);
+            }
+            return {};
         case CfgType::Path:
         case CfgType::Text:
             return {};
@@ -332,6 +343,8 @@ std::expected<ConfigSetResult, ConfigSetError> apply_config_value(
         return std::unexpected(ConfigSetError::UnknownKey);
     }
 
+    resolve_api_keys(cfg);   // a changed *_api_key_env name takes effect now
+
     ConfigSetResult r;
     r.restart_required = (meta->edit == CfgEdit::RestartRequired);
     r.rebuild_required = (meta->edit == CfgEdit::RebuildRequired);
@@ -364,6 +377,16 @@ bool set_config_field_raw(Config& cfg, std::string_view key, const std::string& 
         return true;
     }
     return false;
+}
+
+void resolve_api_keys(Config& cfg) {
+    auto from_env = [](const std::string& name) -> std::string {
+        if (name.empty()) return {};
+        const char* v = std::getenv(name.c_str());
+        return v ? std::string(v) : std::string();
+    };
+    cfg.embedding_external_api_key = from_env(cfg.embedding_api_key_env);
+    cfg.summarizer_api_key         = from_env(cfg.summarizer_api_key_env);
 }
 
 void overlay_settings_from_db(Config& cfg, const std::string& db_path) {
@@ -405,6 +428,8 @@ void overlay_settings_from_db(Config& cfg, const std::string& db_path) {
         cfg.desired_embedding_dimensions = cfg.embedding_dimensions;
     if (cfg.desired_embedding_engine.empty())
         cfg.desired_embedding_engine = cfg.embedding_engine;
+
+    resolve_api_keys(cfg);
 
     // Seed desired_port from the committed port when unset, so the dashboard
     // shows the live port as the starting target. The startup rectify (see

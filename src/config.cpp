@@ -477,6 +477,7 @@ int reload_config() {
     RELOAD(inference_max_tokens);
     RELOAD(summarizer_model);
     RELOAD(summarizer_api_url);
+    RELOAD(summarizer_api_key_env);
     RELOAD(summarizer_api_key);
     RELOAD(summarizer_max_tokens);
     RELOAD(summarizer_target_pct);

@@ -4721,6 +4721,73 @@ void p6_test_pending_predicate(ragger::Embedder& emb) {
 }
 
 
+// semqlite_config (the facts-about-the-file table SemanticSQLite reads): the
+// embedding identity stamps live there under SemanticSQLite's key names, the
+// legacy `settings` rows move over once, and Ragger's change-management keys
+// stay in `settings`. Model-free: uses the DB-only constructor.
+static void sq_test_semqlite_config() {
+    std::print("  sq_test_semqlite_config...\n");
+    cleanup();
+    {
+        ragger::sqlite::Backend db(TEMP_DB);
+        CHECK(!db.get_semqlite_config("embedding_model").has_value());
+
+        // The three identity stamps redirect to semqlite_config, renamed.
+        db.set_setting("embedding_model", "org/model");
+        db.set_setting("vector_type", "f32");
+        db.set_setting("dimensions", "384");
+        CHECK(db.get_semqlite_config("embedding_model").value_or("") == "org/model");
+        CHECK(db.get_semqlite_config("embedding_vector_type").value_or("") == "f32");
+        CHECK(db.get_semqlite_config("embedding_dims").value_or("") == "384");
+        // ...and read back through the old names.
+        CHECK(db.get_setting("vector_type").value_or("") == "f32");
+        CHECK(db.get_setting("dimensions").value_or("") == "384");
+
+        // Change-management state stays in `settings`.
+        db.set_setting("desired_embedding_model", "x/y");
+        CHECK(!db.get_semqlite_config("desired_embedding_model").has_value());
+
+        // Direct semqlite_config access (publish_semqlite_identity uses it).
+        db.set_semqlite_config("embedding_offset", "0");
+        CHECK(db.get_semqlite_config("embedding_offset").value_or("") == "0");
+        db.close();
+    }
+
+    sqlite3* raw = p1_open_raw();
+    // Nothing duplicated in `settings`.
+    CHECK(p1_scalar_int(raw,
+        "SELECT count(*) FROM settings WHERE key IN "
+        "('embedding_model','vector_type','dimensions')") == 0);
+    CHECK(p1_scalar_int(raw,
+        "SELECT count(*) FROM settings WHERE key = 'desired_embedding_model'") == 1);
+
+    // Legacy move: a file from before this change keeps its stamps in
+    // `settings`. One of them ALSO already exists in semqlite_config, which
+    // must win (INSERT OR IGNORE).
+    CHECK(sqlite3_exec(raw,
+        "DELETE FROM semqlite_config WHERE key IN ('embedding_model','embedding_dims');"
+        "UPDATE semqlite_config SET value = 'bf16' WHERE key = 'embedding_vector_type';"
+        "INSERT INTO settings (key, value) VALUES "
+        "('embedding_model','old/model'),('vector_type','int8'),('dimensions','128')",
+        nullptr, nullptr, nullptr) == SQLITE_OK);
+    sqlite3_close(raw);
+
+    {
+        ragger::sqlite::Backend db(TEMP_DB);   // reopening runs the move
+        CHECK(db.get_semqlite_config("embedding_model").value_or("") == "old/model");
+        CHECK(db.get_semqlite_config("embedding_dims").value_or("") == "128");
+        CHECK(db.get_semqlite_config("embedding_vector_type").value_or("") == "bf16");
+        db.close();
+    }
+    raw = p1_open_raw();
+    CHECK(p1_scalar_int(raw,
+        "SELECT count(*) FROM settings WHERE key IN "
+        "('embedding_model','vector_type','dimensions')") == 0);
+    sqlite3_close(raw);
+    cleanup();
+    std::println(" ok");
+}
+
 int main() {
     TestEnv env("sqlite_backend");  // must be first: isolates from ~/.ragger
     // Need config for model dir
@@ -4730,6 +4797,7 @@ int main() {
     p1r_test_transaction();
     p3_test_known_layers();
     p3s_test_status_vocabulary();
+    sq_test_semqlite_config();
 
     if (!fs::exists(model_dir + "/model.onnx") && !fs::exists(model_dir + "/onnx/model.onnx")) {
         std::cerr << "Skipping backend tests: model not found at " << model_dir << "\n";

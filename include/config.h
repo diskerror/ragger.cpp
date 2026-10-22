@@ -69,8 +69,26 @@ struct Config {
     std::string embedding_engine = "internal";  // "internal" or "external"
     std::string embedding_external_host = "";   // IP or hostname
     int         embedding_external_port = 0;    // 0 = not configured
-    std::string embedding_external_api_key = "";
     std::string embedding_external_model = "";  // model name from the endpoint
+
+    // API keys are environment variables, never stored. The settings table
+    // holds only the NAME of the variable (embedding_api_key_env); the value
+    // below is resolved from the process environment when the config loads
+    // (resolve_api_keys()) and is runtime-only: not a schema key, never saved.
+    // The same name is published to semqlite_config so SemanticSQLite reads
+    // the same variable. A daemon started by launchd does not inherit the
+    // shell environment: set the variable in the launchd plist.
+    std::string embedding_api_key_env = "RAGGER_EMBEDDING_API_KEY";
+    std::string embedding_external_api_key = "";   // resolved from the env var
+
+    /// The model name recorded as the identity of the stored vectors: the
+    /// internal model id, or the endpoint's own model name when the engine is
+    /// external (SemanticSQLite's embedding_model means "the server's model
+    /// id" for an http embedder).
+    std::string embedding_identity_model() const {
+        return embedding_engine == "external" ? embedding_external_model
+                                              : embedding_model;
+    }
 
     // --- Desired embedding identity (staged target for re-embedding) -------
     // Editable via dashboard/CLI. The CURRENT identity above is what the
@@ -130,7 +148,8 @@ struct Config {
     // --- [summarizer] section — model, endpoint, and prompt for L2/L3 ---
     std::string summarizer_model   = "";
     std::string summarizer_api_url = "";
-    std::string summarizer_api_key = "";
+    std::string summarizer_api_key_env = "RAGGER_SUMMARIZER_API_KEY";  // env var NAME
+    std::string summarizer_api_key = "";   // resolved from the env var; runtime-only
     int         summarizer_max_tokens  = 0;  // 0 = inherit from [inference] max_tokens
     // Target summary length as a percentage of the raw turn size (1-100).
     // 0 = use built-in default of 30%.

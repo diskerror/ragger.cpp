@@ -443,6 +443,16 @@ std::optional<std::string> Backend::get_setting(const std::string& key) {
     return pImpl->get_setting(key);
 }
 
+std::optional<std::string> Backend::get_semqlite_config(const std::string& key) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->get_semqlite_config(key);
+}
+
+void Backend::set_semqlite_config(const std::string& key, const std::string& value) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    pImpl->set_semqlite_config(key, value);
+}
+
 void Backend::set_setting(const std::string& key, const std::string& value) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     pImpl->set_setting(key, value);

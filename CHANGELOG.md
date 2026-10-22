@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased (0.17)
+- `semqlite_config` moves into Ragger's database as the shared facts-about-the-file table SemanticSQLite reads. The embedding identity stamps (`embedding_model`, `vector_type`, `dimensions`) now live there under SemanticSQLite's names (`embedding_model`, `embedding_vector_type`, `embedding_dims`); Ragger also publishes `embedding_embedder` (`onnx`, or `http://host:port` for an external engine), `embedding_offset` (0: 0.17 stores bare vectors, the version is a column) and `embedding_api_key_env`. `semqlite memories.db` then runs `EMBED()` with no setup. Ragger's change-management state (`desired_*`, `embedding_version`, `reembedding*`) stays in `settings`
+- The legacy `settings` stamp rows move over once, idempotently, whenever the user schema is created (not tied to `db_version`, so an already-stamped 0.17 file is fixed on next open). A stamp already present in `semqlite_config` wins. Nothing is published while embeddings are degraded
+- With an external engine the recorded identity model is the endpoint's own model name (`embedding_external_model`), so `semqlite_config.embedding_model` is usable by the http embedder
+- API keys are environment variables. `embedding_external_api_key` and `summarizer_api_key` settings are replaced by `embedding_api_key_env` and `summarizer_api_key_env`, which hold only the variable NAME (validated as an identifier, so a pasted key is rejected). The dashboard no longer sends a key, the daemon reads its own. A launchd daemon does not inherit the shell environment: set the variables in the plist. Import scripts read the same variable
+- Docs/tests: `semqlite_config` migration test (model-free), API-key environment test
+
 ## v0.16.2.5
 - Hermes plugin: hooks now actually register. `register()` used `@ctx.hook(...)`, which is not a Hermes API; it raised `AttributeError` on every load (logged as "Memory provider 'ragger' raised after registering (hook)") and left both hooks dead since they were written. They now use `ctx.register_hook(name, callback)`: `post_tool_call` forwards the built-in `memory` tool's add/replace calls to `/store`, and `post_turn_finalized` captures interrupted turns
 - `install-hermes.sh` patches Hermes core to fire `post_turn_finalized` from `finalize_turn()` (upstream has no hook that carries message text on an interrupted turn: hermes-agent#108808). Idempotent; re-run after every `hermes update`

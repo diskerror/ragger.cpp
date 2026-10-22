@@ -66,4 +66,12 @@ void UserStore::set_setting(const std::string& key, const std::string& value) {
     pImpl->backend->set_setting(key, value);
 }
 
+std::optional<std::string> UserStore::get_semqlite_config(const std::string& key) {
+    return pImpl->backend->get_semqlite_config(key);
+}
+
+void UserStore::set_semqlite_config(const std::string& key, const std::string& value) {
+    pImpl->backend->set_semqlite_config(key, value);
+}
+
 } // namespace ragger

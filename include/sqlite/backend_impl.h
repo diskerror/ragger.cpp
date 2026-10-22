@@ -288,6 +288,10 @@ struct Backend::Impl {
 
     void set_setting(const std::string& key, const std::string& value);
 
+    std::optional<std::string> get_semqlite_config(const std::string& key);
+
+    void set_semqlite_config(const std::string& key, const std::string& value);
+
     // ---- Schema introspection (gap closure) --------------------------------
 
     std::vector<SchemaObject> list_schema_objects();

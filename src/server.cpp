@@ -1148,7 +1148,10 @@ struct Server::Impl {
                                                     httplib::Response& res) {
             std::string host = req.get_param_value("host");
             std::string port_s = req.get_param_value("port");
-            std::string key = req.get_param_value("key");
+            // The API key is an environment variable the daemon resolves itself;
+            // a `key` query parameter is no longer needed (and would put a
+            // credential in a URL).
+            std::string key = config().embedding_external_api_key;
             if (host.empty() || port_s.empty()) {
                 res.status = 400;
                 res.set_content(R"({"error":"host and port required"})", "application/json");
@@ -1178,7 +1181,7 @@ struct Server::Impl {
             std::string host = body.value("host", "");
             int port = body.value("port", 0);
             std::string model = body.value("model", "");
-            std::string key = body.value("key", "");
+            std::string key = config().embedding_external_api_key;   // from the env var
             if (host.empty() || port == 0 || model.empty()) {
                 res.status = 400;
                 res.set_content(R"({"error":"host, port, and model required"})", "application/json");

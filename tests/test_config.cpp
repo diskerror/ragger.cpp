@@ -302,43 +302,48 @@ void test_ragger_base_override() {
     std::println(" OK");
 }
 
-// PHASE2 Step 5: secret config keys never expose their value through the
-// read JSON, "<set>" written back is a no-op, and a real new value stores.
-void test_secret_config_masking() {
-    std::print("  test_secret_config_masking...\n");
+// API keys are environment variables: the settings table holds only the NAME
+// of the variable, the value is resolved at runtime and never saved, and a
+// pasted credential is rejected as a name.
+void test_api_keys_come_from_environment() {
+    std::print("  test_api_keys_come_from_environment...\n");
     using namespace ragger;
+
+    for (const char* key : {"summarizer_api_key_env", "embedding_api_key_env"}) {
+        const auto* meta = lang::config_meta(key);
+        assert(meta != nullptr);
+        assert(!meta->secret);                       // a name, not a credential
+        // The old value-bearing keys are gone from the schema.
+    }
+    assert(lang::config_meta("summarizer_api_key") == nullptr);
+    assert(lang::config_meta("embedding_external_api_key") == nullptr);
+
+    ::setenv("RAGGER_TEST_SUMMARIZER_KEY", "s3cr3t-value", 1);
+    ::unsetenv("RAGGER_TEST_UNSET_VAR");
 
     auto set = [](std::string_view k, std::string_view v) {
         auto r = set_config_persisted(k, v);
         assert(r.has_value());
     };
 
-    for (const char* key : {"summarizer_api_key", "embedding_external_api_key"}) {
-        const auto* meta = lang::config_meta(key);
-        assert(meta != nullptr);
-        assert(meta->secret);
+    // Naming a variable resolves the live key from the environment...
+    set("summarizer_api_key_env", "RAGGER_TEST_SUMMARIZER_KEY");
+    assert(config().summarizer_api_key == "s3cr3t-value");
+    // ...the persisted/read value is the NAME, never the key...
+    assert(get_config_value(config(), "summarizer_api_key_env").value_or("")
+           == "RAGGER_TEST_SUMMARIZER_KEY");
+    // ...an unset variable gives an empty key, not an error...
+    set("summarizer_api_key_env", "RAGGER_TEST_UNSET_VAR");
+    assert(config().summarizer_api_key.empty());
+    // ...and a pasted credential is not a valid variable name.
+    assert(!set_config_persisted("summarizer_api_key_env", "sk-abc-123.def").has_value());
+    assert(!set_config_persisted("embedding_api_key_env", "9STARTS_WITH_DIGIT").has_value());
+    set("embedding_api_key_env", "RAGGER_TEST_SUMMARIZER_KEY");
+    assert(config().embedding_external_api_key == "s3cr3t-value");
 
-        // Empty: value stays "", but the entry is flagged secret.
-        set(key, "");
-        auto j = config_entry_json(*meta, get_config_value(config(), key).value_or(""));
-        assert(j["secret"] == true);
-        assert(j["value"] == "");
-
-        // Set a real value: reads show the mask, never the credential.
-        set(key, "s3cr3t-value");
-        j = config_entry_json(*meta, get_config_value(config(), key).value_or(""));
-        assert(j["secret"] == true);
-        assert(j["value"] == "<set>");
-
-        // Echoing the mask back must NOT clobber the stored credential.
-        set(key, "<set>");
-        assert(get_config_value(config(), key).value_or("") == "s3cr3t-value");
-
-        // A real new value still stores.
-        set(key, "new-value");
-        assert(get_config_value(config(), key).value_or("") == "new-value");
-        set(key, "");  // leave clean
-    }
+    set("summarizer_api_key_env", "");   // leave clean (back to the default name)
+    set("embedding_api_key_env", "");
+    ::unsetenv("RAGGER_TEST_SUMMARIZER_KEY");
     std::println(" ok");
 }
 
@@ -356,7 +361,7 @@ int main() {
     test_inline_comments();
 
     test_default_values();
-    test_secret_config_masking();
+    test_api_keys_come_from_environment();
 
     test_ragger_base_default();
     test_ragger_base_override();

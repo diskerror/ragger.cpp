@@ -257,6 +257,14 @@ public:
     std::vector<TurnRecord> turns_by_session_desc(const std::string& session_guid,
                                                    int limit = 0);
 
+    /// Record in semqlite_config the facts SemanticSQLite needs that Ragger
+    /// derives rather than stores: embedder (onnx, or http://host:port when the
+    /// engine is external), embedding_offset (0) and the API-key variable name.
+    /// The model / vector type / dimensions rows are written by set_setting().
+    /// Called at startup (when not degraded) and wherever the identity is
+    /// promoted.
+    void publish_semqlite_identity();
+
     /// Settings access (user_store).
     std::optional<std::string> get_setting(const std::string& key);
     void set_setting(const std::string& key, const std::string& value);

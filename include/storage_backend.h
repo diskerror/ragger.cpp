@@ -522,6 +522,14 @@ public:
     /// Set or replace a settings value.
     virtual void set_setting(const std::string& key, const std::string& value) = 0;
 
+    /// Read a row of `semqlite_config` (the facts-about-the-file table shared
+    /// with SemanticSQLite, keyed by SemanticSQLite's own names). nullopt if
+    /// the key (or the table) is absent.
+    virtual std::optional<std::string> get_semqlite_config(const std::string& key) = 0;
+
+    /// Set or replace a `semqlite_config` row.
+    virtual void set_semqlite_config(const std::string& key, const std::string& value) = 0;
+
     // --- Schema introspection (gap closure: replaces export.cpp's raw sqlite_master / PRAGMA calls) ---
 
     /// All schema objects (tables, indexes, triggers) from sqlite_master, ordered

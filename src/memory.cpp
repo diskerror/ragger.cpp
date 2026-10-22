@@ -104,7 +104,7 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     //                                          re-encoding (so an aborted rebuild
     //                                          leaves settings≠config and the
     //                                          guard still catches it next time).
-    const std::string current_model = config().embedding_model;
+    const std::string current_model = config().embedding_identity_model();
     const std::string current_vtype =
         vector_codec::canonical(config().embedding_vector_type);
     const std::string current_dims = std::to_string(config().embedding_dimensions);
@@ -141,6 +141,12 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
         }
     }
 
+    // Tell SemanticSQLite how this file's vectors are made (embedder, offset,
+    // API-key variable name). Never when degraded: the recorded identity is
+    // then unproven and must not be restated as fact.
+    if (!skip_embedding_guard && !embeddings_degraded_)
+        publish_semqlite_identity();
+
     // NOTE: embedding backfill no longer runs here. A large backfill (e.g.
     // after a blob-format or version change touching every row) used to run
     // synchronously in this constructor and could block daemon startup for
@@ -163,6 +169,25 @@ RaggerMemory::~RaggerMemory() {
 std::vector<TurnRecord> RaggerMemory::turns_by_session_desc(
         const std::string& session_guid, int limit) {
     return backend_->turns_by_session_desc(session_guid, limit);
+}
+
+void RaggerMemory::publish_semqlite_identity() {
+    // The model, vector type and dimensions are already recorded in
+    // semqlite_config under SemanticSQLite's names (get/set_setting redirect
+    // them). This adds the three facts Ragger derives rather than stores.
+    const auto& c = config();
+    std::string embedder = "onnx";
+    if (c.embedding_engine == "external") {
+        if (c.embedding_external_host.empty() || c.embedding_external_port <= 0)
+            return;   // not configured: nothing truthful to publish
+        embedder = std::format("http://{}:{}", c.embedding_external_host,
+                               c.embedding_external_port);
+    }
+    user_store_->set_semqlite_config("embedding_embedder", embedder);
+    // 0.17 stores the bare vector payload (the version byte lives in the
+    // embedding_version column), so there is no header to skip.
+    user_store_->set_semqlite_config("embedding_offset", "0");
+    user_store_->set_semqlite_config("embedding_api_key_env", c.embedding_api_key_env);
 }
 
 std::optional<std::string> RaggerMemory::get_setting(const std::string& key) {
@@ -372,16 +397,25 @@ RaggerMemory::EmbeddingStatus RaggerMemory::embedding_status() {
     EmbeddingStatus s;
     // Current = what the stored vectors are (drift-guard settings keys).
     s.current_model = user_store_->get_setting("embedding_model")
-                          .value_or(config().embedding_model);
+                          .value_or(config().embedding_identity_model());
     s.current_vtype = user_store_->get_setting("vector_type")
                           .value_or(config().embedding_vector_type);
     s.current_dims  = std::stoi(user_store_->get_setting("dimensions")
                           .value_or(std::to_string(config().embedding_dimensions)));
     s.current_engine = config().embedding_engine;
     // Desired = staged config target (seeded from current when unset).
-    s.desired_model = config().desired_embedding_model.empty()
-                          ? s.current_model
-                          : config().desired_embedding_model;
+    // The recorded identity names the endpoint's own model when the engine is
+    // external, so the desired side must be compared in the same terms.
+    const std::string desired_engine_now =
+        config().desired_embedding_engine.empty() ? s.current_engine
+                                                  : config().desired_embedding_engine;
+    s.desired_model =
+        desired_engine_now == "external"
+            ? config().embedding_external_model
+            : (config().desired_embedding_model.empty()
+                   ? (s.current_engine == "external" ? config().embedding_model
+                                                     : s.current_model)
+                   : config().desired_embedding_model);
     s.desired_vtype = config().desired_embedding_vector_type.empty()
                           ? s.current_vtype : config().desired_embedding_vector_type;
     s.desired_dims  = config().desired_embedding_dimensions == 0
@@ -404,7 +438,7 @@ bool RaggerMemory::embeddings_unavailable() const {
 bool RaggerMemory::try_recover_embeddings() {
     if (!embeddings_degraded_) return false;  // nothing to recover
 
-    const std::string current_model = config().embedding_model;
+    const std::string current_model = config().embedding_identity_model();
     const std::string current_vtype =
         vector_codec::canonical(config().embedding_vector_type);
     const std::string current_dims = std::to_string(config().embedding_dimensions);
@@ -581,7 +615,11 @@ int RaggerMemory::update_embeddings() {
         // degrades search the same way but is also actionable: housekeeping
         // knows to finish the job instead of waiting for a human.
         user_store_->set_setting("reembed_repair_pending", "true");
-        user_store_->set_setting("embedding_model", desired_model_name);
+        // Recorded identity: the endpoint's own model name when external.
+        user_store_->set_setting(
+            "embedding_model",
+            desired_engine == "external" ? config().embedding_external_model
+                                         : desired_model_name);
         user_store_->set_setting("vector_type", vtype);
         user_store_->set_setting("dimensions", std::to_string(dims));
         // Write the same identity to both the settings table and the live
@@ -598,6 +636,7 @@ int RaggerMemory::update_embeddings() {
             vector_codec::parse(vtype).value_or(vector_codec::VectorType::F16));
         mutable_config().embedding_dimensions = dims;
         mutable_config().embedding_engine = desired_engine;
+        publish_semqlite_identity();   // embedder / offset now match the new engine
         previous_embedder = std::exchange(embedder_, std::move(desired_embedder));
         // Repoint the backend at the new Embedder before the first re-encode
         // (the previous one is held in previous_embedder, still alive).

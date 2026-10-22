@@ -42,6 +42,18 @@ using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 
+    /// `settings` keys whose value lives in `semqlite_config` under
+    /// SemanticSQLite's own key name (embedding identity stamps: what the stored
+    /// vectors are). The `desired_*` staging keys and `embedding_version` are
+    /// Ragger's change-management state and deliberately stay in `settings`.
+    struct SemqliteSettingKey { const char* setting; const char* semqlite; };
+    static constexpr SemqliteSettingKey kSemqliteSettingKeys[] = {
+        {"embedding_model", "embedding_model"},
+        {"vector_type",     "embedding_vector_type"},
+        {"dimensions",      "embedding_dims"},
+    };
+
+
     /// Users + settings tables — declarative, no in-place migration
     /// (single-user app; pre-v2 data is exported out-of-band). `users` mirrors
     /// the reference DDL plus `password_hash` for credentialed access.
@@ -71,6 +83,32 @@ namespace fs = std::filesystem;
                 value TEXT NOT NULL
             )
         )");
+
+        // semqlite_config: the facts-about-the-file table SemanticSQLite reads
+        // when it opens this database (same shape as the table its
+        // SEMQLITE_SAVE() writes). It records what the stored vectors ARE
+        // (model, dtype, dimensions, offset, embedder) in SemanticSQLite's own
+        // key names so a user can write EMBED() queries against this file with
+        // no setup. Everything Ragger uses to MANAGE a change (desired_*,
+        // embedding_version, reembedding*) stays in `settings`.
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS semqlite_config (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            )
+        )");
+
+        // One-time, idempotent move of the legacy identity stamps out of
+        // `settings`. Gated on the rows existing (not on db_version) because a
+        // DB already stamped 0.17 never re-runs the 0.16 -> 0.17 leg.
+        // INSERT OR IGNORE keeps a value already in semqlite_config.
+        for (const auto& m : kSemqliteSettingKeys) {
+            exec(std::format(
+                "INSERT OR IGNORE INTO semqlite_config (key, value) "
+                "SELECT '{1}', value FROM settings WHERE key = '{0}'",
+                m.setting, m.semqlite));
+            exec(std::format("DELETE FROM settings WHERE key = '{0}'", m.setting));
+        }
     }
 
 
@@ -130,7 +168,38 @@ namespace fs = std::filesystem;
     }
 
 
+    /// The semqlite_config key that now holds a `settings` key's value, or
+    /// nullptr when the setting still lives in `settings`.
+    static const char* semqlite_key_for(const std::string& setting_key) {
+        for (const auto& m : kSemqliteSettingKeys)
+            if (setting_key == m.setting) return m.semqlite;
+        return nullptr;
+    }
+
+
+    std::optional<std::string> Backend::Impl::get_semqlite_config(const std::string& key) {
+        // A read-only connection (export) never ran create_user_schema().
+        if (!table_exists("semqlite_config")) return std::nullopt;
+        Stmt s(db, "SELECT value FROM semqlite_config WHERE key = ?");
+        s.bind(1, key);
+        if (s.step()) return s.column_text_opt(0);
+        return std::nullopt;
+    }
+
+
+    void Backend::Impl::set_semqlite_config(const std::string& key, const std::string& value) {
+        Stmt s(db, "INSERT OR REPLACE INTO semqlite_config (key, value) VALUES (?, ?)");
+        s.bind(1, key).bind(2, value).step();
+    }
+
+
     std::optional<std::string> Backend::Impl::get_setting(const std::string& key) {
+        // The embedding identity stamps live in semqlite_config now. Fall back
+        // to a leftover `settings` row only for a connection that never ran the
+        // move (read-only export of a not-yet-opened older file).
+        if (const char* sk = semqlite_key_for(key)) {
+            if (auto v = get_semqlite_config(sk)) return v;
+        }
         Stmt s(db, "SELECT value FROM settings WHERE key = ?");
         s.bind(1, key);
         if (s.step()) return s.column_text_opt(0);
@@ -139,6 +208,10 @@ namespace fs = std::filesystem;
 
 
     void Backend::Impl::set_setting(const std::string& key, const std::string& value) {
+        if (const char* sk = semqlite_key_for(key)) {
+            set_semqlite_config(sk, value);
+            return;
+        }
         Stmt s(db, "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
         s.bind(1, key).bind(2, value).step();
     }

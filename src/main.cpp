@@ -1294,11 +1294,12 @@ int main(int argc, char **argv) {
             if (target == "all") {
                 ragger::UserStore settings_store(db_path);
                 settings_store.set_setting(
-                    "embedding_model", cfg.embedding_model);
+                    "embedding_model", cfg.embedding_identity_model());
                 settings_store.set_setting(
                     "vector_type", ragger::vector_codec::canonical(cfg.embedding_vector_type));
                 settings_store.set_setting(
                     "dimensions", std::to_string(cfg.embedding_dimensions));
+                memory.publish_semqlite_identity();
             }
             Diskerror::Logger::info(std::format(
                 "re-embed finished: {} row(s) re-encoded (table '{}'){}",
