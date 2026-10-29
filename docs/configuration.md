@@ -80,11 +80,11 @@ mismatches abort startup with a clear error.
 
 | Key          | Default            | Description                                                  |
 |--------------|--------------------|--------------------------------------------------------------|
-| `model`      | `all-MiniLM-L6-v2` | Sentence-transformer model name; resolved under `~/.ragger/models/<model-name>/`. |
+| `model`      | `sentence-transformers/all-MiniLM-L12-v2` | Sentence-transformer model name (the `provider/model` form is what the code resolves); looked up under `~/.ragger/models/<provider>/<model-name>/`. |
 | `dimensions` | `384`              | Vector size; must match the model.                           |
 | `vector_type`| `f16`              | On-disk precision. `f16` halves blob size; `f32` is full precision. In-memory math is always f32. |
 
-Model files always live at `~/.ragger/models/<model-name>/` — not
+Model files always live at `~/.ragger/models/<provider>/<model-name>/` — not
 independently configurable; hardcoded like every other Ragger path.
 
 ## `[search]`

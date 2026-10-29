@@ -12,7 +12,7 @@ Documents are split into paragraph-sized chunks (short paragraphs merged
 to a minimum size, never split mid-sentence). Each chunk is:
 
 1. Embedded into a 384-dimensional vector using a local sentence-transformer
-   model (`all-MiniLM-L6-v2`)
+   model, `all-MiniLM-L12-v2` by default
 2. Tokenized into stemmed unigrams and within-sentence bigrams, each paired
    with a Double Metaphone phonetic code, and indexed into Ragger's own
    `terms` / `<table>_terms` tables (v0.16 — replaces the older SQLite FTS5 +

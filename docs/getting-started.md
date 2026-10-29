@@ -69,8 +69,11 @@ into the build dir, so the first configure needs network and `git`; a
 `vendor/onnxruntime/` override or `-DFETCHCONTENT_SOURCE_DIR_TOKENIZERS_CPP=/path`
 works for offline builds. Versions are pinned in `cmake/pins.cmake`.
 
-`scripts/install-bin.sh` downloads the all-MiniLM-L6-v2 embedding model on
-first run (~90 MB). Re-run the script to retry if the network was down.
+`scripts/install-bin.sh` downloads three models on first run (~340 MB total):
+`all-MiniLM-L6-v2` and `all-MiniLM-L12-v2` (the default embedding model) under
+`~/.ragger/models/sentence-transformers/`, and the `all-MiniLM-L12-v2-qa-all-ONNX`
+model under `~/.ragger/models/onnx-community/`. Re-run the script to retry if the
+network was down.
 
 ## First run
 
@@ -131,7 +134,8 @@ The model is downloaded once by `install-bin.sh` (~90 MB); re-run the
 script if the network was down the first time. There's no separate
 CLI command to fetch it — `install-bin.sh` is the mechanism.
 
-Files land in `~/.ragger/models/all-MiniLM-L6-v2/`.
+Files land under `~/.ragger/models/sentence-transformers/<model>/` (and
+`~/.ragger/models/onnx-community/<model>/` for the QA model).
 
 ## Next steps
 
