@@ -14,6 +14,10 @@
 #include <string>
 #include <thread>
 #include <sqlite3.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 using ragger::is_system_injected_turn;
 using ragger::summarize_transcript;
@@ -395,6 +399,47 @@ void p6_test_episode_boundaries() {
 }
 
 
+// PHASE9A: chat() must give up on an endpoint that accepts and never answers.
+void p9a_test_chat_times_out() {
+    std::println("  p9a_test_chat_times_out...");
+    int ls = ::socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(ls >= 0);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;                                   // kernel picks a free port
+    CHECK(::bind(ls, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0);
+    CHECK(::listen(ls, 1) == 0);
+    socklen_t len = sizeof a;
+    ::getsockname(ls, reinterpret_cast<sockaddr*>(&a), &len);
+    const int port = ntohs(a.sin_port);
+
+    // Accept, then hold the connection open without a byte of reply.
+    std::thread srv([&] {
+        int c = ::accept(ls, nullptr, nullptr);
+        if (c >= 0) { std::this_thread::sleep_for(std::chrono::seconds(4)); ::close(c); }
+    });
+
+    ragger::InferenceClient inf(
+        {ragger::Endpoint("stall", "http://127.0.0.1:" + std::to_string(port) + "/v1")}, "m", 64);
+    inf.timeout_sec = 1;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    bool threw = false;
+    std::string what;
+    try { inf.chat({{"user", "hi"}}); }
+    catch (const std::exception& e) { threw = true; what = e.what(); }
+    const auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - t0).count();
+
+    CHECK(threw);
+    CHECK(secs < 4);                                  // our timeout fired, not the server's hang-up
+    CHECK(what.find("imeout") != std::string::npos);  // curl: "Timeout was reached"
+    srv.join();
+    ::close(ls);
+    std::println(" ok");
+}
+
 int main() {
     TestEnv env("summarizer");
     std::println("test_summarizer:");
@@ -408,6 +453,7 @@ int main() {
     p6_test_episode_boundaries();
     p6_test_live_enqueue_skipped(env.base());
     p6_test_single_scan(env.base());
+    p9a_test_chat_times_out();
     std::println("All summarizer tests passed.");
     return 0;
 }

@@ -39,6 +39,19 @@
 
 namespace ragger::sqlite {
 
+namespace {
+// True iff `v` parses as "<major>.<minor>" and is older than 0.16. Anything
+// that does not parse is NOT "older": the version gate further down rejects it.
+bool older_than_0_16(const std::string& v) {
+    std::istringstream in(v);
+    int major = 0, minor = 0;
+    char dot = 0;
+    if (!(in >> major >> dot >> minor) || dot != '.') return false;
+    return major == 0 && minor < 16;
+}
+} // namespace
+
+
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
@@ -232,6 +245,21 @@ void rebuild_table_column_order(Impl& self,
         // ...): it is taken here, once, before the first structural change.
         const std::string pre_migration_version =
             db_preexisted ? db_version() : std::string();
+
+        // PHASE9A: upgrades are supported from 0.16 only. Refuse anything older
+        // HERE -- before the backup and before the first CREATE/ALTER below --
+        // so a rejected file is left byte-for-byte untouched. An existing DB
+        // with no version row at all is older than 0.12 and is refused too.
+        if (db_preexisted &&
+            (pre_migration_version.empty() || older_than_0_16(pre_migration_version))) {
+            throw std::runtime_error(std::format(
+                "Ragger: this database is schema '{}', older than 0.16, and this build "
+                "cannot upgrade it directly.\n"
+                "Open it once with a Ragger v0.16 build to upgrade it to 0.16, then use this "
+                "build. The file has not been modified.",
+                pre_migration_version.empty() ? "<none>" : pre_migration_version));
+        }
+
         maybe_backup_before_migration(*this, pre_migration_version);
 
         // Users, settings, and session tables — credentials (for read-only

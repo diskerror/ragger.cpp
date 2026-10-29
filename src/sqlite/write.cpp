@@ -1015,6 +1015,13 @@ static std::string tags_from_metadata(const json& metadata) {
     // attempts. Trivial-turn skips are NOT touched -- those are tagged with
     // a real model name or the "(skipped)" pseudo-model (PHASE6 3), never
     // "bad", so this only targets genuine poison-abandon rows.
+    //
+    // PHASE9A: a row whose text IS NULL is also reset. NULL means "unset" (an
+    // '' row means "known empty"/done), and the 29 legacy rows in this state
+    // carry no summary at all, so deleting the placeholder loses nothing and
+    // lets the turn be summarized for real. Before this, such rows matched
+    // neither the '' predicate here nor unsummarized_turns()'s no-row test and
+    // stayed stuck forever. Only rows whose turn still exists are touched.
     int Backend::Impl::reset_abandoned_turn_summaries(int limit) {
         // SQLite's DELETE doesn't support ORDER BY/LIMIT without a special
         // build flag (SQLITE_ENABLE_UPDATE_DELETE_LIMIT), which we don't
@@ -1024,7 +1031,8 @@ static std::string tags_from_metadata(const json& metadata) {
             std::string sel =
                 "SELECT ts.turn_summary_id FROM turn_summaries ts "
                 "JOIN models m ON m.model_id = ts.summary_model_id "
-                "WHERE m.name = 'bad' AND ts.text = '' AND ts.turn_id IS NOT NULL "
+                "WHERE ts.turn_id IS NOT NULL "
+                "  AND ((m.name = 'bad' AND ts.text = '') OR ts.text IS NULL) "
                 "ORDER BY ts.turn_summary_id ASC";
             if (limit > 0) sel += " LIMIT ?";
             Stmt s(db, sel);

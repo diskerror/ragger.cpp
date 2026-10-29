@@ -462,15 +462,19 @@ std::expected<ConfigSetResult, ConfigSetError> set_config_persisted(
 
     // Update the live config first (also validates). On failure, nothing is
     // persisted.
-    Config& cfg = mutable_config();
-    auto applied = apply_config_value(cfg, key, value, allow_locked);
+    std::expected<ConfigSetResult, ConfigSetError> applied =
+        std::unexpected(ConfigSetError::UnknownKey);
+    update_config([&](Config& cfg) {
+        applied = apply_config_value(cfg, key, value, allow_locked);
+        return applied.has_value();   // a rejected value publishes nothing
+    });
     if (!applied.has_value()) return std::unexpected(applied.error());
 
     // Persist to the DB settings table. Empty value stores an empty row,
     // which overlay_settings_from_db() re-interprets as "use default" — so
     // the round-trip stays consistent. Best-effort: if the DB isn't there
     // yet, the live change still stands.
-    const std::string db_path = cfg.resolved_db_path();
+    const std::string db_path = config().resolved_db_path();
     if (std::filesystem::exists(db_path)) {
         UserStore store(db_path);
         store.set_setting(std::string(key), std::string(value));

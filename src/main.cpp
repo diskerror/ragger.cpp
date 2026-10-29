@@ -268,7 +268,7 @@ int main(int argc, char **argv) {
             // dashboard's read-only "TCP Port" field reads this, so without
             // this a --port override would show the stale DB value. desired_port
             // is a separate field and is left untouched.
-            ragger::mutable_config().port = port;
+            ragger::update_config([&](ragger::Config& c) { c.port = port; return true; });
 
             ragger::Server server(memory, host, port);
             bool restart = server.run();

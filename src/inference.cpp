@@ -424,7 +424,7 @@ std::string InferenceClient::chat(const std::vector<Message>& messages,
     }
 
     util::HttpClient http;
-    auto resp = http.post(url, body, headers, /*timeout_sec=*/0);
+    auto resp = http.post(url, body, headers, timeout_sec);
 
     if (!resp.ok()) {
         throw std::runtime_error(std::format(lang::ERR_HTTP_REQUEST, resp.error));

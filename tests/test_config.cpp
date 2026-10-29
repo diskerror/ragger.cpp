@@ -2,13 +2,17 @@
 #include "config_access.h"
 #include "config_schema.h"
 #include "test_env.h"
+#include "check.h"
 #include "util/fs.h"
+#include <atomic>
 #include <cassert>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <filesystem>
 #include <print>
+#include <thread>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -347,10 +351,70 @@ void test_api_keys_come_from_environment() {
     std::println(" ok");
 }
 
+// PHASE9A: the shipped defaults must be applied, every live key accepted.
+void p9a_test_shipped_defaults_applied() {
+    std::print("  p9a_test_shipped_defaults_applied...");
+    for (const auto& k : ragger::default_config_unknown_keys())
+        std::println("\n    unknown default key: {}", k);
+    CHECK(ragger::default_config_unknown_keys().empty());
+    ragger::Config d = ragger::default_config();
+    CHECK(d.summarizer_model == "qwen3-4b-instruct-2507");
+    CHECK(d.summarizer_api_url == "http://localhost:1234/v1");
+    CHECK(d.summarizer_max_tokens == 1024);
+    CHECK(d.summarizer_target_pct == 40);
+    CHECK(d.summarizer_max_pct == 60);
+    CHECK(d.embedding_model == "sentence-transformers/all-MiniLM-L12-v2");
+    CHECK(d.embedding_dimensions == 384);
+    CHECK(d.embedding_vector_type == "f16");
+    CHECK(d.summarizer_prompt.empty());   // empty = built-in default prompt
+    std::println(" ok");
+}
+
+// PHASE9A: config() is an immutable snapshot; writers publish a new one.
+void p9a_test_config_snapshots() {
+    std::print("  p9a_test_config_snapshots...");
+    const ragger::Config* before = &ragger::config();
+    const std::string& held = ragger::config().summarizer_prompt;  // taken BEFORE the updates
+    const std::string held_copy = held;
+
+    std::atomic<bool> stop{false};
+    std::atomic<long> torn{0};
+    std::vector<std::thread> readers;
+    for (int t = 0; t < 4; ++t)
+        readers.emplace_back([&] {
+            while (!stop.load()) {
+                const std::string& s = ragger::config().summarizer_prompt;
+                for (size_t i = 1; i < s.size(); ++i)
+                    if (s[i] != s[0]) { ++torn; break; }   // a torn read mixes characters
+            }
+        });
+    for (int i = 0; i < 300; ++i)
+        CHECK(ragger::update_config([&](ragger::Config& c) {
+            c.summarizer_prompt = (i & 1) ? std::string(5, 'a') : std::string(5000, 'b');
+            return true;
+        }));
+    stop = true;
+    for (auto& r : readers) r.join();
+
+    CHECK(torn.load() == 0);
+    CHECK(held == held_copy);                      // the old snapshot is untouched and still valid
+    CHECK(&ragger::config() != before);            // a new snapshot was published
+    CHECK(ragger::config().summarizer_prompt == std::string(5, 'a'));   // i = 299 is odd
+
+    const ragger::Config* cur = &ragger::config();
+    CHECK(!ragger::update_config([](ragger::Config& c) { c.summarizer_prompt = "zzz"; return false; }));
+    CHECK(&ragger::config() == cur);               // false = nothing published
+
+    ragger::update_config([&](ragger::Config& c) { c.summarizer_prompt = held_copy; return true; });
+    std::println(" ok");
+}
+
 int main() {
-    TestEnv env("config");  // must be first: set_config_persisted touches mutable_config
+    TestEnv env("config");  // must be first: set_config_persisted publishes through update_config
     std::print("Running config tests:\n");
     test_housekeeping_section_parsing();
+    p9a_test_shipped_defaults_applied();
+    p9a_test_config_snapshots();
     test_catch_up_batch_size_default();
     test_catch_up_batch_size_ignores_nonpositive();
     test_logging_section_parsing();

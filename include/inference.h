@@ -71,6 +71,11 @@ public:
     std::string model;
     std::string memory_model;   // [inference.memory] model, or = model
     int max_tokens;
+    /// Whole-request limit for chat(), in seconds. The summarizer runs on ONE
+    /// worker thread that Server::stop() joins; with no limit a stalled
+    /// endpoint hung that thread and `ragger stop` with it. Public so tests
+    /// can shorten it.
+    long timeout_sec = 600;
     std::vector<Endpoint> endpoints;
 
     InferenceClient(const std::vector<Endpoint>& endpoints,

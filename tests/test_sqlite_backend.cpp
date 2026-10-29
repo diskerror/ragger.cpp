@@ -1424,6 +1424,75 @@ static long long p1_scalar_int(sqlite3* raw, const std::string& sql) {
     sqlite3_finalize(st);
     return v;
 }
+
+// PHASE9A: a NULL-text turn_summaries row (legacy, text unset) is reset like a
+// poison-abandon row, so its turn gets summarized for real. A '' row (known
+// empty / trivial skip) and a row with real text are left alone.
+// PHASE9A: a pre-0.16 database is refused before anything is touched.
+static void p9a_test_rejects_pre_016_databases(ragger::Embedder& emb) {
+    for (const char* ver : {"0.12", "0.15", ""}) {   // "" = existing DB with no version row
+        cleanup();
+        {
+            sqlite3* raw = nullptr;
+            CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+            std::string sql =
+                "CREATE TABLE turns (turn_id INTEGER PRIMARY KEY);"
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);";
+            if (std::string(ver) != "")
+                sql += std::string("INSERT INTO settings VALUES ('db_version', '") + ver + "');";
+            CHECK(sqlite3_exec(raw, sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+            sqlite3_close(raw);
+        }
+        bool threw = false;
+        std::string what;
+        try { ragger::sqlite::Backend db(emb, TEMP_DB); }
+        catch (const std::exception& e) { threw = true; what = e.what(); }
+        CHECK(threw);
+        CHECK(what.find("0.16") != std::string::npos);
+
+        // Untouched: still exactly the two tables we created, and no backup file.
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT count(*) FROM sqlite_master WHERE type = 'table'") == 2);
+        sqlite3_close(raw);
+        int backups = 0;
+        for (auto& e : fs::directory_iterator(fs::path(TEMP_DB).parent_path()))
+            if (e.path().filename().string().find("ragger_test_backend.db_BACKUP_") == 0) ++backups;
+        CHECK(backups == 0);
+    }
+    cleanup();
+}
+
+static void p9a_test_reset_null_text_rows(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    int t_null  = db.store_turn("legacy turn one",
+        "a long enough assistant reply for the first legacy turn", "test-model");
+    int t_empty = db.store_turn("hi", "hi", "test-model");
+    int t_text  = db.store_turn("real turn",
+        "a long enough assistant reply that has a real summary", "test-model");
+    CHECK(db.mark_turn_summarized(t_null, "legacy-model"));
+    CHECK(db.mark_turn_summarized(t_empty, "trivial-skip-model"));
+    CHECK(db.finalize_turn_summary(t_text, "A real summary.", "sum-model"));
+
+    sqlite3* raw = p1_open_raw();
+    CHECK(sqlite3_exec(raw,
+        ("UPDATE turn_summaries SET text = NULL WHERE turn_id = " + std::to_string(t_null)).c_str(),
+        nullptr, nullptr, nullptr) == SQLITE_OK);
+    sqlite3_close(raw);
+
+    CHECK(db.reset_abandoned_turn_summaries(0) == 1);   // only the NULL-text row
+    CHECK(!db.turn_summary_exists(t_null));
+    CHECK(db.turn_summary_exists(t_empty));
+    CHECK(db.turn_summary_exists(t_text));
+
+    bool found_null = false;
+    for (auto& p : db.unsummarized_turns(0)) if (p.turn_id == t_null) found_null = true;
+    CHECK(found_null);                                  // back in the candidate set
+
+    CHECK(db.reset_abandoned_turn_summaries(0) == 0);   // clean no-op afterwards
+    db.close();
+    cleanup();
+}
 static std::string p1_scalar_text(sqlite3* raw, const std::string& sql) {
     sqlite3_stmt* st = nullptr;
     CHECK(sqlite3_prepare_v2(raw, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
@@ -4869,6 +4938,8 @@ int main() {
     test_unsummarized_turns_excludes_summarized(emb);
     test_mark_turn_summarized_trivial_turn(emb);
     test_reset_abandoned_turn_summaries(emb);
+    p9a_test_reset_null_text_rows(emb);
+    p9a_test_rejects_pre_016_databases(emb);
     test_note_primitives(emb);
     test_path_normalization(emb);
     test_structured_decision_basic(emb);

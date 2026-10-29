@@ -628,14 +628,17 @@ int RaggerMemory::update_embeddings() {
         // spellings it degrades. Models are stored canonically (provider/model,
         // LM Studio-style) under base_dir/models, so desired_model_name is
         // already the canonical form — just keep both sides symmetric.
-        mutable_config().embedding_model = desired_model_name;
-        mutable_config().embedding_vector_type = vtype;
+        update_config([&](Config& c) {
+            c.embedding_model       = desired_model_name;
+            c.embedding_vector_type = vtype;
+            c.embedding_dimensions  = dims;
+            c.embedding_engine      = desired_engine;
+            return true;
+        });
         // The backend's frozen dtype must follow the config BEFORE any
         // rebuild, or rebuild writes old-dtype blobs under the new name.
         backend_->set_vector_type(
             vector_codec::parse(vtype).value_or(vector_codec::VectorType::F16));
-        mutable_config().embedding_dimensions = dims;
-        mutable_config().embedding_engine = desired_engine;
         publish_semqlite_identity();   // embedder / offset now match the new engine
         previous_embedder = std::exchange(embedder_, std::move(desired_embedder));
         // Repoint the backend at the new Embedder before the first re-encode

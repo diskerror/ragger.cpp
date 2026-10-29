@@ -12,6 +12,7 @@
 #include <map>
 #include <stdexcept>
 #include <expected>
+#include <functional>
 
 namespace ragger {
 
@@ -285,10 +286,29 @@ std::string expand_path(const std::string& path);
 /// only store. This remains only for the config-parser unit tests.
 std::expected<Config, ConfigError> load_config(const std::string& path);
 
+/// The compiled-in defaults, without the settings-table overlay.
+Config default_config();
+
+/// "section.key" of every live key in the embedded defaults that the config
+/// schema did not accept (silently dropped otherwise). Empty when healthy.
+std::vector<std::string> default_config_unknown_keys();
+
 /// Global config instance. Must call init_config() before use.
+///
+/// The returned reference is to an IMMUTABLE snapshot and stays valid for the
+/// life of the process: writers (SIGHUP reload, PUT /config, `ragger config
+/// set`, the embedding-identity promotion) never modify a published Config,
+/// they publish a new one through update_config(). A thread that keeps a
+/// `const auto&` into config() across a reload simply keeps seeing the old
+/// values; it never sees a half-written string.
 const Config& config();
-/// Mutable access for CLI overrides applied at startup.
-Config& mutable_config();
+
+/// Copy the current snapshot, let `fn` modify the copy, and publish it when
+/// `fn` returns true (false = discard the copy, nothing changes). Writers are
+/// serialised. Returns what `fn` returned. Superseded snapshots are kept
+/// until exit (a Config is a few KB and writes are rare), which is what makes
+/// every earlier config() reference safe.
+bool update_config(const std::function<bool(Config&)>& fn);
 
 /// Initialize global config. Call once at startup.
 void init_config();
