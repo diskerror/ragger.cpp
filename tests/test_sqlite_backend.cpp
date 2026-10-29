@@ -2189,8 +2189,10 @@ void test_p9_schema_assembly(ragger::Embedder& emb) {
     using ragger::sqlite::Backend;
 
     // kLegs origins are pending; the target, fresh, and unknown are not.
-    CHECK(Backend::migration_pending("0.12"));
-    CHECK(Backend::migration_pending("0.15"));
+    // PHASE9A: 0.16 is the only supported origin; pre-0.16 versions are not
+    // pending (create_schema() refuses them before touching the file).
+    CHECK(!Backend::migration_pending("0.12"));
+    CHECK(!Backend::migration_pending("0.15"));
     CHECK(Backend::migration_pending("0.16"));
     CHECK(!Backend::migration_pending("0.17"));
     CHECK(!Backend::migration_pending(""));

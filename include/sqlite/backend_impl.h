@@ -146,31 +146,30 @@ struct Backend::Impl {
     // (scripts/migrate_to_db*.sh) and the binary merely hard-gated on the
     // version. To make GitHub-cloned upgrades painless, the known upgrade
     // legs now run in-process on open, chained until the DB reaches
-    // kExpectedDbVersion. Each leg mirrors migrate_documents_normalize()'s
+    // kExpectedDbVersion. Each leg mirrors migrate_0_16_to_0_17()'s
     // shape: one BEGIN/try/COMMIT/ROLLBACK transaction, Logger progress,
     // and post-migration verification that aborts (rolls back) on any
     // inconsistency rather than silently shipping a corrupt index.
     //
     // The legs below are called ONLY from within schema.cpp (constructors,
     // create_schema(), run_pending_migrations()); their supporting helpers
-    // (backup/reopen/pragma/table-rebuild) are file-local there.
+    // (backup/reopen/pragma) are file-local there.
 
     /// Chain the in-binary migration legs until the DB reaches
     /// kExpectedDbVersion (or a leg we don't know about is hit -> leave it for
     /// the hard gate to reject). `from_version` is the on-disk version captured
     /// before create_schema() mutated anything. Each leg advances db_version;
-    /// the loop re-reads it so 0.12 flows 0.12 -> 0.15 -> (0.16 once its leg
-    /// lands) under the single backup taken above.
+    /// the loop re-reads it under the single backup taken above (since
+    /// PHASE9A there is one leg: 0.16 -> 0.17).
     void run_pending_migrations(const std::string& from_version);
 
     /// PHASE9: the in-binary migration legs — ONE source of truth used by
     /// both migration_pending() and run_pending_migrations() (replaces the
     /// two per-version if-chains). `to` documents the chain (asserted
     /// by a p9 test); the chain loop still re-reads db_version() after each
-    /// leg rather than trusting `to`. 0.12/0.15 legs are NOT RUNNABLE since
-    /// 0.17 development (TODO Q1) but stay listed until the pre-0.16
-    /// support decision — migration_pending() must keep treating those
-    /// versions as "we claim to migrate them" exactly as before.
+    /// leg rather than trusting `to`. PHASE9A: upgrades are supported from
+    /// 0.16 only, so this is the single 0.16 -> 0.17 leg; anything older is
+    /// refused by create_schema() before the file is touched.
     struct Leg { std::string_view from; std::string_view to; void (Impl::*fn)(); };
 
     /// True iff `current_version` is a kLegs origin (a version this binary
@@ -179,55 +178,6 @@ struct Backend::Impl {
     /// rejected by the hard gate without mutation.
     static bool migration_pending(const std::string& current_version);
 
-    /// 0.12 -> 0.15 migration (in-binary port of scripts/migrate_to_db0.15.sh).
-    ///
-    /// By the time this runs, create_schema() has ALREADY performed the
-    /// structural half of the 0.15 upgrade on this existing DB:
-    ///   - added embedding_version INTEGER to all five embedded tables
-    ///     (ALTER ADD COLUMN guards, above), and
-    ///   - normalized documents into document_sources via
-    ///     migrate_documents_normalize(), which also CLEARS documents'
-    ///     embedding/embedding_version/phon (they get re-embedded with the
-    ///     title appended).
-    ///
-    /// The remaining data step is the embedding version-byte SPLIT for the
-    /// four tables migrate_documents_normalize did NOT wipe: turns,
-    /// turn_summaries, summaries, decisions. Pre-0.15 blobs stored a 1-byte
-    /// version tag at byte 0 (EmbeddingCodec offset=1); 0.15 blobs are payload
-    /// only (offset=0) with the tag living in the embedding_version column. So
-    /// for every row with a non-NULL embedding: embedding_version = blob[0],
-    /// embedding = blob[1:]. NULL embeddings stay NULL in both columns.
-    ///
-    /// Whole thing runs in one transaction. On any verification failure the
-    /// transaction is rolled back (original rows untouched) and the throw
-    /// propagates -- the pre-migration backup made above is the safety net.
-    void migrate_0_12_to_0_15();
-
-
-    /// One-time in-place migration to the normalized documents schema (0.15).
-    /// Extracts per-document metadata (path/title/year/imported_at) from the
-    /// old flat `documents` rows into `document_sources`, converts imported_at
-    /// text -> unix epoch (stored text is a LOCAL wall-clock timestamp), points
-    /// each chunk at its source via document_source_id, redistributes tags
-    /// (source = intersection of a (path,title) group's chunk tags; chunk keeps
-    /// its own set minus that intersection), clears embedding/embedding_version/
-    /// phon on every doc row (so housekeeping re-embeds with title appended),
-    /// then drops the four extracted columns. Whole thing runs in one
-    /// transaction. Caller gates on column_exists("documents","path").
-    void migrate_documents_normalize();
-
-    /// 0.15 -> 0.16 migration (FTS5 teardown + custom index backfill).
-    ///
-    /// This is the big cutover:
-    /// 1. Drop all FTS5 triggers (both text and phonetic)
-    /// 2. Drop both FTS5 virtual tables
-    /// 3. Drop the `phon` column from all 5 text tables
-    /// 4. Call reindex_table() for each of the 5 tables to populate the custom index
-    /// 5. Update db_version to 0.16
-    ///
-    /// The schema (terms, *_terms, count columns) is created by create_schema()
-    /// BEFORE this runs, and reindex_table() (Step 6) populates them.
-    void migrate_0_15_to_0_16();
 
     /// 0.16 -> 0.17 migration: the whole agent-API schema in one step.
     /// Rebuilds `decisions` (adds trigger, rationale, scope, supersedes,
@@ -243,8 +193,6 @@ struct Backend::Impl {
 
     /// PHASE9: the migration chain, declared after the leg methods it names.
     static constexpr Leg kLegs[] = {
-        {"0.12", "0.15", &Impl::migrate_0_12_to_0_15},
-        {"0.15", "0.16", &Impl::migrate_0_15_to_0_16},
         {"0.16", "0.17", &Impl::migrate_0_16_to_0_17},
     };
 

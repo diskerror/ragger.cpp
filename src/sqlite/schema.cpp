@@ -90,14 +90,6 @@ void require_foreign_keys(Impl& self);
 template <class Impl>
 bool pragma_bool(Impl& self, const char* name);
 
-/// Rebuild one table so its PHYSICAL column order matches the fresh-install
-/// CREATE TABLE (see the definition for the caller contract).
-template <class Impl>
-void rebuild_table_column_order(Impl& self,
-                                const std::string& table,
-                                const std::string& new_ddl,
-                                const std::string& cols);
-
 } // anonymous namespace
 
 
@@ -228,12 +220,10 @@ void rebuild_table_column_order(Impl& self,
         // Capture "was this DB already populated?" BEFORE any CREATE TABLE
         // IF NOT EXISTS runs below -- this is the only reliable way to tell
         // a genuinely fresh install (no memory tables at all yet) from an
-        // existing pre-0.12 DB that simply never had its db_version row
-        // stamped. Only a fresh install should be auto-stamped '0.12' at
-        // the bottom of this function; an existing un-migrated DB must
-        // fail the startup version-gate check so the user runs
-        // scripts/migrate_to_db0.12.sh instead of silently being treated
-        // as current.
+        // existing pre-0.16 DB that simply never had its db_version row
+        // stamped. Only a fresh install is auto-stamped at the bottom of
+        // this function; an existing un-migrated DB is refused by the gate
+        // above instead of silently being treated as current.
         bool db_preexisted = table_exists("turns");
 
         // Capture the on-disk schema version BEFORE any CREATE/ALTER below
@@ -420,34 +410,25 @@ void rebuild_table_column_order(Impl& self,
         if (!column_exists("documents", "bigram_count"))
             exec("ALTER TABLE documents ADD COLUMN bigram_count INTEGER NOT NULL DEFAULT 0");
 
-        // In-place migration to the normalized documents schema (0.15):
-        // extract per-document metadata (path/title/year/imported_at) into
-        // document_sources and slim `documents` to chunks + a document_source_id
-        // FK. Gated on the OLD shape (documents.path exists), NOT the db_version
-        // string -- Reid's live DB is already stamped 0.15 with the OLD shape,
-        // so a version check would wrongly skip it. Idempotent: once path is
-        // gone, this never runs again.
-        if (column_exists("documents", "path"))
-            migrate_documents_normalize();
 
         // Custom terms index (v0.16) — replaces both FTS5 layers with a single
         // flat term table + per-content-type junction tables. Created BEFORE
-        // migrations run, so migrate_0_15_to_0_16() can populate them via
-        // reindex_table(). See ownCloud/Ragger/custom-search-schema.md for
+        // migrations run (the 0.16 -> 0.17 leg repopulates through
+        // reindex_table()). See ownCloud/Ragger/custom-search-schema.md for
         // the design rationale and docs/plans/migration-plan-fts-index.md for
         // the step-by-step build plan.
         create_terms_schema();
 
         // Run any pending in-binary version migration for an existing DB
-        // (e.g. the 0.12 -> 0.15 embedding version-byte split). Advances
+        // (since PHASE9A: the 0.16 -> 0.17 leg only). Advances
         // db_version toward kExpectedDbVersion so the hard gate below passes.
         // No-op on a fresh install or an already-current DB; an unknown/too-old
         // version is left untouched and rejected by the gate.
         if (db_preexisted)
             run_pending_migrations(pre_migration_version);
 
-        // Schema-version hard gate. In-binary migration for known upgrade
-        // origins (0.12, 0.15) ran just above; anything still not matching
+        // Schema-version hard gate. In-binary migration for the one supported
+        // origin (0.16) ran just above; anything still not matching
         // kExpectedDbVersion here is an unknown/too-old version and is rejected.
         // First, stamp db_version for a genuinely fresh install ONLY --
         // db_preexisted (captured before any CREATE TABLE ran, at the top
@@ -580,8 +561,8 @@ void rebuild_table_column_order(Impl& self,
     // (scripts/migrate_to_db*.sh) and the binary merely hard-gated on the
     // version. To make GitHub-cloned upgrades painless, the known upgrade
     // legs now run in-process on open, chained until the DB reaches
-    // kExpectedDbVersion. Each leg mirrors migrate_documents_normalize()'s
-    // shape: one BEGIN/try/COMMIT/ROLLBACK transaction, Logger progress,
+    // kExpectedDbVersion. Each leg has the same shape: one
+    // BEGIN/try/COMMIT/ROLLBACK transaction, Logger progress,
     // and post-migration verification that aborts (rolls back) on any
     // inconsistency rather than silently shipping a corrupt index.
 
@@ -603,7 +584,7 @@ void rebuild_table_column_order(Impl& self,
     /// .zip / .db, see fallback chain below) before the first structural
     /// change of a migration run. Only fires when an in-binary migration is
     /// actually pending (see migration_pending()). One snapshot covers a
-    /// whole chain (0.12 -> 0.15 -> ...).
+    /// whole chain (since PHASE9A there is one leg: 0.16 -> 0.17).
     ///
     /// Preferred path: WAL-checkpoint in TRUNCATE mode WITHOUT closing the
     /// connection, then archive the now-fully-checkpointed main .db file
@@ -740,8 +721,8 @@ void rebuild_table_column_order(Impl& self,
     /// kExpectedDbVersion (or a leg we don't know about is hit -> leave it for
     /// the hard gate to reject). `from_version` is the on-disk version captured
     /// before create_schema() mutated anything. Each leg advances db_version;
-    /// the loop re-reads it so 0.12 flows 0.12 -> 0.15 -> (0.16 once its leg
-    /// lands) under the single backup taken above.
+    /// the loop re-reads it under the single backup taken above (since
+    /// PHASE9A there is one leg: 0.16 -> 0.17).
     void Backend::Impl::run_pending_migrations(const std::string& from_version) {
         std::string v = from_version;
         // Guard against an unbounded loop if a leg ever fails to advance the
@@ -756,363 +737,6 @@ void rebuild_table_column_order(Impl& self,
             (this->*leg->fn)();
             v = db_version();
         }
-    }
-
-
-    /// 0.12 -> 0.15 migration (in-binary port of scripts/migrate_to_db0.15.sh).
-    ///
-    /// By the time this runs, create_schema() has ALREADY performed the
-    /// structural half of the 0.15 upgrade on this existing DB:
-    ///   - added embedding_version INTEGER to all five embedded tables
-    ///     (ALTER ADD COLUMN guards, above), and
-    ///   - normalized documents into document_sources via
-    ///     migrate_documents_normalize(), which also CLEARS documents'
-    ///     embedding/embedding_version/phon (they get re-embedded with the
-    ///     title appended).
-    ///
-    /// The remaining data step is the embedding version-byte SPLIT for the
-    /// four tables migrate_documents_normalize did NOT wipe: turns,
-    /// turn_summaries, summaries, decisions. Pre-0.15 blobs stored a 1-byte
-    /// version tag at byte 0 (EmbeddingCodec offset=1); 0.15 blobs are payload
-    /// only (offset=0) with the tag living in the embedding_version column. So
-    /// for every row with a non-NULL embedding: embedding_version = blob[0],
-    /// embedding = blob[1:]. NULL embeddings stay NULL in both columns.
-    ///
-    /// Whole thing runs in one transaction. On any verification failure the
-    /// transaction is rolled back (original rows untouched) and the throw
-    /// propagates -- the pre-migration backup made above is the safety net.
-    void Backend::Impl::migrate_0_12_to_0_15() {
-        Diskerror::Logger::info(
-            "Migrating DB 0.12 -> 0.15 (embedding version-byte split)...");
-
-        // (table, primary-key column) for the four tables whose embeddings
-        // survive into 0.15 and therefore need the byte split. documents is
-        // intentionally excluded: migrate_documents_normalize() already
-        // cleared its embeddings.
-        struct T { const char* table; const char* pk; };
-        const T tables[] = {
-            {"turns",          "turn_id"},
-            {"turn_summaries", "turn_summary_id"},
-            {"summaries",      "summary_id"},
-            {"decisions",      "decision_id"},
-        };
-
-        Stmt(db, "BEGIN").exec();
-        try {
-            for (const auto& t : tables) {
-                // Read each row's blob, split off byte 0, write both columns
-                // back. Collect first, then write, so we never mutate a table
-                // mid-scan.
-                struct Row { int64_t id; int version; std::vector<uint8_t> payload; };
-                std::vector<Row> rows;
-                {
-                    Stmt s(db, std::format(
-                        "SELECT {}, embedding FROM {} WHERE embedding IS NOT NULL",
-                        t.pk, t.table));
-                    while (s.step_checked()) {
-                        const auto* blob =
-                            static_cast<const uint8_t*>(s.column_blob(1));
-                        int n = s.column_bytes(1);
-                        if (blob == nullptr || n < 1)
-                            throw std::runtime_error(std::format(
-                                "{}: non-NULL embedding with <1 byte (id={})",
-                                t.table, s.column_int64(0)));
-                        Row r;
-                        r.id = s.column_int64(0);
-                        r.version = blob[0];
-                        r.payload.assign(blob + 1, blob + n);   // bytes [1, n)
-                        rows.push_back(std::move(r));
-                    }
-                }
-                for (const auto& r : rows) {
-                    Stmt u(db, std::format(
-                        "UPDATE {} SET embedding_version = ?, embedding = ? "
-                        "WHERE {} = ?", t.table, t.pk));
-                    u.bind(1, r.version);
-                    u.bind_blob(2, r.payload.data(),
-                                static_cast<int>(r.payload.size()));
-                    u.bind(3, r.id);
-                    if (!u.exec())
-                        throw std::runtime_error(std::format(
-                            "{}: embedding split UPDATE failed (id={}): {}",
-                            t.table, r.id, sqlite3_errmsg(db)));
-                }
-                Diskerror::Logger::info(std::format(
-                    "  {}: split {} embedding(s)", t.table, rows.size()));
-            }
-
-            // ---- verification (abort/rollback on any mismatch) ------------
-            // For each migrated table: embedding NULL-ness and
-            // embedding_version NULL-ness must move together. (The blob is now
-            // the pure payload; we already stripped exactly one byte in C++,
-            // so a per-row "1 byte shorter" DB check isn't reconstructable
-            // post-split -- the correctness guarantee is the byte-exact
-            // std::vector assign above plus this NULL-parity check.)
-            for (const auto& t : tables) {
-                Stmt s(db, std::format(
-                    "SELECT COUNT(*) FROM {} "
-                    "WHERE (embedding IS NULL) != (embedding_version IS NULL)",
-                    t.table));
-                s.step_checked();
-                int64_t bad = s.column_int64(0);
-                if (bad != 0)
-                    throw std::runtime_error(std::format(
-                        "{}: {} row(s) with embedding/embedding_version NULL "
-                        "mismatch after split", t.table, bad));
-            }
-
-            // Structural integrity of the whole file.
-            {
-                Stmt s(db, "PRAGMA integrity_check");
-                s.step_checked();
-                std::string res = s.column_text(0);
-                if (res != "ok")
-                    throw std::runtime_error(
-                        "PRAGMA integrity_check failed after 0.12->0.15: " + res);
-            }
-
-            set_db_version("0.15");
-            Stmt(db, "COMMIT").exec();
-            Diskerror::Logger::info("DB migration 0.12 -> 0.15 complete.");
-        } catch (...) {
-            Stmt(db, "ROLLBACK").exec();
-            throw;
-        }
-    }
-
-
-
-    /// One-time in-place migration to the normalized documents schema (0.15).
-    /// Extracts per-document metadata (path/title/year/imported_at) from the
-    /// old flat `documents` rows into `document_sources`, converts imported_at
-    /// text -> unix epoch (stored text is a LOCAL wall-clock timestamp), points
-    /// each chunk at its source via document_source_id, redistributes tags
-    /// (source = intersection of a (path,title) group's chunk tags; chunk keeps
-    /// its own set minus that intersection), clears embedding/embedding_version/
-    /// phon on every doc row (so housekeeping re-embeds with title appended),
-    /// then drops the four extracted columns. Whole thing runs in one
-    /// transaction. Caller gates on column_exists("documents","path").
-    void Backend::Impl::migrate_documents_normalize() {
-        Diskerror::Logger::info("Migrating documents to normalized schema (document_sources)...");
-        Stmt(db, "BEGIN").exec();
-        try {
-            // document_sources may not exist yet on an old DB (the CREATE TABLE
-            // IF NOT EXISTS above makes it, but be defensive/idempotent).
-            exec(R"(
-                CREATE TABLE IF NOT EXISTS document_sources (
-                    document_source_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title       TEXT,
-                    path        TEXT,
-                    year        INTEGER,
-                    tags        TEXT NOT NULL DEFAULT '',
-                    imported_at INTEGER NOT NULL
-                )
-            )");
-
-            // The old documents_fts / triggers reference new.title/old.title.
-            // They MUST go before we UPDATE documents or DROP COLUMN title,
-            // else the AFTER UPDATE trigger fires against a missing column.
-            exec("DROP TRIGGER IF EXISTS documents_ai");
-            exec("DROP TRIGGER IF EXISTS documents_ad");
-            exec("DROP TRIGGER IF EXISTS documents_au");
-            exec("DROP TABLE IF EXISTS documents_fts");
-
-            // Same for the phon sidecar FTS + its triggers. Critically, the
-            // external-content documents_phon_fts must be dropped too: after we
-            // rebuild `documents` below, its shadow tables would still hold the
-            // OLD rows. The row COUNT happens to match (same 8627), so
-            // create_phon_fts_schema()'s docsize-vs-base desync probe would NOT
-            // fire a rebuild -- leaving stale rowid->content pointers that make
-            // every later phon UPDATE fail "database disk image is malformed".
-            // Dropping it here forces a fresh, empty index (docsize 0 != base)
-            // so the probe rebuilds and resyncs it.
-            exec("DROP TRIGGER IF EXISTS documents_pai");
-            exec("DROP TRIGGER IF EXISTS documents_pad");
-            exec("DROP TRIGGER IF EXISTS documents_pau");
-            exec("DROP TABLE IF EXISTS documents_phon_fts");
-
-            // The old documents_view SELECTs path/title/year/imported_at, so
-            // SQLite won't let us DROP those columns while it exists. Drop it
-            // here; create_views() rebuilds the new (joined) view afterward.
-            exec("DROP VIEW IF EXISTS documents_view");
-
-            // The old idx_documents_imported_at indexes a column we're about to
-            // drop -- SQLite refuses DROP COLUMN while an index references it.
-            exec("DROP INDEX IF EXISTS idx_documents_imported_at");
-
-            // Helper: split a comma-separated tag string into a token set
-            // (trimmed, empties dropped).
-            auto split_tags = [](const std::string& s) {
-                std::set<std::string> out;
-                std::string tok;
-                std::stringstream ss(s);
-                while (std::getline(ss, tok, ',')) {
-                    size_t a = tok.find_first_not_of(" \t");
-                    size_t b = tok.find_last_not_of(" \t");
-                    if (a != std::string::npos)
-                        out.insert(tok.substr(a, b - a + 1));
-                }
-                return out;
-            };
-            auto join_tags = [](const std::set<std::string>& s) {
-                std::string out;
-                for (const auto& t : s) { if (!out.empty()) out += ','; out += t; }
-                return out;
-            };
-
-            // Group existing chunks by (path, title). Collect each group's
-            // year, earliest imported_at (as epoch), the intersection of its
-            // chunks' tag sets, and the lowest document_id it appears in (so
-            // sources can be inserted in document_id order -- tidy + stable).
-            struct Group {
-                std::string path, title;
-                std::optional<long long> year;
-                long long imported_epoch = 0;
-                bool have_epoch = false;
-                std::set<std::string> tag_intersection;
-                bool first_tag = true;
-                long long first_doc_id = 0;
-            };
-            // key = path + '\x1f' + title  (unit separator can't appear in text)
-            std::unordered_map<std::string, Group> groups;
-
-            {
-                // strftime('%s', ts, 'utc') interprets the stored text as LOCAL
-                // wall-clock and returns the corresponding unix epoch. (SQLite's
-                // bare strftime treats input as UTC; the 'utc' modifier flips a
-                // localtime reading back to UTC epoch.) Handles both the live
-                // 'YYYY-MM-DD HH:MM:SS' form and 'YYYYMMDD' stragglers (the
-                // latter parses as midnight local).
-                Stmt s(db,
-                    "SELECT document_id, path, title, year, tags, "
-                    "  CAST(strftime('%s', imported_at, 'utc') AS INTEGER) AS ep "
-                    "FROM documents ORDER BY document_id");
-                while (s.step()) {
-                    long long doc_id = s.column_int64(0);
-                    std::string path  = s.is_null(1) ? "" : s.column_text(1);
-                    std::string title = s.is_null(2) ? "" : s.column_text(2);
-                    std::string key = path + "\x1f" + title;
-                    auto it = groups.find(key);
-                    bool is_new = (it == groups.end());
-                    Group& g = groups[key];
-                    if (is_new) { g.first_doc_id = doc_id; g.path = path; g.title = title; }
-                    if (!s.is_null(3)) g.year = s.column_int64(3);
-                    if (!s.is_null(5)) {
-                        long long ep = s.column_int64(5);
-                        if (!g.have_epoch || ep < g.imported_epoch) {
-                            g.imported_epoch = ep; g.have_epoch = true;
-                        }
-                    }
-                    std::set<std::string> ts = split_tags(s.is_null(4) ? "" : s.column_text(4));
-                    if (g.first_tag) { g.tag_intersection = ts; g.first_tag = false; }
-                    else {
-                        std::set<std::string> inter;
-                        std::set_intersection(g.tag_intersection.begin(), g.tag_intersection.end(),
-                                              ts.begin(), ts.end(),
-                                              std::inserter(inter, inter.begin()));
-                        g.tag_intersection = std::move(inter);
-                    }
-                }
-            }
-
-            // Insert sources in document_id order (tidy IDs), remember each id.
-            std::vector<std::pair<std::string, Group*>> ordered;
-            ordered.reserve(groups.size());
-            for (auto& [key, g] : groups) ordered.emplace_back(key, &g);
-            std::sort(ordered.begin(), ordered.end(),
-                      [](const auto& a, const auto& b) {
-                          return a.second->first_doc_id < b.second->first_doc_id;
-                      });
-
-            std::unordered_map<std::string, long long> group_source_id;
-            for (auto& [key, gp] : ordered) {
-                Group& g = *gp;
-                Stmt ins(db,
-                    "INSERT INTO document_sources(title, path, year, tags, imported_at) "
-                    "VALUES (?,?,?,?,?)");
-                if (g.title.empty()) ins.bind_null(1); else ins.bind(1, g.title);
-                if (g.path.empty())  ins.bind_null(2); else ins.bind(2, g.path);
-                if (g.year) ins.bind(3, static_cast<int>(*g.year)); else ins.bind_null(3);
-                ins.bind(4, join_tags(g.tag_intersection));
-                // No usable timestamp anywhere in the group -> use "now".
-                ins.bind(5, g.have_epoch ? g.imported_epoch
-                                         : static_cast<long long>(std::time(nullptr)));
-                ins.step();
-                group_source_id[key] = sqlite3_last_insert_rowid(db);
-            }
-
-            // Rebuild `documents` with the FINAL column order (ALTER ADD COLUMN
-            // would append, diverging from a fresh install's layout). Populate
-            // it from the old table, computing per-chunk tags (own set MINUS the
-            // source intersection) in C++, pointing at the source, stamping
-            // modified_on = source epoch, and CLEARING embedding (it gets
-            // rebuilt with the title appended -- see store_document). The four
-            // extracted columns are simply not carried over. `phon` is retired
-            // (v0.16) so it is never (re)created here, even for very old
-            // pre-normalize DBs going through this one-time rebuild.
-            exec(R"(
-                CREATE TABLE documents_new (
-                    document_id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                    text               TEXT NOT NULL,
-                    tags               TEXT NOT NULL DEFAULT '',
-                    chunk_index        INTEGER,
-                    document_source_id INTEGER REFERENCES document_sources(document_source_id),
-                    modified_on        INTEGER,
-                    embedding_version  INTEGER,
-                    embedding          BLOB
-                )
-            )");
-            {
-                Stmt s(db, "SELECT document_id, text, tags, path, title, chunk_index "
-                           "FROM documents ORDER BY document_id");
-                struct Row { long long id; std::string text, tags; bool tags_null;
-                             long long src_id, modified; std::optional<long long> chunk_index; };
-                std::vector<Row> rows;
-                while (s.step()) {
-                    long long id = s.column_int64(0);
-                    std::string text = s.column_text(1);
-                    std::string path  = s.is_null(3) ? "" : s.column_text(3);
-                    std::string title = s.is_null(4) ? "" : s.column_text(4);
-                    std::string key = path + "\x1f" + title;
-                    const Group& g = groups[key];
-                    std::set<std::string> own = split_tags(s.is_null(2) ? "" : s.column_text(2));
-                    std::set<std::string> remainder;
-                    std::set_difference(own.begin(), own.end(),
-                                        g.tag_intersection.begin(), g.tag_intersection.end(),
-                                        std::inserter(remainder, remainder.begin()));
-                    Row r;
-                    r.id = id; r.text = std::move(text);
-                    r.tags = join_tags(remainder); r.tags_null = false;
-                    r.src_id = group_source_id[key];
-                    r.modified = g.have_epoch ? g.imported_epoch
-                                              : static_cast<long long>(std::time(nullptr));
-                    if (!s.is_null(5)) r.chunk_index = s.column_int64(5);
-                    rows.push_back(std::move(r));
-                }
-                for (const auto& r : rows) {
-                    Stmt ins(db,
-                        "INSERT INTO documents_new "
-                        "(document_id, text, tags, chunk_index, document_source_id, "
-                        " modified_on, embedding_version, embedding) "
-                        "VALUES (?,?,?,?,?,?,NULL,NULL)");
-                    ins.bind(1, r.id).bind(2, r.text).bind(3, r.tags);
-                    if (r.chunk_index) ins.bind(4, static_cast<int>(*r.chunk_index));
-                    else ins.bind_null(4);
-                    ins.bind(5, r.src_id).bind(6, r.modified);
-                    ins.step();
-                }
-            }
-            exec("DROP TABLE documents");
-            exec("ALTER TABLE documents_new RENAME TO documents");
-
-            Stmt(db, "COMMIT").exec();
-            Diskerror::Logger::info(std::format(
-                "documents normalized: {} source(s) extracted", groups.size()));
-        } catch (...) {
-            Stmt(db, "ROLLBACK").exec();
-            throw;
-        }
-        // documents_fts is rebuilt (new shape) by create_fts_schema() below.
     }
 
 
@@ -1137,333 +761,6 @@ void rebuild_table_column_order(Impl& self,
     } // anonymous namespace
 
 
-    /// Rebuild one table so its PHYSICAL column order matches the fresh-install
-    /// CREATE TABLE in create_schema(). `ALTER TABLE ... ADD COLUMN` can only
-    /// APPEND, so a DB that reached its current shape via migration ends up with
-    /// (e.g.) unigram_count/bigram_count sitting after the embedding BLOB, while
-    /// a fresh DB has them before it. That divergence is not just cosmetic: rows
-    /// are wide, and a trailing multi-KB embedding pushes the small, human-
-    /// meaningful columns off-screen in any ad-hoc `SELECT *` / `.dump` /
-    /// sqlite3 CLI inspection. Keeping the narrow, readable columns to the LEFT
-    /// of the blobs is the whole point of the fixed order.
-    ///
-    /// Standard SQLite table-rebuild dance (see "Making Other Kinds Of Table
-    /// Schema Changes" in the SQLite docs):
-    ///   1. snapshot this table's index DDL (DROP TABLE takes its indexes with it)
-    ///   2. CREATE <t>_rebuild with the canonical column order
-    ///   3. INSERT ... SELECT the named columns (order-independent, by name)
-    ///   4. DROP old, RENAME new into place
-    ///   5. replay the saved index DDL
-    ///
-    /// CALLER CONTRACT: foreign_keys MUST already be OFF and any dependent views
-    /// already dropped. `PRAGMA foreign_keys` is a NO-OP inside a transaction, so
-    /// it has to be set before BEGIN -- see migrate_0_15_to_0_16().
-    ///
-    /// `cols` is the shared column list present in BOTH old and new tables. The
-    /// count columns are deliberately NOT carried over (they are 0 on a
-    /// just-ALTERed DB anyway); reindex_table() populates them right after.
-    namespace {
-    template <class Impl>
-    void rebuild_table_column_order(Impl& self,
-                                    const std::string& table,
-                                    const std::string& new_ddl,
-                                    const std::string& cols) {
-        // 1. Snapshot index DDL. Skip sql IS NULL rows: those are the implicit
-        //    indexes SQLite auto-creates for UNIQUE/PRIMARY KEY constraints,
-        //    which the new CREATE TABLE already re-declares for itself.
-        std::vector<std::string> index_ddl;
-        {
-            Stmt s(self.db, "SELECT sql FROM sqlite_master WHERE type='index' "
-                       "AND tbl_name=? AND sql IS NOT NULL");
-            s.bind(1, table);
-            while (s.step()) index_ddl.push_back(s.column_text(0));
-        }
-
-        const std::string tmp = table + "_rebuild";
-        self.exec(std::format("DROP TABLE IF EXISTS {}", tmp));
-        self.exec(new_ddl);
-        self.exec(std::format("INSERT INTO {} ({}) SELECT {} FROM {}",
-                         tmp, cols, cols, table));
-        self.exec(std::format("DROP TABLE {}", table));
-        self.exec(std::format("ALTER TABLE {} RENAME TO {}", tmp, table));
-
-        for (const auto& ddl : index_ddl) self.exec(ddl);
-
-        Diskerror::Logger::info(
-            std::format("  {}: rebuilt with canonical column order", table));
-    }
-    } // anonymous namespace
-
-
-    /// 0.15 -> 0.16 migration (FTS5 teardown + custom index backfill).
-    ///
-    /// NOT RUNNABLE since 0.17 development (see TODO Q1): it names tables
-    /// the 0.17 registry no longer has (decisions) and expects the exact
-    /// 0.15-era shapes; it has never been exercised against a real 0.15 DB.
-    /// Kept only until the pre-0.16 support decision — do not "fix" it.
-    ///
-    /// This is the big cutover:
-    /// 1. Drop all FTS5 triggers (both text and phonetic)
-    /// 2. Drop both FTS5 virtual tables
-    /// 3. Drop the `phon` column from all 5 text tables
-    /// 4. Call reindex_table() for each of the 5 tables to populate the custom index
-    /// 5. Update db_version to 0.16
-    ///
-    /// The schema (terms, *_terms, count columns) is created by create_schema()
-    /// BEFORE this runs, and reindex_table() (Step 6) populates them.
-    void Backend::Impl::migrate_0_15_to_0_16() {
-        Diskerror::Logger::info("Migrating DB 0.15 -> 0.16 (custom FTS index)...");
-
-        // Both pragmas MUST be set OUTSIDE the transaction:
-        //
-        // foreign_keys: a no-op inside a transaction, and it has to be OFF for
-        // the table rebuilds below. The *_terms junction tables hold FKs into
-        // these five tables with ON DELETE CASCADE -- with enforcement on, the
-        // `DROP TABLE <t>` step would cascade away every index row we are about
-        // to rebuild (and the parent-key checks would fire mid-swap).
-        //
-        // legacy_alter_table: with the modern (OFF) behavior, `ALTER TABLE
-        // <t>_rebuild RENAME TO <t>` helpfully rewrites REFERENCES clauses in
-        // OTHER tables that point at the renamed table -- which would silently
-        // repoint every junction table's FK at the transient "<t>_rebuild" name.
-        // ON keeps RENAME purely local, which is what the rebuild dance needs.
-        const bool fk_was_on = pragma_bool(*this, "foreign_keys");
-        exec("PRAGMA foreign_keys = OFF");
-        exec("PRAGMA legacy_alter_table = ON");
-
-        try {
-            Stmt(db, "BEGIN").exec();
-
-            // Repair dangling session references BEFORE baselining FK state.
-            // These columns are declared ON DELETE SET NULL, so a NULL here is
-            // precisely what the schema intends when a session goes away -- the
-            // clause simply never fired (the session was deleted while FK
-            // enforcement was off). The summary/turn is the valuable record; the
-            // session pointer is not. Null the stale pointer and KEEP the row,
-            // rather than deleting content to satisfy a constraint.
-            for (const char* t : {"summaries", "turns", "turn_summaries"}) {
-                const std::string sql = std::format(
-                    "UPDATE {} SET session_id = NULL WHERE session_id IS NOT NULL "
-                    "AND session_id NOT IN (SELECT session_id FROM sessions)", t);
-                exec(sql);
-                if (int n = sqlite3_changes(db); n > 0) {
-                    Diskerror::Logger::info(std::format(
-                        "  {}: cleared {} dangling session_id reference(s) "
-                        "(ON DELETE SET NULL never fired; rows preserved)", t, n));
-                }
-            }
-
-            // Baseline the FK violations that ALREADY exist in this DB, so the
-            // post-rebuild check can flag only NEW orphans. Anything still here
-            // after the repair above is a pre-existing data issue unrelated to
-            // this migration and must not abort an otherwise-correct upgrade.
-            auto fk_violations = [this]() {
-                std::multiset<std::string> out;
-                Stmt s(db, "PRAGMA foreign_key_check");
-                while (s.step()) {
-                    // Full violation identity (table, rowid, parent, fkid):
-                    // two FK constraints on one table may point at the SAME
-                    // parent table (e.g. turn_summaries.turn_model_id and
-                    // summary_model_id -> models), so the 3-part form could
-                    // collide and misattribute a NEW violation as one of the
-                    // identical pre-existing ones in the multiset diff.
-                    out.insert(std::format("{}|{}|{}|{}", s.column_text(0),
-                                           s.column_int64(1), s.column_text(2),
-                                           s.column_int64(3)));
-                }
-                return out;
-            };
-            const std::multiset<std::string> fk_before = fk_violations();
-
-            // Drop all FTS5 triggers for the 5 text tables
-            // Triggers: <table>_ai/_ad/_au (text) and <table>_pai/_pad/_pau (phon)
-            const char* tables[] = {"turns", "turn_summaries", "summaries", "decisions", "documents"};
-            const char* triggers_per_table[] = {"ai", "ad", "au", "pai", "pad", "pau"};
-
-            for (const auto* table : tables) {
-                for (const auto* tri : triggers_per_table) {
-                    std::string trigger_name = std::string(table) + "_" + tri;
-                    try {
-                        exec(std::format("DROP TRIGGER IF EXISTS {}", trigger_name));
-                    } catch (...) {
-                        // Trigger may not exist; ignore
-                    }
-                }
-            }
-
-            // Drop FTS5 virtual tables (auto-drops shadow tables)
-            for (const auto* table : tables) {
-                try {
-                    exec(std::format("DROP TABLE IF EXISTS {}_fts", table));
-                } catch (...) {}
-                try {
-                    exec(std::format("DROP TABLE IF EXISTS {}_phon_fts", table));
-                } catch (...) {}
-            }
-
-            // Drop the `phon` column from all 5 tables (SQLite >= 3.35 required)
-            // Safe to check and skip if not supported. The *_view views (created
-            // by an earlier create_views() call, possibly from a pre-fix binary)
-            // may still SELECT the `phon` column -- SQLite refuses DROP COLUMN
-            // while a view references it. Drop them first; create_views() (called
-            // after migrations complete, CREATE VIEW IF NOT EXISTS) recreates the
-            // now-phon-free versions.
-            for (const auto* table : tables) {
-                exec(std::format("DROP VIEW IF EXISTS {}_view", table));
-            }
-
-            // Full table rebuild rather than `ALTER TABLE ... DROP COLUMN phon`.
-            // DROP COLUMN would retire `phon` but leave unigram_count/bigram_count
-            // stranded AFTER the embedding BLOB (create_schema()'s ADD COLUMN
-            // guards can only append), so a migrated DB's physical layout would
-            // permanently differ from a fresh install's. Rebuilding does both jobs
-            // at once: `phon` is dropped simply by not being carried over, and the
-            // remaining columns land in the canonical fresh-install order with the
-            // narrow, readable ones ahead of the wide embedding blob.
-            //
-            // PHASE9: this normalization only ever runs against pre-0.15
-            // shapes (documents.path still present). For current tables the
-            // ddl:: functions are the single source of truth — one DDL
-            // function per table, shared by fresh installs and rebuilds —
-            // so this legacy DDL is frozen history, not a lockstep partner.
-            Diskerror::Logger::info("Rebuilding text tables in canonical column order...");
-            rebuild_table_column_order(*this, "turns", R"(
-                CREATE TABLE turns_rebuild (
-                    turn_id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_text      TEXT NOT NULL,
-                    assistant_text TEXT,
-                    model_id       INTEGER REFERENCES models(model_id) ON DELETE SET NULL,
-                    session_id     INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
-                    created_at     INTEGER NOT NULL,
-                    unigram_count  INTEGER NOT NULL DEFAULT 0,
-                    bigram_count   INTEGER NOT NULL DEFAULT 0,
-                    embedding_version INTEGER,
-                    embedding      BLOB
-                ))",
-                "turn_id, user_text, assistant_text, model_id, session_id, "
-                "created_at, embedding_version, embedding");
-
-            rebuild_table_column_order(*this, "summaries", R"(
-                CREATE TABLE summaries_rebuild (
-                    summary_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    text       TEXT NOT NULL,
-                    level      TEXT NOT NULL,
-                    tags       TEXT NOT NULL DEFAULT '',
-                    session_id INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
-                    model_id   INTEGER REFERENCES models(model_id),
-                    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                    updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                    unigram_count  INTEGER NOT NULL DEFAULT 0,
-                    bigram_count   INTEGER NOT NULL DEFAULT 0,
-                    embedding_version INTEGER,
-                    embedding  BLOB
-                ))",
-                "summary_id, text, level, tags, session_id, model_id, "
-                "created_at, updated_at, embedding_version, embedding");
-
-            rebuild_table_column_order(*this, "turn_summaries", R"(
-                CREATE TABLE turn_summaries_rebuild (
-                    turn_summary_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-                    text             TEXT,
-                    turn_id          INTEGER REFERENCES turns(turn_id) ON DELETE SET NULL,
-                    session_id       INTEGER REFERENCES sessions(session_id),
-                    turn_model_id    INTEGER REFERENCES models(model_id),
-                    summary_model_id INTEGER REFERENCES models(model_id),
-                    turn_datetime    INTEGER NOT NULL,
-                    summarized_on    INTEGER NOT NULL DEFAULT (unixepoch()),
-                    unigram_count  INTEGER NOT NULL DEFAULT 0,
-                    bigram_count   INTEGER NOT NULL DEFAULT 0,
-                    embedding_version INTEGER,
-                    embedding        BLOB
-                ))",
-                "turn_summary_id, text, turn_id, session_id, turn_model_id, "
-                "summary_model_id, turn_datetime, summarized_on, "
-                "embedding_version, embedding");
-
-            rebuild_table_column_order(*this, "decisions", R"(
-                CREATE TABLE decisions_rebuild (
-                    decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    text        TEXT NOT NULL,
-                    status      TEXT NOT NULL,
-                    tags        TEXT NOT NULL DEFAULT '',
-                    created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
-                    unigram_count  INTEGER NOT NULL DEFAULT 0,
-                    bigram_count   INTEGER NOT NULL DEFAULT 0,
-                    embedding_version INTEGER,
-                    embedding   BLOB
-                ))",
-                "decision_id, text, status, tags, created_at, "
-                "embedding_version, embedding");
-
-            rebuild_table_column_order(*this, "documents", R"(
-                CREATE TABLE documents_rebuild (
-                    document_id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                    text               TEXT NOT NULL,
-                    tags               TEXT NOT NULL DEFAULT '',
-                    chunk_index        INTEGER,
-                    document_source_id INTEGER REFERENCES document_sources(document_source_id),
-                    modified_on        INTEGER,
-                    unigram_count      INTEGER NOT NULL DEFAULT 0,
-                    bigram_count       INTEGER NOT NULL DEFAULT 0,
-                    embedding_version  INTEGER,
-                    embedding          BLOB
-                ))",
-                "document_id, text, tags, chunk_index, document_source_id, "
-                "modified_on, embedding_version, embedding");
-
-            // Now backfill the custom FTS index for each table
-            Diskerror::Logger::info("Populating custom FTS index...");
-            for (const auto* table : tables) {
-                Diskerror::Logger::info(std::format("  Indexing {}...", table));
-                // Call reindex_table directly (we're in the Impl class)
-                reindex_table(table, /*progress=*/false);
-            }
-
-            // Update db_version to 0.16
-            set_db_version("0.16");
-
-            // With FK enforcement suspended for the rebuilds, verify we did not
-            // orphan anything NEW before making it permanent. Pre-existing
-            // violations (captured in fk_before) are logged and carried through
-            // unchanged -- they are a data problem, not a migration failure.
-            {
-                const std::multiset<std::string> fk_after = fk_violations();
-                std::vector<std::string> introduced;
-                std::set_difference(fk_after.begin(), fk_after.end(),
-                                    fk_before.begin(), fk_before.end(),
-                                    std::back_inserter(introduced));
-                if (!introduced.empty()) {
-                    throw std::runtime_error(std::format(
-                        "0.15 -> 0.16 migration introduced {} orphaned foreign key "
-                        "row(s) (first: {}); rolling back",
-                        introduced.size(), introduced.front()));
-                }
-                if (!fk_before.empty()) {
-                    Diskerror::Logger::warn(std::format(
-                        "{} pre-existing foreign-key violation(s) carried through "
-                        "the 0.16 migration unchanged (first: {}). Not caused by "
-                        "the migration; worth investigating separately.",
-                        fk_before.size(), *fk_before.begin()));
-                }
-            }
-
-            Stmt(db, "COMMIT").exec();
-            exec("PRAGMA legacy_alter_table = OFF");
-            if (fk_was_on) exec("PRAGMA foreign_keys = ON");
-            Diskerror::Logger::info("DB migration 0.15 -> 0.16 complete.");
-        } catch (...) {
-            try {
-                Stmt(db, "ROLLBACK").exec();
-            } catch (...) {}
-            try {
-                exec("PRAGMA legacy_alter_table = OFF");
-                if (fk_was_on) exec("PRAGMA foreign_keys = ON");
-            } catch (...) {}
-            throw;
-        }
-    }
-
-
     /// 0.16 -> 0.17 migration (the whole agent API schema in one step):
     ///   - knowledge (§4/§4a, PHASE7): the table + evidence tables are created,
     ///     decisions rows move in with kind='decision' and ids PRESERVED;
@@ -1473,8 +770,7 @@ void rebuild_table_column_order(Impl& self,
     ///   - sessions rebuilt with started_on/ended_on (PHASE4; "project" is
     ///     a tag now — no projects table, no project_id anywhere).
     /// (Developed as three internal steps; released as one schema version.)
-    /// Same pragma dance as migrate_0_15_to_0_16() and for the same reasons:
-    /// foreign_keys OFF (decisions_terms has ON DELETE CASCADE into decisions;
+    /// Pragma dance: foreign_keys OFF (decisions_terms has ON DELETE CASCADE into decisions;
     /// DROP TABLE would wipe the index) and legacy_alter_table ON (keeps the
     /// RENAME from repointing other tables' REFERENCES at "decisions_rebuild").
     /// Both must be set OUTSIDE the transaction.
@@ -1565,7 +861,7 @@ void rebuild_table_column_order(Impl& self,
             };
             // Baseline BEFORE any change: pre-existing violations (e.g. a
             // summary whose session was deleted while FKs were off) must not
-            // be blamed on this leg (same lesson as migrate_0_15_to_0_16).
+            // be blamed on this leg.
             const std::multiset<std::string> fk_before = fk_violations();
 
             // PHASE9: drop EVERY view up front (the rebuild dance and the
