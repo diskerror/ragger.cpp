@@ -278,7 +278,8 @@ namespace fs = std::filesystem;
             std::vector<TextScore> hits = text_index_->score_query("documents", query);
             for (const auto& hit : hits) {
                 Stmt s(db,
-                    "SELECT d.text, COALESCE(ds.imported_at, 0) "
+                    "SELECT d.text, CASE WHEN ds.imported_at IS NULL THEN '' "
+                    "ELSE datetime(ds.imported_at,'unixepoch','localtime') END "
                     "FROM documents d LEFT JOIN document_sources ds "
                     "ON d.document_source_id = ds.document_source_id "
                     "WHERE d.document_id = ?");

@@ -377,7 +377,7 @@ Commands:
   serve              Run the server in the foreground (what the daemon invokes)
   search <query>     Search memories by meaning
   store <text>       Store a new memory
-  decision <sub>      Curated L6 decisions/lessons (see `ragger decision`
+  decision <sub>      Curated decisions/lessons (see `ragger decision`
                      with no args for full option list)
                        add <text> [--status=current|roadmap] [--tags=a,b,c]
                        list [--status=current|roadmap|...] [-n N]
@@ -413,11 +413,11 @@ Commands:
   reload             Reload config and search caches on running daemon (SIGHUP)
                      options: --user <name>, --dry-run
   re-embed <table|all> Re-encode embeddings for one table or all memories
-                     (progress per table; tables: turns, turn_summaries,
-                     summaries, decisions, documents, or "all")
+                     (progress per table; tables: turns, knowledge, documents,
+                     turn_summaries, episodes, or "all")
   reindex <table|all> Rebuild the custom text index (terms + TF-IDF)
-                     tables: turns, turn_summaries, summaries, decisions,
-                     documents, or "all" ("all" also resets the shared
+                     tables: turns, knowledge, documents, turn_summaries,
+                     episodes, or "all" ("all" also resets the shared
                      terms table + its id counter, clearing orphaned terms)
   show-embedding-model  Show current embedding model info
   embed               Embed text from stdin, write JSON array to stdout

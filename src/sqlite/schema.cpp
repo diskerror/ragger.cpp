@@ -135,7 +135,10 @@ bool pragma_bool(Impl& self, const char* name);
                 Stmt ins(db,
                     "INSERT OR IGNORE INTO settings (key, value) "
                     "VALUES ('embedding_version', '1')");
-                ins.exec();
+                // PHASE9B step 4c: a failed stamp means every later row gets
+                // an embedding version that is not persisted; fail loudly.
+                if (!ins.exec())
+                    throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
             }
         }
     }
@@ -552,7 +555,9 @@ bool pragma_bool(Impl& self, const char* name);
             "INSERT INTO settings (key, value) VALUES ('db_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value");
         s.bind(1, v);
-        s.exec();
+        // PHASE9B step 4c: the version stamp is the migration's commit flag.
+        if (!s.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
     }
 
 
@@ -782,7 +787,10 @@ bool pragma_bool(Impl& self, const char* name);
         exec("PRAGMA legacy_alter_table = ON");
 
         try {
-            Stmt(db, "BEGIN").exec();
+            // PHASE9B step 4c: unchecked BEGIN/COMMIT — a BUSY COMMIT logged
+            // "migration complete" with the transaction still open. exec()
+            // throws; the catch below rolls back and rethrows.
+            exec("BEGIN");
 
             // ---- PHASE9: pre-checks BEFORE any change (review: the old
             // placement ran the duplicate-path check after the first
@@ -1093,7 +1101,7 @@ bool pragma_bool(Impl& self, const char* name);
                 }
             }
 
-            Stmt(db, "COMMIT").exec();
+            exec("COMMIT");
             exec("PRAGMA legacy_alter_table = OFF");
             if (fk_was_on) exec("PRAGMA foreign_keys = ON");
             Diskerror::Logger::info("DB migration 0.16 -> 0.17 complete.");

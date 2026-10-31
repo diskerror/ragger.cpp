@@ -478,6 +478,9 @@ public:
     /// Delete a memory by ID. Returns true if deleted.
     virtual bool delete_memory(int memory_id) = 0;
 
+    /// PHASE9B step 5: atomic full text-index rebuild. Returns {table, rows}.
+    virtual std::vector<std::pair<std::string, int>> reindex_all(bool progress) = 0;
+
     /// Delete multiple memories by ID. Returns count deleted.
     virtual int delete_batch(const std::vector<int>& memory_ids) = 0;
 

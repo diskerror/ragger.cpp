@@ -5,6 +5,7 @@
 #include "build_info.h"
 #include "server.h"
 #include "memory.h"
+#include "store_kind.h"
 #include "agent_parse.h"
 #include "user_store.h"
 #include "sqlite/backend.h"
@@ -550,28 +551,16 @@ struct Server::Impl {
             metadata["source"] = user.username;
         auto& mem = _get_memory(user.username);
 
-        // Route curated decisions to knowledge(kind='decision'); everything
-        // else (fact/preference/lesson/unspecified) lands in
-        // knowledge(kind='note') via store().
-        std::string category = metadata.value("category", "");
-        if (category == "decision") {
-            std::string tags = metadata.value("tags", "");
-            // Default "current" (the only status the recall pipeline
-            // surfaces). Callers can pass metadata.status="roadmap" for
-            // planned/future work that shouldn't clutter every session's
-            // recall until it's actually done.
-            std::string status = metadata.value("status", "current");
-            int did = mem.store_decision(text, status, tags);
-            Diskerror::Logger::debug("POST /store 200 (decision)");
-            respond_json(res, json{{"id", std::to_string(did)},
-                                 {"status", "stored"},
-                                 {"kind", "decision"}});
-            return;
-        }
-
+        // PHASE9B step 6: ONE function per verb. store() decides the kind
+        // itself (store_kind_for: category=="decision" -> kind='decision',
+        // everything else -> note), so HTTP and MCP cannot disagree. The
+        // old special case bypassed store()'s status validation and its
+        // transaction.
         std::string id = mem.store(text, metadata);
         Diskerror::Logger::debug("POST /store 200");
-        respond_json(res, json{{"id", id}, {"status", "stored"}});
+        respond_json(res, json{{"id", id},
+                               {"status", "stored"},
+                               {"kind", std::string(store_kind_for(metadata))}});
     }
 
     // POST /decision -- structured decision (agent API Phase 1, db 0.17).

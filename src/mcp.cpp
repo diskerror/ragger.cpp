@@ -17,6 +17,7 @@
 #include "lang.h"
 #include "Logger.h"
 #include "memory.h"
+#include "store_kind.h"
 #include "agent_parse.h"
 #include "sqlite/backend.h"
 #include "sqlite/status.h"
@@ -424,8 +425,11 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         if (text.empty())
             return error_result(ragger::lang::ERR_MCP_TEXT_REQUIRED);
         const auto metadata = arguments.value("metadata", nlohmann::json::object());
+        // PHASE9B step 6: same single implementation as HTTP /store; the
+        // reply gains `kind` additively so both transports report it.
         const auto id = memory.store(text, metadata);
-        return text_result(nlohmann::json({{"id", id}, {"status", "stored"}}).dump());
+        return text_result(nlohmann::json({{"id", id}, {"status", "stored"},
+                                           {"kind", std::string(ragger::store_kind_for(metadata))}}).dump());
 
     } else if (tool_name == "memory_decision") {
         // Shared with HTTP POST /decision via parse_decision_input (tags

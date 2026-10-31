@@ -1,4 +1,5 @@
 #include "sqlite/backend_impl.h"
+#include "store_kind.h"
 #include "embedder.h"
 #include "config.h"
 #include "lang.h"
@@ -170,17 +171,27 @@ static std::string tags_from_metadata(const json& metadata) {
     //   session  <- metadata["session"] GUID, lookup only (unknown -> NULL)
     //   model    <- metadata["model"]
     // The returned id is a knowledge_id (string, as before).
+    void Backend::Impl::validate_creatable_status(const std::string& status) {
+        bool ok = false;
+        for (auto sv : status::kCreatable) if (status == sv) ok = true;
+        if (!ok)
+            throw std::invalid_argument(
+                "status must be one of: current, provisional, pending");
+    }
+
+
+    // PHASE9B step 6: store() is the ONE implementation of the `store` verb
+    // for both transports. metadata.category == "decision" (the single rule,
+    // store_kind_for) writes knowledge(kind='decision') with a NULL trigger —
+    // the same row store_decision writes for the CLI/importers — instead of a
+    // note. Everything else (status validation, tags, session lookup, model,
+    // transaction, indexing) is shared.
     std::string Backend::Impl::store(const std::string& raw_text, json metadata, bool defer_embedding) {
         if (metadata.is_null()) metadata = json::object();
 
         std::string status = metadata.value("status", std::string("current"));
-        {
-            bool ok = false;
-            for (auto sv : status::kCreatable) if (status == sv) ok = true;
-            if (!ok)
-                throw std::invalid_argument(
-                    "status must be one of: current, provisional, pending");
-        }
+        validate_creatable_status(status);
+        const std::string kind(store_kind_for(metadata));
 
         // tags: accept a JSON array or a plain string. `keep`/`bad` are
         // flag-tags folded into the tags column — a row tagged "keep" is
@@ -202,15 +213,14 @@ static std::string tags_from_metadata(const json& metadata) {
         // from here (same rule as store_knowledge).
         std::optional<int> session_id;
         const std::string guid = metadata.value("session", std::string());
-        if (!guid.empty()) {
-            Stmt st(db, "SELECT session_id FROM sessions WHERE guid = ?");
-            st.bind(1, guid);
-            if (st.step()) session_id = st.column_int(0);
-        }
+        if (!guid.empty())
+            session_id = find_session(guid);
 
-        std::string text = normalize_path(raw_text);
+        std::string text = (kind == "decision")
+            ? normalize_path(strip_decision_number_prefix(raw_text))
+            : normalize_path(raw_text);
         if (text.empty())
-            throw std::invalid_argument("note text is required");
+            throw std::invalid_argument(std::string(kind) + " text is required");
 
         std::vector<float> emb;
         if (!defer_embedding)
@@ -223,7 +233,7 @@ static std::string tags_from_metadata(const json& metadata) {
 
         Transaction txn(db);
         const int id = insert_knowledge_row(
-            "note", text, status, tags_str,
+            kind, text, status, tags_str,
             /*trigger=*/"", /*rationale=*/"", /*scope=*/"",
             /*supersedes=*/std::nullopt, session_id, model_id,
             resolve_epoch(ts_override), emb, defer_embedding);
@@ -279,8 +289,12 @@ static std::string tags_from_metadata(const json& metadata) {
                     {"path",  s.is_null(1) ? json(nullptr) : json(s.column_text(1))},
                     {"chunks", s.column_int64(2)}};
         }
-        Stmt(db, "BEGIN").exec();
-        try {
+        {
+            // PHASE9B step 4d: the hand-rolled BEGIN/COMMIT ignored both
+            // results — a failed COMMIT reported success with the delete
+            // still open (and a failed ROLLBACK compounded it). Transaction
+            // is RAII and throws where it must.
+            Transaction tx(db);
             Stmt dc(db, "DELETE FROM documents WHERE document_source_id = ?");
             dc.bind(1, document_source_id);
             if (!dc.exec())
@@ -289,10 +303,7 @@ static std::string tags_from_metadata(const json& metadata) {
             ds.bind(1, document_source_id);
             if (!ds.exec())
                 throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-            Stmt(db, "COMMIT").exec();
-        } catch (...) {
-            Stmt(db, "ROLLBACK").exec();
-            throw;
+            tx.commit();
         }
         invalidate_doc_cache();
         return info;
@@ -434,8 +445,21 @@ static std::string tags_from_metadata(const json& metadata) {
         if (id) return id;
         Stmt ins(db, "INSERT INTO models (name) VALUES (?)");
         ins.bind(1, name);
-        ins.step();
-        return static_cast<int>(sqlite3_last_insert_rowid(db));
+        // PHASE9B step 4d: a failed INSERT used to return whatever
+        // sqlite3_last_insert_rowid() happened to hold — an unrelated model's
+        // id, which then landed in turns.model_id. Retry the lookup once (a
+        // concurrent insert by another connection is a benign race); if the
+        // row still is not there, the insert genuinely failed: throw.
+        if (!ins.exec()) {
+            Stmt q(db, "SELECT model_id FROM models WHERE name = ?");
+            q.bind(1, name);
+            if (q.step()) return q.column_int(0);
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+        }
+        const int64_t rowid = sqlite3_last_insert_rowid(db);
+        if (rowid <= 0)
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, "model insert produced no rowid"));
+        return static_cast<int>(rowid);
     }
 
 
@@ -458,8 +482,18 @@ static std::string tags_from_metadata(const json& metadata) {
             else                     ins.bind(2, session_name);
             if (session_name.empty()) ins.bind_null(3);
             else                      ins.bind(3, name_source);
-            ins.step();
-            id = static_cast<int>(sqlite3_last_insert_rowid(db));
+            // PHASE9B step 4d: same stale-rowid hazard as get_or_create_model.
+            if (!ins.exec()) {
+                Stmt q(db, "SELECT session_id FROM sessions WHERE guid = ?");
+                q.bind(1, guid);
+                if (q.step()) id = q.column_int(0);
+                if (!id)
+                    throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            } else {
+                id = static_cast<int>(sqlite3_last_insert_rowid(db));
+                if (!id)
+                    throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, "session insert produced no rowid"));
+            }
         } else if (!session_name.empty()) {
             // Update name if changed (retitled session, or first time a name
             // is available for a previously-unnamed session).
@@ -472,6 +506,14 @@ static std::string tags_from_metadata(const json& metadata) {
             u.exec();
         }
         return id;
+    }
+
+
+    std::optional<int> Backend::Impl::find_session(const std::string& guid) {
+        Stmt s(db, "SELECT session_id FROM sessions WHERE guid = ?");
+        s.bind(1, guid);
+        if (s.step()) return s.column_int(0);
+        return std::nullopt;
     }
 
 
@@ -517,65 +559,64 @@ static std::string tags_from_metadata(const json& metadata) {
         int model_id   = get_or_create_model(model_name);
         int session_id = get_or_create_session(session_guid, session_name, name_source);
 
-        // Retry/regeneration dedup. When the agent re-answers the *same* user
-        // prompt without an intervening new prompt, we get a second turn whose
-        // user_text duplicates the immediately-preceding turn. In a healthy
-        // agent a regeneration stays in one session; a session change between
-        // two identical prompts is itself a breakage signal (observed when the
-        // TUI crash-restarted and minted a fresh session GUID per turn). So the
-        // match is intentionally cross-session: identical user_text in the most
-        // recent turn, within a short time window. We keep-latest — update that
-        // row's assistant_text (+ re-embed) in place rather than inserting a
-        // duplicate. The FTS au-trigger keeps the index consistent. Empty
-        // assistant_text (partial/prompt-arrival rows) never dedups.
-        // Skipped entirely for historical imports (source_timestamp set).
-        if (!a.empty() && source_timestamp.empty()) {
+        // Same-exchange handling (PHASE9B step 10). Only the FINAL assistant
+        // text of a turn is kept; a rejected draft is never stored as its own
+        // turn (that would capture the agent's discarded thinking), and no
+        // existing text is ever overwritten with different content.
+        // Probe: the newest turn OF THIS SESSION (an empty/unknown GUID never
+        // probes), same user_text, within 5 minutes. Historical imports
+        // (source_timestamp set) and empty assistant_text never probe.
+        //   * previous row has no assistant text -> fill it in place (finalize
+        //     flow; created_at and session untouched).
+        //   * identical text, or text already contained in what we hold
+        //     (the second capture hook firing) -> no write, return the row.
+        //   * new text starts with the held text (a cumulative resend) -> it
+        //     is a superset: replace with it, nothing is lost.
+        //   * anything else cannot be told apart from a continuation of a
+        //     multi-part reply -> treated as a continuation: appended after a
+        //     blank line to the same row.
+        // The embedding is recomputed from the combined text (NULL when
+        // defer_embedding, so backfill fills it; a stale vector is never kept).
+        if (!a.empty() && source_timestamp.empty() && session_id) {
             Stmt p(db,
-                "SELECT turn_id, user_text, created_at, session_id FROM turns "
-                "ORDER BY turn_id DESC LIMIT 1");
-            if (p.step()) {
-                const int prev_id          = p.column_int(0);
-                const std::string prev_u   = p.column_text(1);
-                const int64_t prev_ts_ep   = p.column_int64(2);
-                // 5-minute window: wide enough for a slow regeneration, narrow
-                // enough that a genuinely re-typed identical prompt much later
-                // is still recorded as its own turn.
-                bool within_window = false;
-                if (prev_u == u) {
-                    int64_t now_ep = db_epoch();
-                    within_window = (now_ep - prev_ts_ep) <= 300;
+                "SELECT turn_id, user_text, assistant_text, created_at FROM turns "
+                "WHERE session_id = ? ORDER BY turn_id DESC LIMIT 1");
+            p.bind(1, session_id);
+            if (p.step() && p.column_text(1) == u &&
+                (db_epoch() - p.column_int64(3)) <= 300) {
+                const int prev_id        = p.column_int(0);
+                const std::string prev_a = p.column_text(2);   // "" when NULL
+                std::string merged;
+                if (prev_a.empty() || (a.size() >= prev_a.size() && a.rfind(prev_a, 0) == 0)) {
+                    merged = a;                                 // fill / superset
+                } else if (prev_a.find(a) != std::string::npos) {
+                    return prev_id;                             // already held
+                } else {
+                    merged = prev_a + "\n\n" + a;               // continuation
                 }
-                if (within_window) {
-                    std::vector<float> emb2 = require_embedder().encode(turn_embed_text(u, a));
-                    // Single timestamp value shared by the turns UPDATE and the
-                    // placeholder cleanup/insert below — computed once, never
-                    // re-read from the clock, so the two writes can't drift
-                    // apart and strand the old (session_id, prev_ts) slot.
-                    const int64_t new_ts = db_epoch();
-                    // Row write + postings in one transaction (B §1.3); the
-                    // embedder call above stays outside on purpose.
-                    Transaction tx(db);
-                    Stmt up(db,
-                        "UPDATE turns SET assistant_text = ?, embedding_version = ?, embedding = ?, "
-                        "model_id = COALESCE(?, model_id), "
-                        "session_id = COALESCE(?, session_id), created_at = ? "
-                        "WHERE turn_id = ?");
-                    up.bind(1, a);
+                if (merged == prev_a) return prev_id;
+                std::vector<float> emb2;
+                if (!defer_embedding)
+                    emb2 = require_embedder().encode(turn_embed_text(u, merged));
+                Transaction tx(db);
+                Stmt up(db,
+                    "UPDATE turns SET assistant_text = ?, embedding_version = ?, embedding = ?, "
+                    "model_id = COALESCE(model_id, ?) WHERE turn_id = ?");
+                up.bind(1, merged);
+                if (defer_embedding) {
+                    up.bind_null(2);
+                    up.bind_null(3);
+                } else {
                     bind_embedding_version(up.raw(), 2, emb2);
                     bind_embedding(up.raw(), 3, emb2);
-                    if (model_id) up.bind(4, model_id); else up.bind_null(4);
-                    if (session_id) up.bind(5, session_id); else up.bind_null(5);
-                    up.bind(6, new_ts);
-                    up.bind(7, prev_id);
-                    if (!up.exec())
-                        throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-                    text_index_->index_record("turns", prev_id, u + "\n" + a);
-                    // Span follows the row's effective session (the UPDATE
-                    // keeps the old session when no new guid was given).
-                    touch_session_span(session_id ? session_id : p.column_int(3), new_ts);
-                    tx.commit();
-                    return prev_id;
                 }
+                if (model_id) up.bind(4, model_id); else up.bind_null(4);
+                up.bind(5, prev_id);
+                if (!up.exec())
+                    throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+                text_index_->index_record("turns", prev_id, u + "\n" + merged);
+                tx.commit();
+                return prev_id;
             }
         }
 
@@ -751,17 +792,34 @@ static std::string tags_from_metadata(const json& metadata) {
                        const std::string& tags,
                        const std::string& source_timestamp,
                        bool defer_embedding) {
+        // PHASE9B step 6: the same status contract store() enforces (the CLI
+        // used to accept e.g. "roadmap" here; that is Reid's dropped-status
+        // ruling applied consistently). Embed OUTSIDE the transaction; insert
+        // + index INSIDE it, so an indexing failure never leaves a committed,
+        // unindexed row.
+        // PHASE9B step 6: the same status contract store() enforces (the CLI
+        // used to accept e.g. "roadmap" here; that is Reid's dropped-status
+        // ruling applied consistently). Embed OUTSIDE the transaction; insert
+        // + index INSIDE it, so an indexing failure never leaves a committed,
+        // unindexed row.
+        const std::string eff_status = status.empty() ? "current" : status;
+        validate_creatable_status(eff_status);
         std::string t = normalize_path(strip_decision_number_prefix(text));
         std::vector<float> emb;
         if (!defer_embedding) emb = require_embedder().encode(t);
-        const int did = insert_knowledge_row(
-            "decision", t, status.empty() ? "current" : status, tags,
-            /*trigger=*/"", /*rationale=*/"", /*scope=*/"",
-            /*supersedes=*/std::nullopt, /*session_id=*/std::nullopt,
-            /*model_id=*/std::nullopt, resolve_epoch(source_timestamp),
-            emb, defer_embedding);
+        int did = 0;
+        {
+            Transaction txn(db);
+            did = insert_knowledge_row(
+                "decision", t, eff_status, tags,
+                /*trigger=*/"", /*rationale=*/"", /*scope=*/"",
+                /*supersedes=*/std::nullopt, /*session_id=*/std::nullopt,
+                /*model_id=*/std::nullopt, resolve_epoch(source_timestamp),
+                emb, defer_embedding);
+            text_index_->index_record("knowledge", did, t);
+            txn.commit();
+        }
         invalidate_knowledge_cache();
-        text_index_->index_record("knowledge", did, t);
         return did;
     }
 
@@ -804,13 +862,7 @@ static std::string tags_from_metadata(const json& metadata) {
                 "{} requires at least one evidence turn_summary_id", noun));
         // Statuses a NEW row may start in. 'superseded' and 'retired' are
         // reached only by curation, never on create.
-        {
-            bool ok = false;
-            for (auto sv : ragger::sqlite::status::kCreatable) if (status == sv) ok = true;
-            if (!ok)
-                throw std::invalid_argument(
-                    "status must be one of: current, provisional, pending");
-        }
+        validate_creatable_status(status);
 
         if (in.supersedes) {
             Stmt st(db, "SELECT status FROM knowledge WHERE knowledge_id = ?");
@@ -837,9 +889,7 @@ static std::string tags_from_metadata(const json& metadata) {
         if (!in.session_guid.empty()) {
             // Look up only -- never create a session from here. An unknown
             // GUID just means no provenance link (NULL), not an error.
-            Stmt st(db, "SELECT session_id FROM sessions WHERE guid = ?");
-            st.bind(1, in.session_guid);
-            if (st.step()) session_id = st.column_int(0);
+            session_id = find_session(in.session_guid);
         }
 
         // ---- 2. embed (outside the transaction) ------------------------
@@ -1282,10 +1332,13 @@ static std::string tags_from_metadata(const json& metadata) {
             throw std::invalid_argument("store_episode_close: no members");
         if (close.span_end < close.span_start)
             throw std::invalid_argument("store_episode_close: span_end < span_start");
-        const int session_id = get_or_create_session(close.session_guid);
-        if (!session_id)
+        // PHASE9B step 1: an unknown GUID must NOT create a session (the old
+        // get_or_create_session call made the !session_id check unreachable).
+        const std::optional<int> found = find_session(close.session_guid);
+        if (!found)
             throw std::invalid_argument("store_episode_close: unknown session '" +
                                         close.session_guid + "'");
+        const int session_id = *found;
 
         const std::string t = normalize_path(close.text);
         const int model_id = get_or_create_model(close.model_name);
@@ -1539,7 +1592,7 @@ static std::string tags_from_metadata(const json& metadata) {
         if (target.empty()) return std::nullopt;
         Stmt s(db,
             "SELECT t.turn_id, t.user_text, t.assistant_text, m.name, "
-            "t.created_at, ss.guid "
+            "datetime(t.created_at,'unixepoch','localtime'), ss.guid "
             "FROM turns t "
             "LEFT JOIN models m ON t.model_id = m.model_id "
             "LEFT JOIN sessions ss ON t.session_id = ss.session_id "

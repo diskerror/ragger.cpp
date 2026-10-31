@@ -370,6 +370,11 @@ int TextIndex::reindex_table(const std::string& table, bool progress) {
             }
         }
         if (batch.empty()) break;
+        // PHASE9B step 5: one commit per batch instead of one fsync per
+        // statement. Transaction joins an outer one when a caller (reindex_all)
+        // owns the transaction, so this is also correct inside it. A failing
+        // batch rolls back only itself; earlier batches stay indexed.
+        Transaction tx(db_);
         for (const auto& row : batch) {
             index_record(table, row.id, row.text);
             last_id = row.id;
@@ -380,6 +385,7 @@ int TextIndex::reindex_table(const std::string& table, bool progress) {
                 std::cout.flush();
             }
         }
+        tx.commit();
     }
     if (progress) std::cout << "\n";
     return done;

@@ -14,11 +14,13 @@ class RaggerMemory;
 
 /// Import one Markdown/text/JSON file as L5 document chunks: chunk via
 /// chunk_markdown, store every chunk without embedding (fast), then embed
-/// the bodies out-of-process with bounded concurrency (see EmbedExecutor).
+/// every pending row in-process (RaggerMemory::backfill_embeddings).
 /// `title` overrides the default (filename stem) when non-empty; `year`/
 /// `tags` are applied to every chunk of this file. Used by both the
 /// `import-docs` verb and the deprecated bare `import` verb in main.cpp.
-void do_import(RaggerMemory &memory,
+/// Returns true if the file was imported, false if it was refused (already
+/// imported). Throws if the file cannot be read or embedded.
+bool do_import(RaggerMemory &memory,
                const std::string &filepath,
                int min_chunk_size,
                const std::string &title,

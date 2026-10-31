@@ -41,7 +41,6 @@
 #include "memory.h"
 #include "vector_codec.h"
 #include "recipe_cli.h"
-#include "embed_executor.h"
 #include "sqlite/backend.h"
 #include "sqlite/tables.h"
 #include "user_store.h"
@@ -103,7 +102,47 @@ struct DbChangeNotifier {
         armed = false;
         for (auto c : kMayWrite) if (command == c) armed = true;
     }
+    // PHASE9B step 7: `config set` and `recipe` also change the DB, but only
+    // on some paths (`config get`, a no-change picker run). Those branches
+    // call arm() when a write actually happens, so a read-only invocation
+    // never signals the daemon.
+    void arm() { armed = true; }
     ~DbChangeNotifier() { if (armed) notify_daemon_db_changed(); }
+};
+
+// PHASE9B step 7: every CLI verb that changes the DB logs what it did. The
+// daemon's log is the only record of out-of-band writes; before this only
+// `re-embed` logged. Values are never logged — config logs the KEY only, so a
+// token or password set from the CLI can't land in the log file.
+static void cli_audit(const std::string& verb, const std::string& detail) {
+    Diskerror::Logger::info(verb + " started: " + detail);
+}
+static void cli_audit_done(const std::string& verb, const std::string& detail) {
+    Diskerror::Logger::info(verb + " finished: " + detail);
+}
+static void cli_audit_failed(const std::string& verb, const std::string& detail) {
+    Diskerror::Logger::warn(verb + " failed: " + detail);
+}
+
+// For verbs with many early returns: logs `started` on construction and, unless
+// done() was called, `failed` on destruction — so every `return 1` and every
+// exception leaves a closing line instead of an orphan `started`. The reason
+// is in the error the verb logged just before returning.
+struct AuditScope {
+    std::string verb;
+    bool closed = false;
+    AuditScope(std::string v, const std::string& detail) : verb(std::move(v)) {
+        cli_audit(verb, detail);
+    }
+    void done(const std::string& detail) { cli_audit_done(verb, detail); closed = true; }
+    ~AuditScope() {
+        if (closed) return;
+        cli_audit_failed(verb, std::uncaught_exceptions() > 0
+            ? "aborted by an exception"
+            : "exited with an error (see the error logged just before this line)");
+    }
+    AuditScope(const AuditScope&) = delete;
+    AuditScope& operator=(const AuditScope&) = delete;
 };
 
 int main(int argc, char **argv) {
@@ -564,8 +603,14 @@ int main(int argc, char **argv) {
                     if (i > 2) value += " ";
                     value += args[i];
                 }
+                // PHASE9B step 7: arm BEFORE the write — a crash part-way
+                // still refreshes the daemon. Log the KEY only, never the
+                // value: tokens and passwords are settable here.
+                cli_audit("config set", name);
+                db_change_notifier.arm();
                 auto r = ragger::set_config_persisted(name, value);
                 if (!r) {
+                    cli_audit_failed("config set", name);
                     switch (r.error()) {
                         case ragger::ConfigSetError::UnknownKey:
                             std::cerr << "Unknown config key: " << name << "\n"; break;
@@ -580,6 +625,8 @@ int main(int argc, char **argv) {
                 }
                 auto v = ragger::get_config_value(ragger::config(), name);
                 std::cout << name << " = " << (v ? *v : value) << "\n";
+                cli_audit_done("config set",
+                               name + (r->restart_required ? " (restart required)" : ""));
                 if (r->restart_required)
                     std::cout << "(change saved — restart the daemon to apply)\n";
                 if (r->rebuild_required)
@@ -641,11 +688,26 @@ int main(int argc, char **argv) {
             std::string imp_title = opts["title"].as<std::string>();
             int         imp_year  = opts["year"].as<int>();
             std::string imp_tags  = opts["tags"].as<std::string>();
+            cli_audit("import-docs", std::format("{} file(s)", args.size()));
             ragger::RaggerMemory memory(db_path);
-            for (auto &filepath: args) {
-                do_import(memory, filepath, min_chunk_size,
-                          imp_title, imp_year, imp_tags);
+            int n_imported = 0, n_refused = 0;
+            try {
+                for (auto &filepath: args) {
+                    if (do_import(memory, filepath, min_chunk_size,
+                                  imp_title, imp_year, imp_tags))
+                        ++n_imported;
+                    else
+                        ++n_refused;
+                }
+            } catch (const std::exception& e) {
+                cli_audit_failed("import-docs",
+                                 std::format("{} imported, {} refused before the failure: {}",
+                                             n_imported, n_refused, e.what()));
+                throw;
             }
+            cli_audit_done("import-docs",
+                           std::format("{} imported, {} refused (already imported)",
+                                       n_imported, n_refused));
         }
         else if (command == "list-docs") {
             ragger::RaggerMemory memory(db_path);
@@ -677,14 +739,18 @@ int main(int argc, char **argv) {
                 return 1;
             }
             ragger::RaggerMemory memory(db_path);
+            cli_audit("delete-doc", "id " + args[0]);
             try {
                 auto info = memory.delete_document_source(id);
                 std::println("Deleted document {} ({}): {} chunk(s) removed.",
                     id,
                     info["title"].is_null() ? std::string("(untitled)") : info["title"].get<std::string>(),
                     info["chunks"].get<long long>());
+                cli_audit_done("delete-doc",
+                               std::format("{} chunk(s) removed", info["chunks"].get<long long>()));
             } catch (const std::invalid_argument& e) {
                 Diskerror::Logger::error(e.what());
+                cli_audit_failed("delete-doc", e.what());
                 return 1;
             }
         }
@@ -694,6 +760,7 @@ int main(int argc, char **argv) {
                 Diskerror::Logger::error(ragger::lang::CLI_USAGE_IMPORT_CONVERSATIONS);
                 return 1;
             }
+            AuditScope audit("import-conversations", args[0]);
 
             // ISO-8601 (or already-db) timestamp → "YYYY-MM-DD HH:MM:SS".
             auto to_db_ts = [](std::string s) -> std::string {
@@ -723,6 +790,7 @@ int main(int argc, char **argv) {
                 }
                 if (items.empty()) {
                     std::println("Nothing to import.");
+                    audit.done( "summaries: nothing to import");
                     return 0;
                 }
                 ragger::RaggerMemory memory(db_path);
@@ -737,6 +805,9 @@ int main(int argc, char **argv) {
                     ++n;
                 }
                 std::println("Imported {} notes ({} duplicates skipped).", n, n_skip);
+                audit.done(
+                               std::format("summaries: {} notes imported, {} duplicates skipped",
+                                           n, n_skip));
                 return 0;
             }
 
@@ -789,6 +860,10 @@ int main(int argc, char **argv) {
                         "Imported {} Markdown memory files: {} notes ({} duplicates "
                         "skipped), {} decisions ({} duplicates skipped).",
                         n_files, n_sum, n_sum_skip, n_dec, n_dec_skip);
+                    audit.done(
+                                   std::format("flat-md dir: {} files, {} notes, {} decisions "
+                                               "imported ({} + {} duplicates skipped)",
+                                               n_files, n_sum, n_dec, n_sum_skip, n_dec_skip));
                     return 0;
                 }
                 // Directory has neither conversations.json nor any .md
@@ -800,6 +875,7 @@ int main(int argc, char **argv) {
                 auto chunks = ragger::parse_flat_markdown_memory(raw_src);
                 if (chunks.empty()) {
                     std::println("Nothing to import (empty file or recognized as agent scaffolding).");
+                    audit.done( "flat-md: no importable chunks");
                     return 0;
                 }
                 ragger::RaggerMemory memory(db_path);
@@ -820,6 +896,10 @@ int main(int argc, char **argv) {
                     "Imported {} notes ({} duplicates skipped), "
                     "{} decisions ({} duplicates skipped).",
                     n_sum, n_sum_skip, n_dec, n_dec_skip);
+                audit.done(
+                               std::format("flat-md: {} notes, {} decisions imported "
+                                           "({} + {} duplicates skipped)",
+                                           n_sum, n_dec, n_sum_skip, n_dec_skip));
                 return 0;
             }
 
@@ -856,17 +936,20 @@ int main(int argc, char **argv) {
                 std::string text = ragger::extract_text_from_json(raw);
                 if (text.empty()) {
                     std::println("Nothing to import.");
+                    audit.done( "nothing to import");
                     return 0;
                 }
                 ragger::RaggerMemory memory(db_path);
                 if (memory.decision_exists_exact(text, mem_ts)) {
                     std::println("memories.json already imported (dated {}) — skipped.", mem_ts);
+                    audit.done( "memories.json already imported, skipped");
                     return 0;
                 }
                 // TODO: LLM-driven split into discrete claims. For now,
                 // store the narrative as one decision row.
                 memory.store_decision(text, "current", "claude-memory", mem_ts);
                 std::println("Imported memories.json as 1 decision (dated {}).", mem_ts);
+                audit.done( "1 decision imported");
                 return 0;
             }
 
@@ -983,6 +1066,7 @@ int main(int argc, char **argv) {
             turns = ragger::filter_turns(turns, f);
             if (turns.empty() && memories_path.empty() && project_paths.empty()) {
                 std::println("No turns matched.");
+                audit.done( "no turns matched");
                 return 0;
             }
 
@@ -1038,6 +1122,9 @@ int main(int argc, char **argv) {
             }
             std::println("Imported {} conversation turns ({} duplicates skipped, {} session ids merged, {} backfilled).",
                          n, n_skip, n_merged, n_backfilled);
+            const std::string turns_detail = std::format(
+                "{} turns imported, {} duplicates skipped, {} session ids merged, {} backfilled",
+                n, n_skip, n_merged, n_backfilled);
 
             // Per-conversation `summary` field (claude-web only) → one L3
             // session-summary row each, dated by that conversation's own
@@ -1132,6 +1219,7 @@ int main(int argc, char **argv) {
                 }
             }
 
+            audit.done(turns_detail);
             return 0;
         }
         else if (command == "import") {
@@ -1148,11 +1236,26 @@ int main(int argc, char **argv) {
             std::string imp_title = opts["title"].as<std::string>();
             int         imp_year  = opts["year"].as<int>();
             std::string imp_tags  = opts["tags"].as<std::string>();
+            cli_audit("import", std::format("{} file(s)", args.size()));
             ragger::RaggerMemory memory(db_path);
-            for (auto &filepath: args) {
-                do_import(memory, filepath, min_chunk_size,
-                          imp_title, imp_year, imp_tags);
+            int n_imported = 0, n_refused = 0;
+            try {
+                for (auto &filepath: args) {
+                    if (do_import(memory, filepath, min_chunk_size,
+                                  imp_title, imp_year, imp_tags))
+                        ++n_imported;
+                    else
+                        ++n_refused;
+                }
+            } catch (const std::exception& e) {
+                cli_audit_failed("import",
+                                 std::format("{} imported, {} refused before the failure: {}",
+                                             n_imported, n_refused, e.what()));
+                throw;
             }
+            cli_audit_done("import",
+                           std::format("{} imported, {} refused (already imported)",
+                                       n_imported, n_refused));
         }
         else if (command == "export") {
             auto args = opts.getParams("args");
@@ -1210,7 +1313,11 @@ int main(int argc, char **argv) {
             // `ragger recipe [name]` — pick / inspect; writes the choice
             // to DB `settings.recipe`. Sentinel "default" tracks the INI.
             auto recipe_args = opts.getParams("args");
-            return ragger::run_recipe_cli(recipe_args, db_path);
+            bool recipe_persisted = false;
+            int recipe_rc = ragger::run_recipe_cli(recipe_args, db_path, &recipe_persisted);
+            if (recipe_persisted)
+                db_change_notifier.arm();
+            return recipe_rc;
         }
         else if (command == "re-embed") {
             // Re-encode embeddings for one table, or all (default).
@@ -1334,6 +1441,7 @@ int main(int argc, char **argv) {
                     return 1;
                 }
             }
+            cli_audit("reindex", target);
 
             std::string actual_db_path = db_path.empty() ? cfg.resolved_db_path() : db_path;
             std::println("{}", ragger::lang::MSG_DB_BACKING_UP);
@@ -1345,28 +1453,37 @@ int main(int argc, char **argv) {
                 Diskerror::Logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
             }
 
+            // PHASE9B step 5: one transaction over the whole index holds the
+            // write lock for the entire run; warn before starting, do not
+            // refuse (the run is still the right call for a stopped daemon).
+            if (target == "all" && find_live_daemon_pid() > 0)
+                std::println(
+                    "note: a daemon is running; its writes wait or fail until "
+                    "the reindex finishes (stop it first for a large database).");
+
             ragger::RaggerMemory memory(db_path,
                                         /*skip_embedding_guard=*/true);
             int total = 0;
-            if (target == "all") {
-                // Wipe the shared `terms` table + reset its AUTOINCREMENT
-                // counter before rebuilding every table in the same pass --
-                // safe only because every table gets reindexed right after,
-                // so no junction row is left pointing at a deleted term_id.
-                // Clears out any orphaned/legacy terms accumulated before a
-                // tokenizer fix (e.g. digit/stopword rules changing) and
-                // stops term_id from climbing forever on a DB that's never
-                // fully reindexed.
-                memory.backend()->reset_terms_table();
-                for (const auto& t : ragger::sqlite::kTextTables) {
-                    int count = memory.backend()->reindex_table(t.table, /*progress=*/true);
-                    std::println("Reindexed {}: {} row(s).", t.table, count);
-                    total += count;
+            try {
+                if (target == "all") {
+                    // PHASE9B step 5: reset + rebuild of every table in ONE
+                    // transaction (see Backend::reindex_all): either the whole
+                    // index is rebuilt or the old one is untouched. Clears out
+                    // any orphaned/legacy terms accumulated before a tokenizer
+                    // fix and stops term_id from climbing forever.
+                    for (const auto& [table, count] : memory.backend()->reindex_all(/*progress=*/true)) {
+                        std::println("Reindexed {}: {} row(s).", table, count);
+                        total += count;
+                    }
+                    std::println("Reindexed all tables: {} row(s) total.", total);
+                } else {
+                    total = memory.backend()->reindex_table(target, /*progress=*/true);
+                    std::println("Reindexed {}: {} row(s).", target, total);
                 }
-                std::println("Reindexed all tables: {} row(s) total.", total);
-            } else {
-                total = memory.backend()->reindex_table(target, /*progress=*/true);
-                std::println("Reindexed {}: {} row(s).", target, total);
+                cli_audit_done("reindex", std::format("{} row(s) reindexed", total));
+            } catch (const std::exception& e) {
+                cli_audit_failed("reindex", std::format("{}: {}", target, e.what()));
+                throw;
             }
         }
         else if (command == "show-embedding-model") {

@@ -409,6 +409,20 @@ struct Backend::Impl {
                               const std::string& session_name = "",
                               const std::string& name_source = "");
 
+    /// Statuses a NEW row may start in. The message is byte-identical to the
+    /// one the two call sites used to repeat (PHASE9B step 6 extraction).
+    void validate_creatable_status(const std::string& status);
+
+    /// PHASE9B step 5: rebuild the whole text index atomically. One outer
+    /// transaction around reset_terms_table() + every registry table, so the
+    /// old index survives any failure. Returns {table, rows} per table.
+    std::vector<std::pair<std::string, int>> reindex_all(bool progress);
+
+    /// Resolve a session GUID to its compact integer id WITHOUT creating it.
+    /// nullopt = no such session. Callers decide whether that is an error
+    /// (store, store_episode_close) or merely absent provenance (store_knowledge).
+    std::optional<int> find_session(const std::string& guid);
+
     // Embedding for a turn is over the joined exchange (user + assistant),
     // using the same U+001F unit-separator as chat's summary turns.
     static std::string turn_embed_text(const std::string& u, const std::string& a);

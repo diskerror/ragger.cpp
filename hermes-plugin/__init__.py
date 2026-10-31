@@ -38,6 +38,16 @@ _CIRCUIT_THRESHOLD = 5
 _CIRCUIT_COOLDOWN = 120.0   # seconds before auto-reset
 
 
+def _int_or_error(value, name):
+    """int() that reports instead of raising (PHASE9B step 9): a bad argument
+    is a validation error returned to the tool caller, never an exception out
+    of handle_tool_call. Returns (value, None) or (None, message)."""
+    try:
+        return int(value), None
+    except (TypeError, ValueError):
+        return None, f"{name} must be an integer"
+
+
 # ---------------------------------------------------------------------------
 # Unix domain socket HTTP transport
 # ---------------------------------------------------------------------------
@@ -499,11 +509,14 @@ class RaggerMemoryProvider(MemoryProvider):
         self._session_id = ""   # Hermes session id; provenance for memory_decision
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
-        # Circuit breaker
+        # Circuit breaker. Touched from the gateway thread, the prefetch
+        # thread and the post-turn async thread, so all three accessors take
+        # one lock (PHASE9B step 9).
         import time as _time
         self._time = _time
         self._failures = 0
         self._breaker_until = 0.0
+        self._breaker_lock = threading.Lock()
 
     @property
     def name(self) -> str:
@@ -514,42 +527,64 @@ class RaggerMemoryProvider(MemoryProvider):
     # ------------------------------------------------------------------
 
     def _breaker_open(self) -> bool:
-        if self._failures < _CIRCUIT_THRESHOLD:
-            return False
-        if self._time.monotonic() >= self._breaker_until:
-            self._failures = 0
-            return False
-        return True
+        with self._breaker_lock:
+            if self._failures < _CIRCUIT_THRESHOLD:
+                return False
+            if self._time.monotonic() >= self._breaker_until:
+                self._failures = 0
+                return False
+            return True
 
     def _record_ok(self) -> None:
-        self._failures = 0
+        with self._breaker_lock:
+            self._failures = 0
+
+    def _classify(self, got):
+        """Shared classification of a _post_status() result.
+
+        Returns (ok, payload):
+          - got is None      -> (False, message) and a breaker FAILURE: the
+            daemon never answered (socket error, timeout).
+          - status >= 400    -> (False, server message) and a breaker OK:
+            the daemon answered; a 4xx is the caller's mistake, so it must
+            not trip the breaker (PHASE9B step 9).
+          - otherwise        -> (True, parsed JSON body), breaker OK.
+        """
+        if got is None:
+            self._record_fail()
+            return False, "Ragger request failed. Is the daemon running? Try: ragger start"
+        self._record_ok()
+        status, body = got
+        if status >= 400:
+            return False, body.strip()
+        try:
+            return True, json.loads(body)
+        except ValueError:
+            return False, "Ragger returned a non-JSON reply: " + body[:200]
 
     def _agent_tool_result(self, got):
         """Shared result handling for the Phase 2 agent tools (memory_search /
         memory_get): _post_status returned None (daemon down) or a
         (status, body) pair. A 4xx body is the server's ERROR message."""
-        if got is None:
-            self._record_fail()
-            return json.dumps({
-                "error": "Ragger request failed. Is the daemon running? Try: ragger start"
-            })
-        self._record_ok()
-        status, body = got
-        if status >= 400:
-            return json.dumps({"error": body.strip()})
-        try:
-            return json.dumps(json.loads(body))
-        except ValueError:
-            return json.dumps({"error": "Ragger returned a non-JSON reply: " + body[:200]})
+        ok, payload = self._classify(got)
+        return json.dumps({"error": payload} if not ok else payload)
 
     def _record_fail(self) -> None:
-        self._failures += 1
-        if self._failures >= _CIRCUIT_THRESHOLD:
-            self._breaker_until = self._time.monotonic() + _CIRCUIT_COOLDOWN
+        count = 0
+        with self._breaker_lock:
+            self._failures += 1
+            if self._failures >= _CIRCUIT_THRESHOLD:
+                self._breaker_until = self._time.monotonic() + _CIRCUIT_COOLDOWN
+                # Log on the rising edge only. Before this, every failure
+                # past the threshold logged again — a daemon that stayed down
+                # turned each turn into another warning line.
+                if self._failures == _CIRCUIT_THRESHOLD:
+                    count = self._failures
+        if count:
             logger.warning(
                 "Ragger circuit breaker tripped after %d failures — "
                 "pausing for %ds. Is 'ragger start' running?",
-                self._failures, int(_CIRCUIT_COOLDOWN),
+                count, int(_CIRCUIT_COOLDOWN),
             )
 
     # ------------------------------------------------------------------
@@ -714,16 +749,19 @@ class RaggerMemoryProvider(MemoryProvider):
             return
 
         def _run():
-            result = self._post("/search", {"query": query, "limit": 5}, timeout=4.0)
-            if result is not None:
-                self._record_ok()
-                hits = result.get("results", [])
-                if hits:
-                    lines = [h.get("text", "") for h in hits if h.get("text")]
-                    with self._prefetch_lock:
-                        self._prefetch_result = "\n".join(f"- {line}" for line in lines)
-            else:
-                self._record_fail()
+            # PHASE9B step 9: a 4xx is our own bad query, not a daemon outage —
+            # it must not trip the breaker, and this is a background warm-up,
+            # so log it and move on.
+            ok, payload = self._classify(
+                self._post_status("/search", {"query": query, "limit": 5}, timeout=4.0))
+            if not ok:
+                logger.debug("Ragger prefetch: %s", payload)
+                return
+            hits = payload.get("results", []) if isinstance(payload, dict) else []
+            if hits:
+                lines = [h.get("text", "") for h in hits if h.get("text")]
+                with self._prefetch_lock:
+                    self._prefetch_result = "\n".join(f"- {line}" for line in lines)
 
         self._prefetch_thread = threading.Thread(
             target=_run, daemon=True, name="ragger-prefetch",
@@ -844,11 +882,12 @@ class RaggerMemoryProvider(MemoryProvider):
         if title:
             payload["session_name"] = title
             payload["name_source"] = "hermes_title"
-        result = self._post("/turn", payload, timeout=4.0)
-        if result is None:
-            self._record_fail()
-        else:
-            self._record_ok()
+        # PHASE9B step 9: transport failure counts; an HTTP 4xx (the daemon
+        # rejected this turn) does not, and is only worth a debug line — turn
+        # capture must never raise into the caller.
+        ok, detail = self._classify(self._post_status("/turn", payload, timeout=4.0))
+        if not ok:
+            logger.debug("Ragger turn capture: %s", detail)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [SEARCH_SCHEMA, STORE_SCHEMA, DECISION_SCHEMA,
@@ -858,6 +897,16 @@ class RaggerMemoryProvider(MemoryProvider):
                 MEMORY_REVIEW_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
+        """Tool entry point. Must never raise for bad arguments: anything the
+        caller can pass that this code can't process comes back as an error
+        JSON (PHASE9B step 9)."""
+        try:
+            return self._dispatch_tool_call(tool_name, args, **kwargs)
+        except (TypeError, ValueError, AttributeError, KeyError) as exc:
+            logger.debug("Ragger tool %s rejected arguments: %s", tool_name, exc)
+            return json.dumps({"error": f"Invalid arguments for {tool_name}: {exc}"})
+
+    def _dispatch_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._breaker_open():
             return json.dumps({
                 "error": "Ragger temporarily unavailable (circuit breaker tripped). "
@@ -865,17 +914,17 @@ class RaggerMemoryProvider(MemoryProvider):
             })
 
         if tool_name == "ragger_search":
-            query = args.get("query", "").strip()
+            query = str(args.get("query", "")).strip()
             if not query:
                 return json.dumps({"error": "Missing required parameter: query"})
-            limit = max(1, int(args.get("limit", 5)))
-            result = self._post("/search", {"query": query, "limit": limit})
-            if result is None:
-                self._record_fail()
-                return json.dumps({
-                    "error": "Ragger search failed. Is the daemon running? Try: ragger start"
-                })
-            self._record_ok()
+            try:
+                limit = max(1, int(args.get("limit", 5)))
+            except (TypeError, ValueError):
+                return json.dumps({"error": "limit must be an integer"})
+            ok, result = self._classify(
+                self._post_status("/search", {"query": query, "limit": limit}))
+            if not ok:
+                return json.dumps({"error": result})
             hits = result.get("results", [])
             if not hits:
                 return json.dumps({"result": "No relevant memories found."})
@@ -886,23 +935,19 @@ class RaggerMemoryProvider(MemoryProvider):
             return json.dumps({"results": items, "count": len(items)})
 
         elif tool_name == "ragger_store":
-            text = args.get("text", "").strip()
+            text = str(args.get("text", "")).strip()
             if not text:
                 return json.dumps({"error": "Missing required parameter: text"})
-            category = args.get("category", "fact").strip() or "fact"
-            result = self._post(
+            category = str(args.get("category", "fact")).strip() or "fact"
+            ok, result = self._classify(self._post_status(
                 "/store",
                 {
                     "text": text,
                     "metadata": {"category": category, "source": "hermes-agent"},
                 },
-            )
-            if result is None:
-                self._record_fail()
-                return json.dumps({
-                    "error": "Ragger store failed. Is the daemon running? Try: ragger start"
-                })
-            self._record_ok()
+            ))
+            if not ok:
+                return json.dumps({"error": result})
             return json.dumps({"result": "Stored.", "id": result.get("id", "")})
 
         elif tool_name == "memory_decision":
@@ -917,9 +962,15 @@ class RaggerMemoryProvider(MemoryProvider):
             if args.get("tags"):
                 payload["tags"] = [str(t) for t in args["tags"]]
             if args.get("supersedes") is not None:
-                payload["supersedes"] = int(args["supersedes"])
+                v, err = _int_or_error(args["supersedes"], "supersedes")
+                if err:
+                    return json.dumps({"error": err})
+                payload["supersedes"] = v
             if args.get("evidence"):
-                payload["evidence"] = [int(x) for x in args["evidence"]]
+                try:
+                    payload["evidence"] = [int(x) for x in args["evidence"]]
+                except (TypeError, ValueError):
+                    return json.dumps({"error": "evidence must be a list of integers"})
             got = self._post_status("/decision", payload)
             if got is None:
                 self._record_fail()
@@ -954,10 +1005,12 @@ class RaggerMemoryProvider(MemoryProvider):
             if args.get("exclude_session"):
                 s = str(args["exclude_session"])
                 payload["exclude_session"] = self._session_id if s == "current" else s
-            if args.get("limit") is not None:
-                payload["limit"] = int(args["limit"])
-            if args.get("max_tokens") is not None:
-                payload["max_tokens"] = int(args["max_tokens"])
+            for key in ("limit", "max_tokens"):
+                if args.get(key) is not None:
+                    v, err = _int_or_error(args[key], key)
+                    if err:
+                        return json.dumps({"error": err})
+                    payload[key] = v
             got = self._post_status("/memory/search", payload)
             return self._agent_tool_result(got)
 
@@ -970,7 +1023,10 @@ class RaggerMemoryProvider(MemoryProvider):
                 payload["tags"] = [str(t) for t in args["tags"]]
             if args.get("evidence"):
                 # Phase 5: evidence routes the write to store_insight server-side.
-                payload["evidence"] = [int(e) for e in args["evidence"]]
+                try:
+                    payload["evidence"] = [int(e) for e in args["evidence"]]
+                except (TypeError, ValueError):
+                    return json.dumps({"error": "evidence must be a list of integers"})
             got = self._post_status("/memory/note", payload)
             return self._agent_tool_result(got)
 
@@ -981,7 +1037,10 @@ class RaggerMemoryProvider(MemoryProvider):
                     payload[key] = str(args[key])
             for key in ("limit",):
                 if args.get(key) is not None:
-                    payload[key] = int(args[key])
+                    v, err = _int_or_error(args[key], key)
+                    if err:
+                        return json.dumps({"error": err})
+                    payload[key] = v
             if args.get("session"):
                 s = str(args["session"])
                 payload["session"] = self._session_id if s == "current" else s
@@ -1020,7 +1079,10 @@ class RaggerMemoryProvider(MemoryProvider):
                 payload["session"] = self._session_id if s == "current" else s
             for key in ("after_turn", "before_turn", "limit"):
                 if args.get(key) is not None:
-                    payload[key] = int(args[key])
+                    v, err = _int_or_error(args[key], key)
+                    if err:
+                        return json.dumps({"error": err})
+                    payload[key] = v
             if not payload.get("ids") and not payload.get("session"):
                 return json.dumps({"error": "memory_get needs either ids or session"})
             got = self._post_status("/memory/get", payload)

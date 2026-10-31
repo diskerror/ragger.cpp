@@ -356,22 +356,5 @@ CREATE VIEW documents_view AS
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM documents;
 
-CREATE VIEW knowledge_turn_evidence_view AS 
-            SELECT knowledge_id, turn_summary_id FROM knowledge_turn_evidence;
-
-CREATE VIEW knowledge_document_evidence_view AS 
-            SELECT evidence_id, knowledge_id, document_id, document_source_path, chunk_index
-            FROM knowledge_document_evidence;
-
-CREATE VIEW turns_terms_view AS SELECT j.turn_id AS turn_id, t.term, j.count FROM turns_terms j JOIN terms t ON t.term_id = j.term_id ORDER BY j.turn_id, j.count DESC, t.term;
-
-CREATE VIEW knowledge_terms_view AS SELECT j.knowledge_id AS knowledge_id, t.term, j.count FROM knowledge_terms j JOIN terms t ON t.term_id = j.term_id ORDER BY j.knowledge_id, j.count DESC, t.term;
-
-CREATE VIEW documents_terms_view AS SELECT j.document_id AS document_id, t.term, j.count FROM documents_terms j JOIN terms t ON t.term_id = j.term_id ORDER BY j.document_id, j.count DESC, t.term;
-
-CREATE VIEW turn_summaries_terms_view AS SELECT j.turn_summary_id AS turn_summary_id, t.term, j.count FROM turn_summaries_terms j JOIN terms t ON t.term_id = j.term_id ORDER BY j.turn_summary_id, j.count DESC, t.term;
-
-CREATE VIEW episodes_terms_view AS SELECT j.episode_id AS episode_id, t.term, j.count FROM episodes_terms j JOIN terms t ON t.term_id = j.term_id ORDER BY j.episode_id, j.count DESC, t.term;
-
 -- seed row: the version stamp a fresh install carries.
 INSERT INTO settings (key, value) VALUES ('db_version', '0.17');

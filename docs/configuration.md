@@ -75,7 +75,7 @@ new configs should set `cert`/`key` under `[server]` instead.
 
 `model + dimensions + vector_type` define the DB's vector identity and
 are recorded in the `settings` table. Changing any of them once the DB
-holds data requires `ragger rebuild-embeddings` to re-encode everything;
+holds data requires `ragger re-embed` to re-encode everything;
 mismatches abort startup with a clear error.
 
 | Key          | Default            | Description                                                  |

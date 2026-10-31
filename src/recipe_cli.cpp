@@ -4,6 +4,7 @@
 
 #include "recipe_cli.h"
 
+#include "Logger.h"
 #include "config.h"
 #include "recipe.h"
 #include "user_store.h"
@@ -210,13 +211,24 @@ int run_picker(const std::vector<Recipe>& recipes,
 }
 
 void persist_choice(UserStore& backend, const std::string& name) {
-    backend.set_setting("recipe", name);
+    // PHASE9B step 7: the DB is the record, but the log is the only place
+    // that says WHO changed the active recipe and when. Started/finished
+    // pair like every other writing verb; a failed write logs `failed`.
+    Diskerror::Logger::info("recipe started: set active recipe to '" + name + "'");
+    try {
+        backend.set_setting("recipe", name);
+    } catch (const std::exception& e) {
+        Diskerror::Logger::warn(std::string("recipe failed: ") + e.what());
+        throw;
+    }
+    Diskerror::Logger::info("recipe finished: active recipe set to '" + name + "'");
 }
 
 } // namespace
 
 int run_recipe_cli(const std::vector<std::string>& args,
-                   const std::string& db_path) {
+                   const std::string& db_path,
+                   bool* persisted) {
     auto on_disk = load_all();
     if (on_disk.empty()) {
         std::println(stderr, "No recipes found and no built-ins compiled in.");
@@ -256,6 +268,7 @@ int run_recipe_cli(const std::vector<std::string>& args,
             return 2;
         }
         persist_choice(backend, name);
+        if (persisted) *persisted = true;
         std::println("✓ Active recipe set to '{}' (stored in settings.recipe).",
                      name);
         print_recipe(*r, configured_default, /*is_current=*/true);
@@ -276,6 +289,7 @@ int run_recipe_cli(const std::vector<std::string>& args,
         size_t idx = static_cast<size_t>(-1 - result);
         const auto& chosen = recipes[idx];
         persist_choice(backend, chosen.name);
+        if (persisted) *persisted = true;
         std::println("✓ Active recipe set to '{}' (stored in settings.recipe).",
                      chosen.name);
         print_recipe(chosen, configured_default, /*is_current=*/true);

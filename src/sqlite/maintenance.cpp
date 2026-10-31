@@ -359,12 +359,17 @@ namespace fs = std::filesystem;
         // Cycle 1–255; 0 is reserved for empty/placeholder blobs.
         int next = static_cast<int>(embedding_version_) + 1;
         if (next > 255) next = 1;
-        embedding_version_ = static_cast<uint8_t>(next);
+        // PHASE9B step 4b: write FIRST, adopt the member only after the write
+        // succeeded. The old order left the in-memory version ahead of the
+        // persisted one whenever the write failed (BUSY), so subsequent rows
+        // were stamped with a version nothing would ever re-embed.
         Stmt s(db,
             "INSERT INTO settings (key, value) VALUES ('embedding_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value");
-        s.bind(1, std::to_string(static_cast<int>(embedding_version_)));
-        s.exec();
+        s.bind(1, std::to_string(next));
+        if (!s.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+        embedding_version_ = static_cast<uint8_t>(next);
         return embedding_version_;
     }
 
@@ -381,6 +386,24 @@ namespace fs = std::filesystem;
     // safe immediately before reindexing ALL five tables" caveat.
     void Backend::Impl::reset_terms_table() {
         text_index_->reset_terms_table();
+    }
+
+
+    // PHASE9B step 5: `ragger reindex all` used to commit the terms wipe and
+    // then index record by record in autocommit: a crash in between left the
+    // index empty, and the run cost one fsync per statement. One outer
+    // Transaction now makes it all-or-nothing (reset_terms_table and the
+    // per-batch transactions inside reindex_table JOIN it). Known cost: the
+    // write lock is held for the whole run, so a running daemon's writers
+    // wait (busy timeout) or fail — main.cpp prints a note about that.
+    std::vector<std::pair<std::string, int>> Backend::Impl::reindex_all(bool progress) {
+        std::vector<std::pair<std::string, int>> out;
+        Transaction tx(db);
+        reset_terms_table();
+        for (const auto& t : kTextTables)
+            out.emplace_back(std::string(t.table), reindex_table(t.table, progress));
+        tx.commit();
+        return out;
     }
 
 
@@ -462,7 +485,9 @@ namespace fs = std::filesystem;
             "  AND (tags IS NULL OR tags NOT LIKE '%keep%')"
             "  AND NOT EXISTS (SELECT 1 FROM knowledge c WHERE c.supersedes = knowledge.knowledge_id)");
         stmt.bind(1, memory_id);
-        stmt.step();
+        // PHASE9B step 4b: an error is not "nothing to delete".
+        if (!stmt.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         int changes = sqlite3_changes(db);
         if (changes > 0) {
             invalidate_knowledge_cache();
@@ -492,7 +517,9 @@ namespace fs = std::filesystem;
             Stmt stmt(db, sql);
             for (size_t i = 0; i < memory_ids.size(); ++i)
                 stmt.bind(static_cast<int>(i + 1), memory_ids[i]);
-            stmt.step();
+            // PHASE9B step 4b: read changes() only after a successful DELETE.
+            if (!stmt.exec())
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
             changes = sqlite3_changes(db);
             tx.commit();
         }

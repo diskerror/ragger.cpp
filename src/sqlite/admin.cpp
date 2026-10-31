@@ -140,7 +140,12 @@ namespace fs = std::filesystem;
 
     void Backend::Impl::set_user_password(const std::string& username, const std::string& pw_hash) {
         Stmt s(db, "UPDATE users SET password_hash = ? WHERE username = ?");
-        s.bind(1, pw_hash).bind(2, username).step();
+        s.bind(1, pw_hash).bind(2, username);
+        // PHASE9B step 4a: an unchecked write here silently dropped the
+        // password change (e.g. SQLITE_BUSY from the second UserStore
+        // connection contending with the daemon).
+        if (!s.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
     }
 
 
@@ -148,23 +153,38 @@ namespace fs = std::filesystem;
         int64_t ts = db_epoch();
         Stmt s(db,
             "INSERT INTO users (username, token_hash, created_at, updated_at) VALUES (?,?,?,?)");
-        s.bind(1, username).bind(2, token_hash).bind(3, ts).bind(4, ts).step();
-        return sqlite3_changes(db) > 0
-            ? static_cast<int>(sqlite3_last_insert_rowid(db))
-            : -1;
+        s.bind(1, username).bind(2, token_hash).bind(3, ts).bind(4, ts);
+        // PHASE9B step 4a: the old code read sqlite3_changes() after an
+        // unchecked step — after a failure that is the PREVIOUS statement's
+        // count, so a rejected insert could report a stale rowid as success.
+        // Contract (user_store.h): new user_id, or -1 on a constraint
+        // failure (duplicate username); any other error throws.
+        if (!s.exec()) {
+            const int rc = sqlite3_extended_errcode(db);
+            if (rc == SQLITE_CONSTRAINT_UNIQUE || rc == SQLITE_CONSTRAINT_PRIMARYKEY ||
+                rc == SQLITE_CONSTRAINT_TRIGGER || rc == SQLITE_CONSTRAINT)
+                return -1;
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+        }
+        return static_cast<int>(sqlite3_last_insert_rowid(db));
     }
 
 
     bool Backend::Impl::delete_user(const std::string& username) {
         Stmt s(db, "DELETE FROM users WHERE username = ?");
-        s.bind(1, username).step();
+        s.bind(1, username);
+        // PHASE9B step 4a: an error is not "no such user".
+        if (!s.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         return sqlite3_changes(db) > 0;
     }
 
 
     void Backend::Impl::update_user_token(const std::string& username, const std::string& new_hash) {
         Stmt s(db, "UPDATE users SET token_hash = ? WHERE username = ?");
-        s.bind(1, new_hash).bind(2, username).step();
+        s.bind(1, new_hash).bind(2, username);
+        if (!s.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
     }
 
 
@@ -189,7 +209,9 @@ namespace fs = std::filesystem;
 
     void Backend::Impl::set_semqlite_config(const std::string& key, const std::string& value) {
         Stmt s(db, "INSERT OR REPLACE INTO semqlite_config (key, value) VALUES (?, ?)");
-        s.bind(1, key).bind(2, value).step();
+        s.bind(1, key).bind(2, value);
+        if (!s.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
     }
 
 
@@ -213,7 +235,9 @@ namespace fs = std::filesystem;
             return;
         }
         Stmt s(db, "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
-        s.bind(1, key).bind(2, value).step();
+        s.bind(1, key).bind(2, value);
+        if (!s.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
     }
 
 

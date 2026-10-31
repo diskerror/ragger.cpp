@@ -4,7 +4,6 @@
  */
 #include "import.h"
 #include "nlohmann_json.hpp"
-#include "embed_executor.h"
 #include "lang.h"
 #include "memory.h"
 #include "storage_types.h"
@@ -925,7 +924,7 @@ std::vector<SummaryImport> load_summary_jsonl(const std::string& path) {
     return out;
 }
 
-void do_import(RaggerMemory &memory,
+bool do_import(RaggerMemory &memory,
                const std::string &filepath,
                int min_chunk_size,
                const std::string &title,
@@ -944,7 +943,7 @@ void do_import(RaggerMemory &memory,
                      existing["id"].get<long long>(),
                      existing["title"].get<std::string>(),
                      existing["imported_at"].get<std::string>());
-        return;
+        return false;
     }
 
     std::string text = ragger::read_file_to_string(filepath);
@@ -966,14 +965,8 @@ void do_import(RaggerMemory &memory,
                                       ? fs::path(filepath).stem().string()
                                       : title;
 
-    // Store every chunk first WITHOUT embedding (fast), then embed the bodies
-    // out-of-process with bounded concurrency + per-call timeout (issue #41).
-    // This keeps a large import from saturating the box: at most
-    // embed_max_workers `ragger embed` subprocesses run at once.
-    std::vector<int>         ids;
-    std::vector<std::string> texts;
-    ids.reserve(total);
-    texts.reserve(total);
+    // Store every chunk first WITHOUT embedding (fast), then embed the whole
+    // set in-process below (PHASE9B step 8 — no more one-subprocess-per-chunk).
     for (int i = 0; i < total; ++i) {
         ragger::DocumentChunk doc;
         doc.text        = ragger::clean_document_text(chunks[i].text);
@@ -984,23 +977,28 @@ void do_import(RaggerMemory &memory,
         doc.chunk_index = i + 1;
         doc.imported_at = import_ts;
 
-        int id = memory.store_document(doc, /*defer_embedding=*/true);
-        ids.push_back(id);
-        texts.push_back(doc.text);
+        const int id = memory.store_document(doc, /*defer_embedding=*/true);
         std::println(ragger::lang::MSG_IMPORT_CHUNK, (i + 1), total, std::to_string(id));
     }
 
-    ragger::EmbedExecutor embed_exec;  // timeout / retries / workers from config
-    auto vecs = embed_exec.batch(texts);
-    int skipped = 0;
-    for (size_t i = 0; i < ids.size(); ++i) {
-        if (vecs[i]) memory.update_document_embedding(ids[i], *vecs[i]);
-        else ++skipped;   // left NULL — `ragger re-embed` can retry
-    }
+    // PHASE9B step 8: embed IN-PROCESS with the embedder this process already
+    // holds. This used to hand the bodies to EmbedExecutor, which spawned one
+    // `ragger embed` subprocess per chunk and re-loaded the ONNX model every
+    // time — a large import spent more time loading the model than embedding.
+    // backfill_embeddings() embeds every row whose embedding is NULL, so the
+    // scope is this import's chunks PLUS anything else still pending (an
+    // earlier import with the model down, a crashed re-embed). That wider
+    // scope is accepted: it is the same work `ragger re-embed` would do, just
+    // done opportunistically here, and it is idempotent.
+    const bool no_embeddings = memory.embeddings_unavailable();
+    if (!no_embeddings)
+        memory.backfill_embeddings();
+
     std::println(ragger::lang::MSG_IMPORT_DONE, chunks.size());
-    if (skipped > 0)
+    if (no_embeddings)
         Diskerror::Logger::warn(std::format(ragger::lang::WARN_IMPORT_EMBED_SKIPPED,
-                                            skipped, total));
+                                            total, total));
+    return true;
 }
 
 } // namespace ragger

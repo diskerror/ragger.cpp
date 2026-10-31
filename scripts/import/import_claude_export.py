@@ -337,7 +337,7 @@ def main():
     if args.dry_run:
         print("(dry run — nothing written)")
     else:
-        print("\nRun `ragger rebuild-embeddings` then start the daemon.")
+        print("\nRun `ragger re-embed` then start the daemon.")
         print("Housekeeping will summarize the new turns automatically.")
 
 

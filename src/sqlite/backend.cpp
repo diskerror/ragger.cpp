@@ -163,6 +163,11 @@ std::vector<EpisodeCandidateTurn> Backend::episode_candidate_turns(
     return pImpl->episode_candidate_turns(session_guid, since_ts);
 }
 
+std::vector<std::pair<std::string, int>> Backend::reindex_all(bool progress) {
+    return pImpl->reindex_all(progress);
+}
+
+
 int Backend::store_episode_close(const EpisodeClose& close) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->store_episode_close(close);

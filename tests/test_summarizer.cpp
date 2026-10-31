@@ -8,7 +8,10 @@
 #include "test_env.h"
 
 #include "check.h"
+#include "util/utf8.h"
+
 #include <chrono>
+#include <filesystem>
 #include <memory>
 #include <print>
 #include <string>
@@ -440,6 +443,96 @@ void p9a_test_chat_times_out() {
     std::println(" ok");
 }
 
+// PHASE9B step 3c: utf8_safe_prefix never cuts mid-sequence.
+void p9b_test_utf8_safe_prefix() {
+    std::print("  p9b_test_utf8_safe_prefix...\n");
+    using ragger::utf8_safe_prefix;
+    CHECK(utf8_safe_prefix("abc", 10) == "abc");
+    CHECK(utf8_safe_prefix("abc", 0) == "");
+    CHECK(utf8_safe_prefix("h\xc3\xa9llo", 2) == "h");
+    CHECK(utf8_safe_prefix("h\xc3\xa9llo", 3) == "h\xc3\xa9");
+    CHECK(utf8_safe_prefix("\xe2\x82\xacx", 2) == "");
+    CHECK(utf8_safe_prefix("\xe2\x82\xacx", 3) == "\xe2\x82\xac");
+    CHECK(utf8_safe_prefix("\xe2\x82\xacx", 4) == "\xe2\x82\xacx");
+    CHECK(utf8_safe_prefix("\xf0\x9f\x98\x80", 3) == "");
+    CHECK(utf8_safe_prefix("\xf0\x9f\x98\x80", 4) == "\xf0\x9f\x98\x80");
+    // Invalid input: still a prefix, no crash, no underflow.
+    const std::string bad = "\x80\x80\x80";
+    const auto r = utf8_safe_prefix(bad, 1);
+    CHECK(r.size() <= 1);
+    CHECK(bad.rfind(r, 0) == 0);
+
+    // Property: every cut of a mixed string is valid UTF-8 (or empty).
+    const std::string mixed = "a" "\xc3\xa9" "\xe2\x82\xac" "\xf0\x9f\x98\x80" "b" "\xc3\xa9" "c";
+    auto valid_utf8 = [](const std::string& s) {
+        size_t i = 0;
+        while (i < s.size()) {
+            const unsigned char c = s[i];
+            size_t need;
+            if (c < 0x80) need = 1;
+            else if ((c & 0xE0) == 0xC0) need = 2;
+            else if ((c & 0xF0) == 0xE0) need = 3;
+            else if ((c & 0xF8) == 0xF0) need = 4;
+            else return false;
+            if (i + need > s.size()) return false;
+            for (size_t k = 1; k < need; ++k)
+                if ((static_cast<unsigned char>(s[i + k]) & 0xC0) != 0x80) return false;
+            i += need;
+        }
+        return true;
+    };
+    for (size_t m = 0; m <= mixed.size() + 1; ++m) {
+        const auto cut = utf8_safe_prefix(mixed, m);
+        CHECK(cut.size() <= m);
+        CHECK(mixed.rfind(cut, 0) == 0);
+        CHECK(valid_utf8(cut));
+    }
+    std::println(" OK");
+}
+
+// PHASE9B step 3a: a prompt that vformat rejects must behave like an
+// inference failure (warn + return ""), never escape the function.
+void p9b_test_bad_prompt_no_escape(const std::string& base) {
+    std::print("  p9b_test_bad_prompt_no_escape...\n");
+    // A malformed prompt is published straight into the live Config: the
+    // sanctioned doors (validate_config_value, step 3b) now reject it, which
+    // is the point — but a row that predates that guard can still be live,
+    // and the summarizer must survive it regardless.
+    (void)base;
+    ragger::Embedder emb;  // disabled; embedding not needed on this path
+    {
+        CHECK(ragger::update_config([](ragger::Config& c) { c.summarizer_prompt = "{"; return true; }));
+        ragger::InferenceClient inf({}, "", 4096);  // no endpoints
+        const std::vector<std::pair<std::string, std::string>> turns = {
+            {"question about harpsichord concertos",
+             std::string(120, 'x') + " answer about baroque music"},
+        };
+        bool threw = false;
+        try {
+            const auto out = summarize_transcript(inf, turns);
+            CHECK(out.empty());
+        } catch (...) { threw = true; }
+        CHECK(!threw);
+        threw = false;
+        try {
+            const auto out = ragger::summarize_texts(inf, {"some long text ", std::string(120, 'y')});
+            CHECK(out.empty());
+        } catch (...) { threw = true; }
+        CHECK(!threw);
+
+        // A valid prompt still reaches the (failing) inference path.
+        CHECK(ragger::update_config([](ragger::Config& c) {
+            c.summarizer_prompt = "summarize in {} chars, max {}"; return true; }));
+        threw = false;
+        try {
+            const auto out = summarize_transcript(inf, turns);
+            CHECK(out.empty());   // inference failure -> ""
+        } catch (...) { threw = true; }
+        CHECK(!threw);
+    }
+    std::println(" OK");
+}
+
 int main() {
     TestEnv env("summarizer");
     std::println("test_summarizer:");
@@ -453,6 +546,8 @@ int main() {
     p6_test_episode_boundaries();
     p6_test_live_enqueue_skipped(env.base());
     p6_test_single_scan(env.base());
+    p9b_test_utf8_safe_prefix();
+    p9b_test_bad_prompt_no_escape(env.base());
     p9a_test_chat_times_out();
     std::println("All summarizer tests passed.");
     return 0;

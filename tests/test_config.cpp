@@ -1,11 +1,13 @@
 #include "config.h"
 #include "config_access.h"
+#include "user_store.h"
 #include "config_schema.h"
 #include "test_env.h"
 #include "check.h"
 #include "util/fs.h"
 #include <atomic>
 #include <cassert>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -409,11 +411,67 @@ void p9a_test_config_snapshots() {
     std::println(" ok");
 }
 
+// PHASE9B step 3b: summarizer_prompt must be a valid vformat pattern with
+// two args; other Text keys are untouched.
+void p9b_test_summarizer_prompt_validation() {
+    std::print("  p9b_test_summarizer_prompt_validation...\n");
+    auto ok = [](std::string_view k, std::string_view v) {
+        return ragger::validate_config_value(k, v).has_value();
+    };
+    CHECK(ok("summarizer_prompt", ""));   // empty = reset to default
+    CHECK(ok("summarizer_prompt", " "));
+    CHECK(ok("summarizer_prompt", "summarize in {} words, max {}"));
+    CHECK(ok("summarizer_prompt", "{0} {1}"));
+    CHECK(ok("summarizer_prompt", "{{literal braces}}"));
+    CHECK(!ok("summarizer_prompt", "{"));
+    CHECK(!ok("summarizer_prompt", "}"));
+    CHECK(!ok("summarizer_prompt", "{2}"));
+    CHECK(!ok("summarizer_prompt", "{:d"));
+    // Other Text keys keep accepting anything.
+    CHECK(ok("default_recipe", "plain"));
+    std::println(" OK");
+}
+
+// PHASE9B step 7: the episode keys are read per use by summarizer_service,
+// so a SIGHUP reload must apply them (they used to be silently dropped).
+void p9b_test_reload_config_episode_keys() {
+    std::print("  p9b_test_reload_config_episode_keys...\n");
+    const std::string db = ragger::config().resolved_db_path();
+    ragger::UserStore store(db);
+
+    // Nothing written yet: a reload with no change reports 0.
+    CHECK(ragger::reload_config() == 0);
+
+    store.set_setting("episode_threshold_base", "0.42");
+    store.set_setting("episode_threshold_cap", "0.91");
+    store.set_setting("episode_threshold_step", "0.07");
+    store.set_setting("episode_step_minutes", "13");
+
+    CHECK(ragger::reload_config() == 4);
+    const auto& cfg = ragger::config();
+    CHECK(std::abs(cfg.episode_threshold_base - 0.42f) < 1e-6f);
+    CHECK(std::abs(cfg.episode_threshold_cap  - 0.91f) < 1e-6f);
+    CHECK(std::abs(cfg.episode_threshold_step - 0.07f) < 1e-6f);
+    CHECK(cfg.episode_step_minutes == 13);
+
+    // Idempotent: the same rows are not counted as changes again.
+    CHECK(ragger::reload_config() == 0);
+
+    // Reset to defaults so later tests in this binary see the shipped values.
+    for (const char* k : {"episode_threshold_base", "episode_threshold_cap",
+                          "episode_threshold_step", "episode_step_minutes"})
+        store.set_setting(k, "");
+    CHECK(ragger::reload_config() == 4);
+    std::println(" OK");
+}
+
 int main() {
     TestEnv env("config");  // must be first: set_config_persisted publishes through update_config
     std::print("Running config tests:\n");
     test_housekeeping_section_parsing();
     p9a_test_shipped_defaults_applied();
+    p9b_test_summarizer_prompt_validation();
+    p9b_test_reload_config_episode_keys();
     p9a_test_config_snapshots();
     test_catch_up_batch_size_default();
     test_catch_up_batch_size_ignores_nonpositive();

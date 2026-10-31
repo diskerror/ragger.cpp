@@ -30,9 +30,8 @@ C++ port of the original Python [Ragger Memory](https://github.com/diskerror/rag
 ## What you get
 
 - **Captured turns, summarized live.** Turns land in the DB as they happen; an in-daemon worker
-  writes per-turn summaries immediately and closes session summaries on idle, all without blocking
-  the agent. If the summarizer model is unreachable, a draft is stored and rewritten later — the
-  agent never waits on inference it didn't ask for.
+  writes per-turn summaries immediately and closes episodes on idle, all without blocking the
+  agent. The agent never waits on inference it didn't ask for.
 - **Hybrid search.** A custom TF-IDF inverted index (stemmed unigrams + bigrams and
   DoubleMetaphone "sounds-like" codes sharing one flat term table) blended with dense vector
   cosine via Eigen3. Configurable weights; all signals normalized before blending.
@@ -41,7 +40,7 @@ C++ port of the original Python [Ragger Memory](https://github.com/diskerror/rag
   `/v1/embeddings` endpoint (llama.cpp, llama-swap, LM Studio, OpenAI). Stored as IEEE half (f16) by
   default; in-memory math stays f32. Storage type can be `f32`, `f16`, `bf16`, and `int8`. Re-encode
   any time with
-  `ragger rebuild-embeddings` or the dashboard's "Update now".
+  `ragger re-embed` or the dashboard's "Update now".
 - **HTTP and MCP, same data.** Daemon serves a REST API; `ragger mcp`
   speaks JSON-RPC over stdio. Bearer-token auth on remote requests; unix-socket and loopback are
   pre-authenticated.

@@ -50,7 +50,9 @@ Pick the tool by the shape of the thing:
   strategy"), not as the conclusion. Add `rationale` and `scope`. To replace an
   earlier decision pass its id in `supersedes`; the old one is kept, marked
   superseded, never overwritten. Without `memory_decision`, use `store` with
-  `category: "decision"`.
+  `category: "decision"` — such a decision is stored without a trigger (the
+  trigger is exactly what `memory_decision` records), so prefer
+  `memory_decision` whenever you can supply one.
 - **A fact, preference or lesson** -> `memory_note` (or `store`). Tag project
   facts `project:<name>`. If you are synthesizing something from earlier
   results, pass their turn_summary ids as `evidence` and it is stored as an

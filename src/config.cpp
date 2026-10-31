@@ -5,6 +5,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include "Logger.h"
 #include "config_access.h"
 #include "lang.h"
 #include "util/fs.h"
@@ -487,10 +488,13 @@ int reload_config() {
     int changes = 0;
     update_config([&](Config& cfg) {
 
-    // Keys that require restart (log but don't apply)
+    // Keys that require restart (log but don't apply). PHASE9B step 7: log
+    // through the Logger, not stderr — for the daemon, stderr is not the
+    // activity log, so a SIGHUP reload that found restart-only changes was
+    // previously invisible.
     auto warn_restart = [&](const std::string& name, bool changed) {
         if (changed) {
-            std::cerr << std::format(ragger::lang::WARN_CONFIG_RESTART, name) << "\n";
+            Diskerror::Logger::warn(std::format(ragger::lang::WARN_CONFIG_RESTART, name));
         }
     };
     warn_restart("port", fresh.port != cfg.port);
@@ -559,6 +563,10 @@ int reload_config() {
     // Logging
     // (log_level itself is not hot-reloadable — Diskerror::Logger is
     // constructed once at startup with the level fixed.)
+    // PHASE9B step 7: log_level, log_max_size_mb and log_max_age_days are all
+    // applied once at Logger construction (main.cpp), so reloading them would
+    // be cosmetic — they are deliberately absent here. The config metadata
+    // marks them Live; that mismatch is reported, not edited (Q2).
 
     // Paths
     RELOAD(normalize_home_path);
@@ -582,6 +590,16 @@ int reload_config() {
     RELOAD(build_context);
     RELOAD(auto_recall);
     RELOAD(default_recipe);
+
+    // Episode detection (PHASE9B step 7): summarizer_service reads these on
+    // every pass, so they take effect on reload like the rest of the section.
+    RELOAD(episode_threshold_base);
+    RELOAD(episode_threshold_cap);
+    RELOAD(episode_threshold_step);
+    RELOAD(episode_step_minutes);
+
+    // Sent per response by the HTTP server (read from config() per request).
+    RELOAD(server_name);
 
     // System ceilings
 

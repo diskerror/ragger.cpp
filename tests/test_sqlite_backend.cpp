@@ -7,6 +7,7 @@
 #include "config.h"
 #include "embedder.h"
 #include "sqlite/backend.h"
+#include "store_kind.h"
 #include "sqlite/status.h"
 #include "sqlite/tables.h"
 #include "user_store.h"
@@ -733,182 +734,115 @@ void test_store_turn(ragger::Embedder& emb) {
     cleanup();
 }
 
-// Retry/regeneration dedup: when the agent re-answers the SAME user prompt
-// without an intervening new prompt, store_turn must keep-latest (update the
-// prior row's assistant_text in place) instead of inserting a duplicate. The
-// match is cross-session by design — a session change between two identical
-// prompts is itself a breakage signal (TUI crash-restart minting fresh GUIDs).
-void test_store_turn_dedup(ragger::Embedder& emb) {
-    cleanup();
-    int t1 = 0;
-    {
-        ragger::sqlite::Backend db(emb, TEMP_DB);
-
-        // First answer to a prompt, in session A.
-        t1 = db.store_turn("Explain the general_search recipe.",
-                               "It searches summaries.", "model-a",
-                               /*defer_embedding=*/false, "sessionA");
-        CHECK(t1 > 0);
-
-        // Sleep across a second boundary: local_timestamp() has second-level
-        // resolution, so without a real gap here old_ts would trivially equal
-        // new_ts and this test would not exercise the drift this guards
-        // against (a dedup that lands in the same second as the original).
-        std::this_thread::sleep_for(std::chrono::milliseconds(1100));
-
-        // Same prompt re-answered — DIFFERENT session (sessionB), different
-        // assistant text. Must update t1 in place, not insert a new row.
-        int t2 = db.store_turn("Explain the general_search recipe.",
-                               "It searches summaries, documents, and decisions.",
-                               "model-b", /*defer_embedding=*/false, "sessionB");
-        CHECK(t2 == t1);  // same row id returned — keep-latest
-
-        // Cross a second boundary before the next insert: local_timestamp()
-        // has second-level resolution, and turn3 landing in the same second
-        // as t1's dedup-updated created_at is itself a separate known
-        // same-second collision (harmless for the summarizer's matching, but
-        // it would otherwise make this assertion block conflate two issues).
-        std::this_thread::sleep_for(std::chrono::milliseconds(1100));
-
-        // A genuinely different prompt still inserts a fresh row.
-        int t3 = db.store_turn("What about decisions?", "They are first-class.",
-                               "model-b", /*defer_embedding=*/false, "sessionB");
-        CHECK(t3 != t1);
-
-        db.close();
-    }
-
+// PHASE9B step 10: store_turn keeps only the FINAL assistant text of a turn
+// and never rewrites history. Probe = newest turn of the SAME session, same
+// user text, within 5 minutes. See Backend::Impl::store_turn.
+static std::string p9b_turn_field(const std::string& db_path, int turn_id, const char* col) {
     sqlite3* raw = nullptr;
-    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    CHECK(sqlite3_open(db_path.c_str(), &raw) == SQLITE_OK);
+    sqlite3_stmt* st = nullptr;
+    std::string sql = std::string("SELECT ") + col + " FROM turns WHERE turn_id = ?";
+    sqlite3_prepare_v2(raw, sql.c_str(), -1, &st, nullptr);
+    sqlite3_bind_int(st, 1, turn_id);
+    std::string out = "<missing>";
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const char* t = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+        out = t ? t : "<null>";
+    }
+    sqlite3_finalize(st);
+    sqlite3_close(raw);
+    return out;
+}
 
-    // Exactly two turn rows: the deduped pair collapsed to one, plus the
-    // distinct third prompt.
+static int p9b_count_turns(const std::string& db_path) {
+    sqlite3* raw = nullptr;
+    CHECK(sqlite3_open(db_path.c_str(), &raw) == SQLITE_OK);
     sqlite3_stmt* st = nullptr;
     sqlite3_prepare_v2(raw, "SELECT COUNT(*) FROM turns", -1, &st, nullptr);
     CHECK(sqlite3_step(st) == SQLITE_ROW);
-    CHECK(sqlite3_column_int(st, 0) == 2);
+    int n = sqlite3_column_int(st, 0);
     sqlite3_finalize(st);
-
-    // The surviving deduped row carries the LATEST assistant_text and is not
-    // duplicated in the FTS index (one hit for the prompt's distinctive term).
-    sqlite3_prepare_v2(raw,
-        "SELECT assistant_text FROM turns "
-        "WHERE user_text = 'Explain the general_search recipe.'",
-        -1, &st, nullptr);
-    CHECK(sqlite3_step(st) == SQLITE_ROW);
-    {
-        const char* a = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
-        CHECK(a && std::string(a).find("decisions") != std::string::npos);
-    }
-    // Only one such row (no duplicate).
-    CHECK(sqlite3_step(st) != SQLITE_ROW);
-    sqlite3_finalize(st);
-
-    // Custom terms index agrees: the prompt's distinctive stemmed bigram term
-    // resolves to exactly one turn_id (dedup didn't leave a stale/duplicate
-    // turns_terms row behind). Snowball's English algorithm leaves "general"
-    // unstemmed (unlike the old Porter pipeline, which reduced it to
-    // "genera"), so the stored literal bigram token is "general_search".
-    sqlite3_prepare_v2(raw,
-        "SELECT COUNT(*) FROM turns_terms tt "
-        "JOIN terms t ON t.term_id = tt.term_id "
-        "WHERE t.term = 'general_search'",
-        -1, &st, nullptr);
-    CHECK(sqlite3_step(st) == SQLITE_ROW);
-    CHECK(sqlite3_column_int(st, 0) == 1);
-    sqlite3_finalize(st);
-
-    // Regression: a dedup that moves the turn's created_at must not leave a
-    // stray turn_summaries row for this turn. Since placeholders no longer
-    // exist (per Reid's design decision — no placeholder mechanism), the
-    // deduped turn should have ZERO turn_summaries rows until explicitly
-    // finalized.
-    sqlite3_prepare_v2(raw,
-        "SELECT COUNT(*) FROM turn_summaries ts WHERE ts.turn_id = ?",
-        -1, &st, nullptr);
-    sqlite3_bind_int(st, 1, t1);
-    CHECK(sqlite3_step(st) == SQLITE_ROW);
-    CHECK(sqlite3_column_int(st, 0) == 0);
-    sqlite3_finalize(st);
-
     sqlite3_close(raw);
+    return n;
+}
+
+void test_store_turn_dedup(ragger::Embedder& emb) {
+    // (a) identical exchange, same session -> same id, one row, nothing changes.
+    // (c) identical exchange, different sessions -> two rows.
+    cleanup();
+    int t1 = 0, t2 = 0, t3 = 0;
+    std::string created1;
+    {
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        t1 = db.store_turn("Explain recipes.", "They pick context.", "m", false, "sessionA");
+        CHECK(t1 > 0);
+        created1 = p9b_turn_field(TEMP_DB, t1, "created_at");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+        t2 = db.store_turn("Explain recipes.", "They pick context.", "m", false, "sessionA");
+        CHECK(t2 == t1);
+        t3 = db.store_turn("Explain recipes.", "They pick context.", "m", false, "sessionB");
+        CHECK(t3 != t1);
+        db.close();
+    }
+    CHECK(p9b_count_turns(TEMP_DB) == 2);
+    CHECK(p9b_turn_field(TEMP_DB, t1, "created_at") == created1);
+    CHECK(p9b_turn_field(TEMP_DB, t1, "assistant_text") == "They pick context.");
     cleanup();
 }
 
-// PHASE-REVIEW-0.17 step 2: same-session regeneration dedup. The existing
-// test_store_turn_dedup covers the cross-session path (crash-restart GUID
-// churn); this pins the ordinary healthy-agent case: the re-answer arrives
-// in the SAME session as the original prompt.
 void test_store_turn_dedup_same_session(ragger::Embedder& emb) {
+    const std::string S = "p9b-turn-guid";
     cleanup();
-    const std::string S = "dedup-same-session-guid";
-    int t1 = 0;
     {
         ragger::sqlite::Backend db(emb, TEMP_DB);
 
-        t1 = db.store_turn("U1", "A1", "test-model",
-                           /*defer_embedding=*/false, S);
-        CHECK(t1 > 0);
+        // (b) same user text, different assistant text: cannot be told from a
+        // continuation, so it is APPENDED to the same row (no second turn, no
+        // overwrite).
+        int t1 = db.store_turn("U1", "Part one.", "m", false, S);
+        std::string created1 = p9b_turn_field(TEMP_DB, t1, "created_at");
+        int t2 = db.store_turn("U1", "Part two.", "m", false, S);
+        CHECK(t2 == t1);
+        CHECK(p9b_turn_field(TEMP_DB, t1, "assistant_text") == "Part one.\n\nPart two.");
+        CHECK(p9b_turn_field(TEMP_DB, t1, "created_at") == created1);
+        CHECK(p9b_turn_field(TEMP_DB, t1, "embedding IS NOT NULL") == "1");
 
-        // Same prompt, same session, new answer, inside the 5-minute window
-        // (no sleep needed: same-second is well within it). Must keep-latest.
-        int t2 = db.store_turn("U1", "A2", "test-model",
-                               /*defer_embedding=*/false, S);
-        CHECK(t2 == t1);  // same row id returned — dedup branch reached
+        // A repeat of an already-held part (second capture hook) is a no-op.
+        int t3 = db.store_turn("U1", "Part two.", "m", false, S);
+        CHECK(t3 == t1);
+        CHECK(p9b_turn_field(TEMP_DB, t1, "assistant_text") == "Part one.\n\nPart two.");
 
+        // Cumulative resend (starts with the held text) replaces, not appends.
+        int t4 = db.store_turn("U1", "Part one.\n\nPart two.\n\nPart three.", "m", false, S);
+        CHECK(t4 == t1);
+        CHECK(p9b_turn_field(TEMP_DB, t1, "assistant_text") ==
+              "Part one.\n\nPart two.\n\nPart three.");
+
+        // (d) partial row (no assistant text) completed in place.
+        int p1 = db.store_turn("U2", "", "m", false, S);
+        CHECK(p1 > t1);
+        CHECK(p9b_turn_field(TEMP_DB, p1, "assistant_text") == "<null>");
+        std::string pc = p9b_turn_field(TEMP_DB, p1, "created_at");
+        int p2 = db.store_turn("U2", "Final.", "m", false, S);
+        CHECK(p2 == p1);
+        CHECK(p9b_turn_field(TEMP_DB, p1, "assistant_text") == "Final.");
+        CHECK(p9b_turn_field(TEMP_DB, p1, "created_at") == pc);
+
+        // (e) deferred embedding on an append leaves the embedding NULL (never a
+        // stale vector for the old text).
+        int d1 = db.store_turn("U3", "First.", "m", false, S);
+        int d2 = db.store_turn("U3", "Second.", "m", /*defer_embedding=*/true, S);
+        CHECK(d2 == d1);
+        CHECK(p9b_turn_field(TEMP_DB, d1, "embedding IS NULL") == "1");
+
+        // A different prompt is its own turn; unknown session never probes.
+        int n1 = db.store_turn("U4", "A", "m", false, S);
+        CHECK(n1 != d1);
+        int e1 = db.store_turn("U5", "A", "m", false, "");
+        int e2 = db.store_turn("U5", "B", "m", false, "");
+        CHECK(e1 != e2);
         db.close();
     }
-
-    {
-        // Exactly one row for that session after the deduped pair, and the
-        // surviving row carries the LATEST assistant_text.
-        sqlite3* raw = nullptr;
-        CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
-        sqlite3_stmt* st = nullptr;
-        sqlite3_prepare_v2(raw,
-            "SELECT COUNT(*) FROM turns t "
-            "JOIN sessions s ON s.session_id = t.session_id WHERE s.guid = ?",
-            -1, &st, nullptr);
-        sqlite3_bind_text(st, 1, S.c_str(), -1, SQLITE_STATIC);
-        CHECK(sqlite3_step(st) == SQLITE_ROW);
-        CHECK(sqlite3_column_int(st, 0) == 1);
-        sqlite3_finalize(st);
-
-        sqlite3_prepare_v2(raw,
-            "SELECT assistant_text FROM turns WHERE turn_id = ?",
-            -1, &st, nullptr);
-        sqlite3_bind_int(st, 1, t1);
-        CHECK(sqlite3_step(st) == SQLITE_ROW);
-        const char* a = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
-        CHECK(a && std::string(a) == "A2");
-        sqlite3_finalize(st);
-        sqlite3_close(raw);
-    }
-
-    {
-        // A genuinely different prompt in the same session inserts a fresh row.
-        ragger::sqlite::Backend db(emb, TEMP_DB);
-        int t3 = db.store_turn("U2", "A2b", "test-model",
-                               /*defer_embedding=*/false, S);
-        CHECK(t3 > 0 && t3 != t1);
-        db.close();
-    }
-
-    {
-        sqlite3* raw = nullptr;
-        CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
-        sqlite3_stmt* st = nullptr;
-        sqlite3_prepare_v2(raw,
-            "SELECT COUNT(*) FROM turns t "
-            "JOIN sessions s ON s.session_id = t.session_id WHERE s.guid = ?",
-            -1, &st, nullptr);
-        sqlite3_bind_text(st, 1, S.c_str(), -1, SQLITE_STATIC);
-        CHECK(sqlite3_step(st) == SQLITE_ROW);
-        CHECK(sqlite3_column_int(st, 0) == 2);
-        sqlite3_finalize(st);
-        sqlite3_close(raw);
-    }
-
     cleanup();
 }
 
@@ -4615,6 +4549,435 @@ void p5_test_episode_close(ragger::Embedder& emb) {
     std::println(" OK");
 }
 
+// PHASE9B step 1: store_episode_close must never create a session.
+void p9b_test_episode_close_unknown_session(ragger::Embedder& emb) {
+    std::println("  p9b_test_episode_close_unknown_session...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    sqlite3* raw = p1_open_raw();
+    const int sessions_before = static_cast<int>(p1_scalar_int(raw, "SELECT COUNT(*) FROM sessions"));
+    sqlite3_close(raw);
+
+    ragger::EpisodeClose ec;
+    ec.text = "p9bec unknown session";
+    ec.model_name = "summarizer-model";
+    ec.session_guid = "p9bec-never-seen";
+    ec.span_start = p5_epoch("2026-05-01 10:00:00");
+    ec.span_end   = p5_epoch("2026-05-01 10:00:00");
+    ec.member_turn_summary_ids = {1};
+    bool threw = false;
+    std::string what;
+    try { db.store_episode_close(ec); }
+    catch (const std::exception& e) { threw = true; what = e.what(); }
+    CHECK(threw);
+    CHECK(what.find("unknown session") != std::string::npos);
+
+    // Old behavior (pinned before the fix): the unknown GUID silently CREATED
+    // a sessions row; the call only failed later on member assignment, and the
+    // created session survived. The fix must reject before touching anything.
+    raw = p1_open_raw();
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sessions") == sessions_before);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM episodes") == 0);
+    sqlite3_close(raw);
+
+    // A known GUID still works (seed one turn + summary, close it).
+    const int t = db.store_turn("p9bec q", "p9bec answer", "test-model", false,
+                                "p9bec-known", "2026-05-01 10:00:00");
+    CHECK(db.finalize_turn_summary(t, "p9bec summary", "summarizer-model"));
+    raw = p1_open_raw();
+    const int ts_id = static_cast<int>(p1_scalar_int(raw, std::format(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = {}", t)));
+    sqlite3_close(raw);
+    ragger::EpisodeClose ok;
+    ok.text = "p9bec known session episode";
+    ok.model_name = "summarizer-model";
+    ok.session_guid = "p9bec-known";
+    ok.span_start = p5_epoch("2026-05-01 10:00:00");
+    ok.span_end   = p5_epoch("2026-05-01 10:00:00");
+    ok.member_turn_summary_ids = {ts_id};
+    CHECK(db.store_episode_close(ok) > 0);
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+// PHASE9B step 2: reads return local wall-time strings, never raw epochs.
+void p9b_test_timestamp_formats(ragger::Embedder& emb) {
+    std::println("  p9b_test_timestamp_formats...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    // (a) search_text_only on a document chunk: timestamp is the source's
+    // imported_at as local "YYYY-MM-DD HH:MM:SS" (old code: raw epoch int).
+    ragger::DocumentChunk dc;
+    dc.text = "p9bts harpsichord concerto movement";
+    dc.path = "/tmp/p9bts.md";
+    dc.title = "p9bts";
+    dc.chunk_index = 1;
+    dc.imported_at = "2026-05-01 09:30:00";
+    db.store_document(dc);
+    auto resp = db.search_text_only("harpsichord", 10);
+    CHECK(!resp.results.empty());
+    bool found_doc = false;
+    for (const auto& r : resp.results) {
+        if (r.metadata.value("source", std::string()) == "document") {
+            found_doc = true;
+            CHECK(r.timestamp == "2026-05-01 09:30:00");
+        }
+    }
+    CHECK(found_doc);
+
+    // (b) no source row -> empty string, not 1970-01-01. (imported_at itself
+    // is NOT NULL in the schema; the LEFT JOIN's NULL case is a chunk whose
+    // document_source_id is NULL.)
+    sqlite3* raw = p1_open_raw();
+    CHECK(sqlite3_exec(raw, "UPDATE documents SET document_source_id = NULL",
+                       nullptr, nullptr, nullptr) == SQLITE_OK);
+    sqlite3_close(raw);
+    resp = db.search_text_only("harpsichord", 10);
+    found_doc = false;
+    for (const auto& r : resp.results) {
+        if (r.metadata.value("source", std::string()) == "document") {
+            found_doc = true;
+            CHECK(r.timestamp.empty());
+        }
+    }
+    CHECK(found_doc);
+
+    // (c) find_turn_by_text returns the local format too.
+    const int t = db.store_turn("p9bts probe question", "p9bts answer",
+                                "test-model", false, "p9bts-g", "2026-05-01 08:15:00");
+    CHECK(t > 0);
+    auto rec = db.find_turn_by_text("p9bts probe question");
+    CHECK(rec.has_value());
+    CHECK(rec->timestamp == "2026-05-01 08:15:00");
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+// PHASE9B step 4: failure injection (review recipe). A BEFORE trigger that
+// RAISE(ABORT) makes exactly one write path fail deterministically; the
+// error is constraint-class (SQLITE_CONSTRAINT_TRIGGER) and sqlite3_errmsg
+// contains "p9b injected".
+static void p9b_trigger(const std::string& sql) {
+    sqlite3* raw = p1_open_raw();
+    CHECK(sqlite3_exec(raw, sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+    sqlite3_close(raw);
+}
+
+void p9b_test_checked_writes(ragger::Embedder& emb) {
+    std::println("  p9b_test_checked_writes...");
+
+    // --- create_user: duplicate returns -1 (never a stale rowid) ----------
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        ragger::UserStore um(TEMP_DB);
+        const int id1 = um.create_user("p9b-alice", "h1");
+        CHECK(id1 > 0);
+        const int dup = um.create_user("p9b-alice", "h2");
+        CHECK(dup == -1);
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM users WHERE username='p9b-alice'") == 1);
+        sqlite3_close(raw);
+        db.close(); cleanup();
+    }
+
+    // --- create_user under injected failure: -1, no row. (Old code read
+    // sqlite3_changes() after a failed INSERT — the PREVIOUS statement's
+    // count — so this could return a stale rowid. Note what it returned.)
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        ragger::UserStore um(TEMP_DB);
+        CHECK(um.create_user("p9b-carol", "h1") > 0);
+        CHECK(um.create_user("p9b-dave", "h2") > 0);
+        // The previous statement on this connection (dave's INSERT) changed
+        // 1 row: the old code read sqlite3_changes() after the failed INSERT
+        // and returned that stale count as if it were the new rowid.
+        p9b_trigger("CREATE TRIGGER p9b_boom_users BEFORE INSERT ON users "
+                    "BEGIN SELECT RAISE(ABORT, 'p9b injected'); END");
+        const int r = um.create_user("p9b-bob", "h3");
+        std::println("    create_user under trigger returned {}", r);
+        CHECK(r == -1);
+        p9b_trigger("DROP TRIGGER p9b_boom_users");
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM users WHERE username='p9b-bob'") == 0);
+        sqlite3_close(raw);
+        db.close(); cleanup();
+    }
+
+    // --- set_setting failure must throw, not vanish -------------------------
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        p9b_trigger("CREATE TRIGGER p9b_boom_settings BEFORE INSERT ON settings "
+                    "BEGIN SELECT RAISE(ABORT, 'p9b injected'); END");
+        bool threw = false;
+        std::string what;
+        try { db.set_setting("p9b_k", "v"); }
+        catch (const std::runtime_error& e) { threw = true; what = e.what(); }
+        CHECK(threw);
+        CHECK(what.find("p9b injected") != std::string::npos);
+        p9b_trigger("DROP TRIGGER p9b_boom_settings");
+        db.set_setting("p9b_k", "v");   // works again
+        CHECK(db.get_setting("p9b_k") == std::optional<std::string>("v"));
+        db.close(); cleanup();
+    }
+
+    // --- delete_memory: error is not "no such row" -------------------------
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        const int id = std::stoi(db.store("p9b delete me"));
+        p9b_trigger("CREATE TRIGGER p9b_boom_knowledge BEFORE DELETE ON knowledge "
+                    "BEGIN SELECT RAISE(ABORT, 'p9b injected'); END");
+        bool threw = false;
+        try { db.delete_memory(id); } catch (const std::runtime_error&) { threw = true; }
+        CHECK(threw);
+        p9b_trigger("DROP TRIGGER p9b_boom_knowledge");
+        CHECK(db.delete_memory(id));
+        CHECK(!db.delete_memory(id));
+        db.close(); cleanup();
+    }
+
+    // --- get_or_create_model: a failed INSERT must not return a stale rowid
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        const int t1 = db.store_turn("q1", "a1", "p9b-model-a", false);
+        CHECK(t1 > 0);
+        p9b_trigger("CREATE TRIGGER p9b_boom_models BEFORE INSERT ON models "
+                    "BEGIN SELECT RAISE(ABORT, 'p9b injected'); END");
+        bool threw = false;
+        try { db.store_turn("q2", "a2", "p9b-model-new", false); }
+        catch (const std::runtime_error&) { threw = true; }
+        CHECK(threw);
+        p9b_trigger("DROP TRIGGER p9b_boom_models");
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turns") == 1);
+        // The old code returned sqlite3_last_insert_rowid() after the failed
+        // INSERT — a rowid of an unrelated models row (or 0) — so the turn
+        // was stored with a model_id that names nothing.
+        CHECK(p1_scalar_int(raw,
+            "SELECT COUNT(*) FROM turns t LEFT JOIN models m ON t.model_id = m.model_id "
+            "WHERE t.model_id IS NOT NULL AND m.model_id IS NULL") == 0);
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM models WHERE name='p9b-model-new'") == 0);
+        sqlite3_close(raw);
+        db.close(); cleanup();
+    }
+
+    // --- get_or_create_session: same -------------------------------------------------
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        const int t1 = db.store_turn("q1", "a1", "p9b-model-a", false, "p9b-sess-a");
+        CHECK(t1 > 0);
+        p9b_trigger("CREATE TRIGGER p9b_boom_sessions BEFORE INSERT ON sessions "
+                    "BEGIN SELECT RAISE(ABORT, 'p9b injected'); END");
+        bool threw = false;
+        try { db.store_turn("q2", "a2", "p9b-model-a", false, "p9b-sess-new"); }
+        catch (const std::runtime_error&) { threw = true; }
+        CHECK(threw);
+        p9b_trigger("DROP TRIGGER p9b_boom_sessions");
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turns") == 1);
+        CHECK(p1_scalar_int(raw,
+            "SELECT COUNT(*) FROM turns t LEFT JOIN sessions s ON t.session_id = s.session_id "
+            "WHERE t.session_id IS NOT NULL AND s.session_id IS NULL") == 0);
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sessions WHERE guid='p9b-sess-new'") == 0);
+        sqlite3_close(raw);
+        db.close(); cleanup();
+    }
+
+    // --- delete_document_source: atomic (old hand-rolled BEGIN/COMMIT) -----
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        ragger::DocumentChunk c1;
+        c1.text = "p9b atomic chunk one"; c1.path = "/tmp/p9b-atomic.md"; c1.title = "t"; c1.chunk_index = 1;
+        ragger::DocumentChunk c2 = c1;
+        c2.text = "p9b atomic chunk two"; c2.chunk_index = 2;
+        db.store_document(c1);
+        db.store_document(c2);
+        auto src = db.find_document_source("/tmp/p9b-atomic.md");
+        const int src_id = src.at("id").get<int>();
+        p9b_trigger("CREATE TRIGGER p9b_boom_ds BEFORE DELETE ON document_sources "
+                    "BEGIN SELECT RAISE(ABORT, 'p9b injected'); END");
+        bool threw = false;
+        try { db.delete_document_source(src_id); } catch (const std::runtime_error&) { threw = true; }
+        CHECK(threw);
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM documents") == 2);   // rolled back
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM document_sources") == 1);
+        sqlite3_close(raw);
+        p9b_trigger("DROP TRIGGER p9b_boom_ds");
+        db.delete_document_source(src_id);
+        raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM documents") == 0);
+        sqlite3_close(raw);
+        db.close(); cleanup();
+    }
+
+    std::println(" OK");
+}
+
+// PHASE9B step 5: reindex_all is atomic; reindex_table commits per batch.
+void p9b_test_reindex_atomic(ragger::Embedder& emb) {
+    std::println("  p9b_test_reindex_atomic...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    for (int i = 0; i < 3; ++i)
+        db.store(std::format("p9bri harpsichord note {}", i));
+    ragger::DocumentChunk c;
+    c.text = "p9bri harpsichord document one"; c.path = "/tmp/p9bri-1.md"; c.title = "d1"; c.chunk_index = 1;
+    db.store_document(c);
+    c.text = "p9bri harpsichord document two"; c.path = "/tmp/p9bri-2.md"; c.chunk_index = 1;
+    db.store_document(c);
+
+    auto counts = [&]() {
+        sqlite3* raw = p1_open_raw();
+        ragger::json j;
+        j["terms"] = p1_scalar_int(raw, "SELECT COUNT(*) FROM terms");
+        for (const char* t : {"turns_terms","knowledge_terms","documents_terms",
+                              "turn_summaries_terms","episodes_terms"})
+            j[t] = p1_scalar_int(raw, std::string("SELECT COUNT(*) FROM ") + t);
+        sqlite3_close(raw);
+        return j;
+    };
+    const ragger::json before = counts();
+    CHECK(before["terms"].get<int>() > 0);
+    CHECK(before["knowledge_terms"].get<int>() > 0);
+    CHECK(before["documents_terms"].get<int>() > 0);
+
+    // Inject a failure in the THIRD reindexed table (registry order: turns,
+    // knowledge, documents, ...). BEFORE UPDATE on the base table (the counts
+    // write-back), not on the junction: reset_terms_table() DROPs the
+    // junctions inside reindex_all, and a trigger dies with its table.
+    p9b_trigger("CREATE TRIGGER p9b_boom_docs BEFORE UPDATE ON documents "
+                "BEGIN SELECT RAISE(ABORT, 'p9b injected'); END");
+    bool threw = false;
+    try { db.reindex_all(false); } catch (const std::runtime_error&) { threw = true; }
+    CHECK(threw);
+    const ragger::json after_fail = counts();
+    for (auto& [k, v] : after_fail.items())
+        CHECK(v.get<int>() == before[k].get<int>());
+
+    // Happy path: same totals as the per-table loop, search still works.
+    p9b_trigger("DROP TRIGGER p9b_boom_docs");
+    auto done = db.reindex_all(false);
+    CHECK(done.size() == 5);
+    int total = 0;
+    for (auto& [table, n] : done) total += n;
+    CHECK(total == 3 + 2);   // 3 notes + 2 document chunks (turns empty here)
+    const ragger::json after_ok = counts();
+    CHECK(after_ok["terms"].get<int>() == before["terms"].get<int>());
+    auto hits = db.search_text_only("harpsichord", 20);
+    CHECK(!hits.results.empty());
+
+    // Single-table reindex: failure rolls back the batch, success restores.
+    p9b_trigger("CREATE TRIGGER p9b_boom_kn BEFORE UPDATE ON knowledge "
+                "BEGIN SELECT RAISE(ABORT, 'p9b injected'); END");
+    threw = false;
+    try { db.reindex_table("knowledge", false); } catch (const std::runtime_error&) { threw = true; }
+    CHECK(threw);
+    p9b_trigger("DROP TRIGGER p9b_boom_kn");
+    const int n = db.reindex_table("knowledge", false);
+    CHECK(n == 3);
+    CHECK(counts()["knowledge_terms"].get<int>() == before["knowledge_terms"].get<int>());
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+// PHASE9B step 6: store() is the single implementation of the store verb;
+// category=decision writes kind='decision' (NULL trigger) with store()'s
+// validation and transaction.
+void p9b_test_store_one_function(ragger::Embedder& emb) {
+    std::println("  p9b_test_store_one_function...");
+
+    // store_kind_for: the single rule.
+    CHECK(ragger::store_kind_for(ragger::json{{"category", "decision"}}) == "decision");
+    CHECK(ragger::store_kind_for(ragger::json::object()) == "note");
+    CHECK(ragger::store_kind_for(ragger::json{{"category", "fact"}}) == "note");
+    CHECK(ragger::store_kind_for(ragger::json{{"category", ""}}) == "note");
+    CHECK(ragger::store_kind_for(ragger::json()) == "note");
+
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        const std::string did = db.store("p9bs of by hal use the semqlite shell",
+                                         ragger::json{{"category", "decision"}});
+        const std::string nid = db.store("p9bs a plain note about harpsichords",
+                                         ragger::json::object());
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_text(raw, "SELECT kind FROM knowledge WHERE knowledge_id = " + did) == "decision");
+        CHECK(p1_scalar_text(raw, "SELECT ifnull(trigger,'NULL') FROM knowledge WHERE knowledge_id = " + did) == "NULL");
+        CHECK(p1_scalar_text(raw, "SELECT kind FROM knowledge WHERE knowledge_id = " + nid) == "note");
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge_terms WHERE knowledge_id = " + did) > 0);
+        sqlite3_close(raw);
+        // indexed: a keyword search finds it
+        auto hits = db.search_text_only("semqlite", 10);
+        bool found = false;
+        for (const auto& r : hits.results)
+            if (r.text.find("semqlite") != std::string::npos) found = true;
+        CHECK(found);
+        db.close(); cleanup();
+    }
+
+    // Invalid status is rejected on BOTH paths and writes nothing.
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        bool threw = false;
+        std::string what;
+        try { db.store("p9bs roadmap note", ragger::json{{"category", "decision"}, {"status", "roadmap"}}); }
+        catch (const std::invalid_argument& e) { threw = true; what = e.what(); }
+        CHECK(threw);
+        CHECK(what == "status must be one of: current, provisional, pending");
+        threw = false;
+        try { db.store_decision("p9bs roadmap decision", "roadmap", "", "", true); }
+        catch (const std::invalid_argument& e) { threw = true; what = e.what(); }
+        CHECK(threw);
+        CHECK(what == "status must be one of: current, provisional, pending");
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge") == 0);
+        sqlite3_close(raw);
+        db.close(); cleanup();
+    }
+
+    // Atomicity: an indexing failure must not leave a committed, unindexed
+    // row (the old store_decision had no transaction).
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        p9b_trigger("CREATE TRIGGER p9b_boom_kn BEFORE INSERT ON knowledge_terms "
+                    "BEGIN SELECT RAISE(ABORT, 'p9b injected'); END");
+        bool threw = false;
+        try { db.store_decision("p9bs atomic decision", "current", "", "", true); }
+        catch (const std::runtime_error&) { threw = true; }
+        CHECK(threw);
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge") == 0);
+        sqlite3_close(raw);
+        p9b_trigger("DROP TRIGGER p9b_boom_kn");
+        const int did = db.store_decision("p9bs atomic decision", "current", "", "", true);
+        CHECK(did > 0);
+        raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge_terms WHERE knowledge_id = " + std::to_string(did)) > 0);
+        sqlite3_close(raw);
+        db.close(); cleanup();
+    }
+
+    std::println(" OK");
+}
+
 void p5_test_episodes_needing_close(ragger::Embedder& emb) {
     std::println("  p5_test_episodes_needing_close...");
     cleanup();
@@ -4999,6 +5362,11 @@ int main() {
     p3_test_update_embedding(emb);
     p4_session_span(emb);
     p5_test_episode_close(emb);
+    p9b_test_episode_close_unknown_session(emb);
+    p9b_test_timestamp_formats(emb);
+    p9b_test_checked_writes(emb);
+    p9b_test_reindex_atomic(emb);
+    p9b_test_store_one_function(emb);
     p5_test_episodes_needing_close(emb);
     p5_test_episode_reads(emb);
     p6_test_pending_predicate(emb);

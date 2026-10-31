@@ -12,6 +12,7 @@
 #include "util/fs.h"
 
 #include <charconv>
+#include <format>
 #include <cstdlib>
 #include <cerrno>
 #include <algorithm>
@@ -305,6 +306,19 @@ std::expected<void, ConfigSetError> validate_config_value(std::string_view key,
             return {};
         case CfgType::Path:
         case CfgType::Text:
+            // PHASE9B step 3b: the summarizer prompt goes through std::vformat
+            // with two size_t arguments at every summary. Reject a value that
+            // would throw there (stray brace, out-of-range index, malformed
+            // spec) at the door instead of poisoning the summarizer loop.
+            if (key == "summarizer_prompt") {
+                std::size_t t = 1, c = 2;   // lvalues: libc++ make_format_args rejects rvalues
+                try {
+                    std::vformat(std::string_view(value),
+                                 std::make_format_args(t, c));
+                } catch (const std::format_error&) {
+                    return std::unexpected(ConfigSetError::InvalidValue);
+                }
+            }
             return {};
     }
     return {};

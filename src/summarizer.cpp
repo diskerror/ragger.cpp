@@ -6,6 +6,7 @@
 #include "config.h"
 #include "inference.h"
 #include "lang.h"
+#include "util/utf8.h"
 #include "Logger.h"
 
 #include <format>
@@ -21,6 +22,27 @@ namespace {
 // message is extraordinarily unlikely to begin with one. Note the OUT-OF-BAND
 // USER MESSAGE marker is intentionally absent — that wraps a genuine human
 // message and should be summarized normally.
+// Resolve the system prompt: INI/config `summarizer_prompt` overrides the
+// built-in default. Empty (or missing) uses the default; any non-empty value
+// is passed to the model as-is, including a single space to suppress it.
+// PHASE9B step 3a: vformat throws std::format_error on a malformed prompt;
+// that must not escape (an escaping exception skips the caller's failure
+// bookkeeping, so the same turn would re-queue every tick forever). On a bad
+// prompt behave exactly like an inference failure: warn, return "".
+std::string build_system_prompt(const std::string& raw_prompt,
+                                std::size_t target_chars, std::size_t hard_cap) {
+    try {
+        return std::vformat(
+            raw_prompt.empty()
+                ? Config::kDefaultSummarizerPrompt
+                : std::string_view(raw_prompt),
+            std::make_format_args(target_chars, hard_cap));
+    } catch (const std::exception& e) {
+        Diskerror::Logger::warn(std::format(lang::WARN_SUMMARY, e.what()));
+        return "";
+    }
+}
+
 constexpr std::string_view kSystemMarkers[] = {
     "[System note:",
     "[Note: model was just switched",
@@ -203,15 +225,8 @@ std::string summarize_transcript(
     const std::size_t hard_cap =
         std::max(target_chars, source_chars * static_cast<std::size_t>(mpct) / 100);
 
-    // Resolve the system prompt: INI `prompt` key overrides the built-in
-    // default. Empty (or missing) uses the default; any non-empty value is
-    // passed to the model as-is, including a single space to suppress it.
-    const std::string& raw_prompt = config().summarizer_prompt;
-    const std::string system_text = std::vformat(
-        raw_prompt.empty()
-            ? Config::kDefaultSummarizerPrompt
-            : std::string_view(raw_prompt),
-        std::make_format_args(target_chars, hard_cap));
+    const std::string system_text =
+        build_system_prompt(config().summarizer_prompt, target_chars, hard_cap);
 
     std::vector<Message> messages;
     if (!system_text.empty())
@@ -236,7 +251,9 @@ std::string summarize_transcript(
             fallback += u;
             if (!a.empty()) fallback += " → " + a;
         }
-        return (fallback.size() <= hard_cap) ? fallback : result.substr(0, hard_cap);
+        // PHASE9B step 3c: cut on a character boundary, never mid-sequence.
+        return (fallback.size() <= hard_cap) ? fallback
+                                             : utf8_safe_prefix(result, hard_cap);
     }
     return result;
 }
@@ -276,12 +293,8 @@ std::string summarize_texts(
     const std::size_t hard_cap =
         std::max(target_chars, source_chars * static_cast<std::size_t>(mpct) / 100);
 
-    const std::string& raw_prompt = config().summarizer_prompt;
-    const std::string system_text = std::vformat(
-        raw_prompt.empty()
-            ? Config::kDefaultSummarizerPrompt
-            : std::string_view(raw_prompt),
-        std::make_format_args(target_chars, hard_cap));
+    const std::string system_text =
+        build_system_prompt(config().summarizer_prompt, target_chars, hard_cap);
 
     std::vector<Message> messages;
     if (!system_text.empty())
@@ -297,7 +310,7 @@ std::string summarize_texts(
     }
 
     if (result.size() > hard_cap)
-        return result.substr(0, hard_cap);
+        return utf8_safe_prefix(result, hard_cap);
     return result;
 }
 

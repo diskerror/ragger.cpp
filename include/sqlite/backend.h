@@ -183,6 +183,9 @@ public:
     /// Delete a memory by ID. Returns true if deleted.
     bool delete_memory(int memory_id) override;
 
+    /// PHASE9B step 5: atomic full text-index rebuild (see backend_impl.h).
+    std::vector<std::pair<std::string, int>> reindex_all(bool progress) override;
+
     /// Delete multiple memories by ID. Returns count deleted.
     int delete_batch(const std::vector<int>& memory_ids) override;
 
