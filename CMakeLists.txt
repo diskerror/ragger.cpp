@@ -312,9 +312,8 @@ if(RAGGER_STATS)
 endif()
 target_link_libraries(ragger_core PUBLIC
     c_lib_utils
+    diskerror_search
     diskerror_embedding_codec
-    diskerror_double_metaphone
-    diskerror_stemmer_snowball
     ${RAGGER_SQLITE_TARGET}
     onnxruntime
     tokenizers_cpp
