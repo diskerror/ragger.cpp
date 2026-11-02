@@ -77,8 +77,8 @@ struct Backend::Impl {
         sqlite3_bind_int(s, idx, static_cast<int>(embedding_version_));
     }
 
-    // Embedding caches (review 2C): one struct, five instances — the five
-    // tables (summaries, documents, decisions, insights, turn_summaries) each
+    // Embedding caches (review 2C): one struct, four instances — the four
+    // cache tables (documents, knowledge, turn_summaries, episodes) each
     // hold the same six members. Vector scores come from the caches; keyword
     // scores come from the custom text index at query time, blended in
     // search(). Each cache is invalidated on writes to its table.
@@ -99,7 +99,7 @@ struct Backend::Impl {
 
     // Serializes all public-API access (H1): two httplib thread pools, the
     // housekeeping timer, and the SummarizerService worker share one backend.
-    // The non-thread-safe Embedder and the three embedding caches are guarded
+    // The non-thread-safe Embedder and the four embedding caches are guarded
     // by this. Locked once at the Backend:: public boundary; Impl methods
     // never re-lock, so no recursive deadlock is possible.
     mutable std::mutex mu;
@@ -180,15 +180,16 @@ struct Backend::Impl {
 
 
     /// 0.16 -> 0.17 migration: the whole agent-API schema in one step.
-    /// Rebuilds `decisions` (adds trigger, rationale, scope, supersedes,
-    /// session_id) and `summaries` in the canonical column order, rebuilds
-    /// `sessions` (drops project_id, adds started_on/ended_on span columns
-    /// computed from the session's turns), creates insights and
-    /// insight_evidence, drops the projects table and its indexes, and moves
-    /// stray category words that leaked into decisions.status ('fact',
-    /// 'lesson') into tags, setting status 'current'. decision_evidence and
-    /// the orphan-protection trigger are created after migration in
-    /// create_schema().
+    /// Rebuilds `sessions` (drops project_id, adds started_on/ended_on span
+    /// columns computed from the session's turns), moves the episode rows out
+    /// of `summaries` into the new `episodes` table and rebuilds
+    /// `turn_summaries` with `episode_id`, creates `knowledge` + the two
+    /// evidence tables and moves decisions in (kind='decision', ids
+    /// PRESERVED) plus the remaining summaries rows (kind='note'), drops the
+    /// old decisions/insights/summaries/projects objects, and moves stray
+    /// category words that leaked into decisions.status ('fact', 'lesson')
+    /// into tags, setting status 'current'. The turn_summaries indexes and the
+    /// orphan-protection trigger are recreated by create_schema() afterward.
     void migrate_0_16_to_0_17();
 
     /// PHASE9: the migration chain, declared after the leg methods it names.
@@ -313,10 +314,10 @@ struct Backend::Impl {
     void ensure_knowledge_cache();
 
     // Loads the turn_summaries (L2) table into the parallel vector cache.
-    // Mirrors ensure_dec_cache(): vector scores come from here, keyword
-    // scores from FTS5 (turn_summaries_fts) at query time. WHERE text IS NOT
-    // NULL excludes unfinalized placeholder rows (summarizer hasn't run yet)
-    // — these must never surface in search results or feed the embedding
+    // Vector scores come from here, keyword scores from the custom text
+    // index at query time. WHERE text != '' excludes marker rows
+    // (known-empty skips) and legacy NULL rows — these must never surface
+    // in search results or feed the embedding
     // similarity matrix. Metadata carries source="turn_summary" plus
     // turn_id/session_id (turn_summaries has no tags/status/level columns).
     void ensure_turn_cache();
@@ -373,15 +374,13 @@ struct Backend::Impl {
 
     // ---- public API ---------------------------------------------------
 
-    // v2: the generic store API writes a summary (L2/L3/L4). A memory-only
-    // install records agent memories here. `level`/`status` come from
-    // metadata when supplied; defaults suit a settled session-level note.
-    // collection/category and the free-form metadata blob are gone in v2 —
-    // metadata fields are either promoted to columns or dropped. FTS5 sync
-    // triggers index the row, so there is no explicit BM25 step.
+    // The generic store API writes a knowledge row (kind='note'). `status`
+    // and `tags` come from metadata when supplied (status must be creatable);
+    // metadata fields are either promoted to columns or dropped. The text
+    // index is updated in code, so there is no explicit BM25 step.
     std::string store(const std::string& raw_text, json metadata, bool defer_embedding);
 
-    // ---- store_document: write Level 5 RAG chunk ----------------------
+    // ---- store_document: write a RAG chunk ----------------------------
 
     // Resolve a (path, title) document to its document_sources row, inserting
     // one on first sighting. Returns {document_source_id, imported_at_epoch}.
@@ -429,8 +428,8 @@ struct Backend::Impl {
 
     // Store a raw L1 turn. An empty assistant_text writes a *partial* row
     // (assistant + embedding NULL) for the prompt-arrival/finalize flow;
-    // otherwise the exchange is embedded unless defer_embedding. FTS5 sync
-    // triggers index user_text/assistant_text. Returns turn_id.
+    // otherwise the exchange is embedded unless defer_embedding. The text
+    // index covers user_text/assistant_text. Returns turn_id.
     // `source_timestamp` (non-empty, db format) overrides created_at for
     // historical imports; the regeneration-dedup window is skipped in that
     // case (it reasons about "now", which is meaningless for old turns).
@@ -672,25 +671,22 @@ struct Backend::Impl {
 
     // --- search ---
 
-    // Hybrid search over summaries: vector cosine (cached embeddings) blended
+    // Hybrid search over the four corpora (turn_summaries, episodes,
+    // knowledge, documents): vector cosine (cached embeddings) blended
     // with the custom TF-IDF text index (literal + metaphone, v0.16). Both are
     // min-max normalized and combined with vector_weight/bm25_weight (bm25_weight
     // is now the single text-index blend weight; the old separate phon_weight
     // signal is folded into score_query() itself via fts_w_metaphone).
     //
-    // NOTE: the lean v2 summaries table has no collection column, so the
+    // NOTE: the lean schema has no collection column, so the
     // `collections` filter is currently a no-op (kept for API/source compat).
-    // Documents (L5) and decisions (L6) ARE merged into search: parallel passes
-    // (ensure_doc_cache / ensure_dec_cache + a text_index_->score_query() pass)
-    // are scored identically and merged with the summaries results into the
-    // single ranked top-k returned here. Each SearchResult's metadata["source"]
-    // is "summary", "document", or "decision" so callers can tell the corpora
-    // apart.
+    // Each SearchResult's metadata["source"] is "turn_summary", "episode",
+    // "knowledge" or "document" so callers can tell the corpora apart.
     SearchResponse search(const std::string& query, int limit,
                           float min_score,
                           std::vector<std::string> /*collections*/);
 
-    // Text-only search: FTS5 keyword + phonetic scoring across all four
+    // Text-only search: text-index keyword + phonetic scoring across all four
     // corpora. No embedding caches, no embedder call. Used when embeddings
     // are degraded (drift mismatch at startup).
     SearchResponse search_text_only(const std::string& query, int limit);
@@ -702,9 +698,9 @@ struct Backend::Impl {
     std::vector<std::pair<std::string, int64_t>> table_row_counts() const;
 
     // Total rows across the five embedded tables (turns, turn_summaries,
-    // summaries, decisions, documents) — i.e. how many rows
+    // episodes, knowledge, documents) — i.e. how many rows
     // `rebuild_embeddings()` will re-encode. (count() alone is just
-    // summaries, which understates the rebuild scope.)
+    // knowledge rows, which understates the rebuild scope.)
     int count_embeddable_rows(const std::string& table = "all") const;
 
     // True if any embedded table holds a non-NULL embedding. EXISTS short-
@@ -712,12 +708,13 @@ struct Backend::Impl {
     // they get the current model on backfill, so they aren't incompatible.
     bool has_embeddings() const;
 
-    // Lean v2 summaries have no collection column; the `collection` argument
-    // is ignored (kept for API compat). Returns every summary, score 0.
+    // The lean knowledge table has no collection column; the `collection`
+    // argument is ignored (kept for API compat). Returns every knowledge
+    // row, score 0.
     std::vector<SearchResult> load_all(const std::string& /*collection*/);
 
-    // Re-encode embeddings across all five embedded tables (turns, summaries,
-    // decisions, documents, turn_summaries). Two modes, selected by `only_missing`:
+    // Re-encode embeddings across all five embedded tables (turns,
+    // turn_summaries, episodes, knowledge, documents). Two modes, selected by `only_missing`:
     //   * false → re-encode every row (full rebuild; used by CLI
     //             `ragger re-embed` after a model/dtype change)
     //   * true  → only rows whose embedding is NULL or whose embedding_version
@@ -727,9 +724,9 @@ struct Backend::Impl {
     //             not a per-row blob decode.
     // When `progress` is set, prints a running "n/total" line to stdout
     // (interactive CLI). Returns the number of rows (re-)embedded.
-    // The embed/index text formulas (documents' title suffix, decisions'
-    // trigger prefix) live in sqlite/text_index.h -- the single source
-    // shared with TextIndex::text_select_of() and the store paths.
+    // The embed/index text formulas (documents' title suffix, knowledge's
+    // trigger prefix) live in sqlite/tables.h -- the registry is the single
+    // source shared with TextIndex::text_select_of() and the store paths.
     int embed_tables(Embedder& emb_ref, bool only_missing, bool progress,
                       const std::string& table_filter = "all");
 
@@ -766,15 +763,16 @@ struct Backend::Impl {
     // safe immediately before reindexing ALL five tables" caveat.
     void reset_terms_table();
 
-    // Set a document's embedding (used by the import path after embedding
-    // chunks via the subprocess executor). Returns true on a row update.
+    // Set a document's embedding (used by the import path to write vectors
+    // back after chunking). Returns true on a row update.
     // PHASE3 Step 6: shared write-back + per-table cache invalidation.
     void invalidate_cache_for(const TextTable& t);
     bool update_embedding(const TextTable& t, int id, const std::vector<float>& emb);
 
     bool update_document_embedding(int document_id, const std::vector<float>& emb);
 
-    // Per-row embedding write-back for the other three context tables.
+    // Per-row embedding write-back for the other two tables named by the
+    // legacy entry points.
     // Mirrors update_document_embedding; each invalidates the cache that
     // backs its table's vector search.
     bool update_decision_embedding(int decision_id, const std::vector<float>& emb);

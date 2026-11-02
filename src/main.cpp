@@ -159,12 +159,14 @@ int main(int argc, char **argv) {
             ("port,p", Diskerror::po::value<int>(), CLI_PORT)
             ("min-chunk-size", Diskerror::po::value<int>(), CLI_MIN_CHUNK_SIZE)
             ("num,n", Diskerror::po::value<int>(),
-                "search: number of results to return (default: 3)")
+                "search: number of results to return (default: 3; "
+                "decision list: default 20)")
             ("title", Diskerror::po::value<std::string>()->default_value(""), CLI_TITLE)
             ("year", Diskerror::po::value<int>()->default_value(0), CLI_YEAR)
             ("tags", Diskerror::po::value<std::string>()->default_value(""), CLI_TAGS)
             ("status", Diskerror::po::value<std::string>()->default_value(""),
-                "decision: status to store/filter by (current|roadmap|superseded|deprecated)")
+                "decision: status to store (current|provisional|pending) or "
+                "filter list by (any stored status)")
             // `import conversations` filters & inputs
             ("format", Diskerror::po::value<std::string>()->default_value(""),
                 "Conversation source format: code | web | telegram")
@@ -681,7 +683,7 @@ int main(int argc, char **argv) {
                 Diskerror::Logger::error(ragger::lang::CLI_USAGE_IMPORT);
                 return 1;
             }
-            // Markdown/text (and now JSON, auto-extracted to prose) → L5
+            // Markdown/text (and now JSON, auto-extracted to prose) →
             // documents. This is the old bare `ragger import <file>` path,
             // given its own verb name so it's no longer an implicit
             // fallthrough default.
@@ -773,7 +775,8 @@ int main(int argc, char **argv) {
             };
 
             // `summaries` sub-verb unchanged, just reachable from the new
-            // top-level name (hand-authored L4 project summaries).
+            // top-level name (hand-authored notes, stored as knowledge
+            // kind='note').
             if (args[0] == "summaries") {
                 std::vector<ragger::SummaryImport> items;
                 const std::string jsonl = opts["jsonl"].as<std::string>();
@@ -1126,9 +1129,9 @@ int main(int argc, char **argv) {
                 "{} turns imported, {} duplicates skipped, {} session ids merged, {} backfilled",
                 n, n_skip, n_merged, n_backfilled);
 
-            // Per-conversation `summary` field (claude-web only) → one L3
-            // session-summary row each, dated by that conversation's own
-            // created_at (already real, no --fdate/--date needed).
+            // Per-conversation `summary` field (claude-web only) → one
+            // knowledge note row each (tag "session"), dated by that
+            // conversation's own created_at (already real, no --fdate/--date needed).
             if (fmt == "web") {
                 std::ifstream in(conv_path);
                 nlohmann::json doc;
@@ -1154,7 +1157,7 @@ int main(int argc, char **argv) {
                 }
             }
 
-            // memories.json → L5/decisions. No derivable per-claim date —
+            // memories.json → knowledge decisions. No derivable per-claim date —
             // requires --fdate (file mtime) or --date=DATE.
             if (!memories_path.empty()) {
                 bool fdate = opts.count("fdate") > 0;
@@ -1194,7 +1197,7 @@ int main(int argc, char **argv) {
                 }
             }
 
-            // Project files (L4): name + description → one summary row,
+            // Project files: name + description → one knowledge note row,
             // dated by the project's own created_at (real, no flag needed).
             if (!project_paths.empty()) {
                 int n_proj = 0, n_proj_skip = 0;

@@ -20,9 +20,11 @@
  *                      recipes keep working.
  *   project_summary  — still parses (user recipes keep loading) but emits
  *                      nothing: the project rollup layer is gone at 0.17.
- *   decisions        — current L6 decisions, up to `limit`
+ *   decisions        — current knowledge rows (kind='decision'), up to
+ *                      `limit`
  *   general_search   — up to `limit` relevance-ranked results from across
- *                      ALL summaries+documents+decisions (session-agnostic),
+ *                      ALL turn summaries, episodes, knowledge and documents
+ *                      (session-agnostic),
  *                      excluding anything earlier layers already emitted.
  *                      Query = current session's latest user turn + up to 2
  *                      most recent turn summaries.

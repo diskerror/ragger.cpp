@@ -223,7 +223,7 @@ namespace fs = std::filesystem;
     }
 
 
-    // Text-only search: FTS5 keyword + phonetic scoring across all four
+    // Text-only search: text-index keyword + phonetic scoring across all four
     // corpora. No embedding caches, no embedder call. Used when embeddings
     // are degraded (drift mismatch at startup).
     SearchResponse Backend::Impl::search_text_only(const std::string& query, int limit) {

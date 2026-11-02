@@ -12,7 +12,7 @@ namespace ragger {
 
 class RaggerMemory;
 
-/// Import one Markdown/text/JSON file as L5 document chunks: chunk via
+/// Import one Markdown/text/JSON file as document chunks: chunk via
 /// chunk_markdown, store every chunk without embedding (fast), then embed
 /// every pending row in-process (RaggerMemory::backfill_embeddings).
 /// `title` overrides the default (filename stem) when non-empty; `year`/

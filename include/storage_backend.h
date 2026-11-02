@@ -96,8 +96,8 @@ public:
     virtual std::string store(const std::string& text, json metadata = {},
                               bool defer_embedding = false) = 0;
 
-    /// Store a Level 5 RAG document chunk into the `documents` table.
-    /// FTS5 sync triggers index the row's text. Returns the new row id.
+    /// Store a RAG document chunk into the `documents` table. The row's text
+    /// goes into the custom text index. Returns the new row id.
     /// `chunk.imported_at` is honoured when non-empty so every chunk of one
     /// import shares a single timestamp (issue #48).
     virtual int store_document(const DocumentChunk& chunk,
@@ -120,7 +120,7 @@ public:
                            const std::string& name_source = "") = 0;
 
     /// All raw turns belonging to a session GUID, oldest first. Empty if the
-    /// session is unknown. Grouping primitive for session summaries/recipes.
+    /// session is unknown. Grouping primitive for context building.
     virtual std::vector<TurnRecord> turns_by_session(
         const std::string& session_guid) = 0;
 
@@ -135,14 +135,12 @@ public:
     virtual bool update_document_embedding(int document_id,
                                            const std::vector<float>& emb) = 0;
 
-    /// Store a curated L6 decision/lesson (decisions table). `status` defaults
-    /// to "current" — the only status current_decisions() (the recall-
-    /// pipeline layer) actually surfaces. Other recognized values:
-    /// "roadmap" (planned/future work — deliberately excluded from the
-    /// recall layer so every session isn't cluttered with unfinished plans;
-    /// query it via decisions_by_status instead), "superseded", "deprecated".
+    /// Store a curated decision (knowledge kind='decision', trigger NULL).
+    /// `status` defaults to "current" and must be creatable
+    /// (current | provisional | pending) — legacy words such as
+    /// "roadmap"/"deprecated" are rejected on write (TODO Q8).
     /// `tags` stored verbatim; `source_timestamp` overrides the row
-    /// timestamp when non-empty. Returns the new decision_id.
+    /// timestamp when non-empty. Returns the new knowledge_id.
     virtual int store_decision(const std::string& text,
                                const std::string& status = "current",
                                const std::string& tags = "",
@@ -159,9 +157,9 @@ public:
     /// importer to refuse importing the same file twice.
     virtual json find_document_source(const std::string& path) = 0;
 
-    /// Drop every in-memory search cache (summaries, documents, decisions,
-    /// insights, turns). They are rebuilt lazily from the DB on the next
-    /// lookup. Called when something outside this process may have changed
+    /// Drop every in-memory search cache (documents, knowledge,
+    /// turn_summaries, episodes). They are rebuilt lazily from the DB on the
+    /// next lookup. Called when something outside this process may have changed
     /// the DB file (CLI import/delete, hand edits).
     virtual void invalidate_all_caches() = 0;
 
@@ -174,10 +172,6 @@ public:
     /// rows) and its document_sources row, in one transaction. Returns
     /// {id, title, path, chunks}. std::invalid_argument if no such id.
     virtual json delete_document_source(int document_source_id) = 0;
-
-    /// Store an insight (agent API Phase 5, db 0.17). Same shape as a
-    /// structured decision; trigger is optional and evidence is REQUIRED
-    /// (an insight with no sources is just a note). Throws
 
     // --- Agent API (typed handles; see PHASE2/3/4/5-STEPS.md) -----------
 
@@ -208,17 +202,17 @@ public:
     /// Curation (agent API Phase 4): metadata-only update of one typed
     /// handle. Text present -> always rejected (a text change is a new row
     /// with supersedes). turn/turn_summary/document rows are not agent-
-    /// editable. summaries: only agent-written notes (model_id NULL); tags
-    /// only. decisions: status must be a legal transition (see
-    /// the Phase 4 table; 'superseded' is reached only via supersedes).
+    /// editable; episodes are immutable. knowledge (any kind): status must
+    /// be a legal transition (see the table in sqlite/status.h;
+    /// 'superseded' is reached only via supersedes); tags free.
     /// Returns the updated row as agent_get would. std::invalid_argument on
     /// any rule violation.
     virtual json agent_update(const UpdateRequest& req) = 0;
 
     /// Review queue (agent API Phase 4): action "list" returns pending
-    /// decisions oldest first; "approve"/"reject" move each id
-    /// pending->current / pending->retired through the agent_update
-    /// transition code. ids are decision handles (bare integers also
+    /// knowledge rows of any kind oldest first; "approve"/"reject" move each
+    /// id pending->current / pending->retired through the agent_update
+    /// transition code. ids are knowledge handles (bare integers also
     /// accepted). A non-pending id fails only that id.
     /// Returns {"done":[ids],"failed":[{"id":...,"error":...}]}.
     virtual json agent_review(const std::string& action,
@@ -289,37 +283,32 @@ public:
     /// Current (active) decisions, newest first.
     virtual std::vector<std::string> current_decisions(int limit) = 0;
 
-    /// Set a decision's status (e.g. promote "roadmap" -> "current" once
-    /// planned work is done, or mark a stale one "superseded"/"deprecated").
+    /// Set a decision's status (e.g. mark a stale one "retired").
     /// Returns false if no row matched.
     virtual bool set_decision_status(int decision_id, const std::string& status) = 0;
 
-    /// Decisions with the given status, most recent first. Use this for
-    /// anything other than the recall pipeline's "current" default —
-    /// e.g. status="roadmap" to list planned/future work explicitly.
+    /// Decisions with the given status, most recent first. Any stored status
+    /// can be filtered, including legacy words (roadmap, deprecated).
     virtual std::vector<std::string> decisions_by_status(const std::string& status,
                                                          int limit) = 0;
 
-    /// Turns that don't yet have a matching L2 ('turn') summary —
-    /// LEFT JOIN summaries ON (session_id, timestamp) WHERE summary_id IS NULL.
+    /// Turns that don't yet have a `turn_summaries` row — LEFT JOIN
+    /// turn_summaries ON turn_id WHERE none exists; partial turns
+    /// (assistant_text NULL) are excluded.
     /// Returned newest-first, capped at `limit` (0 = unbounded). Powers the
     /// summarizer's startup catch-up and housekeeping retry pass.
     virtual std::vector<TurnRecord> unsummarized_turns(int limit = 0) = 0;
 
-    // --- v0.12.0 turn_id-based turn-summary methods (schema migration) ---
-    // NOTE: unsummarized_turns(int) is intentionally NOT a new overload here.
-    // Per the migration plan, unsummarized_turns() keeps its EXISTING
-    // signature/return type (std::vector<TurnRecord>) unchanged — only its
-    // SQL body changes (JOIN against turn_summaries instead of summaries,
-    // implemented in sqlite_backend.cpp). No interface change needed for it.
+    // --- turn_id-based turn-summary methods ---
     virtual bool turn_summary_exists(int turn_id) = 0;
     virtual bool finalize_turn_summary(int turn_id, const std::string& text,
                                         const std::string& summary_model_name) = 0;
     virtual bool mark_turn_summarized(int turn_id, const std::string& model_name) = 0;
 
-    /// Delete poison-abandoned turn_summaries rows (summary_model_id ->
-    /// model "bad", text NULL) so the underlying turn falls back into
-    /// unsummarized_turns()'s candidate set on the next catch-up pass.
+    /// Delete poison-abandoned turn_summaries rows (model "bad" with the
+    /// known-empty marker text '', plus legacy NULL-text rows) so the
+    /// underlying turn falls back into unsummarized_turns()'s candidate set
+    /// on the next catch-up pass.
     /// Housekeeping retry for turns that hit max_turn_failures before
     /// whatever caused the failures was fixed. Returns rows deleted.
     /// Does NOT touch legitimate trivial-turn skips (tagged with the real
@@ -396,16 +385,17 @@ public:
                                   float min_score = 0.0f,
                                   std::vector<std::string> collections = {}) = 0;
 
-    /// Text-only search using FTS5 keyword + phonetic scoring only (no
-    /// embeddings). Used when embeddings are degraded (drift mismatch).
+    /// Text-only search using the custom text index (keyword + phonetic
+    /// scoring, no embeddings). Used when embeddings are degraded (drift
+    /// mismatch).
     virtual SearchResponse search_text_only(const std::string& query,
                                             int limit = 5) = 0;
 
     /// Number of stored memories.
     virtual int count() const = 0;
 
-    /// Row counts for the user-facing tables (turns, summaries,
-    /// turn_summaries, sessions, documents, decisions, statements, models),
+    /// Row counts for the user-facing tables (turns, turn_summaries,
+    /// episodes, knowledge, sessions, documents, models),
     /// for the dashboard status pane. Ordered, name -> count. Missing tables
     /// are simply omitted rather than erroring.
     virtual std::vector<std::pair<std::string, int64_t>> table_row_counts() const = 0;
@@ -536,7 +526,7 @@ public:
     // --- Schema introspection (gap closure: replaces export.cpp's raw sqlite_master / PRAGMA calls) ---
 
     /// All schema objects (tables, indexes, triggers) from sqlite_master, ordered
-    /// tables-first. FTS5 shadow tables are NOT filtered — callers filter via
+    /// tables-first. Nothing is filtered — callers drop internal helpers via
     /// is_internal_table() if needed.
     virtual std::vector<SchemaObject> list_schema_objects() = 0;
 

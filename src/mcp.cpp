@@ -1,9 +1,10 @@
 /**
  * MCP (Model Context Protocol) server implementation.
  *
- * JSON-RPC 2.0 over stdin/stdout.  Tools exposed:
- *   store  — write a memory
- *   search — semantic + BM25 hybrid search
+ * JSON-RPC 2.0 over stdin/stdout.  Tools exposed (see tools_list()):
+ *   store, search, status, capture_turn, build_context, get_config,
+ *   memory_decision, memory_note, memory_search, memory_get,
+ *   memory_timeline, memory_update, memory_review.
  *
  * Housekeeping: if no ragger HTTP server PID file is found, a
  * background thread runs periodic cleanup so the database doesn't
@@ -144,12 +145,12 @@ static nlohmann::json tools_list() {
                     {"query",       {{"type", "string"},
                                     {"description", "The search query."}}},
                     {"limit",       {{"type", "integer"},
-                                    {"description", "Maximum number of results (default: 5)."}}},
+                                    {"description", "Maximum number of results (default: the `default_search_limit` setting)."}}},
                     {"min_score",   {{"type", "number"},
                                     {"description", "Minimum similarity score 0–1 (default: 0.0)."}}},
                     {"collections", {{"type", "array"},
                                     {"items", {{"type", "string"}}},
-                                    {"description", "Filter by collection names."}}}
+                                    {"description", "Filter by collection names (accepted, currently ignored)."}}}
                 }},
                 {"required", nlohmann::json::array({"query"})}
             }}
@@ -159,7 +160,7 @@ static nlohmann::json tools_list() {
             {"description",
              "Layered search across all memory corpora. Returns handles + snippets only — "
              "call memory_get with chosen handles for full text. `layers` narrows by layer "
-             "(turn, turn_summary, episode, summary, document, knowledge); empty = all. "
+             "(turn, turn_summary, episode, document, knowledge); empty = all. "
              "`kinds` narrows knowledge hits (decision, insight, note). Legacy layer names "
              "'decision'/'insight' are accepted and mean knowledge restricted to that kind. "
              "status: 'active' (default) hides superseded/retired knowledge, 'any' includes them. "
@@ -235,7 +236,7 @@ static nlohmann::json tools_list() {
                     {"tags",    {{"type", "array"}, {"items", {{"type", "string"}}},
                                  {"description", "Optional tags."}}},
                     {"evidence",{{"type", "array"}, {"items", {{"type", "integer"}}},
-                                 {"description", "turn_summary ids this note synthesizes. When present the note is stored as an insight (response carries \"table\":\"insights\") instead of a plain note."}}}
+                                 {"description", "turn_summary ids this note synthesizes. When present the note is stored as an insight (response carries \"kind\":\"insight\") instead of a plain note."}}}
                 }},
                 {"required", nlohmann::json::array({"text"})}
             }}
@@ -286,7 +287,7 @@ static nlohmann::json tools_list() {
                     {"id",     {{"type", "string"},
                                 {"description", "Typed handle '<layer>:<rowid>'."}}},
                     {"status", {{"type", "string"},
-                                {"description", "Knowledge status: current | provisional | pending | roadmap | retired."}}},
+                                {"description", "Knowledge status: current | provisional | pending | retired."}}},
                     {"tags",   {{"type", "string"},
                                 {"description", "Replacement tag string (comma-separated)."}}},
                 }},
@@ -308,7 +309,7 @@ static nlohmann::json tools_list() {
                                 {"enum", nlohmann::json::array({"list", "approve", "reject"})},
                                 {"description", "list | approve | reject."}}},
                     {"ids",    {{"type", "array"}, {"items", {{"type", "string"}}},
-                                {"description", "Decision handles for approve/reject."}}}
+                                {"description", "Knowledge handles (`knowledge:N`) for approve/reject."}}}
                 }},
                 {"required", nlohmann::json::array({"action"})}
             }}
@@ -596,7 +597,7 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         if (!key.empty()) {
             const auto* meta = lang::config_meta(key);
             if (!meta)
-                return error_result(std::format(lang::ERR_MCP_UNKNOWN_TOOL, key));
+                return error_result(std::format(lang::ERR_MCP_UNKNOWN_CONFIG_KEY, key));
             auto v = get_config_value(config(), key);
             return text_result(config_entry_json(*meta, v.value_or("")).dump());
         }

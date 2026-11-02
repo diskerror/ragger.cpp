@@ -526,8 +526,8 @@ static std::string tags_from_metadata(const json& metadata) {
 
     // Store a raw L1 turn. An empty assistant_text writes a *partial* row
     // (assistant + embedding NULL) for the prompt-arrival/finalize flow;
-    // otherwise the exchange is embedded unless defer_embedding. FTS5 sync
-    // triggers index user_text/assistant_text. Returns turn_id.
+    // otherwise the exchange is embedded unless defer_embedding. The text
+    // index covers user_text/assistant_text. Returns turn_id.
     // `source_timestamp` (non-empty, db format) overrides created_at for
     // historical imports; the regeneration-dedup window is skipped in that
     // case (it reasons about "now", which is meaningless for old turns).
@@ -1698,8 +1698,8 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // Set a decision's status (e.g. "roadmap" -> "current" once planned
-    // work is done, or -> "superseded"/"deprecated" once stale).
+    // Set a decision's status (e.g. mark a stale one "retired").
+    // Returns false if no row matched.
     bool Backend::Impl::set_decision_status(int decision_id, const std::string& status) {
         Stmt s(db, "UPDATE knowledge SET status = ? WHERE kind = 'decision' AND knowledge_id = ?");
         s.bind(1, status).bind(2, decision_id);

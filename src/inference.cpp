@@ -341,7 +341,7 @@ std::vector<Endpoint::TypedModel> Endpoint::list_models_lmstudio_typed() const {
 }
 
 // -----------------------------------------------------------------------
-// SSE streaming parse helper (used by chat_stream, defined below)
+// SSE streaming parse helper (legacy; no current caller)
 // -----------------------------------------------------------------------
 struct StreamCallbackData {
     std::function<void(const std::string&)>* on_token;

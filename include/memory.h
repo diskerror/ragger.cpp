@@ -1,7 +1,8 @@
 /**
  * RaggerMemory — high-level facade
  *
- * Mirrors ragger_memory/memory.py from the Python version.
+ * Wraps the storage backend, embedder and user store behind the one API the
+ * CLI, HTTP daemon and MCP surfaces share.
  */
 #pragma once
 
@@ -61,12 +62,10 @@ public:
     /// Write back a document's embedding (import path).
     bool update_document_embedding(int document_id, const std::vector<float>& emb);
 
-    /// Store a curated L6 decision/lesson. Embeds text unless deferred.
-    /// `status` defaults to "current" — the only status current_decisions()
-    /// (the recall-pipeline layer) actually surfaces. Other recognized
-    /// values: "roadmap" (planned/future work — deliberately excluded from
-    /// the recall layer so every session isn't cluttered with unfinished
-    /// plans; query it explicitly instead), "superseded", "deprecated".
+    /// Store a curated decision (knowledge kind='decision', no trigger).
+    /// Embeds text unless deferred. `status` defaults to "current" and must
+    /// be creatable (current | provisional | pending) — legacy words such as
+    /// "roadmap"/"deprecated" are rejected on write (TODO Q8).
     int store_decision(const std::string& text,
                        const std::string& status = "current",
                        const std::string& tags = "",
@@ -76,10 +75,6 @@ public:
     /// Store a structured decision (agent API Phase 1). Throws
     /// std::invalid_argument on validation failure.
     KnowledgeResult store_knowledge(const KnowledgeInput& in);
-
-    /// Store an insight (agent API Phase 5). Trigger optional, evidence
-    /// required. Throws std::invalid_argument on validation failure.
-
 
     /// Document source for `path`, or null json if that path was never imported.
     json find_document_source(const std::string& path);
@@ -125,14 +120,12 @@ public:
                    const std::string& session_guid = "");
     std::vector<std::string> current_decisions(int limit);
 
-    /// Set a decision's status (e.g. promote "roadmap" -> "current" once
-    /// planned work is done, or mark a stale one "superseded"/"deprecated").
+    /// Set a decision's status (e.g. mark a stale one "retired").
     /// Returns false if no row matched.
     bool set_decision_status(int decision_id, const std::string& status);
 
-    /// Decisions with the given status, most recent first. Use this for
-    /// anything other than the recall pipeline's "current" default —
-    /// e.g. status="roadmap" to list planned/future work explicitly.
+    /// Decisions with the given status, most recent first. Any stored status
+    /// can be filtered, including legacy words (roadmap, deprecated).
     std::vector<std::string> decisions_by_status(const std::string& status, int limit);
 
     /// Exact-match idempotency check for bulk importers: does a knowledge
@@ -169,8 +162,8 @@ public:
     int  count() const;
 
     /// Total rows across all five embedded tables (turns, turn_summaries,
-    /// summaries, decisions, documents) — the rebuild/backfill scope, and a
-    /// more accurate "how much is in here" figure than count() (summaries only).
+    /// episodes, knowledge, documents) — the rebuild/backfill scope, and a
+    /// more accurate "how much is in here" figure than count() (knowledge rows only).
     int  count_embeddable_rows() const;
 
     /// Load all memories (for export). Optionally filter by collection.
@@ -206,7 +199,7 @@ public:
     bool embeddings_unavailable() const;
 
     /// True when the embedding drift guard failed at startup — vectors are
-    /// unusable but FTS5 text + phonetic search still works. Log the error
+    /// unusable but text-index search still works. Log the error
     /// and keep serving rather than refusing to start.
     bool embeddings_degraded() const { return embeddings_degraded_; }
 
@@ -311,8 +304,8 @@ CaptureResult capture_turn(RaggerMemory& memory,
 
 /// One assembled chunk in a recipe-built context, ordered oldest-first
 /// (chronological) when emitted so an agent can inject them as-is. `kind`
-/// echoes the recipe layer name (raw_turn / turn_summary / session_summary
-/// / project_summary / decision). `timestamp` is the source-turn/source-row
+/// is one of the kinds the builder emits: raw_turn / turn_summary /
+/// episode / decision / general_search. `timestamp` is the source-turn/source-row
 /// timestamp where available (empty for cross-session items).
 struct ContextChunk {
     std::string kind;
@@ -334,8 +327,8 @@ struct SessionContext {
 /// GET /session/<id>: assemble a session's turns + summaries + decisions
 /// into a recipe-shaped payload. Walks back from the latest turn in the
 /// active session; each layer consumes a slice (raw_turn / turn_summary
-/// pop turns chronologically; session/project/decisions pull recent
-/// rows). max_tokens is enforced as a ceiling.
+/// pop turns chronologically; episode / decision / general_search pull
+/// recent rows). max_tokens is enforced as a ceiling.
 ///
 /// No-op (enabled=false) unless BOTH capture_turns and build_context are
 /// on. `recipe_name` empty falls back to `[server] default_recipe`. If

@@ -31,7 +31,7 @@ port   = 8432                     # TCP port (used when `bind` is set)
 # `bind` is empty/missing, the daemon falls back to bind = 127.0.0.1 so
 # there's always at least one listener. A malformed `bind` value is a
 # startup error (invalid IPv4/IPv6/hostname).
-server_name = ragger            # reserved — parsed but not currently used
+server_name = ragger            # sent as the "Server:" response header
 
 # TLS — only relevant if you expose Ragger beyond localhost (e.g. bind to a
 # LAN/public address, or reverse-proxy from a remote machine). Both must be
@@ -59,7 +59,7 @@ max_tokens = 4096                 # max tokens for inference
 # =====================================================================
 # model + dimensions + vector_type define the DB's vector identity and are
 # recorded in the DB. Changing any of them once the DB holds data requires
-# 'ragger rebuild-embeddings' to re-encode everything.
+# 'ragger re-embed' to re-encode everything.
 [embedding]
 model       = sentence-transformers/all-MiniLM-L12-v2
 dimensions  = 384
@@ -67,7 +67,7 @@ vector_type = f16              # on-disk vector precision: f32 (lossless, 4B/dim
                                #   f16 (IEEE half, 2B/dim), bf16 (bfloat16, 2B/dim),
                                #   or int8 (per-vector quantized, 1B/dim).
                                #   In-memory math is always f32; this only sets the
-                               #   stored blob. Changing it needs rebuild-embeddings.
+                               #   stored blob. Changing it needs ragger re-embed.
 
 # =====================================================================
 # Search
@@ -157,15 +157,13 @@ episode_threshold_cap  = 0.5   # max threshold after time scaling
 episode_threshold_step = 0.01  # threshold increment per step
 episode_step_minutes   = 1.0   # minutes of idle per increment
 
-summary_pause_minutes = 20    # DEPRECATED alias for episode_idle_minutes,
-                              # honored only when episode_idle_minutes is unset.
-catch_up_batch_size   = 8     # per-tick cap on unsummarized turns / draft
+summary_pause_minutes = 20    # deprecated alias for episode_idle_minutes
+catch_up_batch_size   = 8     # per-tick cap on unsummarized turns / abandoned
                               # retries enqueued at once. Keeps a manual
-                              # resummarize (nulling model_id on a batch of
-                              # `summaries` rows via direct SQL) to a small,
-                              # deliberate slice per housekeeping tick instead
-                              # of redoing hundreds of inference calls at
-                              # once. Any positive int; default 10.
+                              # resummarize to a small, deliberate slice per
+                              # housekeeping tick instead of redoing hundreds
+                              # of inference calls at once. Any positive int;
+                              # default 10.
 max_turn_failures     = 3     # consecutive inference failures on one turn before
                               # marking it "bad" and removing it from the queue.
                               # 0 = retry forever (old behaviour).

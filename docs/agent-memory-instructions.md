@@ -13,7 +13,7 @@ Names vary by host. Use the ones you have:
 |---|---|---|---|
 | Quick recall | `search` | `ragger_search` | `memory_search` |
 | Quick save | `store` | `ragger_store` | `memory_store` |
-| Layered search, read, recent history | `memory_search`, `memory_get`, `memory_timeline` | same | `memory_search`, `memory_get` |
+| Layered search, read, recent history | `memory_search`, `memory_get`, `memory_timeline` | same | n/a — OpenClaw exposes only the quick pair; its `memory_get` returns the stored-memories count, not full rows by handle |
 | Structured saves (decisions, notes, insights) | `memory_decision`, `memory_note` | same | n/a |
 | Curation | `memory_update`, `memory_review` | same | n/a |
 
@@ -83,7 +83,7 @@ decision or note. `memory_update` changes only status and tags.
 - `memory_review` lists decisions waiting in the **pending** queue. Approve or
   reject only when the user asks you to. Do not approve your own entries.
 - `memory_update` can retire a note that is wrong or move a decision between
-  `current`, `provisional` and `roadmap`.
+  `current` and `provisional`.
 
 ### Capture policy for `category: "decision"` (canonical — 2026-08-13)
 

@@ -1,7 +1,8 @@
 /**
  * SQLite backend for memory storage
  *
- * Mirrors ragger_memory/sqlite_backend.py from the Python version.
+ * The `sqlite::Backend` facade: one class whose implementation lives in
+ * src/sqlite/ (schema, admin, cache, write, search, maintenance).
  */
 #pragma once
 
@@ -66,7 +67,8 @@ public:
     bool update_document_embedding(int document_id,
                                    const std::vector<float>& emb) override;
 
-    /// Store a curated L6 decision/lesson. Returns decision_id.
+    /// Store a curated decision (knowledge kind='decision'). Returns
+    /// knowledge_id.
     int store_decision(const std::string& text,
                        const std::string& status = "current",
                        const std::string& tags = "",
@@ -147,7 +149,7 @@ public:
                           float min_score = 0.0f,
                           std::vector<std::string> collections = {}) override;
 
-    /// Text-only fallback: FTS5 keyword + phonetic scoring, no embeddings.
+    /// Text-only fallback: text-index keyword + phonetic scoring, no embeddings.
     SearchResponse search_text_only(const std::string& query,
                                     int limit = 5) override;
 

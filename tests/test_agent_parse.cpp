@@ -221,6 +221,26 @@ void test_mcp_tool_call_bad_arg_type(ragger::RaggerMemory& mem) {
     std::println(" OK");
 }
 
+// CR S6: an unknown get_config key must say "Unknown config key: <key>", not
+// reuse the unknown-tool message; an unknown tool keeps the old message.
+static std::string p10_mcp_error_text(ragger::RaggerMemory& mem,
+                                      const std::string& tool,
+                                      const json& arguments) {
+    json params = {{"name", tool}, {"arguments", arguments}};
+    auto r = ragger::mcp_tool_call(mem, params);
+    CHECK(r.value("isError", false) == true);
+    return r["content"][0]["text"].get<std::string>();
+}
+
+void p10_test_mcp_unknown_config_key(ragger::RaggerMemory& mem) {
+    std::println("  p10_test_mcp_unknown_config_key...");
+    CHECK(p10_mcp_error_text(mem, "get_config", {{"key", "nope"}})
+          == "Unknown config key: nope");
+    CHECK(p10_mcp_error_text(mem, "no_such_tool", json::object())
+          == "Unknown tool: no_such_tool");
+    std::println(" OK");
+}
+
 int main() {
     TestEnv env("agent_parse");  // must be first: isolates from ~/.ragger
     std::println("Running agent-parse tests:");
@@ -237,6 +257,7 @@ int main() {
     {
         ragger::RaggerMemory mem(TEMP_DB);
         test_mcp_tool_call_bad_arg_type(mem);
+        p10_test_mcp_unknown_config_key(mem);
         mem.close();
     }
 

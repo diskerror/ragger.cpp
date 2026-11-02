@@ -234,8 +234,8 @@ bool pragma_bool(Impl& self, const char* name);
         // pending -- so the backup reflects the pristine pre-migration state.
         // db_version() is only meaningful for an existing DB (settings table
         // already present); a fresh install has no version yet and needs no
-        // backup. One snapshot covers a whole migration chain (0.12 -> 0.15 ->
-        // ...): it is taken here, once, before the first structural change.
+        // backup. One snapshot covers a whole migration chain (0.16 -> 0.17):
+        // it is taken here, once, before the first structural change.
         const std::string pre_migration_version =
             db_preexisted ? db_version() : std::string();
 
@@ -261,11 +261,13 @@ bool pragma_bool(Impl& self, const char* name);
         // definition, shared with the DB-only constructor.
         create_user_schema();
 
-        // ---- v2 fading-memory schema (issue #33): turns / summaries /
-        //      decisions / documents / models, with FTS5 (issue #49).
+        // ---- memory schema (issue #33): turns / turn_summaries / episodes /
+        //      knowledge / documents / models, with the custom terms index
+        //      (v0.16; the FTS5 layers of issue #49 are gone).
         //      Pre-v2 data is exported out-of-band, not migrated in place.
 
-        // models — lookup table; turns + summaries reference it. created_at
+        // models — lookup table; turns, turn_summaries, episodes and
+        // knowledge reference it. created_at
         // was added in a later schema revision; the column sits at the end so
         // it maps cleanly to the canonical (id, keys, data, timestamps) order.
         exec(R"(
@@ -286,7 +288,7 @@ bool pragma_bool(Impl& self, const char* name);
 
         // turns (L1) — raw verbatim exchanges. embedding nullable for the
         // deferred-embedding path (partial row written, backfilled later).
-        // created_at has NO DEFAULT (matches scripts/schema_db0.12.sql
+        // created_at has NO DEFAULT (matches scripts/schema_db0.17.sql
         // exactly) -- the app always supplies it explicitly on INSERT.
         // unigram_count/bigram_count are TF denominators for the custom terms
         // index (v0.16); placed before embedding_version to keep text-index
@@ -334,7 +336,7 @@ bool pragma_bool(Impl& self, const char* name);
         // the post-migration section below, so fresh / migrated /
         // already-current DBs converge from a single source of truth.
 
-        // document_sources (L5 metadata) — one row per curated document.
+        // document_sources — one row per curated document.
         // Holds title/path/year/tags/imported_at once, instead of repeating
         // them on every chunk. document_source_id gives a document a stable
         // identity. imported_at is a unix epoch (user's local import time).
@@ -350,7 +352,7 @@ bool pragma_bool(Impl& self, const char* name);
             )
         )");
 
-        // documents (L5) — user-curated RAG chunks; the only sharable table.
+        // documents — user-curated RAG chunks; the only sharable table.
         // Per-document metadata lives in document_sources (document_source_id
         // FK). Each chunk keeps only its distinctive tags; chunk_index is a
         // positional handle; modified_on (epoch) = source.imported_at until the
@@ -436,11 +438,10 @@ bool pragma_bool(Impl& self, const char* name);
         // First, stamp db_version for a genuinely fresh install ONLY --
         // db_preexisted (captured before any CREATE TABLE ran, at the top
         // of this function) distinguishes "no memory tables existed yet"
-        // from an existing pre-0.12 DB that simply lacks the version row.
-        // An existing un-migrated DB must NOT get auto-stamped here; it
-        // needs to fail the check below so the user runs
-        // scripts/migrate_to_db0.12.sh instead of silently being treated
-        // as current.
+        // from an existing DB that simply lacks the version row. An
+        // existing un-migrated DB never reaches here: the older_than_0_16
+        // refusal above rejects it (upgrade via a v0.16 build first)
+        // instead of the file being silently treated as current.
         if (!db_preexisted)
             exec(std::format("INSERT OR IGNORE INTO settings (key, value) VALUES ('db_version', '{}')", kExpectedDbVersion));
         {
@@ -477,9 +478,10 @@ bool pragma_bool(Impl& self, const char* name);
         // knowledge (PHASE7) — ONE table for decision | insight | note,
         // replacing decisions + insights + their evidence tables (dropped by
         // the 0.16 -> 0.17 leg; a fresh DB never creates the old ones).
-        // Created BEFORE create_terms_schema() so knowledge_terms can
-        // reference it, and AFTER migrations so it never takes part in a
-        // rebuild dance.
+        // create_terms_schema() above already ran, before this table existed:
+        // SQLite accepts a REFERENCES clause naming a table created later, so
+        // the order is fine. Created AFTER migrations so knowledge never takes
+        // part in a rebuild dance.
         exec(ddl::if_not_exists(ddl::knowledge()));
         exec(ddl::if_not_exists(ddl::knowledge_indexes()));
         exec(ddl::if_not_exists(ddl::knowledge_turn_evidence()));
@@ -510,13 +512,8 @@ bool pragma_bool(Impl& self, const char* name);
         exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_source_chunk_uniq "
              "ON documents(document_source_id, chunk_index)");
 
-        // FTS5 — external-content virtual tables + sync triggers replace
-        // the old hand-rolled bm25_* sidecars (issue #49).
-        // (v0.16: FTS5 schema removed; custom terms index created below via
-        // create_terms_schema().)
-
         // Human-readable views (datetime()-rendered timestamps,
-        // has_embedding booleans) mirroring scripts/schema_db0.12.sql
+        // has_embedding booleans) mirroring scripts/schema_db0.17.sql
         // exactly. Always (re)created so fresh/migrated DBs converge.
         create_views();
 

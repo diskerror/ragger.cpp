@@ -144,14 +144,12 @@ std::vector<ImportChunk> chunk_markdown(const std::string& raw_text, int min_chu
     return chunks;
 }
 
-/// Replace horizontal whitespace runs (including tabs, NBSP, other Unicode
-/// spaces) with a single regular space. Also removes zero-width and invisible
-/// characters that don't contribute to content. Works on multi-byte UTF-8 by
-/// treating any byte >= 128 as part of a non-whitespace character unless it's
-/// explicitly one of the known whitespace sequences.
+/// Replace runs of ASCII whitespace (spaces, tabs, newlines) with a single
+/// space. NOTE: std::regex's default ECMAScript \s matches ASCII whitespace
+/// only — a UTF-8 NBSP (U+00A0) and zero-width characters are NOT matched
+/// and survive this pass (verified against the toolchain's std::regex).
 static std::string normalize_whitespace(const std::string& s) {
-    // Use Unicode property class [:space:] to match all space-like characters,
-    // including tabs, newlines, NBSP, etc. This is portable and handles multi-byte UTF-8.
+    // ASCII-only: see above. NBSP/zero-width chars pass through untouched.
     static const std::regex hspace_re(R"(\s+)");
 
     return std::regex_replace(s.c_str(), hspace_re, " ");
@@ -172,7 +170,7 @@ std::string clean_document_text(const std::string& text) {
     std::string line;
     std::vector<std::string> cleaned_lines;
     while (std::getline(lines, line)) {
-        // Normalize horizontal whitespace on the line (handles tabs, NBSP, etc.).
+        // Normalize ASCII whitespace runs on the line (tabs, spaces).
         line = normalize_whitespace(line);
 
         // Cap long runs of dashes for MD table safety.
@@ -883,7 +881,7 @@ bool is_synthetic_session_guid(const std::string& guid) {
 }
 
 // =========================================================================
-// L4 summary import
+// Hand-authored note import (knowledge kind='note')
 // =========================================================================
 
 std::vector<SummaryImport> load_summary_files(const std::vector<std::string>& paths) {

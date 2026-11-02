@@ -32,6 +32,9 @@ See [Deployment](deployment.md) for the full lifecycle.
 
 ## Authentication
 
+The daemon listens on TCP (`127.0.0.1:8432` by default) and on the unix
+socket `<ragger-base>/ragger.sock` at the same time.
+
 On first start, the daemon auto-generates a random token and writes it to
 `~/.ragger/token`. Run `ragger add-self` once to register that token with
 the database, then include it in the `Authorization` header:
@@ -45,31 +48,65 @@ cat ~/.ragger/token
 
 # Use it in requests
 curl -H "Authorization: Bearer $(cat ~/.ragger/token)" \
-  http://localhost:8432/health
+  http://localhost:8432/count
 ```
 
-Requests arriving on the unix socket (`~/.ragger/ragger.sock`) or from
-localhost (`127.0.0.1` / `::1`) are pre-authenticated as the default user,
-so token headers are not required from the local machine.
+Requests arriving on the unix socket or from loopback (`127.0.0.1` /
+`::1`) are pre-authenticated as the default user, so token headers are
+not required from the local machine.
+
+Browsers can't set headers on `EventSource` or plain navigation, so the
+token is also accepted as a query parameter (`?token=...`) — same trust
+model: holding the token = authorized. The dashboard and its SSE stream
+use this.
+
+After auth, a cross-origin write guard runs: a browser request carrying an
+`Origin` header whose authority doesn't match `Host` is refused with
+`403` (`text/plain`). GET/HEAD/OPTIONS and requests with no `Origin`
+(curl, CLI, plugins, MCP) pass through.
+
+Every route below except **GET /health** requires auth.
+
+## Error Envelopes
+
+There are two shapes in use today (see Known Inconsistencies):
+
+- **`text/plain`** — emitted by the auth wrapper and several field checks:
+  `401 Unauthorized`, `403 ERROR: cross-origin request refused`,
+  `400 Missing 'text' field`, `400 JSON error: <detail>`,
+  `400 ERROR: <validation message>`, `500 ERROR: <detail>`.
+- **`application/json`** — `{"error": "<message>"}` returned directly by
+  handlers (config, models, `/turn` missing-field, …).
+
+Validation failures (`std::invalid_argument` — bad ids, bad ports,
+unknown statuses, illegal transitions) are always `400`, never `500`.
 
 ## Endpoints
 
-### Health Check
+36 routes are registered; each `###` heading below is one route.
 
-**GET** `/health`
+### GET /health
 
-Returns server status and memory count.
+No auth. Liveness + build identity + row counts.
 
 **Response:**
 
 ```json
 {
   "status": "ok",
-  "memories": 42
+  "version": "0.17.0",
+  "commit": "<git describe or 'unknown'>",
+  "built": "<build date>",
+  "memories": 42,
+  "embeddable_rows": 137,
+  "degraded": false
 }
 ```
 
-**Example:**
+`memories` counts knowledge rows; `embeddable_rows` counts all rows the
+embedding rebuild would re-encode. `degraded` is true when stored
+embeddings don't match the configured model (drift) and search has
+fallen back to text-only scoring.
 
 ```bash
 curl http://localhost:8432/health
@@ -77,99 +114,87 @@ curl http://localhost:8432/health
 
 ---
 
-### Count Memories
+### GET /count
 
-**GET** `/count`
+Returns the total number of knowledge rows.
 
-Returns the total number of stored memories.
-
-**Response:**
-
-```json
-{
-  "count": 42
-}
-```
-
-**Example:**
-
-```bash
-curl http://localhost:8432/count
-```
+**Response:** `{"count": 42}`
 
 ---
 
-### Store Memory
+### POST /store
 
-**POST** `/store`
-
-Store a new memory with optional metadata.
+Store a memory. The server decides the kind itself (same function as the
+MCP `store` tool): `metadata.category == "decision"` stores a knowledge
+**decision**, anything else a knowledge **note**.
 
 **Request:**
 
 ```json
 {
   "text": "The deploy script requires Node 18+",
-  "metadata": {
-    "tags": "docs,deployment",
-    "source": "deployment-notes.md"
-  }
+  "metadata": { "tags": "docs,deployment", "source": "deployment-notes.md" }
 }
 ```
 
-**Fields:**
+- `text` (required) — memory content.
+- `metadata` (optional) — recognized fields are promoted to columns
+  (`tags`, `status`, `timestamp`, …); unknown fields are dropped.
+  `source` defaults to the caller's username.
+- `tags` — comma-separated labels; `keep` exempts from turn expiration.
 
-- `text` (required) — Memory content
-- `metadata` (optional) — JSON object with arbitrary fields
+**Response:** `{"id": "123", "status": "stored", "kind": "note"}`
 
-**Common metadata fields:**
+**Status codes:** `400` missing `text` (text/plain), bad JSON, or a
+rejected `status` value.
 
-- `tags` — Comma-separated labels (e.g. `"docs,deployment"`). Use `keep` to exempt from turn expiration.
-- `source` — Where this memory came from
-- `keep` — Boolean shorthand; equivalent to including `"keep"` in tags
+---
+
+### POST /decision
+
+Store a structured decision (knowledge `kind='decision'`).
+
+**Request fields:** `text` (required), `trigger` (required — "Use when
+…" phrasing), `rationale`, `scope`, `tags` (string `"a,b"` or array),
+`status` (default `current`; must be creatable:
+`current | provisional | pending`), `supersedes` (knowledge id this
+replaces), `session` (GUID), `evidence` (array of turn_summary ids).
 
 **Response:**
 
 ```json
 {
-  "id": "123",
-  "status": "stored"
+  "id": "knowledge:5",
+  "kind": "decision",
+  "status": "stored",
+  "superseded": 3,
+  "possible_supersedes": [{"id": 4, "score": 0.81}]
 }
 ```
 
-**Example:**
+`superseded` is the id of the row this one replaced (null if none).
+`possible_supersedes` is a hint list of current decisions this row may
+contradict — nothing is changed by it.
 
-```bash
-curl -X POST http://localhost:8432/store \
-  -H "Content-Type: application/json" \
-  -d '{"text": "Deploy to staging every Friday", "metadata": {"category": "preference"}}'
-```
+**Status codes:** `400` on any validation failure (missing trigger,
+non-creatable status, unknown supersedes target).
 
 ---
 
-### Search Memories
+### POST /search
 
-**POST** `/search`
-
-Search memories using hybrid vector + BM25 search.
+Hybrid search (vector cosine + custom text index) over the four corpora.
 
 **Request:**
 
 ```json
-{
-  "query": "deployment requirements",
-  "limit": 5,
-  "min_score": 0.4
-}
+{ "query": "deployment requirements", "limit": 5, "min_score": 0.4 }
 ```
 
-**Fields:**
-
-- `query` (required) — Search query
-- `limit` (optional) — Maximum results (default: from config, usually 5)
-- `min_score` (optional) — Minimum cosine similarity score (default: from config, usually 0.4)
-
-> **Note:** The `collections` parameter is accepted by the API but has no effect in the current schema — there is no collection column. Use `tags` when storing to group memories; filter by `tags` via `/search_by_metadata`.
+- `query` (required)
+- `limit` (optional; default: the `default_search_limit` setting)
+- `min_score` (optional; default: the `default_min_score` setting)
+- `collections` — accepted, currently ignored (no collection column).
 
 **Response:**
 
@@ -177,44 +202,146 @@ Search memories using hybrid vector + BM25 search.
 {
   "results": [
     {
-      "id": "123",
+      "id": "knowledge:123",
       "text": "The deploy script requires Node 18+",
       "score": 0.823,
-      "metadata": {
-        "tags": "docs,deployment",
-        "source": "deployment-notes.md"
-      },
-      "timestamp": "2024-03-20T15:23:45"
+      "metadata": { "tags": "docs,deployment", "source": "knowledge" },
+      "timestamp": "2026-03-20 15:23:45"
     }
   ],
-  "timing": {
-    "elapsed_ms": 12.3,
-    "total_docs": 10614
-  }
+  "timing": { "elapsed_ms": 12.3, "total_docs": 10614, "total_ms": 13 }
 }
 ```
 
-**Score:** Raw cosine similarity (0.0 to 1.0). Higher is better.
-
-**Example:**
-
-```bash
-curl -X POST http://localhost:8432/search \
-  -H "Content-Type: application/json" \
-  -d '{"query": "API authentication", "limit": 3}'
-```
+`metadata.source` labels the corpus: `turn_summary`, `episode`,
+`knowledge`, or `document`.
 
 ---
 
-**POST** `/turn`
+### POST /memory/search
+
+Layered agent search across turns, turn summaries, episodes, documents,
+and knowledge.
+
+**Request fields:** `query` (required), `layers` (subset of
+`turn | turn_summary | episode | document | knowledge`; the input aliases
+`decision` / `insight` restrict knowledge to that kind; empty = all),
+`kinds` (`decision | insight | note` filter), `since` / `until`
+(`YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS`, or relative `30d` / `12h`),
+`status` (knowledge only: `active` (default = current+provisional) |
+`any` | one exact status), `session`, `exclude_session`, `limit`
+(default 10), `max_tokens` (0 = no budget).
+
+**Response:** `{"results": [AgentHit]}` where each hit is
+`{"id": "<layer>:<rowid>", "layer", "score", "matched_by":
+"vector|lexical|both", "created", "snippet", "extra"}` (`extra` is
+layer-specific: knowledge → `{status, trigger}`, turn_summary →
+`{turn_id, session}`, …).
+
+**Status codes:** `400` on unknown layer/kind or bad time format.
+
+---
+
+### POST /memory/get
+
+Full rows by typed handle, or one session's conversation history. Exactly
+one mode per call.
+
+**Request fields:** `ids` (array of typed handles — mode 1) XOR `session`
+(GUID — mode 2, with `after_turn`, `before_turn`, `limit` clamped
+[1,100], default 20); `expand`: `none | context | sources | chain`.
+
+**Response:** `{"items": [...]}` — full row objects per handle (or
+`{"id", "error": "not found"}` entries); mode 2 returns the session's
+turns.
+
+**Status codes:** `400` if both or neither mode is set, or a handle is
+malformed.
+
+---
+
+### POST /memory/note
+
+Store a note (knowledge `kind='note'`), or an insight when `evidence` is
+supplied.
+
+**Request fields:** `text` (required), `tags` (optional), `evidence`
+(optional array of turn_summary ids — when present the row is stored as
+`kind='insight'` linked to its sources).
+
+**Response (note):** `{"id": "123", "status": "stored",
+"possible_supersedes": [...]}`
+**Response (insight):** `{"id": "knowledge:5", "kind": "insight",
+"status": "stored", "superseded": null, "possible_supersedes": [...]}`
+
+**Status codes:** `400` missing `text`, bad evidence ids.
+
+---
+
+### POST /memory/timeline
+
+Deterministic newest-first range scan (no embeddings).
+
+**Request fields:** `session` (GUID; empty = all), `since` / `until`
+(same formats as `/memory/search`), `granularity`:
+`turn | episode | session` (default `episode`), `limit` (default 20,
+clamped [1,100]), `cursor` (opaque `"<created_epoch>:<rowid>"` from the
+previous page; empty = newest first page).
+
+**Response:** `{"items": [...], "next_cursor": "<...>" | null}`
+
+---
+
+### POST /memory/update
+
+Metadata-only curation of a knowledge row. Text is never edited in place.
+
+**Request fields:** `id` (typed handle `knowledge:<n>`), `status`
+(must be agent-settable and a legal transition from the row's current
+status; `superseded` is never settable here), `tags` (replaces the whole
+tag string), `text` (present ⇒ always rejected).
+
+**Response:** the updated row (same shape as `/memory/get` items).
+
+**Status codes:** `400` for legacy handles (`decision:<n>`,
+`insight:<n>`, `summary:<n>` → "use knowledge:<id>"), immutable layers
+(episodes, turns, turn summaries, documents), unknown status, illegal
+transition, or `text` supplied.
+
+---
+
+### POST /memory/review
+
+The pending-review queue.
+
+**Request fields:** `action`: `list | approve | reject`; `ids` (required
+for approve/reject; `knowledge:<n>` handles or bare integers).
+Approve moves each row `pending → current`, reject `pending → retired`;
+a non-pending id fails only that id.
+
+**Response (list):** `{"pending": [{"id", "trigger", "snippet", ...}]}`
+**Response (approve/reject):** `{"done": [...], "failed": [{"id", "error"}]}`
+
+---
+
+### POST /turn
 
 Ingest one completed conversation turn (user + assistant) for background
-summarization. Called from an agent's turn hook. The same five-field payload is
-accepted by the `capture_turn` MCP tool. Requires `[server] capture_turns = true`;
-otherwise the call is accepted but a no-op (`status: "disabled"`).
+summarization. Called from an agent's turn hook. The same payload is
+accepted by the `capture_turn` MCP tool. Requires `[server] capture_turns
+= true`; otherwise the call is accepted but a no-op (`status:
+"disabled"`).
 
-Body fields: `user` (required), `assistant`, `model`, `session_id` (groups turns
-into a session). Response: `{ "status": "captured" | "disabled", "turn_id": <int> }`.
+**Body fields:** `user` (required), `assistant`, `model`, `session_id`
+(groups turns into a session), `session_name`, `name_source`.
+
+**Response:** `{ "status": "captured" | "disabled", "turn_id": <int> }`
+
+When captured with a non-empty `assistant`, the turn is handed straight
+to the daemon's summarizer queue (the request never waits for inference).
+
+**Status codes:** `400 {"error":"missing required field: user"}` (JSON
+envelope).
 
 ```bash
 curl -X POST http://localhost:8432/turn \
@@ -224,14 +351,15 @@ curl -X POST http://localhost:8432/turn \
 
 ---
 
-**GET** `/session/<session_id>[?recipe=<name>]`
+### GET /session/&lt;session_id&gt;
 
 Assemble a session's context as recipe-shaped chunks (oldest first) — the
 read-side counterpart to `/turn`, and the same payload returned by the
 `build_context` MCP tool. Requires `[server] capture_turns` **and**
 `build_context`; otherwise returns `{ "status": "disabled" }`.
 
-`recipe` is optional. Resolution: explicit query arg → DB
+Optional query parameter: `?recipe=<name>`. Resolution: explicit query
+arg → DB
 `settings.recipe` (set by `ragger recipe`) → `[server] default_recipe`
 from config → first built-in.
 
@@ -244,7 +372,7 @@ Response shape:
   "recipe":     "natural_fading",
   "chunks": [
     {
-      "kind":      "session_summary",
+      "kind":      "episode",
       "text":      "Discussed deployment pipeline; chose Node 18.",
       "timestamp": "2026-03-15 14:02:11"
     },
@@ -257,14 +385,281 @@ Response shape:
 }
 ```
 
-`kind` is one of `raw_turn`, `turn_summary`, `episode`, `decision`.
-`timestamp` is the source-row timestamp (empty for cross-session
-items).
+`kind` is one of `raw_turn`, `turn_summary`, `episode`, `decision`,
+`general_search`. `timestamp` is the source-row timestamp (empty for
+cross-session items).
 
 ```bash
 curl http://localhost:8432/session/sess-abc-123
 curl http://localhost:8432/session/sess-abc-123?recipe=reconnect
 ```
+
+---
+
+### DELETE /memory/&lt;id&gt;
+
+Delete one knowledge row by numeric id (the path segment must be digits;
+anything else matches no route).
+
+**Response:** `{"id": 123, "status": "deleted"}`; `404` (text/plain
+`Memory not found`) when no row matched.
+
+---
+
+### POST /delete_batch
+
+Delete many knowledge rows at once.
+
+**Request:** `{"ids": [1, 2, 3]}` — array of integers.
+**Response:** `{"deleted": <count>}`
+**Status codes:** `400` missing/invalid `ids` (text/plain).
+
+---
+
+### POST /search_by_metadata
+
+Metadata-only scan (no scoring).
+
+**Request:** `{"metadata": {...}, "limit": 0, "after": "", "before": ""}`
+— `metadata` object required; `limit` 0 = unlimited; `after`/`before` are
+timestamp bounds.
+
+**Response:** `{"results": [same shape as /search results], "count": N}`
+
+---
+
+### GET /user/token
+
+Return the caller's own bootstrap token, read from `~/.ragger/token` in
+the authenticated system user's home directory.
+
+**Response:** `{"token": "<token>", "username": "<name>"}`; `404`
+(JSON) when the system user or the token file is missing.
+
+---
+
+### GET /dashboard
+
+The single-page control panel (embedded HTML/JS, `text/html`). From
+non-loopback it needs `?token=...`; the page then talks to `/config`,
+`/stats`, and `/events` with the same token.
+
+---
+
+### GET /config
+
+All settings as an array of entries in dashboard-tab order; each entry
+carries its current value plus schema metadata (type, default, edit
+policy, enum options) so a UI can render the right control. Secret
+fields surface as `"<set>"`, never their real value.
+
+---
+
+### GET /config/&lt;key&gt;
+
+One setting (same entry shape as `GET /config`). `404`
+`{"error":"unknown key"}` for keys not in the schema.
+
+---
+
+### PUT /config/&lt;key&gt;
+
+Set one setting. **Body:** `{"value": "<string>"}` — an empty value
+reverts the key to its schema default. Writing a secret field back as
+`"<set>"` is a no-op (the mask never overwrites the real credential).
+
+**Response:** `{"key", "value", "restart_required", "rebuild_required"}`
+(value is the resolved post-default one).
+
+**Status codes:** `404` unknown key, `403` locked key, `400` invalid
+value (all JSON envelope).
+
+The write updates the daemon's live config snapshot immediately (this
+route runs inside the daemon) and persists to the DB `settings` table.
+The CLI `ragger config set` shares the same path and additionally signals
+the running daemon (SIGHUP) to reload.
+
+---
+
+### GET /stats
+
+One-shot status snapshot: `{"status": "running", "version", "memories",
+"tables": {"turns": N, "turn_summaries": N, "episodes": N, "knowledge":
+N, "sessions": N, "documents": N, "models": N}}`.
+
+---
+
+### GET /models
+
+ONNX embedding models available on disk under `<ragger-base>/models/`.
+Only the two-level `provider/model` layout is offered as a new choice
+(legacy flat dirs are kept for compatibility but not listed). A directory
+counts as a model when it has `tokenizer.json` and
+(`model.onnx` or `onnx/model.onnx`).
+
+**Response:** `{"models": [{"name": "<display>", "path":
+"<provider>/<model>"}]}` — `path` is the canonical key for the config;
+colliding display names get the provider prefix.
+
+---
+
+### GET /models/info?path=&lt;provider/model&gt;
+
+Read `config.json` from a local model dir.
+
+**Response:** `{"dimensions": N, "model_type": "...", "hidden_size": N}`;
+`400` missing `path`, `404` no `config.json`, `500` unparseable.
+
+---
+
+### GET /models/external?host=X&amp;port=Y
+
+Query a remote embedding server's `/v1/models`. The API key is **not** a
+parameter — it comes from config (`embedding_external_api_key`); passing
+one in the URL would leak a credential.
+
+**Response:** `{"models": ["...", ...]}`; `400` missing host/port or
+non-numeric port.
+
+---
+
+### POST /models/external/probe
+
+Send a test embedding request to a remote endpoint and report the vector
+dimensionality. **Body:** `{"host": "...", "port": N, "model": "..."}`
+(key from config, not body).
+
+**Response:** `{"dimensions": N, "served_model": "...",
+"model_mismatch": bool}`; `400` missing fields, `502` probe failed or
+implausible embedding (likely not an embedding model).
+
+---
+
+### GET /models/huggingface?q=&lt;search&gt;
+
+Search HuggingFace for ONNX embedding models (both
+`sentence-similarity` and `feature-extraction` pipeline tags, merged,
+deduped, sorted by downloads, top 20 each).
+
+**Response:** `{"models": [{"id": "<repo>", "downloads": N}]}`
+
+---
+
+### POST /models/download
+
+Download an ONNX model from HuggingFace into
+`<ragger-base>/models/<provider>/<model>/`.
+
+**Body:** `{"repo": "provider/model"}` — strictly validated (no path
+traversal).
+
+**Response:** `{"status": "downloaded" | "already_present", "path":
+"<repo>"}`; `400` bad/missing repo, `502` model.onnx download failed.
+
+---
+
+### GET /models/summarizer
+
+List models on the summarizer endpoint (`summarizer_api_url`, falling
+back to `inference_api_url`; empty `{"models":[]}` when neither is set).
+Prefers LM Studio's authoritative type classification (drops
+`embeddings`); otherwise filters names containing `embed`/`minilm`.
+
+**Response:** `{"models": ["...", ...]}`
+
+---
+
+### GET /models/embedding-external
+
+List embedding-capable models on the local inference endpoint (the
+inverse of `/models/summarizer`). Prefers LM Studio's typed listing
+(keeps `embeddings` only); otherwise keeps names matching embedding hints
+(`embed`, `minilm`, `bge`, `gte`, `e5-`, `nomic`, `gist`,
+`sentence-t5`, `sentence-transformer`, `arctic-embed`, `uae-`).
+
+**Response:** `{"models": ["...", ...]}`
+
+---
+
+### POST /models/embedding-external/probe
+
+Send a test embedding to the configured inference/summarizer endpoint.
+**Body:** `{"model": "<name>"}`.
+
+**Response:** `{"dimensions": N, "served_model": "...",
+"model_mismatch": bool}`; `400` missing model or no endpoint configured,
+`502` probe failed or implausible embedding.
+
+---
+
+### GET /embedding/status
+
+Current-vs-desired embedding identity and flags:
+
+```json
+{
+  "current": {"model": "...", "vector_type": "...", "dimensions": 384, "engine": "..."},
+  "desired": {"model": "...", "vector_type": "...", "dimensions": 384, "engine": "..."},
+  "needs_update": false,
+  "reembedding": false,
+  "repair_pending": false,
+  "degraded": false
+}
+```
+
+---
+
+### POST /embedding/update
+
+Run the staged re-embed now (no body). Runs in a background thread — the
+request returns immediately; progress shows in `/embedding/status`
+(`reembedding`) and the SSE stream.
+
+**Response:** `{"status": "started", "reembedding": true}` or
+`{"status": "up-to-date", "reembedding": false}`; `409` when a re-embed
+is already running.
+
+---
+
+### GET /restart/status
+
+Bound (current) vs configured (desired) listen parameters:
+
+```json
+{
+  "bound_port": 8432, "configured_port": 8432,
+  "bound_bind": "127.0.0.1", "configured_bind": "127.0.0.1",
+  "needs_restart": false,
+  "scheme": "http"
+}
+```
+
+`configured_port` is `desired_port` when set, else the committed `port`.
+
+---
+
+### POST /restart
+
+Re-exec the daemon in place. Returns immediately with the URL the
+dashboard should reconnect to; then the listeners tear down and the
+supervisor re-execs.
+
+**Response:** `{"status": "restarting", "reconnect_url":
+"http://127.0.0.1:8432/dashboard", "port": 8432}`
+
+---
+
+### GET /events
+
+Server-Sent Events stream (one-directional; the dashboard subscribes with
+`EventSource`, `?token=...` from non-loopback). Every ~2 s it pushes:
+
+- `event: stats` — the `GET /stats` payload.
+- `event: activity` — `{"line": "..."}` for each new activity-log line
+  since the last drain (first read starts at EOF, so only new lines
+  stream).
+
+Config writes go through `PUT /config`, not this stream.
 
 ---
 
@@ -296,17 +691,25 @@ standard MCP handshake and tool discovery:
 
 ### Tools
 
-| Tool            | Description                                                                  | Required params       |
-|-----------------|------------------------------------------------------------------------------|-----------------------|
-| `store`         | Store a memory for later retrieval                                           | `text` (string)       |
-| `search`        | Hybrid semantic + keyword search                                             | `query` (string)      |
-| `capture_turn`  | Hand a completed user→assistant turn to the daemon for summarization         | `user` (string)       |
-| `build_context` | Return a recipe-shaped context payload for a session                         | `session_id` (string) |
+| Tool              | Description                                                                | Required params                 |
+|-------------------|----------------------------------------------------------------------------|---------------------------------|
+| `store`           | Store a memory (decision when `metadata.category="decision"`, else note)   | `text` (string)                 |
+| `search`          | Hybrid semantic + keyword search                                           | `query` (string)                |
+| `status`          | Server status (version, counts)                                            | —                               |
+| `capture_turn`    | Hand a completed user→assistant turn to the daemon for summarization       | `user` (string)                 |
+| `build_context`   | Return a recipe-shaped context payload for a session                       | `session_id` (string)           |
+| `get_config`      | Read live configuration (all settings, or one `key`)                       | — (`key` optional)              |
+| `memory_decision` | Store a structured decision                                                | `text`, `trigger`              |
+| `memory_note`     | Store a note, or an insight with `evidence`                                | `text`                          |
+| `memory_search`   | Layered search across all memory layers                                    | `query` (string)                |
+| `memory_get`      | Full rows by typed handle, or session history paging                       | — (exactly one mode per call)   |
+| `memory_timeline` | Deterministic newest-first range scan                                      | —                               |
+| `memory_update`   | Metadata-only curation of a knowledge row                                  | `id` (handle)                   |
+| `memory_review`   | Pending-review queue: list / approve / reject                              | `action`                        |
 
-**Optional `store` params:** `metadata` (object — tags, source).
-
-**Optional `search` params:** `limit` (integer), `min_score` (number).
-The `collections` parameter is accepted but is a no-op in the current schema.
+**Optional `search` params:** `limit` (integer; default: the
+`default_search_limit` setting), `min_score` (number). The `collections`
+parameter is accepted but is a no-op in the current schema.
 
 **Optional `capture_turn` params:** `assistant`, `model`, `session_id`,
 `metadata`. Requires `[server] capture_turns = true`; otherwise the
@@ -321,7 +724,7 @@ call returns `{"status":"disabled"}`.
 
 ```json
 → {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
-← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"ragger-memory","version":"0.7.0"}}}
+← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"ragger-memory","version":"<build version>"}}}
 
 → {"jsonrpc":"2.0","method":"notifications/initialized"}
 
@@ -356,31 +759,22 @@ for full protocol details.
 
 ---
 
-## Error Responses
+## Known Inconsistencies
 
-All endpoints return JSON error responses for failures:
+Documented as-is; no fixes promised here:
 
-```json
-{
-  "error": "Invalid request: missing 'text' field"
-}
-```
-
-**HTTP status codes:**
-
-- `200 OK` — Success
-- `400 Bad Request` — Invalid request (missing fields, malformed JSON)
-- `401 Unauthorized` — Missing or invalid bearer token
-- `500 Internal Server Error` — Server-side error
-
-**Example:**
-
-```bash
-curl -X POST http://localhost:8432/store \
-  -H "Content-Type: application/json" \
-  -d '{}'
-# {"error": "Invalid request: missing 'text' field"}
-```
+- **Two error envelopes.** The auth wrapper and several field checks
+  return `text/plain` (`Unauthorized`, `Missing 'text' field`,
+  `ERROR: ...`, `JSON error: ...`), while config/models/`/turn` handlers
+  return `application/json` `{"error": ...}`. Clients must handle both.
+- **`DELETE /memory/<id>` and `/delete_batch` are on the legacy numeric
+  surface** (bare rowids of knowledge rows), while every other agent
+  write/read path uses typed handles (`knowledge:N`).
+- **`collections` is inert** on `/search` and MCP `search` (accepted,
+  ignored — the lean schema has no collection column).
+- **`/health` is unauthenticated** and exposes `commit`/`built` to any
+  peer that can reach the port (trimming it for non-local peers is an
+  open question).
 
 ---
 

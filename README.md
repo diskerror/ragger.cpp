@@ -35,8 +35,8 @@ C++ port of the original Python [Ragger Memory](https://github.com/diskerror/rag
 - **Hybrid search.** A custom TF-IDF inverted index (stemmed unigrams + bigrams and
   DoubleMetaphone "sounds-like" codes sharing one flat term table) blended with dense vector
   cosine via Eigen3. Configurable weights; all signals normalized before blending.
-- **Local or external embeddings.** Internal engine runs an ONNX model on disk (`all-MiniLM-L6-v2`,
-  `all-MiniLM-L12-v2`, etc., 384-dim by default); external engine calls any OpenAI-compatible
+- **Local or external embeddings.** Internal engine runs an ONNX model on disk (default
+  `all-MiniLM-L12-v2`, 384-dim); external engine calls any OpenAI-compatible
   `/v1/embeddings` endpoint (llama.cpp, llama-swap, LM Studio, OpenAI). Stored as IEEE half (f16) by
   default; in-memory math stays f32. Storage type can be `f32`, `f16`, `bf16`, and `int8`. Re-encode
   any time with

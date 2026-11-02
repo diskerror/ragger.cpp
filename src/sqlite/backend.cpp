@@ -391,7 +391,7 @@ int Backend::cleanup_old_conversations(float max_age_hours) {
     int64_t cutoff_epoch = db_epoch(std::chrono::system_clock::to_time_t(cutoff));
 
     // v2: raw verbatim exchanges (L1 turns) are what age out by retention;
-    // their gist is preserved in the L2/L3 summaries. Purge old turns by
+    // their gist is preserved in turn summaries and episodes. Purge old turns by
     // timestamp. (Pre-v2 this deleted summaries tagged collection='conversation';
     // that column is gone in the lean schema.)
     Stmt stmt(pImpl->db,

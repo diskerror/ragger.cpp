@@ -17,19 +17,19 @@ namespace ragger {
 
 using json = nlohmann::json;
 
-/// Input for a structured (skill-shaped) decision — agent API Phase 1.
-/// text + trigger are required; everything else is optional.
 /// Input to store_knowledge (PHASE7): one row of knowledge(kind). Formerly
-/// DecisionInput for store_structured_decision/store_insight.
+/// DecisionInput for store_structured_decision/store_insight. `text` is
+/// required; the kind rules (status::kKinds): decision requires a trigger,
+/// insight requires >=1 evidence, note neither.
 struct KnowledgeInput {
     std::string kind;                 ///< decision | insight | note (see status::kKinds)
     std::string text;                 ///< the ruling itself
-    std::string trigger;              ///< "Use when ..." — future-query vocabulary
+    std::string trigger;              ///< "Use when ..." — future-query vocabulary ("" = NULL)
     std::string rationale;            ///< why; alternatives rejected ("" = NULL)
     std::string scope;                ///< what it does NOT apply to ("" = NULL)
-    std::string tags;                 ///< comma-separated, stored verbatim
+    std::string tags;                 ///< comma-separated, stored verbatim ("" = absent)
     std::string status = "current";   ///< current | provisional | pending
-    std::optional<int> supersedes;    ///< decision_id this replaces
+    std::optional<int> supersedes;    ///< knowledge_id this replaces (any kind)
     std::string session_guid;         ///< source session GUID ("" = none)
     std::string model_name;           ///< producing model ("" = NULL model_id)
     std::string source_timestamp;     ///< historical created_at ("" = now)
@@ -81,8 +81,9 @@ struct SearchResult {
     float blended    = 0.0f;
 };
 
-/// Input for storing a Level 5 RAG document chunk (lean v2 documents schema).
-/// `chunk_index` of 0 means "unchunked" (single-row document). `imported_at`
+/// Input for storing a RAG document chunk (lean v2 documents schema).
+/// A `chunk_index` <= 0 is stored as NULL ("unchunked" single-row document).
+/// `imported_at`
 /// should be the same string for every chunk of one import so they share a
 /// single timestamp (issue #48); empty = backend stamps now_iso() at insert.
 ///

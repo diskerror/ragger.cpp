@@ -104,9 +104,8 @@ std::vector<Recipe> builtin_recipes() {
     std::vector<Recipe> out;
 
     // natural_fading — the default. Mimics how memory decays:
-    // freshly-spoken turns stay verbatim, older ones fade to summaries,
-    // then to a session-level digest, then to project context, then to
-    // pertinent decisions.
+    // freshly-spoken turns stay verbatim, older ones fade to turn summaries,
+    // then to episodes, then to pertinent decisions.
     Recipe nf;
     nf.name        = "natural_fading";
     nf.description = "Recent raw → turn summaries → episodes → decisions";

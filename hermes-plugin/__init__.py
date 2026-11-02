@@ -255,7 +255,7 @@ SEARCH_SCHEMA = {
             },
             "limit": {
                 "type": "integer",
-                "description": "Maximum number of results (default: 5).",
+                "description": "Maximum number of results (default: the `default_search_limit` setting).",
             },
         },
         "required": ["query"],
@@ -394,7 +394,7 @@ MEMORY_UPDATE_SCHEMA = {
         "properties": {
             "id": {"type": "string", "description": "Typed handle '<layer>:<rowid>'."},
             "status": {"type": "string",
-                       "description": "Knowledge status: current | provisional | pending | roadmap | retired."},
+                       "description": "Knowledge status: current | provisional | pending | retired."},
             "tags": {"type": "string", "description": "Replacement tag string (comma-separated)."},
         },
         "required": ["id"],
@@ -417,7 +417,7 @@ MEMORY_REVIEW_SCHEMA = {
             "action": {"type": "string", "enum": ["list", "approve", "reject"],
                        "description": "list | approve | reject."},
             "ids": {"type": "array", "items": {"type": "string"},
-                    "description": "Decision handles for approve/reject."},
+                    "description": "Knowledge handles (`knowledge:N`) for approve/reject."},
         },
         "required": ["action"],
     },
@@ -442,7 +442,7 @@ MEMORY_SEARCH_SCHEMA = {
         "properties": {
             "query": {"type": "string", "description": "What to search for."},
             "layers": {"type": "array", "items": {"type": "string"},
-                       "description": "Subset of: turn, turn_summary, episode, summary, document, knowledge. Legacy 'decision'/'insight' are accepted and mean knowledge of that kind."},
+                       "description": "Subset of: turn, turn_summary, episode, document, knowledge. Legacy 'decision'/'insight' are accepted and mean knowledge of that kind."},
             "kinds": {"type": "array", "items": {"type": "string"},
                       "description": "Narrow knowledge hits: decision, insight, note."},
             "since": {"type": "string", "description": "Only results at/after this time."},

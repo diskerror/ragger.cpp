@@ -4,8 +4,8 @@
  * Lifecycle is owned by the HTTP server. When the daemon is up, this
  * service keeps the inference + embedder warm; turns captured over HTTP or
  * MCP that lack an L2 summary get one shortly after capture, and sessions
- * whose latest turn is older than `summary_pause_minutes` get a finalized
- * L3 summary. When the daemon is *not* running, MCP-mode capture still
+ * whose latest turn is older than `episode_idle_minutes` get their open
+ * episode closed. When the daemon is *not* running, MCP-mode capture still
  * writes the raw turn (see `ragger::capture_turn`) and this service catches
  * up the moment the daemon next starts.
  *

@@ -260,7 +260,7 @@ std::string summarize_transcript(
 
 // ---------------------------------------------------------------------------
 // summarize_texts — same contract as summarize_transcript but for a flat list
-// of pre-existing summary blobs (L2→L3, L3→L4).
+// of pre-existing summary blobs (turn summaries → episode text at close).
 // ---------------------------------------------------------------------------
 std::string summarize_texts(
     InferenceClient& inference,

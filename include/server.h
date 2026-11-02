@@ -1,8 +1,8 @@
 /**
  * HTTP server for Ragger Memory
  *
- * Mirrors ragger_memory/server.py from the Python version.
- * Uses httplib for routing and built-in JSON handling.
+ * Serves the REST API (httplib) for the daemon: agent routes, dashboard
+ * config, and the SSE activity stream.
  */
 #pragma once
 

@@ -9,7 +9,7 @@
  * during indexing and search are cached as std::optional<Stmt> instance
  * members (lazy: prepared on first use, sqlite3_reset+clear_bindings on
  * reuse), one accessor per table since the 5 text tables are a small fixed
- * set (turns, turn_summaries, summaries, documents, decisions) — no map, no
+ * set (turns, turn_summaries, episodes, knowledge, documents) — no map, no
  * runtime SQL-string formatting for these. A small if/else dispatch
  * (doc_freq_stmt/count_stmt/postings_stmt/delete_terms_stmt/
  * insert_terms_stmt/update_counts_stmt) picks the right per-table accessor

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.17)
+## v0.17.0 (in development)
 - `semqlite_config` moves into Ragger's database as the shared facts-about-the-file table SemanticSQLite reads. The embedding identity stamps (`embedding_model`, `vector_type`, `dimensions`) now live there under SemanticSQLite's names (`embedding_model`, `embedding_vector_type`, `embedding_dims`); Ragger also publishes `embedding_embedder` (`onnx`, or `http://host:port` for an external engine), `embedding_offset` (0: 0.17 stores bare vectors, the version is a column) and `embedding_api_key_env`. `semqlite memories.db` then runs `EMBED()` with no setup. Ragger's change-management state (`desired_*`, `embedding_version`, `reembedding*`) stays in `settings`
 - The legacy `settings` stamp rows move over once, idempotently, whenever the user schema is created (not tied to `db_version`, so an already-stamped 0.17 file is fixed on next open). A stamp already present in `semqlite_config` wins. Nothing is published while embeddings are degraded
 - With an external engine the recorded identity model is the endpoint's own model name (`embedding_external_model`), so `semqlite_config.embedding_model` is usable by the http embedder
@@ -8,6 +8,38 @@
 - Views: only the date-conversion views remain (9). Dropped the two `knowledge_*_evidence_view` passthroughs and the five `<table>_terms_view` junction views; they are dropped by name from existing files on open. The view-coverage test now checks every remaining view converts a date
 - Agent instructions rewritten for the full tool set (quick vs layered tools, which tool for decisions vs notes, `trigger` phrasing, supersede/evidence, curation, per-host tool names, when to write an insight). The Hermes plugin now puts the whole file in the system prompt (static fallback if missing). Every frontend installer (Hermes, OpenClaw, Claude Code, Claude Desktop, install-bin) installs it if absent and, when your copy differs from the shipped one, keeps yours and writes `.new` beside it
 - Docs/tests: `semqlite_config` migration test (model-free), API-key environment test
+
+**Schema**
+- One `knowledge` table (kind: decision | insight | note) replaces `decisions`, `insights` and note summaries; typed handles are `knowledge:N` — `decision:N` / `insight:N` are rejected with a pointer to the new form
+- `episodes` is a real table; membership is recorded on turn summaries (`episode_id`)
+- The `summaries` and `projects` tables are removed; sessions group only, and "project" is a tag (`project:<name>`)
+- `sessions` gains `started_on` / `ended_on`, maintained from the session's turns on write
+- Migration is 0.16→0.17 only; databases older than 0.16 are refused untouched — upgrade to v0.16.2.3 first
+
+**Summarizer / episodes**
+- Every new turn captured via `/turn` is enqueued to the summarizer immediately instead of waiting for the next catch-up tick
+- Trivial turns are marked with a `(skipped)` model even when inference is down, and failing turns back off (5 min, doubling to 6 h) instead of retrying every tick
+- Episodes close when a session has been idle past `episode_idle_minutes`, split on embedding-similarity boundaries (the existing rule), with membership recorded
+
+**API**
+- `store` with `metadata.category=decision` goes through one validated path on every transport (HTTP, MCP, CLI); decision-path responses carry `kind` instead of `table`, and `/memory/search` accepts `kinds`
+- `chat()` requests carry a whole-request timeout, so a stalled endpoint can no longer freeze the summarizer worker
+
+**Fixes**
+- Embedder padding fix: short texts are no longer pooled over `[PAD]` positions — all stored embeddings must be rebuilt (see Upgrade notes)
+- Shipped default settings actually apply on fresh installs
+- Config is now an immutable snapshot; reloads publish a new snapshot instead of mutating strings under readers
+- Turn summaries with NULL text are normalized and re-queued
+- Write paths check statement results; failures throw instead of silently dropping writes or reporting wrong counts
+- `ragger reindex` runs in one transaction — a mid-run failure leaves the old index intact
+- CLI verbs (`import-docs`, `delete-doc`, `reindex`, `config set`, `recipe`) write audit lines to `activity.log`; `config set` signals the daemon to reload
+- `import-docs` embeds in-process instead of spawning one model-loading subprocess per chunk
+
+**Upgrade notes**
+- Back up the database before upgrading (the migration leg makes its own pre-migration backup too)
+- Run `ragger re-embed all` after upgrading — embeddings stored before the padding fix are degraded
+- After the tokenizer changes land in this cycle, run `ragger reindex all` on existing databases; stored term rows are stale
+- If your stored `summarizer_prompt` is wrapped in double quotes (older installs), fix it with `ragger config set`
 
 ## v0.16.2.5
 - Hermes plugin: hooks now actually register. `register()` used `@ctx.hook(...)`, which is not a Hermes API; it raised `AttributeError` on every load (logged as "Memory provider 'ragger' raised after registering (hook)") and left both hooks dead since they were written. They now use `ctx.register_hook(name, callback)`: `post_tool_call` forwards the built-in `memory` tool's add/replace calls to `/store`, and `post_turn_finalized` captures interrupted turns

@@ -1158,7 +1158,8 @@ struct Server::Impl {
 
         // POST /models/external/probe -> send a test embedding request to a
         // remote endpoint and return the vector dimensionality.
-        // Body: {"host":"...", "port":N, "model":"...", "key":"..."}
+        // Body: {"host":"...", "port":N, "model":"..."} — the API key is NOT
+        // read from the body; it comes from config (embedding_external_api_key).
         svr.Post("/models/external/probe", guarded([this](const UserInfo&, const httplib::Request& req,
                                                           httplib::Response& res) {
             auto body = json::parse(req.body, nullptr, false);
@@ -1687,7 +1688,7 @@ static bool is_port_available(const std::string& host, int port) {
     int sock = ::socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return false;
 
-    // Allow binding to TIME_WAIT sockets (matches Crow's SO_REUSEADDR)
+    // Allow binding to TIME_WAIT sockets (SO_REUSEADDR, same as the real bind)
     int opt = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
@@ -1760,7 +1761,8 @@ bool Server::run() {
     // periodic housekeeping timer (runs every interval + on SIGUSR1).
     pImpl->start_background_threads();
 
-    // Start the daemon-resident summarizer (L2 per-turn + L3 on idle pause).
+    // Start the daemon-resident summarizer (per-turn turn summaries + episode
+    // close on idle).
     // Only the HTTP daemon runs this: it keeps the inference + embedder warm
     // and catches up any turns that were captured via MCP while the daemon
     // was down. See SummarizerService doc for the timestamp-linkage rule.

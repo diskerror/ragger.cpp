@@ -112,17 +112,13 @@ constexpr const char* CLI_USAGE_SEARCH        = "Usage: ragger search <query>";
 constexpr const char* CLI_USAGE_STORE         = "Usage: ragger store <text>";
 constexpr const char* CLI_USAGE_DECISION      =
     "Usage:\n"
-    "  ragger decision add <text> [--status=current|roadmap] [--tags=a,b,c]\n"
-    "      Store a curated L6 decision/lesson. --status defaults to\n"
-    "      \"current\" (the only status the recall pipeline surfaces).\n"
-    "      Use --status=roadmap for planned/future work you want tracked\n"
-    "      but don't want cluttering every session's recall until it's\n"
-    "      actually done.\n"
-    "  ragger decision list [--status=current|roadmap|superseded|deprecated] [-n N]\n"
-    "      List decisions by status, newest first. Defaults to \"current\".\n"
+    "  ragger decision add <text> [--status=current|provisional|pending] [--tags=a,b,c]\n"
+    "      Store a curated decision. --status defaults to \"current\".\n"
+    "  ragger decision list [--status=current|provisional|pending|retired|superseded] [-n N]\n"
+    "      List decisions by status, newest first. Defaults to \"current\";\n"
+    "      up to 20 rows unless -n says otherwise.\n"
     "  ragger decision set-status <decision_id> <status>\n"
-    "      Change a decision's status (e.g. promote a roadmap item to\n"
-    "      \"current\" once it's done, or mark one \"superseded\"/\"deprecated\").";
+    "      Change a decision's status (e.g. mark one \"retired\").";
 constexpr const char* CLI_USAGE_DELETE_DOC    =
     "Usage: ragger delete-doc <id>\n"
     "  <id> is the document's index (primary key) number; find it with `ragger list-docs`.";
@@ -131,7 +127,7 @@ constexpr const char* CLI_USAGE_USERMOD       = "Usage: ragger usermod <username
 constexpr const char* CLI_USAGE_USERDEL       = "Usage: ragger userdel <username>";
 constexpr const char* CLI_USAGE_PASSWD        = "Usage: ragger passwd <username>";
 constexpr const char* CLI_USAGE_IMPORT        =
-    "Usage: ragger import-docs <file> [file...]      # markdown/text → L5 documents\n"
+    "Usage: ragger import-docs <file> [file...]      # markdown/text → documents\n"
     "       [--title T] [--year YYYY] [--tags a,b,c]\n"
     "Deprecated alias: ragger import <file> [file...] (same behavior, warns)\n"
     "\n"
@@ -140,7 +136,7 @@ constexpr const char* CLI_USAGE_IMPORT_CONVERSATIONS =
     "Usage:\n"
     "  ragger import-conversations PATH\n"
     "      Import Claude/Telegram/Claude-Code conversation history into turns\n"
-    "      (L1/L2), session summaries (L3/L4), and memories (L5/L6 decisions).\n"
+    "      and knowledge (notes; a memories.json file becomes a decision).\n"
     "      Format is auto-detected from PATH's JSON structure.\n"
     "\n"
     "  Options:\n"
@@ -163,7 +159,7 @@ constexpr const char* CLI_USAGE_IMPORT_CONVERSATIONS =
     "                              timestamp override. Same --all exception.\n"
     "\n"
     "  ragger import-conversations summaries <file> [file...]\n"
-    "      One hand-authored L4 project summary per file.\n"
+    "      One note per file (stored as knowledge kind='note').\n"
     "  ragger import-conversations summaries --jsonl=FILE\n"
     "      {text, tags?, timestamp?} per line.\n"
     "\n"
@@ -282,7 +278,7 @@ constexpr const char* MSG_USER_REGISTERED     = "✓ Registered in database (use
 constexpr const char* WARN_DB_DEFERRED        = "Warning: DB registration deferred ({})";
 
 // --- Rebuild ---
-constexpr const char* MSG_REBUILD_CONFIRM     = "This will re-embed all {} stored rows (turns, summaries, decisions, documents). It's safe to run with the server up, but it blocks all other requests until it finishes — the server will appear to hang.";
+constexpr const char* MSG_REBUILD_CONFIRM     = "This will re-embed all {} stored rows (turns, turn summaries, episodes, knowledge, documents). It's safe to run with the server up, but it blocks all other requests until it finishes — the server will appear to hang.";
 constexpr const char* PROMPT_CONTINUE         = "Continue? [y/N] ";
 constexpr const char* MSG_ABORTED             = "Aborted.";
 constexpr const char* MSG_DB_BACKING_UP       = "Backing up database...";
@@ -320,7 +316,7 @@ constexpr const char* ERR_MODEL_NOT_FOUND     = "Model file not found: {}";
 constexpr const char* ERR_TOKENIZER_NOT_FOUND = "Tokenizer file not found: {}";
 constexpr const char* ERR_EMPTY_TOKENIZATION  = "Empty tokenization result";
 constexpr const char* ERR_OUTPUT_SHAPE        = "Unexpected output shape from model";
-constexpr const char* ERR_EMBEDDING_MISMATCH  = "Embedding model mismatch: database was built with '{}' but config specifies '{}'. Reorganise your models directory and run 'ragger rebuild' to re-embed.";
+constexpr const char* ERR_EMBEDDING_MISMATCH  = "Embedding model mismatch: database was built with '{}' but config specifies '{}'. Reorganise your models directory and run 'ragger re-embed' to re-encode.";
 constexpr const char* ERR_VECTOR_TYPE_MISMATCH = "Vector dtype mismatch: database was built with '{}' embeddings but config specifies '{}'. Run 'ragger re-embed' to re-encode at the new precision.";
 // Ragger-managed ONNX models live at ~/.ragger/models/<provider>/<model>/, so
 // a valid internal model name is always "provider/model". These report a bad
@@ -379,24 +375,28 @@ Commands:
   store <text>       Store a new memory
   decision <sub>      Curated decisions/lessons (see `ragger decision`
                      with no args for full option list)
-                       add <text> [--status=current|roadmap] [--tags=a,b,c]
-                       list [--status=current|roadmap|...] [-n N]
+                       add <text> [--status=current|provisional|pending] [--tags=a,b,c]
+                       list [--status=current|provisional|pending|retired|superseded] [-n N]
                        set-status <decision_id> <status>
   count              Show number of stored memories
+  config get|set     Read/change settings: config get -a [-j] | get <name> [-j]
+                     | set <name> <value> (blank value = default)
+  dashboard          Print the dashboard URL with access token (-b opens browser)
   import <file...>   Deprecated alias for import-docs (warns, same behavior)
   import-docs <file...>
-                     Import markdown/text files (paragraph-aware chunking) → L5 documents
+                     Import markdown/text files (paragraph-aware chunking) → documents
                        --title <T>  --year <YYYY>  --tags a,b,c
   list-docs          List imported documents (id, chunks, year, title, path)
   delete-doc <id>    Delete an imported document and all its chunks. <id> is the
                      document index number, discoverable with `ragger list-docs`
   import-conversations <PATH> [--all]
                      Import Claude web/Claude Code/Telegram conversation history
-                     (format auto-detected) into turns, session summaries, and
-                     memories/decisions. See `ragger import-conversations` with
-                     no args for full option list.
+                     (format auto-detected) into turns and knowledge (notes;
+                     memories.json becomes a decision). See
+                     `ragger import-conversations` with no args for full option
+                     list.
                      Subcommand: import-conversations summaries <file...>
-                       one hand-authored L4 project summary per file
+                       one note per file
   export <all|table> Dump database as SQL (like mysqldump)
                        -e, --embeddings  include embedding blobs
                        --output <file>   write to file instead of stdout
@@ -411,7 +411,6 @@ Commands:
   reload-cache       Make the running daemon re-read its search caches from the DB
                      (done automatically after commands that may change the DB)
   reload             Reload config and search caches on running daemon (SIGHUP)
-                     options: --user <name>, --dry-run
   re-embed <table|all> Re-encode embeddings for one table or all memories
                      (progress per table; tables: turns, knowledge, documents,
                      turn_summaries, episodes, or "all")
@@ -530,6 +529,7 @@ constexpr const char* ERR_UNKNOWN_FORMAT      = "Unknown API format '{}'. No {}.
 
 // --- MCP errors ---
 constexpr const char* ERR_MCP_UNKNOWN_TOOL    = "Unknown tool: {}";
+constexpr const char* ERR_MCP_UNKNOWN_CONFIG_KEY = "Unknown config key: {}";
 
 // --- Import / file errors ---
 constexpr const char* ERR_FILE_NOT_FOUND      = "File not found: {}";
@@ -728,7 +728,7 @@ inline constexpr std::array<ConfigMeta, 62> kConfigSchema = {{
      "Seconds between housekeeping passes (0 disables; values <10 clamp to 10)."},
     {"episode_idle_minutes", "housekeeping", "Episode Idle Minutes", CfgType::Integer, CfgEdit::Live,
      "15", "",
-     "Idle gap (minutes) that closes an episode of work within a session. Also drives session/project rollups."},
+     "Idle gap (minutes) that closes an episode of work within a session."},
     {"episode_threshold_base", "housekeeping", "Episode Threshold Base", CfgType::Float, CfgEdit::Live,
      "0.2", "",
      "Starting similarity threshold for mid-session episode boundaries. boundary fires when avg(turn_sim, summary_sim) <= threshold; threshold rises with idle time."},

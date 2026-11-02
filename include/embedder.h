@@ -2,9 +2,7 @@
  * Embedder — generate embeddings via ONNX Runtime (internal) or a remote
  * OpenAI-compatible /v1/embeddings endpoint (external).
  *
- * Internal mode mirrors ragger_memory/embedding.py from the Python version.
- * Uses ONNX models from ~/.ragger/models/ + HuggingFace tokenizer.
- *
+ * Internal mode uses ONNX models from ~/.ragger/models/ + HuggingFace tokenizer.
  * External mode sends text to a remote endpoint and reads the returned vector.
  */
 #pragma once
