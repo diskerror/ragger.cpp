@@ -6,7 +6,9 @@
  */
 #pragma once
 
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -268,10 +270,22 @@ public:
     void close();
 
 private:
-    std::unique_ptr<Embedder>      embedder_;
+    /// S20 (C M6): the live embedder as a shared_ptr snapshot. POST
+    /// /embedding/update swaps this member while request threads are calling
+    /// through it; every user copies the pointer once per call
+    /// (embedder_snapshot()) and uses only its copy, so the old Embedder
+    /// stays alive until all in-flight calls drop theirs. The mutex guards
+    /// ONLY the pointer copy/assign — never encode().
+    std::shared_ptr<Embedder> embedder_snapshot() const {
+        std::lock_guard<std::mutex> lk(embedder_mu_);
+        return embedder_;
+    }
+
+    std::shared_ptr<Embedder>         embedder_;
+    mutable std::mutex                embedder_mu_;    // guards embedder_ pointer only
     std::unique_ptr<StorageBackend> backend_;
     std::unique_ptr<UserStore>      user_store_;   // settings and user management
-    bool                            embeddings_degraded_ = false;
+    std::atomic<bool>               embeddings_degraded_{false};   // S19 (C M6)
 #ifdef RAGGER_STATS
     std::unique_ptr<class StatsLogger> stats_;      // opt-in retrieval instrumentation
 #endif

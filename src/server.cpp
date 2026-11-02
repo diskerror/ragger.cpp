@@ -130,8 +130,7 @@ struct Server::Impl {
         inference_ = std::move(c);
     }
 
-    // SSE activity-log tailing: byte offset already streamed to /events.
-    std::uintmax_t activity_log_offset_ = 0;
+    // SSE activity-log tailing moved to per-subscriber offsets (S17).
 
     // Housekeeping timer
     std::atomic<bool> timer_running_{false};
@@ -495,6 +494,12 @@ struct Server::Impl {
             res.set_content(lang::HTTP_MISSING_TEXT, "text/plain");
             return;
         }
+        // S27 (C §4): a non-string collection/source is a client error with
+        // a clear message (was: nlohmann's type-error text via json::exception).
+        if (metadata.contains("collection") && !metadata["collection"].is_string())
+            throw std::invalid_argument("metadata.collection must be a string");
+        if (metadata.contains("source") && !metadata["source"].is_string())
+            throw std::invalid_argument("metadata.source must be a string");
         if (!metadata.contains("collection") || metadata["collection"].get<std::string>().empty())
             metadata["collection"] = "memory";
         if (!metadata.contains("source") || metadata["source"].get<std::string>().empty())
@@ -981,7 +986,13 @@ struct Server::Impl {
                         {"restart_required", r->restart_required},
                         {"rebuild_required", r->rebuild_required}};
             res.set_content(out.dump(), "application/json");
-            Diskerror::Logger::debug(std::format("PUT /config/{} 200", key));
+            // S27 (C §4): a config change is an audit event — info level
+            // with key and new value. A secret's value never reaches the
+            // log (the response body is the caller's own submission).
+            if (const auto* meta = lang::config_meta(key); meta && meta->secret)
+                Diskerror::Logger::info(std::format("PUT /config/{} 200 (secret: value not logged)", key));
+            else
+                Diskerror::Logger::info(std::format("PUT /config/{} 200 -> {}", key, v.value_or("")));
         }));
 
         // GET /stats -> one-shot status snapshot (server + table sizes).
@@ -1414,7 +1425,9 @@ struct Server::Impl {
             auto colon = hp.rfind(':');
             if (colon != std::string::npos) {
                 host = hp.substr(0, colon);
-                try { port = std::stoi(hp.substr(colon + 1)); } catch (...) {}
+                try { port = std::stoi(hp.substr(colon + 1)); }
+                catch (const std::exception& e) { Diskerror::Logger::debug(std::format("origin host:port parse: {}", e.what())); }
+                catch (...) { Diskerror::Logger::debug("origin host:port parse: unknown exception"); }
             } else {
                 host = hp; port = 80;
             }
@@ -1548,14 +1561,14 @@ struct Server::Impl {
             res.set_header("Connection", "keep-alive");
             res.set_chunked_content_provider(
                 "text/event-stream",
-                [this](size_t /*offset*/, httplib::DataSink& sink) {
+                [this, offset = std::uintmax_t{}](size_t /*offset_arg*/, httplib::DataSink& sink) mutable {
                     // Emit a stats frame.
                     std::string frame = "event: stats\ndata: " +
                                         build_stats_json().dump() + "\n\n";
                     if (!sink.write(frame.data(), frame.size())) return false;
 
                     // Emit any new activity-log lines as "activity" events.
-                    for (auto& line : drain_activity_lines()) {
+                    for (auto& line : drain_activity_lines(offset)) {
                         std::string a = "event: activity\ndata: " +
                                         json{{"line", line}}.dump() + "\n\n";
                         if (!sink.write(a.data(), a.size())) return false;
@@ -1586,7 +1599,11 @@ struct Server::Impl {
         try {
             for (auto& [name, n] : memory.backend()->table_row_counts())
                 tables[name] = n;
-        } catch (...) { /* backend unavailable — empty tables */ }
+        } catch (const std::exception& e) {   // S27 (C §4): never silent
+            Diskerror::Logger::debug(std::format("stats: table counts failed: {}", e.what()));
+        } catch (...) {
+            Diskerror::Logger::debug("stats: table counts failed: unknown exception");
+        }
         return json{
             {"status",   "running"},
             {"version",  RAGGER_VERSION},
@@ -1595,29 +1612,32 @@ struct Server::Impl {
         };
     }
 
-    // Return activity-log lines appended since the last drain. Best-effort:
-    // tracks a byte offset into the live activity.log and reads the tail.
-    std::vector<std::string> drain_activity_lines() {
+    // Return activity-log lines appended since the CALLER's byte offset
+    // (S17, C M6): each /events subscriber owns its offset, so two dashboard
+    // tabs each receive every line instead of splitting one shared stream.
+    // Best-effort: first read starts at EOF (only NEW activity); a shrunk
+    // file means rotation -> reset to 0; capped at the last ~20 lines.
+    std::vector<std::string> drain_activity_lines(std::uintmax_t& offset) {
         std::vector<std::string> out;
         const std::string path = config().resolved_log_file_path();
         std::error_code ec;
         auto size = std::filesystem::file_size(path, ec);
         if (ec) return out;
-        if (activity_log_offset_ == 0 && size > 0) {
+        if (offset == 0 && size > 0) {
             // First read: start at EOF so we only stream NEW activity.
-            activity_log_offset_ = size;
+            offset = size;
             return out;
         }
-        if (size < activity_log_offset_) activity_log_offset_ = 0;  // rotated
-        if (size == activity_log_offset_) return out;
+        if (size < offset) offset = 0;  // rotated
+        if (size == offset) return out;
         std::ifstream f(path, std::ios::binary);
         if (!f) return out;
-        f.seekg(static_cast<std::streamoff>(activity_log_offset_));
+        f.seekg(static_cast<std::streamoff>(offset));
         std::string line;
         while (std::getline(f, line)) {
             if (!line.empty()) out.push_back(line);
         }
-        activity_log_offset_ = size;
+        offset = size;
         // Cap to the last ~20 lines so a burst doesn't flood the client.
         if (out.size() > 20) out.erase(out.begin(), out.end() - 20);
         return out;
@@ -1658,8 +1678,10 @@ bool Server::run() {
     const bool want_tcp  = cfg.tcp_enabled && !pImpl->host.empty();
 
     if (want_tcp && !is_port_available(pImpl->host, pImpl->port)) {
+        // S18 (C M6): report failure to the caller — std::exit here skipped
+        // destructors with three DB connections already open.
         Diskerror::Logger::critical(std::format(lang::ERR_PORT_IN_USE, pImpl->port));
-        std::exit(1);
+        return false;
     }
 
     std::string addr;
@@ -1707,18 +1729,20 @@ bool Server::run() {
     sigaction(SIGTERM, &sa, nullptr);
     sigaction(SIGINT,  &sa, nullptr);
 
-    // Start background threads: the always-on signal poller plus the
-    // periodic housekeeping timer (runs every interval + on SIGUSR1).
-    pImpl->start_background_threads();
-
     // Start the daemon-resident summarizer (per-turn turn summaries + episode
     // close on idle).
     // Only the HTTP daemon runs this: it keeps the inference + embedder warm
     // and catches up any turns that were captured via MCP while the daemon
     // was down. See SummarizerService doc for the timestamp-linkage rule.
+    // S18 (C M6): created and started BEFORE the background threads — the
+    // housekeeping timer reads summarizer_.
     pImpl->summarizer_ = std::make_unique<SummarizerService>(
         *pImpl->memory.backend(), [impl = pImpl.get()] { return impl->inference(); });
     pImpl->summarizer_->start();
+
+    // Start background threads: the always-on signal poller plus the
+    // periodic housekeeping timer (runs every interval + on SIGUSR1).
+    pImpl->start_background_threads();
 
     // Launch each enabled listener on its own thread. listen() blocks until
     // the corresponding Server::stop() is called, so the main thread blocks
@@ -1787,7 +1811,9 @@ bool Server::run() {
     pImpl->stop_background_threads();
     if (!pImpl->pid_file_.empty()) std::remove(pImpl->pid_file_.c_str());
 
-    return g_restart_requested.load(std::memory_order_relaxed);
+    // Ran and stopped normally; a pending restart is read by the caller via
+    // Server::restart_requested() (S18: false is reserved for start failure).
+    return true;
 }
 
 bool Server::restart_requested() {

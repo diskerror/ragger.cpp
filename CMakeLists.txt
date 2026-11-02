@@ -275,6 +275,7 @@ add_library(ragger_core STATIC
     src/api_formats.cpp
     src/auth.cpp
     src/mcp.cpp
+    src/daemon_control.cpp
 )
 target_include_directories(ragger_core PUBLIC
     "${CMAKE_SOURCE_DIR}/include"
@@ -328,7 +329,7 @@ target_link_libraries(ragger_core PUBLIC
 # ---------------------------------------------------------------------------
 # ragger executable
 # ---------------------------------------------------------------------------
-add_executable(ragger src/main.cpp src/daemon_control.cpp)
+add_executable(ragger src/main.cpp)
 target_link_libraries(ragger PRIVATE
     ragger_core)
 

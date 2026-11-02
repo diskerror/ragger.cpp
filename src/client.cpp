@@ -13,6 +13,36 @@
 
 namespace ragger {
 
+// S28 (C m17): the json -> SearchResult loop was duplicated verbatim in
+// search() and search_by_metadata(). One parser now; output identical
+// (fields read are exactly those the old loops read). Not in client.h:
+// internal to this TU plus the test's extern declaration (S28 pin choice —
+// the public client path needs a live daemon, which tests must not assume).
+std::vector<SearchResult> parse_search_results(const json& j) {
+    std::vector<SearchResult> results;
+    if (j.contains("results") && j["results"].is_array()) {
+        for (const auto& item : j["results"]) {
+            SearchResult sr;
+            // ID might be string or int depending on server
+            if (item.contains("id")) {
+                if (item["id"].is_string()) {
+                    sr.id = std::stoi(item["id"].get<std::string>());
+                } else {
+                    sr.id = item["id"].get<int>();
+                }
+            } else {
+                sr.id = 0;
+            }
+            sr.text = item.value("text", "");
+            sr.score = item.value("score", 0.0f);
+            sr.metadata = item.value("metadata", json::object());
+            sr.timestamp = item.value("timestamp", "");
+            results.push_back(sr);
+        }
+    }
+    return results;
+}
+
 RaggerClient::RaggerClient(const std::string& host, int port,
                            const std::string& token)
     : host_(host), port_(port), token_(token) {}
@@ -66,28 +96,8 @@ SearchResponse RaggerClient::search(const std::string& query, int limit,
     
     auto j = json::parse(resp.body);
     SearchResponse result;
-    
-    if (j.contains("results") && j["results"].is_array()) {
-        for (const auto& item : j["results"]) {
-            SearchResult sr;
-            // ID might be string or int depending on server
-            if (item.contains("id")) {
-                if (item["id"].is_string()) {
-                    sr.id = std::stoi(item["id"].get<std::string>());
-                } else {
-                    sr.id = item["id"].get<int>();
-                }
-            } else {
-                sr.id = 0;
-            }
-            sr.text = item.value("text", "");
-            sr.score = item.value("score", 0.0f);
-            sr.metadata = item.value("metadata", json::object());
-            sr.timestamp = item.value("timestamp", "");
-            result.results.push_back(sr);
-        }
-    }
-    
+    result.results = parse_search_results(j);
+
     if (j.contains("timing")) {
         result.timing = j["timing"];
     }
@@ -141,30 +151,7 @@ std::vector<SearchResult> RaggerClient::search_by_metadata(const json& metadata_
     }
     
     auto j = json::parse(resp.body);
-    std::vector<SearchResult> results;
-    
-    if (j.contains("results") && j["results"].is_array()) {
-        for (const auto& item : j["results"]) {
-            SearchResult sr;
-            // ID might be string or int depending on server
-            if (item.contains("id")) {
-                if (item["id"].is_string()) {
-                    sr.id = std::stoi(item["id"].get<std::string>());
-                } else {
-                    sr.id = item["id"].get<int>();
-                }
-            } else {
-                sr.id = 0;
-            }
-            sr.text = item.value("text", "");
-            sr.score = item.value("score", 0.0f);
-            sr.metadata = item.value("metadata", json::object());
-            sr.timestamp = item.value("timestamp", "");
-            results.push_back(sr);
-        }
-    }
-    
-    return results;
+    return parse_search_results(j);
 }
 
 // HTTP implementation helpers

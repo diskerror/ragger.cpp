@@ -1,5 +1,5 @@
 /**
- * SummarizerService — daemon-resident L2/L3 summarization worker.
+ * SummarizerService — daemon-resident L2 turn-summary + episode-close worker.
  *
  * Lifecycle is owned by the HTTP server. When the daemon is up, this
  * service keeps the inference + embedder warm; turns captured over HTTP or
@@ -94,9 +94,9 @@ private:
     void worker_loop();
     void pause_timer_loop();
 
-    /// Handlers — each returns true on success, false on retryable error.
-    bool handle_l2(const Job& j);
-    bool handle_episode_close(const Job& j); // close open episode(s) -> immutable episodes rows
+    /// Handlers — report through logs/DB state only (S25: void).
+    void handle_l2(const Job& j);
+    void handle_episode_close(const Job& j); // close open episode(s) -> immutable episodes rows
 
     StorageBackend&  backend_;
     std::function<std::shared_ptr<InferenceClient>()> inference_provider_;
@@ -124,6 +124,10 @@ private:
     // a daemon restart gives every failing turn a fresh set of attempts —
     // bounded by reset_backoff_'s wait, not by max_turn_failures alone.
     std::unordered_map<int, int> turn_failures_;
+
+    // S25 (C M10): "no inference endpoint configured" is logged once per
+    // service lifetime, not once per skipped job.
+    std::once_flag no_inference_warned_;
 };
 
 } // namespace ragger

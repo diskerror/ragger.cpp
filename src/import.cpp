@@ -41,19 +41,26 @@ std::vector<ImportChunk> chunk_markdown(const std::string& raw_text, int min_chu
     // Clean the text
     std::string text = raw_text;
 
+    // S29 (C m20): patterns hoisted to function-local statics (compiled
+    // once); the pattern strings are copied verbatim — none "improved".
+    static const std::regex base64_md_re(R"(!\[[^\]]*\]\(data:[^)]+\))");
+    static const std::regex base64_raw_re(R"(data:image/[^;]+;base64,[A-Za-z0-9+/=]+)");
+    static const std::regex multi_space_re(R"(  +)");
+    static const std::regex blank_runs_re(R"(\n{3,})");
+
     // Strip base64 image data
-    text = std::regex_replace(text, std::regex(R"(!\[[^\]]*\]\(data:[^)]+\))"), "");
-    text = std::regex_replace(text, std::regex(R"(data:image/[^;]+;base64,[A-Za-z0-9+/=]+)"), "");
+    text = std::regex_replace(text, base64_md_re, "");
+    text = std::regex_replace(text, base64_raw_re, "");
 
     // Collapse multi-space artifacts per line
     std::istringstream lines_stream(text);
     std::string line;
     std::string cleaned;
     while (std::getline(lines_stream, line)) {
-        line = std::regex_replace(line, std::regex(R"(  +)"), " ");
+        line = std::regex_replace(line, multi_space_re, " ");
         cleaned += line + "\n";
     }
-    text = std::regex_replace(cleaned, std::regex(R"(\n{3,})"), "\n\n");
+    text = std::regex_replace(cleaned, blank_runs_re, "\n\n");
 
     // Split on paragraph boundaries
     std::vector<std::string> paragraphs;
@@ -454,8 +461,9 @@ std::vector<FlatMemoryChunk> parse_flat_markdown_memory(const std::string& path,
             }
         }
         // Collapse any now-consecutive blank lines left behind by removed
-        // headings, and trim.
-        body = std::regex_replace(body, std::regex(R"(\n{3,})"), "\n\n");
+        // headings, and trim. (S29: pattern hoisted, copied verbatim.)
+        static const std::regex blank_runs_re(R"(\n{3,})");
+        body = std::regex_replace(body, blank_runs_re, "\n\n");
         while (!body.empty() && (body.front() == '\n' || body.front() == ' '))
             body.erase(body.begin());
         while (!body.empty() && (body.back() == '\n' || body.back() == ' '))

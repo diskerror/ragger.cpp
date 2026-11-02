@@ -290,11 +290,12 @@ constexpr const char* WARN_EMBED_SUBPROCESS   = "Warning: embed subprocess faile
 constexpr const char* WARN_IMPORT_EMBED_SKIPPED = "Warning: {}/{} chunks left unembedded (embed subprocess failed or timed out); re-import to retry";
 
 // --- Summarizer service (daemon-resident L2/L3 worker) -------------
-constexpr const char* MSG_SUMMARIZER_START    = "Summarizer started (catch-up queued: {} turn(s), {} episode close(s))";
+constexpr const char* MSG_SUMMARIZER_START    = "[summarizer] catch-up queued {} turn(s), {} episode close(s)";
 constexpr const char* MSG_SUMMARIZER_STOP     = "Summarizer stopped";
 constexpr const char* MSG_SUMMARIZER_L2       = "L2 turn summary written for session {} at {}";
 constexpr const char* WARN_SUMMARIZER_L2      = "Summarizer L2 failed for turn_id {}: {}";
-constexpr const char* WARN_SUMMARIZER_L3      = "Summarizer L3 failed for session {}: {}";
+constexpr const char* WARN_SUMMARIZER_L3      = "[summarizer] episode catch-up failed: {}";
+constexpr const char* MSG_SUMMARIZER_NO_ENDPOINT = "[summarizer] disabled: no inference endpoint configured";
 constexpr const char* WARN_SUMMARY            = "Warning: summary generation failed: {}";
 
 // --- Generic CLI error wrapper ---
@@ -492,6 +493,7 @@ constexpr const char* ERR_MCP_TEXT_REQUIRED     = "Error: text parameter require
 constexpr const char* ERR_MCP_USER_REQUIRED     = "Error: user parameter required";
 constexpr const char* ERR_MCP_QUERY_REQUIRED    = "Error: query parameter required";
 constexpr const char* MSG_MCP_NO_RESULTS        = "No results found.";
+constexpr const char* MSG_MCP_IGNORE_NON_JSON   = "[mcp] ignoring non-JSON input";
 constexpr const char* MSG_MCP_HOUSEKEEPING      = "MCP housekeeping: cleaned {} expired conversations";
 constexpr const char* ERR_MCP_METHOD_NOT_FOUND  = "Method not found: {}";
 
@@ -550,7 +552,6 @@ constexpr const char* MSG_EMBEDDING_PATH_DEFAULT= "(default)";
 constexpr const char* MSG_HOUSEKEEPING_TRIGGERED= "Housekeeping triggered";
 
 // --- Main.cpp specific (daemon control) ---
-constexpr const char* ERR_DAEMON_PID_NOT_RUNNING= "Daemon not running (pid {} not found)";
 constexpr const char* ERR_PERMISSION_DENIED_SIGNAL= "Permission denied: cannot send signal to daemon process";
 
 // =====================================================================

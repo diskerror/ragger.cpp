@@ -152,6 +152,17 @@ void test_whitespace_collapsing() {
     }
 }
 
+// S29: exact cleaning output of chunk_markdown (recorded from the pre-fix
+// code; hoisting the regexes to static const must not change a byte).
+void p10_chunk_markdown_exact() {
+    std::println("  p10_chunk_markdown_exact...");
+    const std::string in = "a b\n\n\n\n c ![x](data:image/png;base64,AAAA) d";
+    auto chunks = chunk_markdown(in, 300);
+    CHECK(chunks.size() == 1);
+    CHECK(chunks[0].text == "a b\n\n c d");   // recorded pre-fix
+    CHECK(chunks[0].section == "");
+}
+
 void test_tiny_file() {
     std::string text = "Hi.";
     auto chunks = chunk_markdown(text, 300);
@@ -235,6 +246,7 @@ int main() {
     test_minimum_chunk_size_splitting();
     test_base64_stripping();
     test_whitespace_collapsing();
+    p10_chunk_markdown_exact();
     test_tiny_file();
     test_clean_document_text();
 

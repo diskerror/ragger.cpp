@@ -64,29 +64,15 @@ namespace fs = std::filesystem;
 // -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
-// PID of a live ragger daemon (from /tmp/ragger/server-*.pid), or 0.
-static pid_t find_live_daemon_pid() {
-    namespace fs = std::filesystem;
-    try {
-        for (const auto &entry: fs::directory_iterator("/tmp/ragger")) {
-            auto name = entry.path().filename().string();
-            if (name.rfind("server-", 0) == 0 &&
-                name.size() > 4 && name.substr(name.size() - 4) == ".pid") {
-                std::ifstream pf(entry.path());
-                pid_t pid = 0;
-                if (pf >> pid && pid > 0 && kill(pid, 0) == 0) return pid;
-            }
-        }
-    } catch (...) {}
-    return 0;
-}
+// (The live-daemon PID lookup moved to ragger::find_live_daemon_pid in
+// daemon_control.cpp — S22, the one PID-file scanner.)
 
 // Tell the running daemon (if any) to drop its in-memory search caches:
 // the DB file may have just been changed by this process. Silent when no
 // daemon is running -- there is nothing stale to refresh. Uses SIGHUP (reload:
 // config + caches), which every daemon version already handles.
 static void notify_daemon_db_changed() noexcept {
-    if (pid_t pid = find_live_daemon_pid(); pid > 0) kill(pid, SIGHUP);
+    if (pid_t pid = ragger::find_live_daemon_pid(); pid > 0) kill(pid, SIGHUP);
 }
 
 // Runs notify_daemon_db_changed() when the command scope ends, on every
@@ -335,7 +321,13 @@ int main(int argc, char **argv) {
             ragger::update_config([&](ragger::Config& c) { c.port = port; return true; });
 
             ragger::Server server(memory, host, port);
-            bool restart = server.run();
+            if (!server.run()) {
+                // S18 (C M6): could not start (port busy). run() logged the
+                // critical ERR_PORT_IN_USE; return 1 through normal cleanup
+                // so destructors release the open DB connections.
+                return 1;
+            }
+            bool restart = ragger::Server::restart_requested();
 
             if (restart) {
                 // In-place re-exec: rebind listeners with the current config
@@ -348,18 +340,10 @@ int main(int argc, char **argv) {
                     // argv so the restarted daemon takes host/port from config
                     // (the DB, which now holds the new port the dashboard set).
                     // Without this, a CLI -p would pin the OLD port on re-exec.
-                    std::vector<std::string> filtered;
-                    for (size_t i = 0; i < saved_argv.size(); ++i) {
-                        const std::string& a = saved_argv[i];
-                        if (a == "-p" || a == "--port" || a == "--host") {
-                            ++i;  // also skip the following value token
-                            continue;
-                        }
-                        if (a.rfind("--port=", 0) == 0 || a.rfind("--host=", 0) == 0 ||
-                            (a.rfind("-p", 0) == 0 && a.size() > 2))  // -p18435
-                            continue;
-                        filtered.push_back(a);
-                    }
+                    // S23: extracted to ragger::filter_restart_argv (also
+                    // covers -H and the attached-value forms).
+                    std::vector<std::string> filtered =
+                        ragger::filter_restart_argv(saved_argv);
                     std::vector<char*> cargv;
                     cargv.reserve(filtered.size() + 1);
                     for (const auto& a : filtered)
@@ -1449,7 +1433,7 @@ int main(int argc, char **argv) {
             // PHASE9B step 5: one transaction over the whole index holds the
             // write lock for the entire run; warn before starting, do not
             // refuse (the run is still the right call for a stopped daemon).
-            if (target == "all" && find_live_daemon_pid() > 0)
+            if (target == "all" && ragger::find_live_daemon_pid() > 0)
                 std::println(
                     "note: a daemon is running; its writes wait or fail until "
                     "the reindex finishes (stop it first for a large database).");
@@ -1531,28 +1515,13 @@ int main(int argc, char **argv) {
             return ragger::cmd_passwd(opts, cfg.resolved_db_path());
         }
         else if (command == "housekeeping") {
-            // Send SIGUSR1 to the running daemon via server PID file
-            namespace fs = std::filesystem;
-            pid_t daemon_pid = 0;
-            try {
-                for (const auto &entry: fs::directory_iterator("/tmp/ragger")) {
-                    auto name = entry.path().filename().string();
-                    if (name.rfind("server-", 0) == 0 &&
-                        name.size() > 4 && name.substr(name.size() - 4) == ".pid") {
-                        std::ifstream pf(entry.path());
-                        if (pf) pf >> daemon_pid;
-                        break;
-                    }
-                }
-            }
-            catch (...) {
-            }
+            // Send SIGUSR1 to the running daemon via the shared PID-file
+            // scanner (S22). A stale pid file whose process is gone reads as
+            // "no daemon" here — the old separate not-running message went
+            // with the liveness check that was missing.
+            pid_t daemon_pid = ragger::find_live_daemon_pid();
             if (daemon_pid <= 0) {
                 Diskerror::Logger::error(ragger::lang::ERR_DAEMON_NOT_FOUND);
-                return 1;
-            }
-            if (kill(daemon_pid, 0) != 0) {
-                Diskerror::Logger::error(std::format(ragger::lang::ERR_DAEMON_PID_NOT_RUNNING, daemon_pid));
                 return 1;
             }
             if (kill(daemon_pid, SIGUSR1) != 0) {
@@ -1568,7 +1537,7 @@ int main(int argc, char **argv) {
 
         }
         else if (command == "reload-cache") {
-            pid_t daemon_pid = find_live_daemon_pid();
+            pid_t daemon_pid = ragger::find_live_daemon_pid();
             if (daemon_pid <= 0) {
                 Diskerror::Logger::error(ragger::lang::ERR_DAEMON_NOT_FOUND);
                 return 1;
@@ -1580,24 +1549,9 @@ int main(int argc, char **argv) {
             std::println(ragger::lang::MSG_CACHE_RELOAD_OK, daemon_pid);
         }
         else if (command == "reload") {
-            // Send SIGHUP to running daemon to reload config
-            namespace fs = std::filesystem;
-            pid_t daemon_pid = 0;
-            try {
-                for (const auto &entry: fs::directory_iterator("/tmp/ragger")) {
-                    auto name = entry.path().filename().string();
-                    if (name.rfind("server-", 0) == 0 &&
-                        name.size() > 4 && name.substr(name.size() - 4) == ".pid") {
-                        std::ifstream pf(entry.path());
-                        if (pf >> daemon_pid && daemon_pid > 0 && kill(daemon_pid, 0) == 0) {
-                            break;
-                        }
-                        daemon_pid = 0;
-                    }
-                }
-            }
-            catch (...) {
-            }
+            // Send SIGHUP to running daemon to reload config (shared
+            // PID-file scanner, S22).
+            pid_t daemon_pid = ragger::find_live_daemon_pid();
 
             if (daemon_pid <= 0) {
                 Diskerror::Logger::error(ragger::lang::ERR_DAEMON_NOT_FOUND);

@@ -61,7 +61,7 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
 
     try {
         if (config().embedding_engine == "external") {
-            embedder_ = std::make_unique<Embedder>(
+            embedder_ = std::make_shared<Embedder>(
                 config().embedding_external_host,
                 config().embedding_external_port,
                 config().embedding_external_model,
@@ -69,21 +69,21 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
                 config().embedding_dimensions);
         } else {
             std::string resolved_model_dir = config().resolved_model_dir();
-            embedder_ = std::make_unique<Embedder>(resolved_model_dir);
+            embedder_ = std::make_shared<Embedder>(resolved_model_dir);
         }
     } catch (const std::exception& e) {
         Diskerror::Logger::critical(std::format(
             lang::ERR_EMBED_MODEL_UNUSABLE,
             config().embedding_model,
             config().resolved_model_dir(), e.what()));
-        embedder_ = std::make_unique<Embedder>();   // disabled
+        embedder_ = std::make_shared<Embedder>();   // disabled
         embeddings_degraded_ = true;
     }
 
     // The resolved path — used for both the storage backend and the user store.
     const std::string resolved_db = expand_path(db_path);
 
-    backend_    = std::make_unique<sqlite::Backend>(*embedder_, resolved_db);
+    backend_    = std::make_unique<sqlite::Backend>(*embedder_snapshot(), resolved_db);
     user_store_ = std::make_unique<UserStore>(resolved_db);
 
     // NOTE: no legacy "prepend a provider" migration here. A stored value that
@@ -359,8 +359,9 @@ SearchResponse RaggerMemory::search(const std::string& query,
     }
     // When embeddings are degraded (drift mismatch at startup), fall back to
     // text-only search (custom terms index). Vector similarity is
-    // unavailable but lookups still work.
-    if (embeddings_degraded_ || !embedder_->ready()) {
+    // unavailable but lookups still work. S20: one snapshot per call.
+    auto emb = embedder_snapshot();
+    if (embeddings_degraded_ || !emb->ready()) {
         return backend_->search_text_only(query, limit);
     }
     SearchResponse resp = backend_->search(query, limit, min_score, std::move(collections));
@@ -390,7 +391,8 @@ std::vector<SearchResult> RaggerMemory::load_all(const std::string& collection) 
 }
 
 int RaggerMemory::rebuild_embeddings(bool progress, const std::string& table) {
-    return backend_->rebuild_embeddings(*embedder_, progress, table);
+    auto emb = embedder_snapshot();
+    return backend_->rebuild_embeddings(*emb, progress, table);
 }
 
 RaggerMemory::EmbeddingStatus RaggerMemory::embedding_status() {
@@ -432,7 +434,8 @@ RaggerMemory::EmbeddingStatus RaggerMemory::embedding_status() {
 }
 
 bool RaggerMemory::embeddings_unavailable() const {
-    return !embedder_ || !embedder_->ready();
+    auto emb = embedder_snapshot();
+    return !emb || !emb->ready();
 }
 
 bool RaggerMemory::try_recover_embeddings() {
@@ -459,21 +462,26 @@ bool RaggerMemory::try_recover_embeddings() {
     // embed. Build the real one now. Until this succeeds we stay degraded, so
     // a config that is merely self-consistent but still wrong does not flip
     // semantic search back on and start writing vectors nobody can use.
-    if (!embedder_->ready()) {
+    auto emb = embedder_snapshot();
+    if (!emb->ready()) {
         try {
+            std::shared_ptr<Embedder> fresh;
             if (config().embedding_engine == "external") {
-                embedder_ = std::make_unique<Embedder>(
+                fresh = std::make_shared<Embedder>(
                     config().embedding_external_host,
                     config().embedding_external_port,
                     config().embedding_external_model,
                     config().embedding_external_api_key,
                     config().embedding_dimensions);
             } else {
-                embedder_ = std::make_unique<Embedder>(config().resolved_model_dir());
+                fresh = std::make_shared<Embedder>(config().resolved_model_dir());
             }
-            // The old Embedder object is destroyed by the assignment above;
-            // the backend holds a raw pointer — repoint it NOW (C §1.2).
-            backend_->set_embedder(*embedder_);
+            // Swap the member under the mutex (S20); the old Embedder stays
+            // alive until every in-flight snapshot drops its reference. The
+            // backend holds a raw pointer — repoint it NOW (C §1.2).
+            { std::lock_guard<std::mutex> lk(embedder_mu_); embedder_ = fresh; }
+            emb = std::move(fresh);
+            backend_->set_embedder(*emb);
             Diskerror::Logger::warn(std::format(
                 lang::MSG_EMBED_MODEL_RECOVERED, current_model));
         } catch (const std::exception& e) {
@@ -491,7 +499,7 @@ bool RaggerMemory::try_recover_embeddings() {
 
     // Backfill any rows left without embeddings.
     try {
-        int filled = backend_->backfill_embeddings(*embedder_);
+        int filled = backend_->backfill_embeddings(*emb);
         if (filled > 0) {
             Diskerror::Logger::info(
                 std::format(lang::MSG_BACKFILLED_EMBEDDINGS, filled));
@@ -552,7 +560,7 @@ int RaggerMemory::update_embeddings() {
     // model, so putting the old one back would make the live embedder
     // disagree with the recorded identity.
     bool promoted = false;
-    std::unique_ptr<Embedder> previous_embedder;
+    std::shared_ptr<Embedder> previous_embedder;
     try {
         const std::string desired_model_name =
             config().desired_embedding_model.empty()
@@ -569,9 +577,9 @@ int RaggerMemory::update_embeddings() {
         // unreadable model must fail here, with nothing promoted — promoting
         // first would record an identity the daemon cannot load, and the next
         // startup would throw out of the constructor and refuse to boot.
-        std::unique_ptr<Embedder> desired_embedder;
+        std::shared_ptr<Embedder> desired_embedder;
         if (desired_engine == "external") {
-            desired_embedder = std::make_unique<Embedder>(
+            desired_embedder = std::make_shared<Embedder>(
                 config().embedding_external_host,
                 config().embedding_external_port,
                 config().embedding_external_model,
@@ -579,7 +587,7 @@ int RaggerMemory::update_embeddings() {
                 config().desired_embedding_dimensions > 0
                     ? config().desired_embedding_dimensions : 0);
         } else {
-            desired_embedder = std::make_unique<Embedder>(desired_model_dir);
+            desired_embedder = std::make_shared<Embedder>(desired_model_dir);
         }
         Embedder& active = *desired_embedder;
 
@@ -640,10 +648,15 @@ int RaggerMemory::update_embeddings() {
         backend_->set_vector_type(
             vector_codec::parse(vtype).value_or(vector_codec::VectorType::F16));
         publish_semqlite_identity();   // embedder / offset now match the new engine
-        previous_embedder = std::exchange(embedder_, std::move(desired_embedder));
+        {
+            // S20: pointer swap under the mutex; request threads keep the old
+            // Embedder alive in their snapshots until they finish.
+            std::lock_guard<std::mutex> lk(embedder_mu_);
+            previous_embedder = std::exchange(embedder_, std::move(desired_embedder));
+        }
         // Repoint the backend at the new Embedder before the first re-encode
         // (the previous one is held in previous_embedder, still alive).
-        backend_->set_embedder(*embedder_);
+        backend_->set_embedder(*embedder_snapshot());
         promoted = true;
 
         // warn, not info: the daemon's default log_level is "warn", and an
@@ -682,8 +695,8 @@ int RaggerMemory::update_embeddings() {
         // housekeeping finishes the remaining rows.
         if (!promoted) {
             if (previous_embedder) {
-                embedder_ = std::move(previous_embedder);
-                backend_->set_embedder(*embedder_);  // restore the binding too
+                { std::lock_guard<std::mutex> lk(embedder_mu_); embedder_ = previous_embedder; }
+                backend_->set_embedder(*previous_embedder);  // restore the binding too
             }
             user_store_->set_setting("reembed_repair_pending", "false");
         }
@@ -722,8 +735,9 @@ int RaggerMemory::resume_interrupted_reembed() {
     // stabilises can't spin forever.
 
     constexpr int kMaxPasses = 5;
+    auto emb = embedder_snapshot();
     for (int pass = 0; pass < kMaxPasses; ++pass) {
-        int n = backend_->backfill_embeddings(*embedder_);
+        int n = backend_->backfill_embeddings(*emb);
         total += n;
         if (n == 0) {
             user_store_->set_setting("reembed_repair_pending", "false");
@@ -738,7 +752,8 @@ int RaggerMemory::resume_interrupted_reembed() {
 }
 
 int RaggerMemory::backfill_embeddings() {
-    return backend_->backfill_embeddings(*embedder_);
+    auto emb = embedder_snapshot();
+    return backend_->backfill_embeddings(*emb);
 }
 
 std::vector<std::string> RaggerMemory::collections() const {

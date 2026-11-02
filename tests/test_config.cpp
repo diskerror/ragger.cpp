@@ -1,5 +1,6 @@
 #include "config.h"
 #include "config_access.h"
+#include "daemon_control.h"
 #include "user_store.h"
 #include "config_schema.h"
 #include "test_env.h"
@@ -308,6 +309,45 @@ void test_ragger_base_override() {
     std::println(" OK");
 }
 
+// S21 (C m18): the stop/restart sweep targets only daemons and MCP servers,
+// matched on whole argv tokens equal to "serve"/"mcp".
+void p10_is_sweepable_cmdline() {
+    std::print("  p10_is_sweepable_cmdline...\n");
+    using ragger::is_sweepable_cmdline;
+    CHECK(is_sweepable_cmdline({"ragger", "serve"}));
+    CHECK(is_sweepable_cmdline({"/usr/local/bin/ragger", "--ragger-base", "/x", "serve"}));
+    CHECK(is_sweepable_cmdline({"ragger", "mcp"}));
+    CHECK(!is_sweepable_cmdline({"ragger", "re-embed", "all"}));
+    CHECK(!is_sweepable_cmdline({"ragger", "import-docs", "a.md"}));
+    CHECK(!is_sweepable_cmdline({"ragger", "store", "serve me"}));  // one token, not equal to "serve"
+    CHECK(!is_sweepable_cmdline({}));
+    CHECK(!is_sweepable_cmdline({"ragger"}));
+    std::print(" ok\n");
+}
+
+// S23 (C m9): the re-exec argv filter — host/port overrides and their
+// values stripped, everything else untouched.
+void p10_filter_restart_argv() {
+    std::print("  p10_filter_restart_argv...\n");
+    using ragger::filter_restart_argv;
+    CHECK(filter_restart_argv({"ragger", "-p", "1234", "serve"}) ==
+          std::vector<std::string>({"ragger", "serve"}));
+    CHECK(filter_restart_argv({"ragger", "--port=1234", "serve"}) ==
+          std::vector<std::string>({"ragger", "serve"}));
+    CHECK(filter_restart_argv({"ragger", "-H", "0.0.0.0", "serve"}) ==
+          std::vector<std::string>({"ragger", "serve"}));
+    CHECK(filter_restart_argv({"ragger", "-H0.0.0.0", "serve"}) ==
+          std::vector<std::string>({"ragger", "serve"}));
+    CHECK(filter_restart_argv({"ragger", "--host", "h", "--ragger-base", "/x", "serve"}) ==
+          std::vector<std::string>({"ragger", "--ragger-base", "/x", "serve"}));
+    CHECK(filter_restart_argv({"ragger", "serve"}) ==
+          std::vector<std::string>({"ragger", "serve"}));
+    // trailing flag with no value: drop only the flag
+    CHECK(filter_restart_argv({"ragger", "store", "-p"}) ==
+          std::vector<std::string>({"ragger", "store"}));
+    std::print(" ok\n");
+}
+
 // API keys are environment variables: the settings table holds only the NAME
 // of the variable, the value is resolved at runtime and never saved, and a
 // pasted credential is rejected as a name.
@@ -432,6 +472,28 @@ void p9b_test_summarizer_prompt_validation() {
     std::println(" OK");
 }
 
+// S26 (C m12): the two percent knobs are documented 1-100 — values outside
+// that range are rejected at the door (same mechanism as the prompt check;
+// see the deviation note in the step report).
+void p10_pct_validation() {
+    std::print("  p10_pct_validation...\n");
+    auto ok = [](std::string_view k, std::string_view v) {
+        return ragger::validate_config_value(k, v).has_value();
+    };
+    for (const char* key : {"summarizer_target_pct", "summarizer_max_pct"}) {
+        CHECK(ok(key, "1"));
+        CHECK(ok(key, "100"));
+        CHECK(!ok(key, "0"));
+        CHECK(!ok(key, "101"));
+        CHECK(!ok(key, "-5"));
+        CHECK(!ok(key, "abc"));      // existing int-parse path
+        CHECK(ok(key, ""));          // empty = reset to default: always valid
+    }
+    // Other Integer keys keep accepting any int (no accidental range creep).
+    CHECK(ok("housekeeping_interval", "0"));
+    std::println(" OK");
+}
+
 // PHASE9B step 7: the episode keys are read per use by summarizer_service,
 // so a SIGHUP reload must apply them (they used to be silently dropped).
 void p9b_test_reload_config_episode_keys() {
@@ -471,6 +533,7 @@ int main() {
     test_housekeeping_section_parsing();
     p9a_test_shipped_defaults_applied();
     p9b_test_summarizer_prompt_validation();
+    p10_pct_validation();
     p9b_test_reload_config_episode_keys();
     p9a_test_config_snapshots();
     test_catch_up_batch_size_default();
@@ -481,6 +544,8 @@ int main() {
     test_socket_bind_config();
     test_bool_parsing_variants();
     test_inline_comments();
+    p10_is_sweepable_cmdline();
+    p10_filter_restart_argv();
 
     test_default_values();
     test_api_keys_come_from_environment();

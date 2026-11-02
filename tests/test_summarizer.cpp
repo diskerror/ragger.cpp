@@ -9,10 +9,14 @@
 
 #include "check.h"
 #include "util/utf8.h"
+#include "nlohmann_json.hpp"
 
+#include <atomic>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <print>
 #include <string>
 #include <thread>
@@ -314,6 +318,187 @@ void p6_test_live_enqueue_skipped(const std::string& base) {
     std::println(" OK");
 }
 
+// S25 (C M10): "not configured" is not "unreachable". With no inference
+// endpoint, non-trivial turns must NOT count toward max_turn_failures and
+// must never be stamped 'bad' — they stay unsummarized until an endpoint
+// exists. Pre-fix, repeating the job max_turn_failures times wrote 'bad'
+// rows (then the back-off reset deleted them, forever).
+void p10_summarizer_no_endpoint(const std::string& base) {
+    std::println("  p10_summarizer_no_endpoint...");
+
+    namespace fs = std::filesystem;
+    const std::string dir = base + "/p10noep";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const std::string db_path = dir + "/memories.db";
+
+    ragger::Embedder emb;  // disabled — no embedding needed here
+    ragger::sqlite::Backend backend(emb, db_path);
+
+    ragger::SummarizerService svc(
+        backend, [] { return std::shared_ptr<ragger::InferenceClient>(nullptr); });
+    svc.start();
+
+    // Non-trivial turns (combined >= 80 chars, assistant >= 20).
+    const std::string u = "a user question that is definitely long enough to be real content";
+    const std::string a = "and an assistant reply also long enough to survive the trivial filter";
+    int t1 = backend.store_turn(u, a);
+    int t2 = backend.store_turn(u + " two", a);
+    int t3 = backend.store_turn(u + " three", a);
+    CHECK(t1 > 0 && t2 > 0 && t3 > 0);
+    // 4 rounds > max_turn_failures (3): the old path stamped 'bad' here.
+    for (int round = 0; round < 4; ++round) {
+        svc.enqueue_turn(t1, u, a, "", "", "");
+        svc.enqueue_turn(t2, u + " two", a, "", "", "");
+        svc.enqueue_turn(t3, u + " three", a, "", "", "");
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
+    svc.stop();
+
+    sqlite3* db = nullptr;
+    CHECK(sqlite3_open(db_path.c_str(), &db) == SQLITE_OK);
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM turn_summaries", -1, &st, nullptr);
+    long long rows = (sqlite3_step(st) == SQLITE_ROW) ? sqlite3_column_int64(st, 0) : -1;
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    CHECK(rows == 0);   // no 'bad' stamps, no markers — nothing written
+
+    // All three turns are still unsummarized (failure counter untouched).
+    auto un = backend.unsummarized_turns(0);
+    CHECK(un.size() == 3);
+    backend.close();
+    std::println(" ok");
+}
+
+// S26 (C m12): pin the EXACT system-prompt text produced by the shared
+// budget formula for both public summarize entry points. The expected
+// strings were captured from the pre-refactor code; the extraction of
+// SummaryBudget/make_budget/system_prompt must keep them byte-identical.
+void p10_summarizer_budget_prompt() {
+    std::println("  p10_summarizer_budget_prompt...");
+
+    // --- canned expectations (captured pre-refactor) ----------------------
+    static const std::string EXPECTED_TRANSCRIPT_PROMPT =
+        "Summarize this conversation into a concise memory entry. Extract key "
+        "facts, decisions, questions asked, topics discussed. Write in third "
+        "person past tense. Target about 44 characters; never exceed 89. If "
+        "the exchange is trivial (a single command like /exit, a one-line "
+        "greeting), respond with a short phrase, not a full sentence.";
+    static const std::string EXPECTED_TEXTS_PROMPT =
+        "Summarize this conversation into a concise memory entry. Extract key "
+        "facts, decisions, questions asked, topics discussed. Write in third "
+        "person past tense. Target about 40 characters; never exceed 58. If "
+        "the exchange is trivial (a single command like /exit, a one-line "
+        "greeting), respond with a short phrase, not a full sentence.";
+
+    // --- fake OpenAI endpoint: captures request bodies, replies SUMMARY ---
+    int ls = ::socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(ls >= 0);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    CHECK(::bind(ls, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0);
+    CHECK(::listen(ls, 8) == 0);
+    socklen_t len = sizeof a;
+    ::getsockname(ls, reinterpret_cast<sockaddr*>(&a), &len);
+    const int port = ntohs(a.sin_port);
+
+    std::atomic<bool> running{true};
+    std::mutex cmu;
+    std::vector<std::string> bodies;
+    std::thread srv([&] {
+        const std::string resp_body =
+            R"({"choices":[{"message":{"content":"SUMMARY"}}]})";
+        const std::string resp =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            "Content-Length: " + std::to_string(resp_body.size()) +
+            "\r\nConnection: close\r\n\r\n" + resp_body;
+        while (running.load()) {
+            int c = ::accept(ls, nullptr, nullptr);
+            if (c < 0) break;
+            std::string req;
+            char buf[8192];
+            size_t hdr_end = std::string::npos;
+            long long cl = -1;
+            while (true) {
+                ssize_t n = ::recv(c, buf, sizeof buf, 0);
+                if (n <= 0) break;
+                req.append(buf, static_cast<size_t>(n));
+                if (hdr_end == std::string::npos) {
+                    hdr_end = req.find("\r\n\r\n");
+                    if (hdr_end != std::string::npos) {
+                        std::string head = req.substr(0, hdr_end);
+                        // lowercase scan for content-length
+                        for (auto& ch : head) ch = static_cast<char>(::tolower(ch));
+                        auto p = head.find("content-length:");
+                        if (p != std::string::npos)
+                            cl = std::stoll(head.substr(p + 15));
+                    }
+                }
+                if (cl >= 0 && req.size() >= hdr_end + 4 + static_cast<size_t>(cl))
+                    break;
+            }
+            if (cl >= 0) {
+                std::string body = req.substr(hdr_end + 4, static_cast<size_t>(cl));
+                if (body.find("\"messages\"") != std::string::npos) {
+                    std::lock_guard<std::mutex> lk(cmu);
+                    bodies.push_back(std::move(body));
+                }
+            }
+            ::send(c, resp.data(), resp.size(), 0);
+            ::close(c);
+        }
+    });
+
+    // Deterministic config: built-in default prompt, default percentages.
+    CHECK(ragger::update_config([](ragger::Config& c) {
+        c.summarizer_prompt = "";
+        c.summarizer_target_pct = 30;
+        c.summarizer_max_pct = 60;
+        return true; }));
+
+    ragger::InferenceClient inf(
+        {ragger::Endpoint("fake", "http://127.0.0.1:" + std::to_string(port) + "/v1")},
+        "m", 64);
+    inf.memory_model = "m";
+    inf.timeout_sec = 5;
+
+    const std::string u = "What changed in the schema migration?";
+    const std::string as =
+        "The migration adds the terms table, drops FTS5 shadows, and "
+        "rebuilds the text index from scratch on first start.";
+    const auto out1 = summarize_transcript(inf, {{u, as}});
+    CHECK(out1 == "SUMMARY");
+
+    const std::vector<std::string> texts = {
+        "First turn summary about the Beelink deployment.",
+        "Second turn summary about llama.cpp Vulkan builds."};
+    const auto out2 = ragger::summarize_texts(inf, texts);
+    CHECK(out2 == "SUMMARY");
+
+    running.store(false);
+    ::close(ls);
+    srv.join();
+
+    // Extract the system message content of the last request per call.
+    auto system_of = [&](size_t idx) -> std::string {
+        std::lock_guard<std::mutex> lk(cmu);
+        CHECK(bodies.size() >= 2);
+        nlohmann::json j = nlohmann::json::parse(bodies[idx]);
+        for (auto& m : j["messages"])
+            if (m.value("role", "") == "system")
+                return m["content"].get<std::string>();
+        return {};
+    };
+    const std::string p1 = system_of(0);
+    const std::string p2 = system_of(1);
+    CHECK(p1 == EXPECTED_TRANSCRIPT_PROMPT);
+    CHECK(p2 == EXPECTED_TEXTS_PROMPT);
+    std::println(" ok");
+}
+
 // PHASE6 4: Backoff contract (pure, injected time).
 void p6_test_backoff() {
     std::println("  p6_test_backoff...");
@@ -570,6 +755,8 @@ int main() {
     p6_test_backoff();
     p6_test_episode_boundaries();
     p6_test_live_enqueue_skipped(env.base());
+    p10_summarizer_no_endpoint(env.base());
+    p10_summarizer_budget_prompt();
     p6_test_single_scan(env.base());
     p9b_test_utf8_safe_prefix();
     p9b_test_bad_prompt_no_escape(env.base());

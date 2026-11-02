@@ -263,6 +263,12 @@ std::expected<void, ConfigSetError> validate_config_value(std::string_view key,
             long n;
             if (!parse_int_strict(value, n))
                 return std::unexpected(ConfigSetError::InvalidValue);
+            // S26 (C m12): the two percent knobs are documented 1-100;
+            // reject anything else at the door (no max>=target rule — not
+            // asked for).
+            if ((key == "summarizer_target_pct" || key == "summarizer_max_pct") &&
+                (n < 1 || n > 100))
+                return std::unexpected(ConfigSetError::InvalidValue);
             return {};
         }
         case CfgType::Float: {

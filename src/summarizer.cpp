@@ -43,6 +43,40 @@ std::string build_system_prompt(const std::string& raw_prompt,
     }
 }
 
+// S26 (C m12): the summary size contract in ONE place (it used to be copied
+// verbatim into summarize_transcript and summarize_texts). The arithmetic is
+// the original, copied — no number changed.
+struct SummaryBudget {
+    std::size_t target_chars;
+    std::size_t hard_cap;
+};
+
+SummaryBudget make_budget(std::size_t source_chars) {
+    // Defaults: target = 30%, hard cap = 60%.  Both are floored at 40 chars
+    // so trivially short exchanges are never squeezed to nothing.
+    // hard_cap is clamped to >= target_chars so the constraint is never
+    // impossible (e.g. if the user sets target_pct > max_pct by accident).
+    constexpr int kDefaultTargetPct = 30;
+    constexpr int kDefaultMaxPct    = 60;
+    constexpr std::size_t kMinChars = 40;
+
+    const int tpct = (config().summarizer_target_pct > 0)
+                         ? config().summarizer_target_pct : kDefaultTargetPct;
+    const int mpct = (config().summarizer_max_pct > 0)
+                         ? config().summarizer_max_pct    : kDefaultMaxPct;
+
+    SummaryBudget b;
+    b.target_chars =
+        std::max(kMinChars, source_chars * static_cast<std::size_t>(tpct) / 100);
+    b.hard_cap =
+        std::max(b.target_chars, source_chars * static_cast<std::size_t>(mpct) / 100);
+    return b;
+}
+
+std::string system_prompt(const SummaryBudget& b) {
+    return build_system_prompt(config().summarizer_prompt, b.target_chars, b.hard_cap);
+}
+
 constexpr std::string_view kSystemMarkers[] = {
     "[System note:",
     "[Note: model was just switched",
@@ -206,27 +240,11 @@ std::string summarize_transcript(
         return u + " | " + a;
     }
 
-    // Summary size contract: percentages of the raw-turn character count.
-    // Defaults: target = 30%, hard cap = 60%.  Both are floored at 40 chars
-    // so trivially short exchanges are never squeezed to nothing.
-    // hard_cap is clamped to >= target_chars so the constraint is never
-    // impossible (e.g. if the user sets target_pct > max_pct by accident).
-    constexpr int kDefaultTargetPct = 30;
-    constexpr int kDefaultMaxPct    = 60;
-    constexpr std::size_t kMinChars = 40;
+    // Summary size contract (S26: one implementation, see make_budget).
+    const SummaryBudget budget = make_budget(source_chars);
+    const std::size_t hard_cap = budget.hard_cap;
 
-    const int tpct = (config().summarizer_target_pct > 0)
-                         ? config().summarizer_target_pct : kDefaultTargetPct;
-    const int mpct = (config().summarizer_max_pct > 0)
-                         ? config().summarizer_max_pct    : kDefaultMaxPct;
-
-    const std::size_t target_chars =
-        std::max(kMinChars, source_chars * static_cast<std::size_t>(tpct) / 100);
-    const std::size_t hard_cap =
-        std::max(target_chars, source_chars * static_cast<std::size_t>(mpct) / 100);
-
-    const std::string system_text =
-        build_system_prompt(config().summarizer_prompt, target_chars, hard_cap);
+    const std::string system_text = system_prompt(budget);
 
     std::vector<Message> messages;
     if (!system_text.empty())
@@ -278,23 +296,11 @@ std::string summarize_texts(
 
     if (source_chars == 0) return "";
 
-    // Same size contract as summarize_transcript.
-    constexpr int kDefaultTargetPct = 30;
-    constexpr int kDefaultMaxPct    = 60;
-    constexpr std::size_t kMinChars = 40;
+    // Same size contract as summarize_transcript (S26: one implementation).
+    const SummaryBudget budget = make_budget(source_chars);
+    const std::size_t hard_cap = budget.hard_cap;
 
-    const int tpct = (config().summarizer_target_pct > 0)
-                         ? config().summarizer_target_pct : kDefaultTargetPct;
-    const int mpct = (config().summarizer_max_pct > 0)
-                         ? config().summarizer_max_pct    : kDefaultMaxPct;
-
-    const std::size_t target_chars =
-        std::max(kMinChars, source_chars * static_cast<std::size_t>(tpct) / 100);
-    const std::size_t hard_cap =
-        std::max(target_chars, source_chars * static_cast<std::size_t>(mpct) / 100);
-
-    const std::string system_text =
-        build_system_prompt(config().summarizer_prompt, target_chars, hard_cap);
+    const std::string system_text = system_prompt(budget);
 
     std::vector<Message> messages;
     if (!system_text.empty())

@@ -20,8 +20,10 @@ public:
                     int port = 8432);
     ~Server();
 
-    /// Start listening (blocks). Returns true if a restart was requested
-    /// (POST /restart) — the caller (main) should re-exec the daemon in place.
+    /// Start listening (blocks). S18 (C M6): true = ran and stopped
+    /// normally; false = could not start (port busy) — the caller exits
+    /// non-zero through normal cleanup instead of std::exit inside run().
+    /// Whether a restart was requested is reported by restart_requested().
     bool run();
 
     /// Request stop (from signal handler or another thread).

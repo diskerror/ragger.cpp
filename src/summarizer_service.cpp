@@ -167,15 +167,16 @@ void SummarizerService::enqueue_catch_up() {
         ++ep_n;
     }
 
-    Diskerror::Logger::info(std::format(
-        lang::MSG_SUMMARIZER_START, turn_n, ep_n));
+    // S25 (C m11): report only when the scan actually queued work — this
+    // runs every catch-up tick; a 0/0 line every poll is noise. The separate
+    // episode-close line is folded into this one message.
+    if (turn_n + ep_n > 0)
+        Diskerror::Logger::info(std::format(
+            lang::MSG_SUMMARIZER_START, turn_n, ep_n));
     if (reset_n)
         Diskerror::Logger::info(std::format(
             "[summarizer] housekeeping reset {} poison-abandoned turn_summaries "
             "row(s) for retry", reset_n));
-    if (ep_n)
-        Diskerror::Logger::info(std::format(
-            "[summarizer] catch-up queued {} episode close(s)", ep_n));
     cv_.notify_all();
 }
 
@@ -228,8 +229,10 @@ void SummarizerService::pause_timer_loop() {
             // retry), plus idle episode closes.
             enqueue_catch_up();
         } catch (const std::exception& e) {
+            // S25: the "(catch-up)" placeholder argument was dead — the
+            // reworded message names the stage itself.
             Diskerror::Logger::warn(std::format(
-                lang::WARN_SUMMARIZER_L3, std::string("(catch-up)"), e.what()));
+                lang::WARN_SUMMARIZER_L3, e.what()));
         }
     }
 }
@@ -239,8 +242,8 @@ void SummarizerService::pause_timer_loop() {
 // On inference failure, write a heuristic `draft` row instead — the
 // chronology is preserved and the next successful pass can overwrite.
 // --------------------------------------------------------------------
-bool SummarizerService::handle_l2(const Job& j) {
-    if (j.assistant_text.empty()) return true;  // partial turn
+void SummarizerService::handle_l2(const Job& j) {
+    if (j.assistant_text.empty()) return;  // partial turn
 
     // Resolve the inference client ONCE for the whole job (C §1.3): a
     // SIGHUP reload mid-job replaces the daemon's shared_ptr but cannot
@@ -288,7 +291,7 @@ bool SummarizerService::handle_l2(const Job& j) {
                 "combined_chars={})",
                 j.turn_id, j.session_guid.empty() ? "-" : j.session_guid,
                 j.source_timestamp, combined));
-            return true;
+            return;
         }
     }
 
@@ -300,17 +303,26 @@ bool SummarizerService::handle_l2(const Job& j) {
     // worker is single-threaded, so by the time a duplicate job runs, the
     // first has already inserted the row.
     if (backend_.turn_summary_exists(j.turn_id))
-        return true;
+        return;
 
-    const std::string summarizer_model =
-        inf ? inf->memory_model : "";
-
-    std::string summary;
-    if (inf) {
-        summary = summarize_transcript(
-            *inf,
-            {{ eff_user, j.assistant_text }});
+    // S25 (C M10): "not configured" is not "unreachable". With no inference
+    // endpoint there is nothing to retry against: counting failures here
+    // stamped turns 'bad' after max_turn_failures ticks, the back-off job
+    // reset them, and the cycle repeated forever on a fresh install. Leave
+    // the turn unsummarized (an endpoint appearing later resumes it) and
+    // say so once per service lifetime.
+    if (!inf) {
+        std::call_once(no_inference_warned_, [] {
+            Diskerror::Logger::info(lang::MSG_SUMMARIZER_NO_ENDPOINT);
+        });
+        return;
     }
+
+    const std::string summarizer_model = inf->memory_model;
+
+    std::string summary = summarize_transcript(
+        *inf,
+        {{ eff_user, j.assistant_text }});
 
     const std::string& guid = j.session_guid;
     const std::string& ts   = j.source_timestamp;
@@ -337,7 +349,7 @@ bool SummarizerService::handle_l2(const Job& j) {
                 Diskerror::Logger::warn(std::format(
                     "[summarizer] abandoned turn after {} failures "
                     "(turn_id={}, session={}, ts={})", n, j.turn_id, display_guid, ts));
-                return true;  // consumed — won't retry
+                return;  // consumed — won't retry
             }
         }
         // No turn_summaries row is created on inference failure — the turn
@@ -345,7 +357,7 @@ bool SummarizerService::handle_l2(const Job& j) {
         Diskerror::Logger::info(std::format(
             "[summarizer] L2 deferred (inference unreachable) for session {} at {}",
             display_guid, ts));
-        return false;
+        return;
     }
 
     // Insert the turn_summaries row: real summary text + summarizer model.
@@ -354,7 +366,7 @@ bool SummarizerService::handle_l2(const Job& j) {
         Diskerror::Logger::warn(std::format(
             "[summarizer] finalize_turn_summary failed for turn_id={} "
             "(session={}, ts={})", j.turn_id, display_guid, ts));
-        return false;
+        return;
     }
     {
         // Clear any prior failure count for this turn, and open the
@@ -367,7 +379,7 @@ bool SummarizerService::handle_l2(const Job& j) {
     Diskerror::Logger::info(std::format(
         lang::MSG_SUMMARIZER_L2, display_guid, ts));
 
-    return true;
+    return;
 }
 
 // --------------------------------------------------------------------
@@ -390,14 +402,23 @@ bool SummarizerService::handle_l2(const Job& j) {
 // the whole close is aborted (retried next pass) — partial writes within
 // one session's close are avoided.
 // --------------------------------------------------------------------
-bool SummarizerService::handle_episode_close(const Job& j) {
-    if (j.session_guid.empty()) return true;
+void SummarizerService::handle_episode_close(const Job& j) {
+    if (j.session_guid.empty()) return;
 
     auto inf = inference_provider_ ? inference_provider_() : nullptr;  // once per job
 
     const std::string since = backend_.last_episode_end(j.session_guid);
     auto candidates = backend_.episode_candidate_turns(j.session_guid, since);
-    if (candidates.empty()) return true;  // nothing new to close
+    if (candidates.empty()) return;  // nothing new to close
+
+    // S25 (C M10): same "not configured" guard as handle_l2 — an episode
+    // cannot be closed without inference; leave it open for a later pass.
+    if (!inf) {
+        std::call_once(no_inference_warned_, [] {
+            Diskerror::Logger::info(lang::MSG_SUMMARIZER_NO_ENDPOINT);
+        });
+        return;
+    }
 
     // Config for the sliding threshold.
     const auto& cfg = config();
@@ -415,8 +436,7 @@ bool SummarizerService::handle_episode_close(const Job& j) {
         candidates, EpisodeBoundaryParams{th_base, th_cap, th_step, step_min});
 
     // Summarize each segment.
-    const std::string summarizer_model =
-        inf ? inf->memory_model : "";
+    const std::string summarizer_model = inf->memory_model;
 
     struct EpisodeSegment {
         std::string summary;
@@ -439,15 +459,13 @@ bool SummarizerService::handle_episode_close(const Job& j) {
                 texts.push_back(candidates[k].summary_text);
         if (texts.empty()) continue;
 
-        std::string summary;
-        if (inf)
-            summary = summarize_texts(*inf, texts);
-        if (summary.empty()) return false;  // inference down — retry ALL next pass
+        std::string summary = summarize_texts(*inf, texts);
+        if (summary.empty()) return;  // inference failed — retry ALL next pass
 
         segments.push_back({std::move(summary), start, end, texts.size()});
     }
 
-    if (segments.empty()) return true;
+    if (segments.empty()) return;
 
     // Commit all segments in order (PHASE5 D.2): each close records the
     // episode AND its membership atomically (store_episode_close). A 0
@@ -486,7 +504,7 @@ bool SummarizerService::handle_episode_close(const Job& j) {
             "[summarizer] session {} split into {} episodes by similarity threshold",
             j.session_guid, segments.size()));
 
-    return true;
+    return;
 }
 
 } // namespace ragger

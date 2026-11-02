@@ -4,6 +4,7 @@
 #include "embedder.h"
 #include "config.h"
 #include "lang.h"
+#include "Logger.h"
 #include "tokenizer_wrapper.h"
 #include <onnxruntime_cxx_api.h>
 #include <cmath>
@@ -290,7 +291,11 @@ struct Embedder::Impl {
             auto vec = encode_external("dimension probe");
             last_probe_sane = is_plausible_embedding(vec);
             return static_cast<int>(vec.size());
+        } catch (const std::exception& e) {   // S27 (C §4): never silent
+            Diskerror::Logger::debug(std::format("probe_dimensions: {}", e.what()));
+            return 0;
         } catch (...) {
+            Diskerror::Logger::debug("probe_dimensions: unknown exception");
             return 0;
         }
     }

@@ -15,6 +15,7 @@
 #include "mcp.h"
 #include "config.h"
 #include "config_access.h"
+#include "daemon_control.h"
 #include "lang.h"
 #include "Logger.h"
 #include "memory.h"
@@ -25,14 +26,16 @@
 #include "util/fs.h"
 #include "nlohmann_json.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <print>
-#include <pwd.h>
 #include <thread>
 #include <unistd.h>
 
@@ -43,24 +46,10 @@ using sqlite::Backend;
 // Internal helpers
 // -----------------------------------------------------------------------
 
-/// Returns true if a ragger HTTP server PID file exists and the process
-/// is still alive, meaning it owns housekeeping for the database.
+/// Returns true if a live ragger HTTP daemon owns housekeeping for the
+/// database (S22: the one PID-file scanner in daemon_control.cpp).
 static bool http_server_running() {
-    namespace fs = std::filesystem;
-    const std::string dir = "/tmp/ragger";
-    try {
-        for (const auto& entry : fs::directory_iterator(dir)) {
-            auto name = entry.path().filename().string();
-            if (name.rfind("server-", 0) == 0 &&
-                name.substr(name.size() - 4) == ".pid") {
-                std::ifstream pf(entry.path());
-                pid_t pid = 0;
-                if (pf >> pid && pid > 0 && kill(pid, 0) == 0)
-                    return true;
-            }
-        }
-    } catch (...) {}
-    return false;
+    return ragger::find_live_daemon_pid() > 0;
 }
 
 /// Agent-facing usage guidance, returned in the MCP `initialize` result so
@@ -608,7 +597,11 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         try {
             for (auto& [name, n] : memory.backend()->table_row_counts())
                 tables[name] = n;
-        } catch (...) { /* backend unavailable — empty tables */ }
+        } catch (const std::exception& e) {   // S27 (C §4): never silent
+            Diskerror::Logger::debug(std::format("status: table counts failed: {}", e.what()));
+        } catch (...) {
+            Diskerror::Logger::debug("status: table counts failed: unknown exception");
+        }
         return text_result(nlohmann::json({
             {"status",    "running"},
             {"version",   RAGGER_VERSION},
@@ -625,21 +618,31 @@ static nlohmann::json tool_call(RaggerMemory& memory,
 
 /// Background thread: periodically remove expired memories when no
 /// HTTP server is doing it.
+// MCP-mode housekeeping loop (S16, C m5): runs on a JOINABLE thread owned by
+// run_mcp — the stop flag + condition variable let the sleep wake at once at
+// shutdown, so the thread never outlives the RaggerMemory it references, and
+// it shares the memory instance instead of opening a second Backend.
 static void housekeeping_thread(RaggerMemory& memory,
-                                const std::string& /*username*/) {
+                                const std::atomic<bool>& stop,
+                                std::condition_variable& cv,
+                                std::mutex& cv_mu) {
     const auto& cfg = config();
     const float max_age_hours = cfg.cleanup_max_age_hours;
     const int   interval      = cfg.housekeeping_interval;
     if (interval == 0) return;
 
     while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(interval));
+        {
+            std::unique_lock<std::mutex> lk(cv_mu);
+            cv.wait_for(lk, std::chrono::seconds(interval),
+                        [&] { return stop.load(); });
+        }
+        if (stop.load()) return;
         if (http_server_running()) continue;  // hand off to HTTP server
         if (max_age_hours <= 0) continue;
 
         try {
-            sqlite::Backend tmp(config().resolved_db_path());
-            const int deleted = tmp.cleanup_old_conversations(max_age_hours);
+            const int deleted = memory.cleanup_old_conversations(max_age_hours);
             if (deleted > 0) {
                 std::string msg(ragger::lang::MSG_MCP_HOUSEKEEPING);
                 size_t pos = msg.find("{}");
@@ -648,7 +651,11 @@ static void housekeeping_thread(RaggerMemory& memory,
                 }
                 Diskerror::Logger::info(msg);
             }
-        } catch (...) {}
+        } catch (const std::exception& e) {
+            Diskerror::Logger::debug(e.what());
+        } catch (...) {
+            Diskerror::Logger::debug("unknown exception");
+        }
     }
 }
 
@@ -671,13 +678,28 @@ nlohmann::json mcp_tool_call(RaggerMemory& memory, const nlohmann::json& params)
 }
 
 void run_mcp(RaggerMemory& memory) {
-    // Spawn housekeeping only when this is the sole Ragger process.
+    // Spawn housekeeping only when this is the sole Ragger process. The
+    // thread is joinable and owned here (S16): the guard stops it and joins
+    // on every exit path so it can never touch a destroyed RaggerMemory.
+    std::atomic<bool> hk_stop{false};
+    std::mutex hk_mu;
+    std::condition_variable hk_cv;
+    std::thread hk_thread;
     if (!http_server_running()) {
-        struct passwd* pw = getpwuid(getuid());
-        const std::string username = pw ? pw->pw_name : "default";
-        std::thread(housekeeping_thread,
-                    std::ref(memory), username).detach();
+        hk_thread = std::thread(housekeeping_thread,
+                                std::ref(memory), std::cref(hk_stop),
+                                std::ref(hk_cv), std::ref(hk_mu));
     }
+    struct HkJoin {
+        std::atomic<bool>& stop;
+        std::condition_variable& cv;
+        std::thread& t;
+        ~HkJoin() {
+            stop = true;
+            cv.notify_all();
+            if (t.joinable()) t.join();
+        }
+    } hk_join{hk_stop, hk_cv, hk_thread};
 
     // JSON-RPC 2.0 read loop
     auto send = [](const nlohmann::json& msg) {
@@ -685,6 +707,10 @@ void run_mcp(RaggerMemory& memory) {
     };
 
     std::string line;
+    // S15 (C m6): the interactive plain-text search shortcut is for TTY
+    // stdin only. Piped stdin is the JSON-RPC channel — human text there
+    // must never reach stdout, or it corrupts the client's stream.
+    const bool interactive = isatty(STDIN_FILENO) != 0;
     while (std::getline(std::cin, line)) {
         if (line.empty()) continue;
 
@@ -735,7 +761,11 @@ void run_mcp(RaggerMemory& memory) {
             }
 
         } else {
-            // Plain text → interactive search shortcut
+            // Plain text → interactive search shortcut (TTY stdin only).
+            if (!interactive) {
+                Diskerror::Logger::warn(ragger::lang::MSG_MCP_IGNORE_NON_JSON);
+                continue;
+            }
             try {
                 const auto response = memory.search(line);
                 if (response.results.empty()) {

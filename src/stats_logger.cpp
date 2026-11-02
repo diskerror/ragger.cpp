@@ -126,11 +126,17 @@ void StatsLogger::log_lookup(const std::string& query,
                              double elapsed_ms,
                              int top_n) {
     if (!db_) return;
+    // S24: serialize all use of db_ (see the member comment).
+    std::lock_guard<std::mutex> lk(mu_);
     try {
         // One transaction per lookup keeps the lookup row + its hits atomic
-        // and cheap. A failure rolls back and is swallowed.
-        if (sqlite3_exec(db_, "BEGIN", nullptr, nullptr, nullptr) != SQLITE_OK)
+        // and cheap. A failure rolls back and is logged at debug (S24: not
+        // swallowed silently).
+        if (sqlite3_exec(db_, "BEGIN", nullptr, nullptr, nullptr) != SQLITE_OK) {
+            Diskerror::Logger::debug(std::string("stats: BEGIN failed: ") +
+                                     sqlite3_errmsg(db_));
             return;
+        }
 
         sqlite3_int64 lookup_id = 0;
         {
@@ -143,7 +149,12 @@ void StatsLogger::log_lookup(const std::string& query,
              .bind(4, static_cast<double>(min_score))
              .bind(5, static_cast<int>(results.size()));
             if (elapsed_ms < 0.0) s.bind_null(6); else s.bind(6, elapsed_ms);
-            if (!s.exec()) { sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr); return; }
+            if (!s.exec()) {
+                sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+                Diskerror::Logger::debug(std::string("stats: lookup insert failed: ") +
+                                         sqlite3_errmsg(db_));
+                return;
+            }
             lookup_id = sqlite3_last_insert_rowid(db_);
         }
 
@@ -184,6 +195,7 @@ void StatsLogger::log_lookup(const std::string& query,
         Diskerror::Logger::debug(std::string("stats: log_lookup swallowed: ") + e.what());
     } catch (...) {
         sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+        Diskerror::Logger::debug("stats: log_lookup swallowed unknown exception");
     }
 }
 

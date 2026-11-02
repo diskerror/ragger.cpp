@@ -26,6 +26,7 @@
 #include <limits>
 #include <print>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -207,6 +208,29 @@ int main() {
     CHECK(scalar("SELECT phon_score IS NULL FROM hits WHERE memory_id=202") == 1);
     // ...while its active vec/bm25 still land.
     CHECK(std::abs(scalar_real("SELECT vec_score FROM hits WHERE memory_id=202") - 0.4) < 1e-6);
+    std::println("    OK");
+
+    // --- S24 (C m16): concurrent log_lookup calls must not collide -------
+    // 8 threads x 25 lookups into one StatsLogger: every row must land.
+    // Pre-fix the shared sqlite3* ran BEGIN/COMMIT from many threads at once
+    // ("cannot start a transaction within a transaction", swallowed).
+    std::println("  p10_concurrent_log_lookup...");
+    cleanup();
+    {
+        StatsLogger s(DB);
+        CHECK(s.enabled());
+        std::vector<std::thread> threads;
+        for (int t = 0; t < 8; ++t) {
+            threads.emplace_back([&s, t] {
+                for (int i = 0; i < 25; ++i) {
+                    s.log_lookup("q-" + std::to_string(t) + "-" + std::to_string(i),
+                                 3, 0.0f, { mk(1000 + i, "hit", 0.5f) });
+                }
+            });
+        }
+        for (auto& th : threads) th.join();
+        CHECK(scalar("SELECT COUNT(*) FROM lookups") == 200);
+    }
     std::println("    OK");
 
     cleanup();
