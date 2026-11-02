@@ -253,12 +253,51 @@ bool Endpoint::is_reachable() const {
 }
 
 bool Endpoint::is_local() const {
-    // Local if URL contains localhost, 127.x, 192.168.x, 10.x, or has /v1 without an API key
-    return api_url.find("localhost") != std::string::npos
-        || api_url.find("127.0.0.") != std::string::npos
-        || api_url.find("192.168.") != std::string::npos
-        || api_url.find("10.") != std::string::npos
-        || api_url.find("0.0.0.0") != std::string::npos;
+    // S14 (C m15): parse the host out of the URL — substring matching used
+    // to call e.g. https://host110.example.com "local" because "10." appears
+    // in the middle. Schemeless or empty URLs are never local.
+    static constexpr std::string_view sep = "://";
+    auto p = api_url.find(sep);
+    if (p == sep.npos) return false;
+    std::string authority = api_url.substr(p + sep.size());
+    if (auto e = authority.find_first_of("/?#"); e != std::string::npos)
+        authority.erase(e);
+    // Strip userinfo: everything up to the last '@' of the authority.
+    if (auto at = authority.rfind('@'); at != std::string::npos)
+        authority.erase(0, at + 1);
+
+    std::string host = authority;
+    if (!host.empty() && host.front() == '[') {
+        // IPv6 literal: the host is the bracket contents.
+        auto close = host.find(']');
+        host = close == std::string::npos ? host.substr(1)
+                                          : host.substr(1, close - 1);
+    } else if (auto c = host.find(':'); c != std::string::npos) {
+        host.erase(c);  // strip :port
+    }
+
+    if (host == "localhost" || host == "0.0.0.0" || host == "::1")
+        return true;
+    if (host.starts_with("127.") || host.starts_with("10.") ||
+        host.starts_with("192.168.")) {
+        // Must be a real dotted quad: four numeric labels, each 0-255.
+        size_t labels = 0;
+        size_t start = 0;
+        while (true) {
+            auto dot = host.find('.', start);
+            auto part = host.substr(start,
+                dot == std::string::npos ? std::string::npos : dot - start);
+            if (part.empty() || part.size() > 3 ||
+                part.find_first_not_of("0123456789") != std::string::npos)
+                return false;
+            if (std::stoi(part) > 255) return false;
+            ++labels;
+            if (dot == std::string::npos) break;
+            start = dot + 1;
+        }
+        return labels == 4;
+    }
+    return false;
 }
 
 std::vector<std::string> Endpoint::list_models() const {
@@ -338,58 +377,6 @@ std::vector<Endpoint::TypedModel> Endpoint::list_models_lmstudio_typed() const {
     }
 
     return result;
-}
-
-// -----------------------------------------------------------------------
-// SSE streaming parse helper (legacy; no current caller)
-// -----------------------------------------------------------------------
-struct StreamCallbackData {
-    std::function<void(const std::string&)>* on_token;
-    std::string buffer;
-    ApiFormat* format;
-    std::string raw_response;   // accumulates every raw SSE line for dump
-};
-
-static size_t stream_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    size_t total = size * nmemb;
-    auto* data = static_cast<StreamCallbackData*>(userdata);
-    data->buffer.append(ptr, total);
-
-    // Process complete lines (SSE format: "data: {...}\n")
-    size_t pos;
-    while ((pos = data->buffer.find('\n')) != std::string::npos) {
-        std::string line = data->buffer.substr(0, pos);
-        data->buffer.erase(0, pos + 1);
-
-        // Trim whitespace
-        line.erase(0, line.find_first_not_of(" \t\r"));
-        line.erase(line.find_last_not_of(" \t\r") + 1);
-
-        if (line.empty()) continue;
-
-        // Capture every raw SSE line for payload dump
-        data->raw_response += line + "\n";
-
-        // Check for stream stop
-        if (is_stream_stop(*data->format, line)) continue;
-        
-        if (line.substr(0, 6) != "data: ") continue;
-
-        std::string json_str = line.substr(6);
-        try {
-            auto chunk = nlohmann::json::parse(json_str);
-            
-            // Extract delta content using format
-            std::string content = extract_stream_delta(*data->format, chunk);
-            if (!content.empty() && data->on_token) {
-                (*data->on_token)(content);
-            }
-        } catch (...) {
-            // Skip malformed JSON
-        }
-    }
-
-    return total;
 }
 
 std::string InferenceClient::chat_memory(const std::vector<Message>& messages) {

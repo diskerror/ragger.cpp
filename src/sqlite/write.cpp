@@ -149,14 +149,6 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // ---- local timestamp ("%F %T" == "YYYY-MM-DD HH:MM:SS") ----------
-    // Thin aliases over the shared formatter (ragger/util/time.h) so every
-    // DB timestamp uses one local-time format.
-    std::string Backend::Impl::local_timestamp(std::time_t tt) { return db_timestamp(tt); }
-
-    std::string Backend::Impl::local_timestamp() { return db_timestamp(); }
-
-
     // ---- public API ---------------------------------------------------
 
     // v2: the generic store API (behind /store, MCP `store`, CLI `ragger
@@ -390,7 +382,7 @@ static std::string tags_from_metadata(const json& metadata) {
             chunk.path, chunk.title, chunk.year, chunk.tags, chunk.imported_at);
 
         // Slim chunk row: no path/title/year/imported_at (they live on the
-        // source). documents_fts sync triggers index text/tags only.
+        // source). The text index covers text/tags only.
         Stmt s(db,
             "INSERT INTO documents "
             "(text, tags, chunk_index, document_source_id, modified_on, "
@@ -792,11 +784,6 @@ static std::string tags_from_metadata(const json& metadata) {
                        const std::string& tags,
                        const std::string& source_timestamp,
                        bool defer_embedding) {
-        // PHASE9B step 6: the same status contract store() enforces (the CLI
-        // used to accept e.g. "roadmap" here; that is Reid's dropped-status
-        // ruling applied consistently). Embed OUTSIDE the transaction; insert
-        // + index INSIDE it, so an indexing failure never leaves a committed,
-        // unindexed row.
         // PHASE9B step 6: the same status contract store() enforces (the CLI
         // used to accept e.g. "roadmap" here; that is Reid's dropped-status
         // ruling applied consistently). Embed OUTSIDE the transaction; insert
@@ -1698,9 +1685,25 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // Set a decision's status (e.g. mark a stale one "retired").
-    // Returns false if no row matched.
+    // Set a decision's status (ragger decision set-status), e.g. mark a
+    // stale one "retired". Same status discipline as agent_update's status
+    // path (S10): the word must be one of kAgentSettable ('roadmap' and
+    // 'deprecated' are legacy words, no longer offered; 'superseded' is
+    // never reachable here), and the transition must exist in the table.
+    // Returns false only when no such decision row exists.
     bool Backend::Impl::set_decision_status(int decision_id, const std::string& status) {
+        if (!status::is_in(status::kAgentSettable, status))
+            throw std::invalid_argument(std::format(
+                "unknown decision status: '{}' (choose from: {})",
+                status, std::string(status::in_list_sql(status::kAgentSettable))));
+        Stmt f(db, "SELECT status FROM knowledge WHERE kind = 'decision' AND knowledge_id = ?");
+        f.bind(1, decision_id);
+        if (!f.step())
+            return false;
+        const std::string from = f.column_text(0);
+        if (!status::transition_ok(from, status))
+            throw std::invalid_argument(std::format(
+                "illegal decision status transition: {} -> {}", from, status));
         Stmt s(db, "UPDATE knowledge SET status = ? WHERE kind = 'decision' AND knowledge_id = ?");
         s.bind(1, status).bind(2, decision_id);
         bool ok = s.exec() && sqlite3_changes(db) > 0;

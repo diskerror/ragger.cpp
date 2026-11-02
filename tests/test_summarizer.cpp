@@ -163,6 +163,30 @@ void test_strip_thinking() {
     std::println(" ok");
 }
 
+// S14 (C m15): Endpoint::is_local() parses the host instead of matching
+// substrings anywhere in the URL. Empty or schemeless URLs return false and
+// must never throw.
+void p10_endpoint_is_local() {
+    std::println("  p10_endpoint_is_local...");
+    auto local = [](const char* url) {
+        return ragger::Endpoint("t", url).is_local();
+    };
+    CHECK(local("http://localhost:1234/v1"));
+    CHECK(local("http://127.0.0.1:8080"));
+    CHECK(local("http://192.168.1.5:1234/v1"));
+    CHECK(local("http://10.0.0.7/v1"));
+    CHECK(local("http://0.0.0.0:1234"));
+    CHECK(local("http://[::1]:1234/v1"));
+    CHECK(!local("https://api.openai.com/v1"));
+    CHECK(!local("https://host110.example.com/v1"));
+    CHECK(!local("https://10.example.com/v1"));
+    CHECK(!local("https://api.example.com:8010/v1"));
+    CHECK(!local("http://beelink:1234/v1"));
+    CHECK(!local("http://user@api.example.com/v1"));
+    CHECK(!local(""));
+    std::println(" ok");
+}
+
 // PHASE1 Step 6: the summarizer resolves the inference client through a
 // provider ONCE PER JOB — a job enqueued after the provider starts handing
 // out a different client must observe the new one (C §1.3). Hermetic: the
@@ -541,6 +565,7 @@ int main() {
     test_assistant_only_trivial();
     test_strip_system_prefix();
     test_strip_thinking();
+    p10_endpoint_is_local();
     test_summarizer_provider_per_job(env.base());
     p6_test_backoff();
     p6_test_episode_boundaries();

@@ -281,8 +281,7 @@ static std::expected<Config, ConfigError> parse_config(std::istream& file,
             set_raw(prefixed("embedding_"), val);
         }
         else if (section == "search") {
-            if (key == "inject_data") cfg.inject_data = parse_bool(val);  // not a schema key
-            else set_raw(key, val);
+            set_raw(key, val);
         }
         else if (section == "inference") {
             // Not schema keys (no CLI/dashboard-editable equivalent yet).
@@ -523,7 +522,6 @@ int reload_config() {
     RELOAD(bm25_enabled);
     RELOAD(bm25_weight);
     RELOAD(vector_weight);
-    RELOAD(inject_data);
     RELOAD(fts_w_unigram);
     RELOAD(fts_w_bigram);
     RELOAD(fts_w_metaphone);

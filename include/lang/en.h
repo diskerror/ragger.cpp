@@ -299,6 +299,7 @@ constexpr const char* WARN_SUMMARY            = "Warning: summary generation fai
 
 // --- Generic CLI error wrapper ---
 constexpr const char* ERR_INFERENCE           = "Error: {}";
+constexpr const char* ERR_CLI                 = "Error: {}";
 
 // --- Errors: config ---
 constexpr const char* ERR_CONFIG_NOT_INIT     = "Config not initialized — call init_config() first";
@@ -444,7 +445,6 @@ constexpr const char* MSG_PRELOADED_MODEL       = "Preloaded model: {}";
 constexpr const char* MSG_MODEL_PRELOAD_SKIPPED = "Model preload skipped: {}";
 constexpr const char* ERR_CLEANUP_DB            = "Cleanup failed for main DB: {}";
 constexpr const char* MSG_HOUSEKEEPING_EXPIRED  = "Housekeeping: {} sessions expired, {} conversations cleaned";
-constexpr const char* MSG_HOUSEKEEPING_OWNER    = "Housekeeping owner for user '{}'";
 constexpr const char* MSG_HOUSEKEEPING_DISABLED = "Housekeeping: disabled (interval = 0)";
 constexpr const char* MSG_HOUSEKEEPING_SIGNAL   = "Housekeeping triggered by signal";
 constexpr const char* MSG_CONFIG_RELOADED_N     = "Config reloaded: {} value(s) changed";
@@ -501,7 +501,7 @@ constexpr const char* ERR_CLIENT_SEARCH       = "Search failed: HTTP {}";
 constexpr const char* ERR_CLIENT_COUNT        = "Count failed: HTTP {}";
 constexpr const char* ERR_CLIENT_DELETE_BATCH = "Delete batch failed: HTTP {}";
 constexpr const char* ERR_CLIENT_SEARCH_META  = "Search by metadata failed: HTTP {}";
-constexpr const char* ERR_CLIENT_REGISTER     = "Register failed: HTTP {}";
+constexpr const char* ERR_CLIENT_REGISTER     = "Register failed: HTTP {}";  // S12: register_user removed; constant kept for message-history continuity
 constexpr const char* ERR_CLIENT_SOCKET       = "Failed to create socket: {}";
 constexpr const char* ERR_CLIENT_CONNECT      = "Connection failed: {}";
 

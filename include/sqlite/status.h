@@ -30,14 +30,19 @@ inline constexpr std::string_view kCreatable[] = {"current", "provisional", "pen
 
 // Statuses the 0.16 -> 0.17 migration leg recognizes as already-valid
 // (anything else leaked in as a category word and moves to tags).
+// 'roadmap' and 'deprecated' are legacy words: rows may still carry them,
+// they are no longer offered on any write path. 'deprecated' is terminal
+// like 'retired' (no transition edge exists from it).
 inline constexpr std::string_view kMigrationKnown[] = {
     "current", "provisional", "pending", "superseded", "retired", "roadmap", "deprecated"};
 
 // Fifth list (not one of the four the phase doc anticipated): the target
 // statuses agent_update accepts. Excludes 'superseded' (reachable only via
-// `supersedes` on a new row) and 'deprecated' (legacy, not settable).
+// `supersedes` on a new row), 'deprecated' and 'roadmap' (legacy words, not
+// offered — round-2 ruling; a stored 'roadmap' row can still leave it via
+// the transition table).
 inline constexpr std::string_view kAgentSettable[] = {
-    "current", "provisional", "pending", "roadmap", "retired"};
+    "current", "provisional", "pending", "retired"};
 
 // -> "'current','provisional'" — for SQL IN (...) clauses.
 inline std::string in_list_sql(std::span<const std::string_view> values) {

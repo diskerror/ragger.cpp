@@ -112,8 +112,6 @@ struct Config {
     bool  bm25_enabled         = true;
     float bm25_weight          = 4.0f;
     float vector_weight        = 8.0f;
-    // Reserved: not yet wired to search behavior.
-    bool  inject_data          = false;
 
     // TF-IDF text-index blend weights (v0.16 custom terms index). Pushed into
     // TextIndex::set_weights() once per search call. See TextIndexWeights.

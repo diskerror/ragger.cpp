@@ -130,10 +130,6 @@ struct Server::Impl {
         inference_ = std::move(c);
     }
 
-    // Per-user memory cache (username → RaggerMemory)
-    std::unordered_map<std::string, std::unique_ptr<RaggerMemory>> user_memories_;
-    std::mutex user_memories_mutex_;
-
     // SSE activity-log tailing: byte offset already streamed to /events.
     std::uintmax_t activity_log_offset_ = 0;
 
@@ -303,38 +299,7 @@ struct Server::Impl {
         //    `ragger reindex [table|all]` for manual rebuilds.)
     }
 
-    // Per-user housekeeping locks: username → fd
-    std::unordered_map<std::string, int> housekeeping_locks_;
-    std::mutex housekeeping_locks_mutex_;
-
-    /// Try to acquire housekeeping lock for a specific user.
-    /// Lock file: /tmp/ragger/housekeeping-{username}.lock
-    /// Returns true if this instance now owns housekeeping for that user.
-    bool acquire_user_housekeeping_lock(const std::string& username) {
-        std::lock_guard<std::mutex> lock(housekeeping_locks_mutex_);
-        if (housekeeping_locks_.count(username)) return true;  // already own it
-
-        fs::create_directories("/tmp/ragger");
-        std::string lock_path = "/tmp/ragger/housekeeping-" + username + ".lock";
-        int fd = open(lock_path.c_str(), O_WRONLY | O_CREAT, 0644);
-        if (fd < 0) return false;
-
-        if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
-            ::close(fd);
-            return false;  // another instance owns it
-        }
-
-        // Write our PID
-        ftruncate(fd, 0);
-        auto pid_str = std::to_string(getpid());
-        (void)write(fd, pid_str.c_str(), pid_str.size());
-        housekeeping_locks_[username] = fd;
-        Diskerror::Logger::info(std::format(lang::MSG_HOUSEKEEPING_OWNER, username));
-        return true;
-    }
-
     /// Start background timer for periodic housekeeping.
-    /// Housekeeping only acts on users whose locks we hold.
     void start_background_threads() {
         start_signal_poller();
         start_housekeeping_timer();
@@ -433,13 +398,6 @@ struct Server::Impl {
         if (poller_thread_.joinable()) {
             poller_thread_.join();
         }
-        // Release all user housekeeping locks
-        std::lock_guard<std::mutex> lock(housekeeping_locks_mutex_);
-        for (auto& [username, fd] : housekeeping_locks_) {
-            flock(fd, LOCK_UN);
-            ::close(fd);
-        }
-        housekeeping_locks_.clear();
     }
 
     void init_inference() {
@@ -524,14 +482,6 @@ struct Server::Impl {
         return std::nullopt;
     }
 
-    /// Get per-user memory (or fallback to common).
-    /// In single-user mode, always returns the main memory instance.
-    RaggerMemory& _get_memory(const std::string& /*username*/) {
-        // Single-user mode: always return the main memory
-        return memory;
-    }
-
-
     // ---- Route handlers (named for navigability) ---------------------------
 
     void handle_store(const UserInfo& user, const httplib::Request& req,
@@ -549,7 +499,7 @@ struct Server::Impl {
             metadata["collection"] = "memory";
         if (!metadata.contains("source") || metadata["source"].get<std::string>().empty())
             metadata["source"] = user.username;
-        auto& mem = _get_memory(user.username);
+        auto& mem = memory;
 
         // PHASE9B step 6: ONE function per verb. store() decides the kind
         // itself (store_kind_for: category=="decision" -> kind='decision',
@@ -569,10 +519,10 @@ struct Server::Impl {
     // tags may be a string ("a,b") or an array of strings.
     // Validation failures are 400 with the message; they are caller errors,
     // not server faults, so they must not fall through to guarded()'s 500.
-    void handle_decision(const UserInfo& user, const httplib::Request& req,
+    void handle_decision(const UserInfo& /*user*/, const httplib::Request& req,
                          httplib::Response& res) {
         auto body = json::parse(req.body);
-        auto& mem = _get_memory(user.username);
+        auto& mem = memory;
         // Project (Phase 3): explicit name/path wins; otherwise infer from
         // cwd (longest-prefix match). No match leaves it empty — not an
         // error. Shared with the MCP surface via parse_decision_input.
@@ -618,7 +568,7 @@ struct Server::Impl {
         if (body.contains("tags"))
             metadata["tags"] = body["tags"];
 
-        auto& mem = _get_memory(user.username);
+        auto& mem = memory;
 
         // ---- insight routing (Phase 5; PHASE7 kind="insight") -----------
         if (body.contains("evidence") && body["evidence"].is_array()) {
@@ -657,10 +607,10 @@ struct Server::Impl {
     // POST /memory/timeline — deterministic newest-first range scan
     // (agent API Phase 4). Body: {session?, since?, until?,
     // granularity?, limit?, cursor?}. Returns {items, next_cursor}.
-    void handle_memory_timeline(const UserInfo& user, const httplib::Request& req,
+    void handle_memory_timeline(const UserInfo& /*user*/, const httplib::Request& req,
                                 httplib::Response& res) {
         auto body = json::parse(req.body);
-        auto& mem = _get_memory(user.username);
+        auto& mem = memory;
         TimelineQuery q = parse_timeline_query(body);
         try {
             Diskerror::Logger::debug("POST /memory/timeline 200");
@@ -675,11 +625,11 @@ struct Server::Impl {
     // POST /memory/update — metadata-only curation (agent API Phase 4).
     // Body: {id, status?, tags?, text?}. `text` present is always
     // rejected: text changes go through a new decision/note with supersedes.
-    void handle_memory_update(const UserInfo& user, const httplib::Request& req,
+    void handle_memory_update(const UserInfo& /*user*/, const httplib::Request& req,
                               httplib::Response& res) {
         auto body = json::parse(req.body);
         UpdateRequest u = parse_update_request(body);
-        auto& mem = _get_memory(user.username);
+        auto& mem = memory;
         try {
             Diskerror::Logger::debug("POST /memory/update 200");
             respond_json(res, mem.agent_update(u));
@@ -692,7 +642,7 @@ struct Server::Impl {
 
     // POST /memory/review — pending-decision queue (agent API Phase 4).
     // Body: {action: list|approve|reject, ids?: [handles]}.
-    void handle_memory_review(const UserInfo& user, const httplib::Request& req,
+    void handle_memory_review(const UserInfo& /*user*/, const httplib::Request& req,
                               httplib::Response& res) {
         auto body = json::parse(req.body);
         const std::string action = body.value("action", "");
@@ -700,7 +650,7 @@ struct Server::Impl {
         if (body.contains("ids"))
             ids = body["ids"].get<std::vector<std::string>>();
 
-        auto& mem = _get_memory(user.username);
+        auto& mem = memory;
         try {
             Diskerror::Logger::debug("POST /memory/review 200");
             respond_json(res, mem.agent_review(action, ids));
@@ -715,11 +665,11 @@ struct Server::Impl {
     // Body = AgentSearchQuery fields: {query, layers?: [..], since?, until?,
     // status?, session?, exclude_session?, limit?, max_tokens?}.
     // Returns {"results":[AgentHit...]}. Validation failures are 400.
-    void handle_memory_search(const UserInfo& user, const httplib::Request& req,
+    void handle_memory_search(const UserInfo& /*user*/, const httplib::Request& req,
                               httplib::Response& res) {
         auto body = json::parse(req.body);
         // Shared with the MCP surface via parse_agent_search_query.
-        auto& mem = _get_memory(user.username);
+        auto& mem = memory;
         AgentSearchQuery q = parse_agent_search_query(body);
         try {
             auto hits = mem.agent_search(q);
@@ -742,11 +692,11 @@ struct Server::Impl {
     // POST /memory/get — agent row reads (agent API Phase 2).
     // Body = AgentGetQuery fields: {ids?: [handles], expand?, session?,
     // after_turn?, before_turn?, limit?}. Exactly one mode per call.
-    void handle_memory_get(const UserInfo& user, const httplib::Request& req,
+    void handle_memory_get(const UserInfo& /*user*/, const httplib::Request& req,
                            httplib::Response& res) {
         auto body = json::parse(req.body);
         AgentGetQuery q = parse_agent_get_query(body);
-        auto& mem = _get_memory(user.username);
+        auto& mem = memory;
         try {
             Diskerror::Logger::debug("POST /memory/get 200");
             respond_json(res, mem.agent_get(q));
@@ -757,7 +707,7 @@ struct Server::Impl {
         }
     }
 
-    void handle_search(const UserInfo& user, const httplib::Request& req,
+    void handle_search(const UserInfo& /*user*/, const httplib::Request& req,
                        httplib::Response& res) {
         auto body = json::parse(req.body);
         std::string query = body.value("query", "");
@@ -769,7 +719,7 @@ struct Server::Impl {
         float min_score = body.value("min_score", config().default_min_score);
         auto collections = body.value("collections", std::vector<std::string>{});
         auto t0 = std::chrono::high_resolution_clock::now();
-        auto& mem = _get_memory(user.username);
+        auto& mem = memory;
         auto sr = mem.search(query, limit, min_score, collections);
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::high_resolution_clock::now() - t0).count();
@@ -783,7 +733,7 @@ struct Server::Impl {
 
     // POST /turn: ingest one agent-pushed conversation turn for background
     // summarization. No-op unless [server] capture_turns is true.
-    void handle_turn(const UserInfo& user, const httplib::Request& req,
+    void handle_turn(const UserInfo& /*user*/, const httplib::Request& req,
                      httplib::Response& res) {
         auto body = json::parse(req.body);
         std::string user_text  = body.value("user", "");
@@ -797,7 +747,7 @@ struct Server::Impl {
                         respond_json(res, json{{"error", "missing required field: user"}}, 400);
             return;
         }
-        auto& mem = _get_memory(user.username);
+        auto& mem = memory;
         auto result = capture_turn(mem, user_text, assistant, model, session_id,
                                    session_name, name_source);
         // PHASE6 2.2: hand the fresh turn straight to the summarizer so L2
@@ -817,11 +767,11 @@ struct Server::Impl {
     }
 
     // GET /session/<guid>[?recipe=name]: assemble a recipe-shaped context payload.
-    void handle_session(const UserInfo& user, const httplib::Request& req,
+    void handle_session(const UserInfo& /*user*/, const httplib::Request& req,
                         httplib::Response& res) {
         std::string sid = req.matches[1];
         std::string recipe_name = req.get_param_value("recipe");
-        auto& mem = _get_memory(user.username);
+        auto& mem = memory;
         auto ctx = build_context(mem, sid, recipe_name);
         if (!ctx.enabled) {
             respond_json(res, json{{"status", "disabled"}});
@@ -837,12 +787,12 @@ struct Server::Impl {
                              {"chunks",     chunks}});
     }
 
-    void handle_delete_memory(const UserInfo& user, const httplib::Request& req,
+    void handle_delete_memory(const UserInfo& /*user*/, const httplib::Request& req,
                                httplib::Response& res) {
         int id = 0;
         if (!util::parse_positive_int(std::string(req.matches[1]), id))
             throw std::invalid_argument("memory id must be a positive integer");
-        auto& mem = _get_memory(user.username);
+        auto& mem = memory;
         if (mem.delete_memory(id)) {
             Diskerror::Logger::debug("DELETE /memory 200");
             respond_json(res, json{{"id", id}, {"status", "deleted"}});
@@ -852,7 +802,7 @@ struct Server::Impl {
         }
     }
 
-    void handle_delete_batch(const UserInfo& user, const httplib::Request& req,
+    void handle_delete_batch(const UserInfo& /*user*/, const httplib::Request& req,
                               httplib::Response& res) {
         auto body = json::parse(req.body);
         if (!body.contains("ids") || !body["ids"].is_array()) {
@@ -860,20 +810,20 @@ struct Server::Impl {
             res.status = 400; res.set_content(lang::HTTP_MISSING_IDS, "text/plain"); return;
         }
         auto ids = body["ids"].get<std::vector<int>>();
-        auto& mem = _get_memory(user.username);
+        auto& mem = memory;
         int deleted = mem.delete_batch(ids);
         Diskerror::Logger::debug("POST /delete_batch 200");
         respond_json(res, json{{"deleted", deleted}});
     }
 
-    void handle_search_by_metadata(const UserInfo& user, const httplib::Request& req,
+    void handle_search_by_metadata(const UserInfo& /*user*/, const httplib::Request& req,
                                     httplib::Response& res) {
         auto body = json::parse(req.body);
         if (!body.contains("metadata") || !body["metadata"].is_object()) {
             Diskerror::Logger::debug("POST /search_by_metadata 400");
             res.status = 400; res.set_content(lang::HTTP_MISSING_METADATA, "text/plain"); return;
         }
-        auto results = _get_memory(user.username).search_by_metadata(
+        auto results = memory.search_by_metadata(
             body["metadata"], body.value("limit", 0),
             body.value("after", ""), body.value("before", ""));
         Diskerror::Logger::debug("POST /search_by_metadata 200");
@@ -938,9 +888,9 @@ struct Server::Impl {
             };
         };
 
-        svr.Get("/count", guarded([this](const UserInfo& user, const httplib::Request&,
+        svr.Get("/count", guarded([this](const UserInfo& /*user*/, const httplib::Request&,
                                          httplib::Response& res) {
-            respond_json(res, json{{"count", _get_memory(user.username).count()}});
+            respond_json(res, json{{"count", memory.count()}});
             Diskerror::Logger::debug("GET /count 200");
         }));
 

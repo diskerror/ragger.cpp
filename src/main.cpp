@@ -48,7 +48,6 @@
 #include "server.h"
 #include "embedder.h"
 #include "daemon_control.h"
-#include "util/fs.h"
 #include "util/time.h"
 #include "storage_types.h"
 #include "nlohmann_json.hpp"
@@ -122,6 +121,30 @@ static void cli_audit_done(const std::string& verb, const std::string& detail) {
 }
 static void cli_audit_failed(const std::string& verb, const std::string& detail) {
     Diskerror::Logger::warn(verb + " failed: " + detail);
+}
+
+// S11 (C m9): the CLI joins trailing positional args with single spaces in
+// four verbs; one helper replaces the hand-rolled loops (byte-identical).
+static std::string join_args(const std::vector<std::string>& args, size_t from) {
+    std::string out;
+    for (size_t i = from; i < args.size(); ++i) {
+        if (i > from) out += " ";
+        out += args[i];
+    }
+    return out;
+}
+
+// S11 (C m9): `re-embed` and `reindex` both back the DB up before touching
+// it, with the same messages; failure warns and proceeds (as before).
+static void backup_db_or_warn(const std::string& path) {
+    std::println("{}", ragger::lang::MSG_DB_BACKING_UP);
+    try {
+        std::string archive = ragger::archive_db_files(path);
+        std::println(ragger::lang::MSG_DB_BACKED_UP, archive);
+    }
+    catch (const std::exception &e) {
+        Diskerror::Logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
+    }
 }
 
 // For verbs with many early returns: logs `started` on construction and, unless
@@ -212,7 +235,7 @@ int main(int argc, char **argv) {
         opts.run(argc, argv);
     }
     catch (const std::exception &e) {
-        std::cerr << std::format(ragger::lang::ERR_INFERENCE, e.what()) << "\n";
+        std::cerr << std::format(ragger::lang::ERR_CLI, e.what()) << "\n";
         return 1;
     }
 
@@ -242,7 +265,7 @@ int main(int argc, char **argv) {
         ragger::init_config();
     }
     catch (const std::exception &e) {
-        std::cerr << std::format(ragger::lang::ERR_INFERENCE, e.what()) << "\n";
+        std::cerr << std::format(ragger::lang::ERR_CLI, e.what()) << "\n";
         return 1;
     }
 
@@ -270,7 +293,7 @@ int main(int argc, char **argv) {
 
         }
         else if (command == "serve") {
-            const auto &cfg = ragger::config();
+            const auto &serve_cfg = ragger::config();
 
             // Create the memory store first so the DB + schema exist. The
             // port rectify below needs it in place.
@@ -286,12 +309,12 @@ int main(int argc, char **argv) {
             // just the dashboard's Restart button. A --port override is
             // transient: it binds the given port but leaves desired_port
             // untouched, so the next plain restart falls back to desired.
-            if (!port_overridden && cfg.desired_port != 0 &&
-                cfg.desired_port != cfg.port) {
-                int adopted = cfg.desired_port;
+            if (!port_overridden && serve_cfg.desired_port != 0 &&
+                serve_cfg.desired_port != serve_cfg.port) {
+                int adopted = serve_cfg.desired_port;
                 Diskerror::Logger::info(std::format(
                     "Startup port rectify: adopting desired_port {} (was {})",
-                    adopted, cfg.port));
+                    adopted, serve_cfg.port));
                 auto r = ragger::set_config_persisted("port", std::to_string(adopted),
                                                       /*allow_locked=*/true);
                 if (r.has_value()) {
@@ -358,11 +381,7 @@ int main(int argc, char **argv) {
                 Diskerror::Logger::error(CLI_USAGE_SEARCH);
                 return 1;
             }
-            std::string query;
-            for (size_t i = 0; i < args.size(); ++i) {
-                if (i > 0) query += " ";
-                query += args[i];
-            }
+            std::string query = join_args(args, 0);
 
             std::vector<std::string> colls;
 
@@ -404,11 +423,7 @@ int main(int argc, char **argv) {
                 Diskerror::Logger::error(CLI_USAGE_STORE);
                 return 1;
             }
-            std::string text;
-            for (size_t i = 0; i < args.size(); ++i) {
-                if (i > 0) text += " ";
-                text += args[i];
-            }
+            std::string text = join_args(args, 0);
 
             nlohmann::json meta = {};
 
@@ -442,11 +457,7 @@ int main(int argc, char **argv) {
                     Diskerror::Logger::error(ragger::lang::CLI_USAGE_DECISION);
                     return 1;
                 }
-                std::string text;
-                for (size_t i = 1; i < args.size(); ++i) {
-                    if (i > 1) text += " ";
-                    text += args[i];
-                }
+                std::string text = join_args(args, 1);
                 std::string status = opts["status"].as<std::string>();
                 if (status.empty()) status = "current";
                 std::string tags = opts["tags"].as<std::string>();
@@ -600,11 +611,7 @@ int main(int argc, char **argv) {
                 }
                 const std::string name = args[1];
                 // Value may be empty (reset to default) or contain spaces.
-                std::string value;
-                for (size_t i = 2; i < args.size(); ++i) {
-                    if (i > 2) value += " ";
-                    value += args[i];
-                }
+                std::string value = join_args(args, 2);
                 // PHASE9B step 7: arm BEFORE the write — a crash part-way
                 // still refreshes the daemon. Log the KEY only, never the
                 // value: tokens and passwords are settable here.
@@ -1268,9 +1275,8 @@ int main(int argc, char **argv) {
             }
             std::string target = args[0];
 
-            // Resolve DB path (same logic as other commands that don't need embedder)
-            std::string resolved_db = db_path.empty()
-                ? ragger::config().resolved_db_path() : ragger::expand_path(db_path);
+            // DB path is always resolved (S11: the empty branch was dead).
+            std::string resolved_db = ragger::expand_path(db_path);
 
             ragger::ExportOptions export_opts;
             export_opts.include_embeddings = opts.count("embeddings") > 0;
@@ -1371,15 +1377,7 @@ int main(int argc, char **argv) {
             // Backup the database file(s) — tar.gz (falls back to zip, then
             // plain copy) via archive_db_files(), same naming convention as
             // migration snapshots: <name>_BACKUP_<timestamp>.tar.gz.
-            std::string actual_db_path = db_path.empty() ? cfg.resolved_db_path() : db_path;
-            std::println("{}", ragger::lang::MSG_DB_BACKING_UP);
-            try {
-                std::string archive = ragger::archive_db_files(actual_db_path);
-                std::println(ragger::lang::MSG_DB_BACKED_UP, archive);
-            }
-            catch (const std::exception &e) {
-                Diskerror::Logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
-            }
+            backup_db_or_warn(db_path);
 
             // Re-embed. Skip the drift guard -- re-encoding at the
             // new config is exactly the point -- then rewrite the settings
@@ -1446,15 +1444,7 @@ int main(int argc, char **argv) {
             }
             cli_audit("reindex", target);
 
-            std::string actual_db_path = db_path.empty() ? cfg.resolved_db_path() : db_path;
-            std::println("{}", ragger::lang::MSG_DB_BACKING_UP);
-            try {
-                std::string archive = ragger::archive_db_files(actual_db_path);
-                std::println(ragger::lang::MSG_DB_BACKED_UP, archive);
-            }
-            catch (const std::exception &e) {
-                Diskerror::Logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
-            }
+            backup_db_or_warn(db_path);
 
             // PHASE9B step 5: one transaction over the whole index holds the
             // write lock for the entire run; warn before starting, do not
@@ -1617,7 +1607,7 @@ int main(int argc, char **argv) {
                 std::cerr << std::format(ragger::lang::ERR_SIGNAL_FAILED, strerror(errno)) << "\n";
                 return 1;
             }
-            Diskerror::Logger::error(std::format(ragger::lang::MSG_CONFIG_RELOAD_OK, daemon_pid));
+            Diskerror::Logger::info(std::format(ragger::lang::MSG_CONFIG_RELOAD_OK, daemon_pid));
 
         }
         else {

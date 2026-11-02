@@ -47,25 +47,6 @@ struct TurnRecord {
     std::string session_guid;
 };
 
-/// One row of the v0.12.0 `turn_summaries` table (turn_id-FK based, epoch
-/// timestamps). Replaces the old (session_guid, source_timestamp)-keyed
-/// linkage. `*_null` flags distinguish "0/absent" from a real 0 value for
-/// nullable FK/int columns (turn_id is 0/absent if NULL — pruned turn).
-struct TurnSummaryRecord {
-    int turn_summary_id;
-    std::string text;
-    int turn_id;           // 0/absent if NULL (pruned)
-    bool turn_id_null;
-    int session_id;
-    bool session_id_null;
-    int turn_model_id;
-    bool turn_model_id_null;
-    int summary_model_id;
-    bool summary_model_id_null;
-    int64_t turn_datetime;   // epoch seconds
-    int64_t summarized_on;   // epoch seconds
-};
-
 /**
  * Abstract base class for storage backends.
  *
@@ -525,9 +506,9 @@ public:
 
     // --- Schema introspection (gap closure: replaces export.cpp's raw sqlite_master / PRAGMA calls) ---
 
-    /// All schema objects (tables, indexes, triggers) from sqlite_master, ordered
-    /// tables-first. Nothing is filtered — callers drop internal helpers via
-    /// is_internal_table() if needed.
+    /// All schema objects (tables, indexes, triggers) from sqlite_master,
+    /// ordered tables-first. Names containing "_fts" (legacy FTS5 shadow
+    /// tables that can survive in migrated databases) are excluded.
     virtual std::vector<SchemaObject> list_schema_objects() = 0;
 
     /// Column names for a table, in schema order (PRAGMA table_info).

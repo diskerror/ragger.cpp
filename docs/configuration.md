@@ -39,7 +39,7 @@ symlink `~/.ragger` there instead.
 |------------------|-----------------------------------------------------------------|
 | `[server]`       | Socket/bind/port, TLS cert/key, turn-capture/build-context toggles, recipes |
 | `[embedding]`    | Model, vector dimensions, on-disk precision                    |
-| `[search]`       | Default limit, score floor, BM25/vector/phonetic blend, `inject_data` |
+| `[search]`       | Default limit, score floor, BM25/vector/phonetic blend |
 | `[summarizer]`   | Inference endpoint used by the L2/L3 background worker         |
 | `[embed]`        | Embedding subprocess pool — timeouts, retries, concurrency     |
 | `[logging]`      | Log level (one unified log file — see below)                  |
@@ -100,7 +100,6 @@ independently configurable; hardcoded like every other Ragger path.
 | `fts_w_bigram`      | `0.7`   | Text index's internal weight for adjacent-word-pair (bigram) term matches.   |
 | `fts_w_metaphone`   | `1.0`   | Weight for phonetic (Double Metaphone) term matches relative to exact stemmed-literal matches. `0` disables phonetic matching; `1` treats it as equal to literal. |
 | `fts_literal_enabled` | `true` | Enable exact stemmed-literal term matching. Disable for DMP-only (phonetic-only) scoring — no reindex needed, it's a scoring-time flag. |
-| `inject_data`       | `false` | Reserved — parsed and hot-reloadable, not yet wired to any search behavior. |
 | `max_search_limit`  | `0`     | Ceiling on client-requested `limit` for sub-users. `0` disables the cap.    |
 
 Weights are ratios; they're normalized internally. The default blend is

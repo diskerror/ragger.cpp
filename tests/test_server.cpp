@@ -1,24 +1,11 @@
 /**
  * Server integration tests
  *
- * NOTE: Full HTTP endpoint testing is handled by tests/python/test_http_api.py,
- * which works against both Python and C++ server implementations.
- *
- * This file provides basic C++ sanity checks that don't require full HTTP
- * integration (which would require threading Crow, managing ports, HTTP clients).
- *
- * To run full server tests:
- *   1. Build and start the C++ server: ./build/ragger --server
- *   2. Run: cd tests/python && python test_http_api.py
- *
- * The Python test suite covers:
- * - Health endpoint
- * - Store/search/count endpoints
- * - Auth token validation
- * - Collection filtering
- * - Min score filtering
- * - Cleanup endpoint
- * - Error handling (401, 404, etc.)
+ * Basic C++ sanity checks for the Server object (pImpl construction against a
+ * scratch DB). Full HTTP endpoint behavior is documented in
+ * docs/http-api.md; the retired Python suite (tests/python/test_http_api.py)
+ * was deleted in the v0.17 rework (S12) — it targeted the removed
+ * ragger_memory package and was never wired into CTest.
  */
 
 #include "config.h"
@@ -61,16 +48,13 @@ void test_server_instantiation(const std::string& model_dir) {
 
 // TODO: Add more C++-only server tests here if we extract testable
 // helper functions from server.cpp (auth logic, route handlers, etc.)
-// For now, the Python integration tests provide comprehensive coverage.
 
 int main() {
     TestEnv env("server");  // must be first: isolates from ~/.ragger
     std::println("Running server tests:");
-    std::println("NOTE: Full HTTP endpoint testing is in tests/python/test_http_api.py");
 
     test_server_instantiation(env.model_dir());
 
     std::println("test_server: basic checks passed");
-    std::println("For complete server testing, run: cd tests/python && python test_http_api.py");
     return 0;
 }

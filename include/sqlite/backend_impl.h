@@ -366,12 +366,6 @@ struct Backend::Impl {
     // consumed. No-op if the text doesn't start with this pattern.
     static std::string strip_decision_number_prefix(const std::string& text);
 
-    // ---- local timestamp ("%F %T" == "YYYY-MM-DD HH:MM:SS") ----------
-    // Thin aliases over the shared formatter (ragger/util/time.h) so every
-    // DB timestamp uses one local-time format.
-    static std::string local_timestamp(std::time_t tt);
-    static std::string local_timestamp();
-
     // ---- public API ---------------------------------------------------
 
     // The generic store API writes a knowledge row (kind='note'). `status`

@@ -4196,7 +4196,7 @@ void p3s_test_status_vocabulary() {
     CHECK(st::in_list_sql(st::kMigrationKnown) ==
           "'current','provisional','pending','superseded','retired','roadmap','deprecated'");
     CHECK(st::in_list_sql(st::kAgentSettable) ==
-          "'current','provisional','pending','roadmap','retired'");
+          "'current','provisional','pending','retired'");
 
     // transition_ok — verbatim table semantics.
     CHECK(st::transition_ok("pending", "current"));
@@ -4215,6 +4215,76 @@ void p3s_test_status_vocabulary() {
     CHECK(!st::transition_ok("retired", "current"));     // terminal
     CHECK(!st::transition_ok("deprecated", "current"));  // not in table
     CHECK(!st::transition_ok("nonsense", "current"));
+    std::println(" ok");
+}
+
+// S10 (v0.17 CR, B m1 / Q8 / round-2 ruling "roadmap dropped"): every
+// offered status must be reachable by an allowed transition, and every
+// legacy-known non-terminal status must be able to leave. NOTE: 'pending'
+// is creation-only (kCreatable) — no transition edge targets it; the
+// review's "every kAgentSettable value is the target of some allowed edge"
+// claim is false for 'pending' under the verbatim table (flagged as a
+// review error; asserted honestly here).
+void p10_test_agent_settable_targets() {
+    std::println("  p10_test_agent_settable_targets...");
+    namespace st = ragger::sqlite::status;
+    for (const auto* to : {"current", "provisional", "retired"}) {
+        bool any = false;
+        for (const auto& from : st::kMigrationKnown)
+            if (st::transition_ok(from, to)) { any = true; break; }
+        CHECK(any);
+    }
+    CHECK(!st::transition_ok("pending", "pending"));   // creation-only
+    // Every legacy-known value that is not terminal has >= 1 allowed target.
+    for (const auto* from : {"current", "provisional", "pending", "roadmap"}) {
+        bool any = false;
+        for (const auto& to : st::kMigrationKnown)
+            if (st::transition_ok(from, to)) { any = true; break; }
+        CHECK(any);
+    }
+    // Terminal: retired and superseded have no outgoing edge; deprecated is
+    // not in the table at all (also terminal).
+    for (const auto& to : st::kMigrationKnown) {
+        CHECK(!st::transition_ok("retired", to));
+        CHECK(!st::transition_ok("superseded", to));
+        CHECK(!st::transition_ok("deprecated", to));
+    }
+    std::println(" ok");
+}
+
+// S10: set_decision_status gains the agent_update status discipline:
+// unknown word -> invalid_argument naming the word; illegal transition ->
+// invalid_argument; false only for "no such id"; superseded unreachable.
+void p10_test_set_decision_status(ragger::Embedder& emb) {
+    std::println("  p10_test_set_decision_status...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    int id = db.store_decision("p10 vocabulary decision", "current", "", "", true);
+    auto throws_iav = [&](const char* to) {
+        try { db.set_decision_status(id, to); }
+        catch (const std::invalid_argument&) { return true; }
+        return false;
+    };
+    CHECK(throws_iav("roadmap"));      // legacy word: not offered
+    CHECK(throws_iav("nonsense"));     // unknown word
+    CHECK(throws_iav("superseded"));   // never reachable here
+    CHECK(throws_iav("current"));      // same-status is not a listed edge
+    CHECK(db.set_decision_status(id, "provisional"));
+    {
+        sqlite3* raw = p1_open_raw();
+        sqlite3_stmt* s = nullptr;
+        sqlite3_prepare_v2(raw, "SELECT status FROM knowledge WHERE knowledge_id = ?", -1, &s, nullptr);
+        sqlite3_bind_int(s, 1, id);
+        std::string got = "<?>";
+        if (sqlite3_step(s) == SQLITE_ROW) got = reinterpret_cast<const char*>(sqlite3_column_text(s, 0));
+        sqlite3_finalize(s);
+        sqlite3_close(raw);
+        CHECK(got == "provisional");
+    }
+    CHECK(db.set_decision_status(id, "retired"));   // legal edge
+    CHECK(throws_iav("current"));                   // retired is terminal
+    CHECK(!db.set_decision_status(999999, "current")); // no such id -> false
+    db.close(); cleanup();
     std::println(" ok");
 }
 
@@ -5259,6 +5329,7 @@ int main() {
     p1r_test_transaction();
     p3_test_known_layers();
     p3s_test_status_vocabulary();
+    p10_test_agent_settable_targets();
     sq_test_semqlite_config();
 
     if (!fs::exists(model_dir + "/model.onnx") && !fs::exists(model_dir + "/onnx/model.onnx")) {
@@ -5367,6 +5438,7 @@ int main() {
     p9b_test_checked_writes(emb);
     p9b_test_reindex_atomic(emb);
     p9b_test_store_one_function(emb);
+    p10_test_set_decision_status(emb);
     p5_test_episodes_needing_close(emb);
     p5_test_episode_reads(emb);
     p6_test_pending_predicate(emb);

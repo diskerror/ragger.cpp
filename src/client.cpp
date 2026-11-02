@@ -167,18 +167,6 @@ std::vector<SearchResult> RaggerClient::search_by_metadata(const json& metadata_
     return results;
 }
 
-json RaggerClient::register_user(const std::string& username) {
-    json payload;
-    payload["username"] = username;
-    // admin flag removed — sudo is the admin gate
-
-    auto resp = http_post("/register", payload.dump());
-    if (resp.status < 200 || resp.status >= 300) {
-        throw std::runtime_error(std::format(lang::ERR_CLIENT_REGISTER, resp.status));
-    }
-    return json::parse(resp.body);
-}
-
 // HTTP implementation helpers
 
 RaggerClient::HttpResponse RaggerClient::http_get(const std::string& path) const {
