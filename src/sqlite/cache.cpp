@@ -1,41 +1,9 @@
 #include "sqlite/backend_impl.h"
-#include "embedder.h"
 #include "config.h"
-#include "lang.h"
-#include "util/fs.h"
 #include "util/time.h"
-#include "util/sqlite.h"
-#include "double_metaphone.h"
-#include "fts_tokenize.h"
-#include "sqlite/text_index.h"
-#include "vector_codec.h"
 #include "Logger.h"
-#include <format>
-#include "nlohmann_json.hpp"
 
-#include <sqlite3.h>
-#include <Eigen/Dense>
 
-#include <algorithm>
-#include <cctype>
-#include <chrono>
-#include <functional>
-#include <cstdlib>
-#include <cstring>
-#include <ctime>
-#include <unordered_map>
-#include <unordered_set>
-#include <iomanip>
-#include <iterator>
-#include <filesystem>
-#include <numeric>
-#include <optional>
-#include <regex>
-#include <set>
-#include <mutex>
-#include <iostream>
-#include <sstream>
-#include <stdexcept>
 
 namespace ragger::sqlite {
 
@@ -94,23 +62,18 @@ void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
     // which handles the current version-tagged format AND legacy formats (RV1
     // headers, raw f16/f32). On any failure (NULL, deferred-but-unbackfilled
     // row, corruption, or a dimension mismatch) a zero vector is returned;
-    // the first such row per cache load is logged once (table + id).
+    // failures are counted into `bad_count` (S39) and the caller logs ONE
+    // warn line per load with the first offender and the total.
     std::vector<float> Backend::Impl::decode_embedding_blob(const void* blob, int blob_bytes,
                                              int dims, const char* table,
-                                             int row_id, bool& warned) {
+                                             int row_id, int& bad_count) {
         std::vector<float> emb;
         if (blob == nullptr) {         // deferred row; silent (expected)
             emb.assign(static_cast<size_t>(dims), 0.0f);
             return emb;
         }
-        if (!decode_any(blob, blob_bytes, dims, vtype_, emb) && !warned) {
-            warned = true;
-            Diskerror::Logger::warn(std::format(
-                "[cache] {} row {}: undecodable embedding blob ({} bytes, "
-                "expected {}-dim {}); using zero vector",
-                table, row_id, blob_bytes, dims,
-                vector_codec::to_string(vtype_)));
-        }
+        if (!decode_any(blob, blob_bytes, dims, vtype_, emb))
+            ++bad_count;
         return emb;
     }
 
@@ -161,7 +124,7 @@ void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
         Stmt s(db, sql);
         std::vector<std::vector<float>> emb_rows;
         const int expected_dims = config().embedding_dimensions;
-        bool blob_warned = false;
+        int bad = 0, bad_first_id = 0, bad_first_bytes = 0;
 
         while (s.step()) {
             c.ids.push_back(s.column_int(0));
@@ -169,15 +132,30 @@ void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
 
             const void* blob = s.column_blob(2);
             int blob_bytes   = s.column_bytes(2);
+            const int bad_before = bad;
             emb_rows.push_back(decode_embedding_blob(
                 blob, blob_bytes, expected_dims, label,
-                c.ids.back(), blob_warned));
+                c.ids.back(), bad));
+            if (bad > bad_before && bad_before == 0) {
+                bad_first_id = c.ids.back();
+                bad_first_bytes = blob_bytes;
+            }
 
             json meta = json::object();
             fill_meta(s, meta);
             c.metadata.push_back(std::move(meta));
 
             c.timestamps.push_back(s.column_text(5));
+        }
+
+        // One warn line per load: first offender's details plus the total (S39).
+        if (bad > 0) {
+            Diskerror::Logger::warn(std::format(
+                "[cache] {} row {}: undecodable embedding blob ({} bytes, "
+                "expected {}-dim {}); using zero vector; "
+                "{} undecodable embedding(s) in {}",
+                label, bad_first_id, bad_first_bytes, expected_dims,
+                vector_codec::to_string(vtype_), bad, label));
         }
 
         pack_embeddings(c, emb_rows, expected_dims);
@@ -269,7 +247,6 @@ void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
             "FROM episodes WHERE text != ''",
             [](Stmt& s, json& meta) {
                 meta["source"] = "episode";
-                meta["layer"]  = "episode";
                 meta["level"]  = "episode";
                 std::string tags = s.column_text(3);
                 if (!tags.empty()) meta["tags"] = tags;

@@ -60,17 +60,7 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     }
 
     try {
-        if (config().embedding_engine == "external") {
-            embedder_ = std::make_shared<Embedder>(
-                config().embedding_external_host,
-                config().embedding_external_port,
-                config().embedding_external_model,
-                config().embedding_external_api_key,
-                config().embedding_dimensions);
-        } else {
-            std::string resolved_model_dir = config().resolved_model_dir();
-            embedder_ = std::make_shared<Embedder>(resolved_model_dir);
-        }
+        embedder_ = make_embedder_from_config(config());
     } catch (const std::exception& e) {
         Diskerror::Logger::critical(std::format(
             lang::ERR_EMBED_MODEL_UNUSABLE,
@@ -223,11 +213,6 @@ bool RaggerMemory::finalize_turn(int turn_id, const std::string& assistant_text,
     return backend_->finalize_turn(turn_id, assistant_text, model_name);
 }
 
-bool RaggerMemory::update_document_embedding(int document_id,
-                                             const std::vector<float>& emb) {
-    return backend_->update_document_embedding(document_id, emb);
-}
-
 int RaggerMemory::store_decision(const std::string& text,
                                  const std::string& status,
                                  const std::string& tags,
@@ -275,16 +260,6 @@ json RaggerMemory::agent_review(const std::string& action,
 std::vector<std::pair<int,float>> RaggerMemory::possible_supersedes_for_text(
         const std::string& text) {
     return backend_->possible_supersedes_for_text(text);
-}
-
-bool RaggerMemory::update_decision_embedding(int decision_id,
-                                             const std::vector<float>& emb) {
-    return backend_->update_decision_embedding(decision_id, emb);
-}
-
-bool RaggerMemory::update_turn_embedding(int turn_id,
-                                         const std::vector<float>& emb) {
-    return backend_->update_turn_embedding(turn_id, emb);
 }
 
 int RaggerMemory::cleanup_old_conversations(float max_age_hours) {
@@ -390,7 +365,7 @@ std::vector<SearchResult> RaggerMemory::load_all(const std::string& collection) 
     return backend_->load_all(collection);
 }
 
-int RaggerMemory::rebuild_embeddings(bool progress, const std::string& table) {
+int RaggerMemory::rebuild_embeddings(const ProgressFn& progress, const std::string& table) {
     auto emb = embedder_snapshot();
     return backend_->rebuild_embeddings(*emb, progress, table);
 }
@@ -465,17 +440,7 @@ bool RaggerMemory::try_recover_embeddings() {
     auto emb = embedder_snapshot();
     if (!emb->ready()) {
         try {
-            std::shared_ptr<Embedder> fresh;
-            if (config().embedding_engine == "external") {
-                fresh = std::make_shared<Embedder>(
-                    config().embedding_external_host,
-                    config().embedding_external_port,
-                    config().embedding_external_model,
-                    config().embedding_external_api_key,
-                    config().embedding_dimensions);
-            } else {
-                fresh = std::make_shared<Embedder>(config().resolved_model_dir());
-            }
+            std::shared_ptr<Embedder> fresh = make_embedder_from_config(config());
             // Swap the member under the mutex (S20); the old Embedder stays
             // alive until every in-flight snapshot drops its reference. The
             // backend holds a raw pointer — repoint it NOW (C §1.2).
@@ -566,8 +531,6 @@ int RaggerMemory::update_embeddings() {
             config().desired_embedding_model.empty()
                 ? config().embedding_model
                 : config().desired_embedding_model;
-        const std::string desired_model_dir =
-            ragger_base_dir() + "/models/" + desired_model_name;
         const std::string desired_engine =
             config().desired_embedding_engine.empty()
                 ? config().embedding_engine
@@ -577,18 +540,12 @@ int RaggerMemory::update_embeddings() {
         // unreadable model must fail here, with nothing promoted — promoting
         // first would record an identity the daemon cannot load, and the next
         // startup would throw out of the constructor and refuse to boot.
-        std::shared_ptr<Embedder> desired_embedder;
-        if (desired_engine == "external") {
-            desired_embedder = std::make_shared<Embedder>(
-                config().embedding_external_host,
-                config().embedding_external_port,
-                config().embedding_external_model,
-                config().embedding_external_api_key,
-                config().desired_embedding_dimensions > 0
-                    ? config().desired_embedding_dimensions : 0);
-        } else {
-            desired_embedder = std::make_shared<Embedder>(desired_model_dir);
-        }
+        // dims is passed explicitly (0 = probe the endpoint) so the configured
+        // embedding_dimensions of the OLD identity never leak into the new one.
+        std::shared_ptr<Embedder> desired_embedder = make_embedder_from_config(
+            config(), desired_engine, desired_model_name,
+            config().desired_embedding_dimensions > 0
+                ? config().desired_embedding_dimensions : 0);
         Embedder& active = *desired_embedder;
 
         const std::string vtype = vector_codec::canonical(
@@ -667,7 +624,7 @@ int RaggerMemory::update_embeddings() {
             lang::MSG_REEMBED_STARTED,
             desired_model_name, desired_engine));
 
-        int count = backend_->rebuild_embeddings(active, /*progress=*/false);
+        int count = backend_->rebuild_embeddings(active, /*progress=*/{});
 
         // Verify rather than trust. A rebuild that stops partway leaves rows
         // at the previous embedding version — same width, same blob format,
@@ -760,8 +717,8 @@ std::vector<std::string> RaggerMemory::collections() const {
     return backend_->collections();
 }
 
-bool RaggerMemory::delete_memory(int memory_id) {
-    return backend_->delete_memory(memory_id);
+bool RaggerMemory::delete_memory(int knowledge_id) {
+    return backend_->delete_memory(knowledge_id);
 }
 
 int RaggerMemory::delete_batch(const std::vector<int>& memory_ids) {

@@ -82,6 +82,19 @@ inline constexpr const TextTable* find_text_table(std::string_view name) {
     return nullptr;
 }
 
+// WHERE fragment selecting rows whose built embed text is non-empty —
+// exactly the rows embed_tables() encodes (marker rows (turn_summaries
+// text = ''), NULL-text rows and empty partial turns are skipped there;
+// B m7). ONE source for that filter: embed_tables()'s scan and
+// count_embeddable_rows() both use it so they cannot drift apart again.
+inline std::string embeddable_where_sql(const TextTable& t) {
+    if (std::string_view(t.table) == "turns")
+        // turn_embed_text(u, a) is empty only when both parts are.
+        return "(ifnull(user_text,'') != '' OR ifnull(assistant_text,'') != '')";
+    const std::string expr = t.embed_sql ? t.embed_sql : "text";
+    return "COALESCE(" + expr + ", '') != ''";
+}
+
 // Comma-separated table names for usage/error text (registry-derived).
 inline std::string text_table_names() {
     std::string out;

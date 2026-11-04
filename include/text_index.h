@@ -9,11 +9,19 @@
  */
 #pragma once
 
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace ragger {
+
+// Progress callback for the long maintenance paths (reindex, re-embed).
+// Called once per processed row with (table, done, total), and once more at
+// the end of each table with done = -1 to close the line. Empty = silent:
+// library code never writes to stdout itself (B m6) — the CLI supplies the
+// printer, the daemon passes nothing.
+using ProgressFn = std::function<void(const char* table, int done, int total)>;
 
 // One scored hit from the text index: record id + accumulated TF-IDF score.
 struct TextScore { int id; float score; };

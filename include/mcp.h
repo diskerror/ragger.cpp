@@ -27,4 +27,9 @@ void run_mcp(RaggerMemory& memory);
 /// Exposed for testing; run_mcp is the only production caller.
 nlohmann::json mcp_tool_call(RaggerMemory& memory, const nlohmann::json& params);
 
+/// The tools/list payload, with the capture_turn/build_context gating decided
+/// by the caller's flags (run_mcp passes config()). S54: exposed for testing;
+/// run_mcp is the only production caller.
+nlohmann::json mcp_tools_list(bool capture_turns, bool build_context);
+
 } // namespace ragger

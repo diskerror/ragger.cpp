@@ -5,6 +5,7 @@
 #include <set>
 #include <algorithm>
 
+#include "check.h"
 #include "fts_tokenize.h"
 #include "lang/en.h"
 
@@ -320,6 +321,46 @@ int main() {
         }
         assert(meta_count > 0);  // at least one has a valid metaphone
         std::cout << "  ✓ Metaphone assignment is consistent (one per unigram)\n";
+    }
+
+    // ===== Test 10: UTF-8 minus (U+2212) behaves like the ASCII hyphen =====
+    {
+        std::cout << "Test 10: UTF-8 minus (U+2212) recognized; U+2252 is not a minus\n";
+        // Pre-fix, the "0x92" branch sat inside the E2 89 family, matching
+        // U+2252 (E2 89 92) while real U+2212 (E2 88 92) fell to the generic
+        // non-alphanumeric path and was dropped.
+        auto utf = normalize_words("x \xE2\x88\x92 5");
+        auto ascii = normalize_words("x - 5");
+        CHECK(utf == ascii);  // both: [x, minus, five]
+        CHECK(std::find(utf.begin(), utf.end(), "minus") != utf.end());
+        CHECK(std::find(utf.begin(), utf.end(), "five") != utf.end());
+        // Bare minus between words: same shape as the ASCII hyphen (dropped).
+        auto bare_utf = normalize_words("a \xE2\x88\x92 b");
+        auto bare_ascii = normalize_words("a - b");
+        CHECK(bare_utf == bare_ascii);
+        // U+2252 must NOT produce "minus" (it is not a recognized operator).
+        auto not_minus = normalize_words("a \xE2\x89\x92 5");
+        CHECK(std::find(not_minus.begin(), not_minus.end(), "minus") == not_minus.end());
+        std::cout << "  ✓ U+2212 converts like '-', U+2252 stays unrecognized\n";
+    }
+
+    // ===== Test 11: split_sentences keeps code-ish text intact =====
+    {
+        std::cout << "Test 11: '.' ':' ';' split only before whitespace/end; '!' '?' always\n";
+        auto eq = [](const std::vector<std::string>& got,
+                     const std::vector<std::string>& want) { return got == want; };
+
+        CHECK(eq(split_sentences("version v0.17 is out. See schema.cpp: std::string works; ok"),
+                 {"version v0.17 is out.", "See schema.cpp:", "std::string works;", "ok"}));
+        CHECK(eq(split_sentences("pi is 3.14 today"), {"pi is 3.14 today"}));
+        CHECK(eq(split_sentences("a::b"), {"a::b"}));
+        CHECK(eq(split_sentences("Stop! Go? Yes."), {"Stop!", "Go?", "Yes."}));
+        CHECK(eq(split_sentences("x.y.z"), {"x.y.z"}));
+        CHECK(eq(split_sentences("end."), {"end."}));
+        CHECK(eq(split_sentences(""), {}));
+        // Accepted limitation: "e.g." is followed by a space, so it splits.
+        CHECK(eq(split_sentences("e.g. this"), {"e.g.", "this"}));
+        std::cout << "  ✓ sentence splitting matches the code-aware contract\n";
     }
 
     // ===== Test: raw UTF-8 bytes must not trip <cctype> UB =====

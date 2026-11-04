@@ -20,6 +20,8 @@
 #include <filesystem>
 #include <iostream>
 #include <print>
+#include <set>
+#include <sstream>
 
 namespace fs = std::filesystem;
 using nlohmann::json;
@@ -241,6 +243,70 @@ void p10_test_mcp_unknown_config_key(ragger::RaggerMemory& mem) {
     std::println(" OK");
 }
 
+// S54 (C §7 item 2): the tools/list contract. mcp_tools_list takes the two
+// gating flags directly, so all four combinations are testable without
+// touching persisted settings (the old tools_list() read config() itself).
+void p12_mcp_tools_list_contract() {
+    std::println("  p12_mcp_tools_list_contract...");
+    const auto find_tool = [](const json& tools, const char* name) -> json {
+        for (const auto& t : tools)
+            if (t.value("name", "") == name) return t;
+        return json();
+    };
+    for (const bool cap : {false, true}) {
+        for (const bool ctx : {false, true}) {
+            const auto result = ragger::mcp_tools_list(cap, ctx);
+            CHECK(result.contains("tools"));
+            const auto tools = result["tools"];
+            CHECK(tools.is_array());
+            // Every tool: unique name, non-empty description, object schema.
+            std::set<std::string> names;
+            for (const auto& t : tools) {
+                CHECK(t.contains("name"));
+                CHECK(names.insert(t["name"].get<std::string>()).second);
+                CHECK(!t.value("description", "").empty());
+                CHECK(t.contains("inputSchema"));
+                CHECK(t["inputSchema"].value("type", "") == "object");
+            }
+            // Gating: the two hook tools appear exactly when their flag is on.
+            CHECK(find_tool(tools, "capture_turn").is_object() == cap);
+            CHECK(find_tool(tools, "build_context").is_object() == ctx);
+        }
+    }
+
+    // S6 vocabulary: memory_search's layer list must not offer a bare
+    // `summary` layer (turn_summary is a different, legitimate name — so the
+    // check parses the enumeration instead of substring-matching "summary").
+    const auto tools = ragger::mcp_tools_list(true, true)["tools"];
+    const auto ms = find_tool(tools, "memory_search");
+    CHECK(ms.is_object());
+    const std::string ms_desc = ms.value("description", "");
+    const auto open = ms_desc.find("narrows by layer (");
+    CHECK(open != std::string::npos);
+    const auto close = ms_desc.find(')', open);
+    CHECK(close != std::string::npos);
+    bool saw_turn_summary = false;
+    std::istringstream layer_list(ms_desc.substr(open + 18, close - open - 18));
+    std::string layer;
+    while (std::getline(layer_list, layer, ',')) {
+        const auto b = layer.find_first_not_of(" \t");
+        const auto e = layer.find_last_not_of(" \t");
+        layer = b == std::string::npos ? "" : layer.substr(b, e - b + 1);
+        CHECK(layer != "summary");
+        CHECK(layer != "decisions");
+        CHECK(layer != "insights");
+        if (layer == "turn_summary") saw_turn_summary = true;
+    }
+    CHECK(saw_turn_summary);
+
+    // The search tool must not hard-code a numeric default in its schema
+    // text (the limit follows the default_search_limit setting).
+    const auto search = find_tool(tools, "search");
+    CHECK(search.is_object());
+    CHECK(search.dump().find("default: 5") == std::string::npos);
+    std::println(" OK");
+}
+
 int main() {
     TestEnv env("agent_parse");  // must be first: isolates from ~/.ragger
     std::println("Running agent-parse tests:");
@@ -258,6 +324,7 @@ int main() {
         ragger::RaggerMemory mem(TEMP_DB);
         test_mcp_tool_call_bad_arg_type(mem);
         p10_test_mcp_unknown_config_key(mem);
+        p12_mcp_tools_list_contract();
         mem.close();
     }
 

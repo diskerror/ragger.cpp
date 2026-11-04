@@ -1,40 +1,10 @@
 #include "sqlite/backend_impl.h"
 #include "embedder.h"
-#include "config.h"
 #include "lang.h"
-#include "util/fs.h"
 #include "util/time.h"
-#include "util/sqlite.h"
-#include "double_metaphone.h"
-#include "fts_tokenize.h"
-#include "sqlite/text_index.h"
-#include "vector_codec.h"
 #include "Logger.h"
-#include <format>
-#include "nlohmann_json.hpp"
 
-#include <sqlite3.h>
-#include <Eigen/Dense>
 
-#include <algorithm>
-#include <cctype>
-#include <chrono>
-#include <cstdlib>
-#include <cstring>
-#include <ctime>
-#include <unordered_map>
-#include <unordered_set>
-#include <iomanip>
-#include <iterator>
-#include <filesystem>
-#include <numeric>
-#include <optional>
-#include <regex>
-#include <set>
-#include <mutex>
-#include <iostream>
-#include <sstream>
-#include <stdexcept>
 
 namespace ragger::sqlite {
 
@@ -62,26 +32,26 @@ namespace fs = std::filesystem;
         };
         std::vector<std::pair<std::string, int64_t>> out;
         for (const char* t : kTables) {
-            try {
-                Stmt s(db, std::string("SELECT COUNT(*) FROM ") + t);
-                if (s.step())
-                    out.emplace_back(t, static_cast<int64_t>(s.column_int(0)));
-            } catch (...) {
-                // Table absent in this schema version — just skip it.
-            }
+            // Every listed table exists in 0.17: let a real error propagate
+            // instead of reporting it as "table absent" (B m7).
+            Stmt s(db, std::string("SELECT COUNT(*) FROM ") + t);
+            if (s.step())
+                out.emplace_back(t, static_cast<int64_t>(s.column_int(0)));
         }
         return out;
     }
 
 
-    // Total rows across the registry's embedded tables — i.e. how many rows
-    // `rebuild_embeddings()` will re-encode. (count() alone is just
-    // summaries, which understates the rebuild scope.)
+    // Total rows across the registry's embedded tables whose embed text is
+    // non-empty — i.e. how many rows `rebuild_embeddings()` will re-encode
+    // (the same predicate embed_tables() scans with; B m7). (count() alone is
+    // just summaries, which understates the rebuild scope.)
     int Backend::Impl::count_embeddable_rows(const std::string& table) const {
         int total = 0;
         for (const auto& t : kTextTables) {
             if (table != "all" && table != t.table) continue;
-            Stmt s(db, std::format("SELECT COUNT(*) FROM {}", t.table));
+            Stmt s(db, std::format("SELECT COUNT(*) FROM {} WHERE {}",
+                                   t.table, embeddable_where_sql(t)));
             if (s.step()) total += s.column_int(0);
         }
         return total;
@@ -134,8 +104,9 @@ namespace fs = std::filesystem;
     }
 
 
-    int Backend::Impl::embed_tables(Embedder& emb_ref, bool only_missing, bool progress,
-                      const std::string& table_filter) {
+    int Backend::Impl::embed_tables(Embedder& emb_ref, bool only_missing,
+                                    const ProgressFn& progress,
+                                    const std::string& table_filter) {
         struct TableSpec {
             const char* table;
             const char* id_col;
@@ -186,6 +157,10 @@ namespace fs = std::filesystem;
         // "\rReindexing {table}: {done}/{total}" style.
         auto process = [&](const TableSpec& t, bool stale_only, int table_total) {
             int table_done = 0;
+            // Rows without embeddable text never enter the scan: the same
+            // single-source predicate count_embeddable_rows() uses (B m7),
+            // so the two cannot drift apart.
+            const std::string embeddable = embeddable_where_sql(*find_text_table(t.table));
             // stale_only's filter is a plain embedding_version column
             // comparison (db_version 0.15+) — no blob decode needed. Rows
             // with embedding IS NULL were already handled in pass 1, so this
@@ -204,8 +179,8 @@ namespace fs = std::filesystem;
                 : std::format("{}, {}", t.id_col, t.text_col);
 
             std::string sel = std::format(
-                "SELECT {} FROM {} WHERE {} AND {} > ? ORDER BY {} LIMIT {}",
-                cols, t.table, filter, t.id_col, t.id_col, kBatch);
+                "SELECT {} FROM {} WHERE ({}) AND ({}) AND {} > ? ORDER BY {} LIMIT {}",
+                cols, t.table, filter, embeddable, t.id_col, t.id_col, kBatch);
             std::string upd = std::format(
                 "UPDATE {} SET embedding_version = ?, embedding = ? WHERE {} = ?",
                 t.table, t.id_col);
@@ -247,8 +222,8 @@ namespace fs = std::filesystem;
                     // in it was skipped as up-to-date or textless), so only
                     // stop when the scan itself is exhausted.
                     Stmt more(db, std::format(
-                        "SELECT 1 FROM {} WHERE {} AND {} > ? LIMIT 1",
-                        t.table, filter, t.id_col));
+                        "SELECT 1 FROM {} WHERE ({}) AND ({}) AND {} > ? LIMIT 1",
+                        t.table, filter, embeddable, t.id_col));
                     if (stale_only) more.bind(1, static_cast<int>(embedding_version_));
                     more.bind(id_param, last_id);
                     if (!more.step_checked()) break;
@@ -269,10 +244,7 @@ namespace fs = std::filesystem;
                     ++done;
                     ++table_done;
                     if (progress) {
-                        std::cout << std::format(
-                            ragger::lang::MSG_REBUILD_EMBEDDINGS_PROGRESS,
-                            t.table, table_done, table_total);
-                        std::cout.flush();
+                        progress(t.table, table_done, table_total);
                     }
                     else if (done % 1000 == 0) {
                         // Non-interactive callers (the daemon) get an audit
@@ -284,7 +256,7 @@ namespace fs = std::filesystem;
                     }
                 }
             }
-            if (progress) std::cout << "\n";
+            if (progress) progress(t.table, -1, table_total);  // close the line
         };
 
         // Pass 1: rows with no embedding (or every row, on a full rebuild).
@@ -313,9 +285,11 @@ namespace fs = std::filesystem;
     }
 
 
-    // Full re-encode of every embedded row (interactive, with progress),
+    // Full re-encode of every embedded row (progress callback optional),
     // or one table when `table` != "all".
-    int Backend::Impl::rebuild_embeddings(Embedder& emb_ref, bool progress, const std::string& table) {
+    int Backend::Impl::rebuild_embeddings(Embedder& emb_ref,
+                                          const ProgressFn& progress,
+                                          const std::string& table) {
         if (!embedder_usable(emb_ref)) return 0;
         int n = embed_tables(emb_ref, /*only_missing=*/false, progress, table);
         // Belt and braces: a full rebuild touches every corpus and a dtype
@@ -329,7 +303,7 @@ namespace fs = std::filesystem;
     // scoped to one table when `table` != "all".
     int Backend::Impl::backfill_embeddings(Embedder& emb_ref, const std::string& table) {
         if (!embedder_usable(emb_ref)) return 0;
-        return embed_tables(emb_ref, /*only_missing=*/true, /*progress=*/false, table);
+        return embed_tables(emb_ref, /*only_missing=*/true, /*progress=*/{}, table);
     }
 
 
@@ -376,7 +350,8 @@ namespace fs = std::filesystem;
 
     // (Re)build the custom index for a single text table. Delegates to the
     // TextIndex engine (schema + tokenize + TF-IDF live there now).
-    int Backend::Impl::reindex_table(const std::string& table_name, bool progress) {
+    int Backend::Impl::reindex_table(const std::string& table_name,
+                                     const ProgressFn& progress) {
         return text_index_->reindex_table(table_name, progress);
     }
 
@@ -396,7 +371,8 @@ namespace fs = std::filesystem;
     // per-batch transactions inside reindex_table JOIN it). Known cost: the
     // write lock is held for the whole run, so a running daemon's writers
     // wait (busy timeout) or fail — main.cpp prints a note about that.
-    std::vector<std::pair<std::string, int>> Backend::Impl::reindex_all(bool progress) {
+    std::vector<std::pair<std::string, int>> Backend::Impl::reindex_all(
+            const ProgressFn& progress) {
         std::vector<std::pair<std::string, int>> out;
         Transaction tx(db);
         reset_terms_table();
@@ -404,6 +380,30 @@ namespace fs = std::filesystem;
             out.emplace_back(std::string(t.table), reindex_table(t.table, progress));
         tx.commit();
         return out;
+    }
+
+
+    // S38: moved from the Backend wrapper (B §2). v2: raw verbatim exchanges
+    // (L1 turns) are what age out by retention; their gist is preserved in
+    // turn summaries and episodes. Only delete turns that HAVE a
+    // turn_summaries row (marker rows count: '' means done/skipped on
+    // purpose) — a turn with no summary row is never deleted, so a disabled
+    // summarizer cannot silently destroy unsummarized history. The FK
+    // (turn_summaries.turn_id ON DELETE SET NULL) leaves the summary behind.
+    int Backend::Impl::cleanup_old_conversations(float max_age_hours) {
+        auto cutoff = std::chrono::system_clock::now() -
+            std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                std::chrono::duration<double, std::ratio<3600>>(max_age_hours));
+        int64_t cutoff_epoch = db_epoch(std::chrono::system_clock::to_time_t(cutoff));
+
+        Stmt stmt(db,
+            "DELETE FROM turns WHERE created_at < ? "
+            "AND EXISTS (SELECT 1 FROM turn_summaries ts WHERE ts.turn_id = turns.turn_id)");
+        stmt.bind(1, cutoff_epoch);
+        if (!stmt.exec())
+            throw std::runtime_error(std::format(
+                "cleanup_old_conversations: DELETE failed: {}", sqlite3_errmsg(db)));
+        return static_cast<int>(sqlite3_changes(db));
     }
 
 
@@ -436,20 +436,15 @@ namespace fs = std::filesystem;
         return false;
     }
 
-    bool Backend::Impl::update_document_embedding(int document_id, const std::vector<float>& emb) {
-        return update_embedding(*find_text_table("documents"), document_id, emb);
-    }
-
-    bool Backend::Impl::update_decision_embedding(int decision_id, const std::vector<float>& emb) {
-        return update_embedding(*find_text_table("knowledge"), decision_id, emb);
+    bool Backend::Impl::update_decision_embedding(int knowledge_id, const std::vector<float>& emb) {
+        return update_embedding(*find_text_table("knowledge"), knowledge_id, emb);
     }
 
     // PHASE8: the old summary embedding write-back is gone with its table;
     // re-embedding goes through update_embedding(knowledge).
-
-    bool Backend::Impl::update_turn_embedding(int turn_id, const std::vector<float>& emb) {
-        return update_embedding(*find_text_table("turns"), turn_id, emb);
-    }
+    // S47: update_document_embedding and update_turn_embedding entry points
+    // deleted — no callers remained (import-docs backfills in-process since
+    // 9B step 8). update_embedding is the single write-back implementation.
 
     void Backend::Impl::invalidate_all_caches() {
         invalidate_doc_cache();
@@ -467,7 +462,7 @@ namespace fs = std::filesystem;
 
 
     // True if the knowledge row exists and has a "keep" tag.
-    bool Backend::Impl::has_keep_tag(int knowledge_id) {
+    bool Backend::Impl::has_keep_tag(int knowledge_id) const {
         Stmt s(db, "SELECT tags FROM knowledge WHERE knowledge_id = ?");
         s.bind(1, knowledge_id);
         if (!s.step()) return false;
@@ -479,12 +474,17 @@ namespace fs = std::filesystem;
     // surface, TODO Q2). Restricted to kind='note' rows that no other row
     // `supersedes` — deleting a superseded parent would dangle the chain —
     // and that carry no `keep` tag. Returns whether a row was deleted.
-    bool Backend::Impl::delete_memory(int memory_id) {
+    // S43: the single deletable-note predicate shared by delete_memory and
+    // delete_batch — the two surfaces must agree on what may be deleted.
+    constexpr const char* kDeletableNoteWhere =
+        "kind = 'note'"
+        " AND (tags IS NULL OR tags NOT LIKE '%keep%')"
+        " AND NOT EXISTS (SELECT 1 FROM knowledge c WHERE c.supersedes = knowledge.knowledge_id)";
+
+    bool Backend::Impl::delete_memory(int knowledge_id) {
         Stmt stmt(db,
-            "DELETE FROM knowledge WHERE knowledge_id = ? AND kind = 'note'"
-            "  AND (tags IS NULL OR tags NOT LIKE '%keep%')"
-            "  AND NOT EXISTS (SELECT 1 FROM knowledge c WHERE c.supersedes = knowledge.knowledge_id)");
-        stmt.bind(1, memory_id);
+            std::string("DELETE FROM knowledge WHERE knowledge_id = ? AND ") + kDeletableNoteWhere);
+        stmt.bind(1, knowledge_id);
         // PHASE9B step 4b: an error is not "nothing to delete".
         if (!stmt.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
@@ -502,10 +502,8 @@ namespace fs = std::filesystem;
         // Single atomic DELETE filtered by kind/keep/supersedes, entirely in
         // SQL. RAII: a throw between BEGIN and COMMIT used to leave the
         // connection inside an open transaction.
-        std::string sql = "DELETE FROM knowledge WHERE kind = 'note'"
-                          "  AND (tags IS NULL OR tags NOT LIKE '%keep%')"
-                          "  AND NOT EXISTS (SELECT 1 FROM knowledge c WHERE c.supersedes = knowledge.knowledge_id)"
-                          "  AND knowledge_id IN (";
+        std::string sql = std::string("DELETE FROM knowledge WHERE ") + kDeletableNoteWhere +
+                          " AND knowledge_id IN (";
         for (size_t i = 0; i < memory_ids.size(); ++i) {
             if (i > 0) sql += ",";
             sql += "?";

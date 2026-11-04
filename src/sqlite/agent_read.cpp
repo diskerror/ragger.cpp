@@ -165,8 +165,7 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
     // Lexical-only signal; ids already scored by the hybrid pass are not
     // duplicated.
     if (q.status != "active") {
-        text_index_->set_weights({config().fts_w_unigram, config().fts_w_bigram,
-                                  config().fts_w_metaphone, config().fts_literal_enabled});
+        push_text_weights();
         auto supplement = [&](const char* table, const char* pk,
                               const char* source) {
             std::unordered_set<int> seen;
@@ -198,15 +197,10 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
     // ---- session filter helpers ------------------------------------------
     // GUID -> sessions.session_id once per filter (unknown GUID -> nullopt:
     // `session` then matches nothing, `exclude_session` excludes nothing).
-    auto guid_to_id = [this](const std::string& guid) -> std::optional<int> {
-        Stmt s(db, "SELECT session_id FROM sessions WHERE guid = ?");
-        s.bind(1, guid);
-        if (!s.step()) return std::nullopt;
-        return s.column_int(0);
-    };
+    // S43: find_session is the single lookup-only helper (never creates).
     std::optional<int> sess_id, excl_id;
-    if (!q.session.empty())         sess_id = guid_to_id(q.session);
-    if (!q.exclude_session.empty()) excl_id = guid_to_id(q.exclude_session);
+    if (!q.session.empty())         sess_id = find_session(q.session);
+    if (!q.exclude_session.empty()) excl_id = find_session(q.exclude_session);
 
     // ---- batched per-layer lookups (review 3A) ----------------------------
     // One "WHERE <pk> IN (...)" query per layer per lookup instead of one
@@ -437,12 +431,10 @@ json Backend::Impl::agent_timeline(const TimelineQuery& q) {
     }
 
     // Session filter: unknown GUID matches nothing (nullopt).
+    // S43: find_session is the single lookup-only helper (never creates).
     std::optional<int> sess_id;
-    if (!q.session.empty()) {
-        Stmt s(db, "SELECT session_id FROM sessions WHERE guid = ?");
-        s.bind(1, q.session);
-        if (s.step()) sess_id = s.column_int(0);
-    }
+    if (!q.session.empty())
+        sess_id = find_session(q.session);
 
     // Each granularity builds one SELECT over (created_epoch, rowid, text,
     // session_guid) with the same filter/cursor plumbing, ordered newest

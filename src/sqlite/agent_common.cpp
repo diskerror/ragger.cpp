@@ -136,10 +136,12 @@ json fetch_knowledge_row(sqlite3* db, int rowid) {
         {"scope",   s.is_null(6) ? json(nullptr) : json(s.column_text(6))},
         {"supersedes", s.is_null(7) ? json(nullptr) : json(s.column_int(7))},
         {"created", s.column_text(8)},
+        // session/session_name/model come from COALESCE subqueries, so they
+        // are never NULL: the keys are always present, '' when absent.
+        {"session",      s.column_text(9)},
+        {"session_name", s.column_text(10)},
+        {"model",        s.column_text(11)},
     };
-    if (!s.is_null(9)) item["session"] = s.column_text(9);
-    if (!s.is_null(10)) item["session_name"] = s.column_text(10);
-    if (!s.is_null(11)) item["model"] = s.column_text(11);
     json ev = json::array();
     Stmt e(db, "SELECT turn_summary_id FROM knowledge_turn_evidence "
                "WHERE knowledge_id = ? ORDER BY turn_summary_id");

@@ -28,6 +28,7 @@
 #include <stdexcept>
 #include <set>
 #include <vector>
+#include <algorithm>
 
 namespace fs = std::filesystem;
 
@@ -1521,8 +1522,8 @@ void test_structured_decision_rebuild_is_stable(ragger::Embedder& emb) {
     const long long   bi_before   = p1_scalar_int(raw, "SELECT bigram_count" + w);
     sqlite3_close(raw);
 
-    db.rebuild_embeddings(emb, false, "knowledge");
-    db.reindex_table("knowledge", false);
+    db.rebuild_embeddings(emb, {}, "knowledge");
+    db.reindex_table("knowledge", {});
 
     raw = p1_open_raw();
     CHECK(p1_scalar_text(raw, "SELECT hex(embedding)" + w) == blob_before);
@@ -1693,6 +1694,8 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
             INSERT INTO settings VALUES ('db_version', '0.16');
             INSERT INTO settings VALUES ('session_boundary_watermark_turn_id', '99');
             INSERT INTO settings VALUES ('project_boundary_watermark_turn_id', '98');
+            INSERT INTO settings VALUES ('phon_weight', '0.1');
+            INSERT INTO settings VALUES ('ini_migrated', '1');
             CREATE TABLE turns (
                 turn_id INTEGER PRIMARY KEY AUTOINCREMENT, user_text TEXT NOT NULL,
                 assistant_text TEXT,
@@ -1853,8 +1856,12 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
     // duplicate; the restore must UPDATE).
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_sequence WHERE name = 'turn_summaries'") == 1);
     CHECK(p1_scalar_int(raw, "SELECT seq FROM sqlite_sequence WHERE name = 'turn_summaries'") == 42);
-    // Watermark settings rows deleted with the rollup machinery.
+    // Watermark settings rows deleted with the rollup machinery, and the two
+    // dead keys (phon_weight, ini_migrated) removed by the same leg (S40);
+    // surviving settings (db_version) untouched.
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM settings WHERE key LIKE '%boundary_watermark_turn_id'") == 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM settings WHERE key IN ('phon_weight', 'ini_migrated')") == 0);
+    CHECK(p1_scalar_text(raw, "SELECT value FROM settings WHERE key = 'db_version'") == "0.17");
     // All-table reindex ran: junctions consistent, episodes indexed.
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turn_summaries_terms WHERE turn_summary_id NOT IN (SELECT turn_summary_id FROM turn_summaries)") == 0);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM episodes_terms") > 0);
@@ -2501,8 +2508,8 @@ void test_p5_insight_rebuild_is_stable(ragger::Embedder& emb) {
     const long long bi_b  = p1_scalar_int(raw, "SELECT bigram_count" + wb);
     sqlite3_close(raw);
 
-    db.rebuild_embeddings(emb, false, "knowledge");
-    db.reindex_table("knowledge", false);
+    db.rebuild_embeddings(emb, {}, "knowledge");
+    db.reindex_table("knowledge", {});
 
     raw = p1_open_raw();
     CHECK(p1_scalar_text(raw, "SELECT hex(embedding)" + wa) == blob_a);
@@ -3919,6 +3926,366 @@ void p1t_test_import_probes(ragger::Embedder& emb) {
 }
 
 // =======================================================================
+// S51 (a) (B §6 item 3): search_by_metadata temporal boundaries.
+// The existing probe brackets ONE row; this pins the boundary behaviour with
+// three rows a day apart.
+//
+// Semantics AS IMPLEMENTED (src/sqlite/maintenance.cpp search_by_metadata):
+//   after  -> created_at >= ?   INCLUSIVE lower bound
+//   before -> created_at <  ?   EXCLUSIVE upper bound
+// i.e. a half-open interval [after, before). Note the asymmetry: it is not
+// "both inclusive", so after==before is the EMPTY set, not a single row.
+// created_at is an INTEGER epoch and both bounds resolve through
+// resolve_epoch() (local-time '%F %T'), so raw-string comparison never
+// applies here.
+// =======================================================================
+void p11_search_by_metadata_boundaries(ragger::Embedder& emb) {
+    std::println("  p11_search_by_metadata_boundaries...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    const std::string t0 = "2026-05-01 12:00:00";
+    const std::string t1 = "2026-05-02 12:00:00";   // t0 + 1d
+    const std::string t2 = "2026-05-03 12:00:00";   // t0 + 2d
+    for (const auto& [ts, txt] : std::vector<std::pair<std::string, std::string>>{
+             {t0, "boundary row alpha"}, {t1, "boundary row beta"}, {t2, "boundary row gamma"}}) {
+        ragger::KnowledgeInput in;
+        in.kind = "note";
+        in.text = txt;
+        in.tags = "boundary";
+        in.source_timestamp = ts;
+        CHECK(db.store_knowledge(in).id > 0);
+    }
+
+    auto texts = [](std::vector<ragger::SearchResult> v) {
+        std::sort(v.begin(), v.end(), [](const ragger::SearchResult& a, const ragger::SearchResult& b) {
+            return a.timestamp > b.timestamp;
+        });
+        std::string s;
+        for (const auto& r : v) { s += r.text; s += "|"; }
+        return s;
+    };
+
+    // INCLUSIVE lower bound: the row exactly ON the bound is included.
+    CHECK(texts(db.search_by_metadata({{"tags", "boundary"}}, 0, t1, "")) ==
+          "boundary row gamma|boundary row beta|");
+    // EXCLUSIVE upper bound: the row exactly ON the bound is NOT included.
+    CHECK(texts(db.search_by_metadata({{"tags", "boundary"}}, 0, "", t1)) ==
+          "boundary row alpha|");
+    // Half-open: [t1, t1) is empty (this is where "both inclusive" would give 1).
+    CHECK(db.search_by_metadata({{"tags", "boundary"}}, 0, t1, t1).empty());
+    // [t0, t2) -> the two older rows; ORDER BY created_at DESC.
+    CHECK(texts(db.search_by_metadata({{"tags", "boundary"}}, 0, t0, t2)) ==
+          "boundary row beta|boundary row alpha|");
+    // Open lower bound: [.., t2) excludes the row ON t2 (upper bound is <).
+    CHECK(texts(db.search_by_metadata({{"tags", "boundary"}}, 0, "", t2)) ==
+          "boundary row beta|boundary row alpha|");
+    CHECK(texts(db.search_by_metadata({{"tags", "boundary"}}, 0, t2, "")) ==
+          "boundary row gamma|");
+    // A lower bound one second past the newest row matches nothing (>= on a
+    // value no row has).
+    CHECK(db.search_by_metadata({{"tags", "boundary"}}, 0, "2026-05-03 12:00:01").empty());
+    // Timestamps render as local datetime strings, never bare epochs.
+    for (const auto& r : db.search_by_metadata({{"tags", "boundary"}}))
+        CHECK(r.timestamp.size() == 19 && r.timestamp[4] == '-' && r.timestamp[13] == ':');
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+
+// =======================================================================
+// S51 (b) (B §6 item 11-ish, C §7): agent_search on the DEGRADED path
+// (no usable embedder -> search_text_only) with a document hit and a time
+// window. The existing since/until probe (test_p2_search_since) uses a ready
+// embedder and a knowledge row; nothing covered the degraded branch, the
+// documents layer, or `until`.
+//
+// Window semantics AS IMPLEMENTED (src/sqlite/agent_read.cpp): the bounds are
+// resolved by resolve_agent_time_bound() and then compared as STRINGS against
+// the rendered local datetime of each hit — `since` inclusive, `until`
+// inclusive, with a bare "YYYY-MM-DD" until widened to 23:59:59 (end_of_day).
+// That is [since, until] — deliberately different from search_by_metadata's
+// half-open [after, before).
+//
+// Runs without an ONNX model: the DB-only constructor leaves the embedder
+// null, which is exactly the "unready" condition.
+// =======================================================================
+void p11_agent_search_unready_document_window(ragger::Embedder& emb) {
+    std::println("  p11_agent_search_unready_document_window...");
+    cleanup();
+
+    // Writes need an embedder (require_embedder() throws without one), so the
+    // fixture is written with the model and the DB is then REOPENED through the
+    // DB-only constructor: that is the unready condition, reached the way a
+    // server without a model reaches it.
+    {
+        ragger::sqlite::Backend w(emb, TEMP_DB);
+        ragger::DocumentChunk early;
+    early.path = "/docs/window-early.md";
+    early.title = "window early";
+    early.text = "otter slide rule specifications";
+        early.imported_at = "2026-06-01 10:00:00";
+        CHECK(w.store_document(early, /*defer_embedding=*/true) > 0);
+
+        ragger::DocumentChunk late;
+        late.path = "/docs/window-late.md";
+        late.title = "window late";
+        late.text = "otter slide rule calibration";
+        late.imported_at = "2026-06-05 10:00:00";
+        CHECK(w.store_document(late, /*defer_embedding=*/true) > 0);
+    }
+
+    ragger::sqlite::Backend db(TEMP_DB);   // DB-only: embedder == nullptr
+
+    // Handles sorted so score ordering can't make the assertion flaky.
+    auto ids = [](std::vector<ragger::AgentHit> hits) {
+        std::vector<std::string> v;
+        for (const auto& h : hits) v.push_back(h.id);
+        std::sort(v.begin(), v.end());
+        std::string s;
+        for (const auto& x : v) { s += x; s += "|"; }
+        return s;
+    };
+
+    ragger::AgentSearchQuery q;
+    q.query = "otter slide rule";
+    q.limit = 10;
+
+    // Degraded path finds both documents. NOTE: matched_by is deliberately NOT
+    // asserted here -- see p11_agent_search_matched_by_no_vector_signal below
+    // (FINDING, parked unregistered).
+    auto all = db.agent_search(q);
+    CHECK(all.size() == 2);
+    for (const auto& h : all) {
+        CHECK(h.layer == "document");
+        // Rendered local datetime, never a bare epoch.
+        CHECK(h.created.size() == 19);
+        CHECK(h.created[4] == '-' && h.created[7] == '-' &&
+              h.created[10] == ' ' && h.created[13] == ':' && h.created[16] == ':');
+    }
+
+    // since (inclusive lower bound, date widened to 00:00:00).
+    q.since = "2026-06-03";
+    CHECK(ids(db.agent_search(q)) == "document:2|");
+    // until (inclusive upper bound, date widened to 23:59:59).
+    q.since = "";
+    q.until = "2026-06-03";
+    CHECK(ids(db.agent_search(q)) == "document:1|");
+    // A bare `since` date is widened to 00:00:00, so the row on that day is in
+    // (and so is every later row: this bound alone has no upper edge).
+    q.until = "";
+    q.since = "2026-06-01";
+    CHECK(ids(db.agent_search(q)) == "document:1|document:2|");
+    // Empty window.
+    q.since = "2026-06-02";
+    q.until = "2026-06-04";
+    CHECK(db.agent_search(q).empty());
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+
+// =======================================================================
+// S51 (c) (C §7): agent_timeline at TURN granularity across TWO interleaved
+// sessions. Existing coverage: turn granularity for ONE session
+// (test_p4_timeline_turn_fallback) and session/episode granularity for two.
+// Nothing pinned that a session-filtered turn timeline excludes the other
+// session's rows while the two are interleaved in time, nor that keyset
+// paging over a filtered timeline neither repeats nor skips.
+// =======================================================================
+void p11_timeline_turn_interleaved_sessions(ragger::Embedder& emb) {
+    std::println("  p11_timeline_turn_interleaved_sessions...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    const std::string ga = "p11-interleave-a", gb = "p11-interleave-b";
+    // A1, B1, A2, B2 — interleaved, ascending in time.
+    int a1 = db.store_turn("Alpha first question",  "a1", "test-model", true, ga, "2026-07-01 10:00:00");
+    int b1 = db.store_turn("Bravo first question",  "b1", "test-model", true, gb, "2026-07-01 10:01:00");
+    int a2 = db.store_turn("Alpha second question", "a2", "test-model", true, ga, "2026-07-01 10:02:00");
+    int b2 = db.store_turn("Bravo second question", "b2", "test-model", true, gb, "2026-07-01 10:03:00");
+    CHECK(a1 > 0 && b1 > 0 && a2 > 0 && b2 > 0);
+
+    auto collect = [&](const std::string& session, int limit) {
+        std::vector<std::string> ids;
+        ragger::TimelineQuery q;
+        q.granularity = "turn";
+        q.session = session;
+        q.limit = limit;
+        for (int guard = 0; guard < 10; ++guard) {
+            auto page = db.agent_timeline(q);
+            for (const auto& it : page["items"]) ids.push_back(it["id"].get<std::string>());
+            if (page["next_cursor"].is_null()) return ids;
+            q.cursor = page["next_cursor"].get<std::string>();
+        }
+        return ids;   // guard exhausted; the CHECK below fails loudly
+    };
+    auto turn = [](int id) { return "turn:" + std::to_string(id); };
+
+    // (locals, not literals inside CHECK: the macro splits on top-level commas)
+    const std::vector<std::string> expect_a{turn(a2), turn(a1)};
+    const std::vector<std::string> expect_b{turn(b2), turn(b1)};
+
+    // Session-filtered: only that session's turns, newest first.
+    CHECK(collect(ga, 20) == expect_a);
+    CHECK(collect(gb, 20) == expect_b);
+
+    // Paging one at a time must yield exactly the same set, in the same order
+    // (no repeat across pages, no skip).
+    CHECK(collect(ga, 1) == expect_a);
+    CHECK(collect(gb, 1) == expect_b);
+
+    // Unfiltered: all four, strictly descending in time (the interleave shows).
+    ragger::TimelineQuery all;
+    all.granularity = "turn";
+    all.limit = 20;
+    auto page = db.agent_timeline(all);
+    CHECK(page["items"].size() == 4);
+    for (size_t i = 1; i < page["items"].size(); ++i)
+        CHECK(page["items"][i - 1]["created"].get<std::string>() >
+              page["items"][i]["created"].get<std::string>());
+    CHECK(page["items"][0]["id"].get<std::string>() == turn(b2));
+    CHECK(page["items"][3]["id"].get<std::string>() == turn(a1));
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+
+// =======================================================================
+// S51 (d): time-bound formats, ONE CASE PER FORMAT.
+//
+// SPEC DEVIATION, stated rather than papered over: the step names `recipe.cpp`,
+// but recipe.cpp parses NO timestamps at all (parse_recipe reads name /
+// description / max_tokens / chars_per_token / layers[kind,limit|count]; see
+// include/recipe.h) and no recipe consumer formats a timestamp either — grepped
+// src/recipe*.cpp and src/memory.cpp for time/date/strftime/localtime. The only
+// multi-format timestamp PARSER in the query path is resolve_agent_time_bound()
+// (file-static in src/sqlite/agent_read.cpp), so its accepted shapes are pinned
+// here through the public surface that reaches it. Formats, read from the code:
+//   "<N>d" / "<N>h"   N days/hours AGO (rejected above 100000000)
+//   "YYYY-MM-DD"      since -> +00:00:00, until -> +23:59:59 (end_of_day)
+//   "YYYY-MM-DD HH:MM:SS"  used verbatim
+//   anything else     std::invalid_argument
+// =======================================================================
+void p11_time_bound_formats(ragger::Embedder& emb) {
+    std::println("  p11_time_bound_formats...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    const std::string guid = "p11-tbf";
+    int d1 = db.store_turn("July ten",  "x", "test-model", true, guid, "2026-07-10 08:00:00");
+    int d2 = db.store_turn("July eleven", "x", "test-model", true, guid, "2026-07-11 08:00:00");
+    // Relative rows, anchored to now so the "<N>d"/"<N>h" formats have meaning.
+    const auto wall = std::time(nullptr);
+    auto stamp = [](std::time_t t) {
+        std::tm tm{};
+        localtime_r(&t, &tm);
+        char buf[20];
+        std::strftime(buf, sizeof buf, "%F %T", &tm);
+        return std::string(buf);
+    };
+    int r3 = db.store_turn("Three hours ago", "x", "test-model", true, guid, stamp(wall - 3 * 3600));
+    int r4 = db.store_turn("Forty hours ago", "x", "test-model", true, guid, stamp(wall - 40 * 3600));
+    CHECK(d1 > 0 && d2 > 0 && r3 > 0 && r4 > 0);
+
+    auto count = [&](const std::string& since, const std::string& until) {
+        ragger::TimelineQuery q;
+        q.granularity = "turn";
+        q.session = guid;
+        q.since = since;
+        q.until = until;
+        q.limit = 100;
+        return db.agent_timeline(q)["items"].size();
+    };
+    auto throws_bad = [&](const std::string& bound) {
+        ragger::TimelineQuery q;
+        q.granularity = "turn";
+        q.session = guid;
+        q.since = bound;
+        try { db.agent_timeline(q); }
+        catch (const std::invalid_argument&) { return true; }
+        return false;
+    };
+
+    // "YYYY-MM-DD": widened to the whole local day on BOTH sides, so a
+    // since==until date still selects that day's rows.
+    CHECK(count("2026-07-10", "2026-07-10") == 1);
+    CHECK(count("2026-07-11", "2026-07-11") == 1);
+    CHECK(count("2026-07-10", "2026-07-11") == 2);
+    // "YYYY-MM-DD HH:MM:SS": verbatim, inclusive at the exact instant.
+    CHECK(count("2026-07-10 08:00:00", "2026-07-10 08:00:00") == 1);
+    CHECK(count("2026-07-10 08:00:01", "2026-07-11 23:59:59") == 1);
+    // "<N>h" / "<N>d": ago-relative against the two relative rows.
+    CHECK(count("12h", "") == 1);     // only the 3h-old row
+    CHECK(count("2d", "") == 2);      // 3h and 40h old; July rows are older
+    CHECK(count("", "12h") == 3);     // everything OLDER than 12h ago
+    // Rejections (each a distinct branch of the parser).
+    CHECK(throws_bad("2026-13-45"));            // month out of range
+    CHECK(throws_bad("2026-07-10 25:00:00"));   // hour out of range
+    CHECK(throws_bad("100000001d"));            // relative cap
+    CHECK(throws_bad("abc"));                   // no shape matches
+    CHECK(throws_bad("1d2"));                   // digit suffix, not a shape
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+
+// =======================================================================
+// FINDING (S51 b) — PARKED, NOT REGISTERED IN main(). Do not "fix" this by
+// weakening it; it asserts what matched_by SHOULD be.
+//
+// On the degraded path (no embedder) every candidate carries vec_score = -1.0f
+// as the "no vector signal" sentinel (search_text_only), and agent_search then
+// labels hits with:
+//     vec>0 && bm25>0 -> "both";  bm25>0 -> "lexical";  else -> "vector"
+// The final `else` therefore reports "vector" for a hit that provably has NO
+// vector signal, whenever its text score is exactly 0.0.
+//
+// That is reachable, not theoretical: idf = log(N/df) is 0 when the query term
+// occurs in EVERY row of the corpus, so a 2-document fixture whose two rows
+// both contain the query scores 0.0 on both. Observed (2026-11-03):
+//     id=document:1 layer=document matched=vector score=0
+//     id=document:2 layer=document matched=vector score=0
+// The agent API surfaces matched_by to callers, so "vector" here is a lie about
+// provenance. Suggested shape of a fix (Reid's call -- it is an API contract):
+// branch on the two signals explicitly and give the no-positive-signal case its
+// own label ("neither"), or treat vec_score <= 0 as "no vector" so the degraded
+// path can never claim "vector".
+// =======================================================================
+void p11_agent_search_matched_by_no_vector_signal(ragger::Embedder& emb) {
+    std::println("  p11_agent_search_matched_by_no_vector_signal...");
+    cleanup();
+    {
+        ragger::sqlite::Backend w(emb, TEMP_DB);
+        ragger::DocumentChunk c;
+        c.path = "/docs/matched-by.md";
+        c.title = "matched by";
+        c.text = "walrus barometer reading";
+        c.imported_at = "2026-06-01 10:00:00";
+        CHECK(w.store_document(c, /*defer_embedding=*/true) > 0);
+    }
+    ragger::sqlite::Backend db(TEMP_DB);   // unready embedder
+    ragger::AgentSearchQuery q;
+    q.query = "walrus barometer";
+    auto hits = db.agent_search(q);
+    CHECK(hits.size() == 1);
+    // No embedder exists, so no hit can have matched by vector.
+    CHECK(hits[0].matched_by != "vector");
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+
+// =======================================================================
 // PHASE1 Step 5: embedder / vector-type swap must not dangle.
 // =======================================================================
 void p1_test_embedder_swap(ragger::Embedder& emb, const std::string& model_dir) {
@@ -4058,6 +4425,386 @@ void p2_test_has_embeddings_turn_summaries(ragger::Embedder& emb) {
     // The ONLY embedded row is a turn_summaries row — before the fix the
     // UNION omitted that table and this returned false.
     CHECK(db.has_embeddings());
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+// S38: cleanup_old_conversations deletes only OLD turns that HAVE a
+// turn_summaries row (marker rows count); unsummarized turns survive.
+// Failures throw; no open transaction may survive them.
+void p10_cleanup_old_conversations(ragger::Embedder& emb) {
+    std::println("  p10_cleanup_old_conversations...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    const std::string old_ts = "2026-01-01 00:00:00";  // far past a 1h cutoff
+    const int a = db.store_turn("old a", "answer a", "", false, "", old_ts);
+    const int b = db.store_turn("old b", "answer b", "", false, "", old_ts);
+    const int c = db.store_turn("old c", "answer c", "", false, "", old_ts);
+    const int d = db.store_turn("recent d", "answer d");
+    CHECK(a > 0 && b > 0 && c > 0 && d > 0);
+    CHECK(db.finalize_turn_summary(a, "summary a", "summarizer-model"));
+    CHECK(db.mark_turn_summarized(b, "trivial-skip-model"));  // marker row
+    // c deliberately gets NO summary row.
+    CHECK(db.finalize_turn_summary(d, "summary d", "summarizer-model"));
+
+    CHECK(db.cleanup_old_conversations(1.0f) == 2);  // A and B only
+
+    sqlite3* raw = nullptr;
+    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    CHECK(p1_scalar_int(raw, std::format(
+        "SELECT COUNT(*) FROM turns WHERE turn_id IN ({},{})", a, b)) == 0);
+    CHECK(p1_scalar_int(raw, std::format(
+        "SELECT COUNT(*) FROM turns WHERE turn_id IN ({},{})", c, d)) == 2);
+    // The FK (turn_summaries.turn_id ON DELETE SET NULL) keeps the summaries.
+    CHECK(p1_scalar_int(raw,
+        "SELECT COUNT(*) FROM turn_summaries WHERE turn_id IS NULL AND text = 'summary a'") == 1);
+    // foreign_key_check: no violation rows.
+    {
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(raw, "PRAGMA foreign_key_check", -1, &st, nullptr) == SQLITE_OK);
+        CHECK(sqlite3_step(st) == SQLITE_DONE);
+        sqlite3_finalize(st);
+    }
+
+    // Injection (8.0.8): a failing DELETE throws and deletes nothing.
+    // C must match the DELETE first, so mark it summarized (the first pass
+    // correctly skipped it).
+    CHECK(db.mark_turn_summarized(c, "trivial-skip-model"));
+    char* err = nullptr;
+    CHECK(sqlite3_exec(raw,
+        "CREATE TRIGGER p10_boom_del BEFORE DELETE ON turns "
+        "BEGIN SELECT RAISE(ABORT,'p10 injected'); END;",
+        nullptr, nullptr, &err) == SQLITE_OK);
+    sqlite3_free(err);
+    bool threw = false;
+    try {
+        db.cleanup_old_conversations(1.0f);
+    } catch (const std::runtime_error& e) {
+        threw = true;
+        CHECK(std::string(e.what()).find("p10 injected") != std::string::npos);
+    }
+    CHECK(threw);
+    CHECK(p1_scalar_int(raw, std::format(
+        "SELECT COUNT(*) FROM turns WHERE turn_id = {}", c)) == 1);
+    // No open transaction survives the throw (second-connection write works).
+    err = nullptr;
+    CHECK(sqlite3_exec(raw, "INSERT INTO models (name) VALUES ('p10_cleanup_after_throw')",
+                       nullptr, nullptr, &err) == SQLITE_OK);
+    sqlite3_free(err);
+    err = nullptr;
+    CHECK(sqlite3_exec(raw, "DROP TRIGGER p10_boom_del", nullptr, nullptr, &err) == SQLITE_OK);
+    sqlite3_free(err);
+    // After the trigger is gone the marked turn ages out normally.
+    CHECK(db.cleanup_old_conversations(1.0f) == 1);
+    sqlite3_close(raw);
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+// S37: finalize_turn_summary/mark_turn_summarized distinguish UNIQUE (false,
+// "already summarized") from any other INSERT failure (throw), and an empty
+// model name on mark_turn_summarized is invalid_argument, not a silent false.
+void p10_summary_insert_failures(ragger::Embedder& emb) {
+    std::println("  p10_summary_insert_failures...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    const int t1 = db.store_turn("q one", "a one");
+
+    // (a) Duplicate finalize: false, row count unchanged.
+    CHECK(db.finalize_turn_summary(t1, "first summary text.", "summarizer-model"));
+    CHECK(!db.finalize_turn_summary(t1, "second summary text.", "summarizer-model"));
+
+    sqlite3* raw = nullptr;
+    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    CHECK(p1_scalar_int(raw, std::format(
+        "SELECT COUNT(*) FROM turn_summaries WHERE turn_id = {}", t1)) == 1);
+
+    // (b) Injected failure (8.0.8 recipe): throws with the trigger's message.
+    char* err = nullptr;
+    CHECK(sqlite3_exec(raw,
+        "CREATE TRIGGER p10_boom BEFORE INSERT ON turn_summaries "
+        "BEGIN SELECT RAISE(ABORT,'p10 injected'); END;",
+        nullptr, nullptr, &err) == SQLITE_OK);
+    sqlite3_free(err);
+    const int t2 = db.store_turn("q two", "a two");
+    bool threw = false;
+    try {
+        db.finalize_turn_summary(t2, "boom text", "summarizer-model");
+    } catch (const std::runtime_error& e) {
+        threw = true;
+        CHECK(std::string(e.what()).find("p10 injected") != std::string::npos);
+    }
+    CHECK(threw);
+    try {
+        db.mark_turn_summarized(t2, "some-model");
+        threw = false;
+    } catch (const std::runtime_error& e) {
+        threw = true;
+        CHECK(std::string(e.what()).find("p10 injected") != std::string::npos);
+    }
+    CHECK(threw);
+    // No open transaction may survive the throw: the backend's handle is not
+    // reachable from here, so the proxy is a write on this second connection —
+    // it would hit SQLITE_BUSY while the backend still held the write lock.
+    err = nullptr;
+    const int rc = sqlite3_exec(raw,
+        "INSERT INTO models (name) VALUES ('p10_after_throw')", nullptr, nullptr, &err);
+    if (rc != SQLITE_OK)
+        std::println("  second-connection write failed: {} ({})", rc, err ? err : "?");
+    CHECK(rc == SQLITE_OK);
+    sqlite3_free(err);
+    CHECK(p1_scalar_int(raw, std::format(
+        "SELECT COUNT(*) FROM turn_summaries WHERE turn_id = {}", t2)) == 0);
+    err = nullptr;
+    CHECK(sqlite3_exec(raw, "DROP TRIGGER p10_boom", nullptr, nullptr, &err) == SQLITE_OK);
+    sqlite3_free(err);
+
+    // (c) Empty model name: invalid_argument, and nothing was marked.
+    threw = false;
+    try {
+        db.mark_turn_summarized(t2, "");
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    CHECK(threw);
+    CHECK(!db.turn_summary_exists(t2));
+    sqlite3_close(raw);
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+// S36: deferred writes leave embedding AND embedding_version NULL through
+// the single bind_embedding*/empty-vector choke point (the explicit
+// defer_embedding bind branches are redundant). Passes before and after the
+// refactor; the non-deferred twins assert the embedder path stays non-NULL.
+void p10_defer_binds_null(ragger::Embedder& emb) {
+    std::println("  p10_defer_binds_null...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    const int kid  = std::stoi(db.store("deferred note", {}, /*defer_embedding=*/true));
+    const int kid2 = std::stoi(db.store("embedded note", {}, /*defer_embedding=*/false));
+    const int did  = db.store_decision("deferred decision", "current", "", "", /*defer_embedding=*/true);
+    ragger::DocumentChunk c1; c1.text = "deferred chunk"; c1.path = "/p/d1.md";
+    c1.chunk_index = 1;
+    ragger::DocumentChunk c2; c2.text = "embedded chunk"; c2.path = "/p/d2.md";
+    c2.chunk_index = 1;
+    const int doc1 = db.store_document(c1, /*defer_embedding=*/true);
+    const int doc2 = db.store_document(c2, /*defer_embedding=*/false);
+
+    sqlite3* raw = nullptr;
+    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    CHECK(p1_scalar_int(raw, std::format(
+        "SELECT embedding IS NULL AND embedding_version IS NULL FROM knowledge WHERE knowledge_id = {}", kid)) == 1);
+    CHECK(p1_scalar_int(raw, std::format(
+        "SELECT embedding IS NOT NULL AND embedding_version IS NOT NULL FROM knowledge WHERE knowledge_id = {}", kid2)) == 1);
+    CHECK(p1_scalar_int(raw, std::format(
+        "SELECT embedding IS NULL AND embedding_version IS NULL FROM knowledge WHERE knowledge_id = {}", did)) == 1);
+    CHECK(p1_scalar_int(raw, std::format(
+        "SELECT embedding IS NULL AND embedding_version IS NULL FROM documents WHERE document_id = {}", doc1)) == 1);
+    CHECK(p1_scalar_int(raw, std::format(
+        "SELECT embedding IS NOT NULL AND embedding_version IS NOT NULL FROM documents WHERE document_id = {}", doc2)) == 1);
+    sqlite3_close(raw);
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+// S35(1): fetch_knowledge_row's COALESCE subqueries always yield '' — the
+// session/session_name/model keys must be present even when the row has no
+// session or model (pin for the dead is_null-branch removal: JSON identical
+// before and after).
+void p10_knowledge_get_absent_keys(ragger::Embedder& emb) {
+    std::println("  p10_knowledge_get_absent_keys...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    ragger::KnowledgeInput a;
+    a.kind = "note";
+    a.text = "p10 note without session or model";
+    int a_id = db.store_knowledge(a).id;
+    ragger::AgentGetQuery g;
+    g.ids = {"knowledge:" + std::to_string(a_id)};
+    auto item = db.agent_get(g)["items"][0];
+    CHECK(item.contains("session"));
+    CHECK(item["session"] == "");
+    CHECK(item.contains("model"));
+    CHECK(item["model"] == "");
+    CHECK(item.contains("trigger"));
+    CHECK(item["trigger"].is_null());
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+// S45 pin: search_text_only must score documents through the SAME lambda as
+// the other corpora (was a hand-expanded copy). Records exact ids/sources/
+// scores from the unfixed code; must be identical after the refactor.
+void p10_text_only_one_path(ragger::Embedder& emb) {
+    std::println("  p10_text_only_one_path...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    int kn = db.store("zephyr quoll knowledge note").empty() ? -1 : 1;
+    CHECK(kn > 0);
+    int t = p2_store_turn(db, "s45-guid", "zephyr quoll question");
+    CHECK(db.finalize_turn_summary(t, "zephyr quoll summary gist", "s45-model"));
+    ragger::DocumentChunk dc;
+    dc.text = "zephyr quoll document chunk";
+    dc.path = "s45-src";
+    int doc = db.store_document(dc, false);
+    CHECK(doc > 0);
+
+    auto resp = db.search_text_only("zephyr quoll", 10);
+    std::vector<std::string> got;
+    for (const auto& r : resp.results) {
+        std::println("    hit id={} source={} score={:.8f} ts='{}'", r.id,
+                     r.metadata.value("source", "?"), r.bm25_score, r.timestamp);
+        got.push_back(r.metadata.value("source", "?"));
+    }
+    // Recorded from the UNFIXED code (hand-expanded documents branch):
+    const std::vector<std::string> want{"document", "knowledge", "turn_summary"};
+    CHECK(got == want);
+    for (const auto& r : resp.results) {
+        CHECK(r.bm25_score == 0.0f);   // idf tie: term in all 3 docs
+        // Rendered local datetime, never a bare epoch (9B step 2).
+        CHECK(r.timestamp.size() == 19 && r.timestamp[4] == '-' && r.timestamp[13] == ':');
+    }
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+// S44 pin: turn_meta + insert_turn_summary refactor. A marker row (via
+// mark_turn_summarized) and a real row (via finalize_turn_summary) must get
+// the same turn_datetime and session_id as their source turn, before and
+// after the refactor (pure: no behavior change).
+void p10_turn_meta_columns(ragger::Embedder& emb) {
+    std::println("  p10_turn_meta_columns...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    const std::string guid = "s44-guid";
+    int t1 = p2_store_turn(db, guid, "s44 alpha text");
+    int t2 = p2_store_turn(db, guid, "s44 beta text");
+
+    CHECK(db.finalize_turn_summary(t1, "s44 summary one", "s44-model"));
+    CHECK(db.mark_turn_summarized(t2, "s44-model"));
+
+    // Read back directly: turn_datetime == source turn's created_at;
+    // session_id == the session row for guid.
+    auto q = [&](const char* sql, int turn) {
+        sqlite3* raw = nullptr;
+        CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+        sqlite3_stmt* st = nullptr;
+        sqlite3_prepare_v2(raw, sql, -1, &st, nullptr);
+        sqlite3_bind_int(st, 1, turn);
+        int64_t dt = -1; int sid = -1;
+        if (sqlite3_step(st) == SQLITE_ROW) { dt = sqlite3_column_int64(st, 0); sid = sqlite3_column_int(st, 1); }
+        sqlite3_finalize(st); sqlite3_close(raw);
+        return std::pair<int64_t,int>{dt, sid};
+    };
+    auto src = [&](int turn) {
+        return q("SELECT created_at, session_id FROM turns WHERE turn_id = ?", turn);
+    };
+    auto sum = [&](int turn) {
+        return q("SELECT turn_datetime, session_id FROM turn_summaries WHERE turn_id = ?", turn);
+    };
+    auto s1 = src(t1), r1 = sum(t1);
+    auto s2 = src(t2), r2 = sum(t2);
+    CHECK(r1.first  == s1.first);   // turn_datetime matches
+    CHECK(r1.second == s1.second);  // session_id matches
+    CHECK(r2.first  == s2.first);
+    CHECK(r2.second == s2.second);
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+void p10_unknown_session_guid(ragger::Embedder& emb) {
+    std::println("  p10_unknown_session_guid...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    // One known turn so the DB has a session; the queries use an unknown GUID.
+    p2_store_turn(db, "s43-known-guid", "s43 turn");
+
+    // agent_get mode 2: unknown GUID -> empty page, no error.
+    ragger::AgentGetQuery g;
+    g.session = "s43-no-such-guid";
+    auto hist = db.agent_get(g);
+    CHECK(hist["turns"].is_array());
+    CHECK(hist["turns"].empty());
+    CHECK(hist["next_after"].is_null());
+
+    // agent_timeline: unknown GUID -> no items, no error (turn granularity).
+    ragger::TimelineQuery t;
+    t.granularity = "turn";
+    t.session = "s43-no-such-guid";
+    auto tl = db.agent_timeline(t);
+    CHECK(tl["items"].is_array());
+    CHECK(tl["items"].empty());
+    CHECK(tl["next_cursor"].is_null());
+
+    // agent_search session filter with an unknown GUID matches nothing.
+    ragger::AgentSearchQuery aq;
+    aq.query = "s43 turn";
+    aq.session = "s43-no-such-guid";
+    auto hits = db.agent_search(aq);
+    CHECK(hits.empty());
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+void p10_embeddable_counts(ragger::Embedder& emb) {
+    std::println("  p10_embeddable_counts...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    // turn_summaries fixture: 2 rows with text, 1 marker ('' = skipped on
+    // purpose), 1 legacy NULL-text row. embed_tables() skips the last two;
+    // count_embeddable_rows() must agree (B m7).
+    int t1 = db.store_turn("q one", "a one");
+    int t2 = db.store_turn("q two", "a two");
+    int t3 = db.store_turn("q three", "a three");
+    int t4 = db.store_turn("q four", "a four");
+    CHECK(db.finalize_turn_summary(t1, "summary one", "test-model"));
+    CHECK(db.finalize_turn_summary(t2, "summary two", "test-model"));
+    CHECK(db.mark_turn_summarized(t3, "test-model"));
+    CHECK(db.finalize_turn_summary(t4, "summary four", "test-model"));
+    {   // Reshape one summary into the legacy NULL-text form.
+        sqlite3* raw = nullptr;
+        CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+        char* err = nullptr;
+        const std::string sql =
+            "UPDATE turn_summaries SET text = NULL WHERE text = 'summary four'";
+        CHECK(sqlite3_exec(raw, sql.c_str(), nullptr, nullptr, &err) == SQLITE_OK);
+        sqlite3_free(err);
+        sqlite3_close(raw);
+    }
+    CHECK(db.count_embeddable_rows("turn_summaries") == 2);
+
+    CHECK(!db.store("a knowledge note").empty());
+    CHECK(db.count_embeddable_rows("knowledge") == 1);
+
+    ragger::DocumentChunk chunk;
+    chunk.text = "a document chunk";
+    chunk.path = "/p/doc.md";
+    chunk.title = "Doc";
+    CHECK(db.store_document(chunk) > 0);
+    CHECK(db.count_embeddable_rows("documents") == 1);
+
+    // A full rebuild touches exactly the embeddable rows, and afterwards the
+    // counts still agree (rebuild does not change text).
+    const int rebuilt = db.rebuild_embeddings(emb);
+    CHECK(rebuilt == db.count_embeddable_rows("all"));
+
     db.close();
     cleanup();
     std::println(" OK");
@@ -4520,6 +5267,20 @@ void p5_test_episode_close(ragger::Embedder& emb) {
     }
     CHECK(db.last_episode_end(ga) == "2026-05-01 10:10:00");
 
+    // (S41.4) Episode cache metadata: `layer` was dead (no consumer anywhere);
+    // `level` stays (stats_logger's collection_of fallback chain reads it).
+    {
+        auto resp = db.search("p5ec first episode", 10, 0.0f);
+        bool saw_episode = false;
+        for (const auto& r : resp.results) {
+            if (r.metadata.value("source", "") != "episode") continue;
+            saw_episode = true;
+            CHECK(r.metadata.value("level", "") == "episode");
+            CHECK(!r.metadata.contains("layer"));
+        }
+        CHECK(saw_episode);
+    }
+
     // (c) member already in an episode -> throws, nothing written.
     {
         ragger::EpisodeClose ec2 = ec;
@@ -4932,7 +5693,7 @@ void p9b_test_reindex_atomic(ragger::Embedder& emb) {
     p9b_trigger("CREATE TRIGGER p9b_boom_docs BEFORE UPDATE ON documents "
                 "BEGIN SELECT RAISE(ABORT, 'p9b injected'); END");
     bool threw = false;
-    try { db.reindex_all(false); } catch (const std::runtime_error&) { threw = true; }
+    try { db.reindex_all({}); } catch (const std::runtime_error&) { threw = true; }
     CHECK(threw);
     const ragger::json after_fail = counts();
     for (auto& [k, v] : after_fail.items())
@@ -4940,7 +5701,7 @@ void p9b_test_reindex_atomic(ragger::Embedder& emb) {
 
     // Happy path: same totals as the per-table loop, search still works.
     p9b_trigger("DROP TRIGGER p9b_boom_docs");
-    auto done = db.reindex_all(false);
+    auto done = db.reindex_all({});
     CHECK(done.size() == 5);
     int total = 0;
     for (auto& [table, n] : done) total += n;
@@ -4954,10 +5715,10 @@ void p9b_test_reindex_atomic(ragger::Embedder& emb) {
     p9b_trigger("CREATE TRIGGER p9b_boom_kn BEFORE UPDATE ON knowledge "
                 "BEGIN SELECT RAISE(ABORT, 'p9b injected'); END");
     threw = false;
-    try { db.reindex_table("knowledge", false); } catch (const std::runtime_error&) { threw = true; }
+    try { db.reindex_table("knowledge", {}); } catch (const std::runtime_error&) { threw = true; }
     CHECK(threw);
     p9b_trigger("DROP TRIGGER p9b_boom_kn");
-    const int n = db.reindex_table("knowledge", false);
+    const int n = db.reindex_table("knowledge", {});
     CHECK(n == 3);
     CHECK(counts()["knowledge_terms"].get<int>() == before["knowledge_terms"].get<int>());
 
@@ -5421,11 +6182,26 @@ int main() {
 
     p1_test_turn_summary_index_keying(emb);
     p1t_test_import_probes(emb);
+    p11_search_by_metadata_boundaries(emb);
+    p11_agent_search_unready_document_window(emb);
+    p11_timeline_turn_interleaved_sessions(emb);
+    p11_time_bound_formats(emb);
     p1_test_embedder_swap(emb, model_dir);
     p2_test_close_really_closes(emb);
     p2_test_write_paths_postings(emb);
     p2_test_store_turn_under_outer_begin(emb);
     p2_test_has_embeddings_turn_summaries(emb);
+    p10_cleanup_old_conversations(emb);
+    p10_summary_insert_failures(emb);
+    p10_defer_binds_null(emb);
+    p10_knowledge_get_absent_keys(emb);
+    p10_text_only_one_path(emb);
+    p10_turn_meta_columns(emb);
+    // p10_unknown_session_guid(emb);  // FINDING 2026-11-03: fails on old code
+    // (agent_timeline/agent_search return UNFILTERED results for an unknown
+    // session GUID; comments in agent_read.cpp say 'matches nothing'). Left
+    // defined below, unregistered, per the findings rule; awaiting Reid.
+    p10_embeddable_counts(emb);
     p2_test_backfill_invalidates_dec_cache(emb);
     p2_test_db_version_gate(emb);
     p2_test_require_embedder(emb);

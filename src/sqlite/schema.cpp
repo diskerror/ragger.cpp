@@ -1,41 +1,12 @@
 #include "sqlite/backend_impl.h"
 #include "ddl.h"
-#include "embedder.h"
 #include "config.h"
 #include "lang.h"
 #include "util/fs.h"
-#include "util/time.h"
-#include "util/sqlite.h"
-#include "double_metaphone.h"
-#include "fts_tokenize.h"
-#include "sqlite/text_index.h"
-#include "vector_codec.h"
 #include "Logger.h"
-#include <format>
-#include "nlohmann_json.hpp"
 
-#include <sqlite3.h>
-#include <Eigen/Dense>
 
-#include <algorithm>
-#include <cctype>
-#include <chrono>
-#include <cstdlib>
-#include <cstring>
-#include <ctime>
-#include <unordered_map>
-#include <unordered_set>
-#include <iomanip>
-#include <iterator>
-#include <filesystem>
-#include <numeric>
-#include <optional>
-#include <regex>
 #include <set>
-#include <mutex>
-#include <iostream>
-#include <sstream>
-#include <stdexcept>
 
 namespace ragger::sqlite {
 
@@ -203,7 +174,7 @@ bool pragma_bool(Impl& self, const char* name);
     /// ADD COLUMN migrations (SQLite has no ADD COLUMN IF NOT EXISTS).
     /// The table name is inlined (PRAGMA table_info doesn't take a bound
     /// parameter reliably); callers pass internal constants, never user input.
-    bool Backend::Impl::column_exists(const std::string& table, const std::string& col) {
+    bool Backend::Impl::column_exists(const std::string& table, const std::string& col) const {
         Stmt s(db, "PRAGMA table_info(" + table + ")");
         while (s.step()) {
             if (s.column_text(1) == col) return true;  // col 1 = column name
@@ -212,7 +183,7 @@ bool pragma_bool(Impl& self, const char* name);
     }
 
 
-    bool Backend::Impl::table_exists(const std::string& table) {
+    bool Backend::Impl::table_exists(const std::string& table) const {
         Stmt s(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?");
         s.bind(1, table);
         return s.step();
@@ -540,7 +511,7 @@ bool pragma_bool(Impl& self, const char* name);
     }
 
 
-    std::string Backend::Impl::db_version() {
+    std::string Backend::Impl::db_version() const {
         Stmt s(db, "SELECT value FROM settings WHERE key = 'db_version'");
         if (s.step()) return s.column_text(0);
         return "";  // absent
@@ -1049,17 +1020,19 @@ bool pragma_bool(Impl& self, const char* name);
             Diskerror::Logger::info("  reindexing all text tables...");
             reset_terms_table();
             for (const auto& t : kTextTables)
-                reindex_table(t.table, /*progress=*/true);
+                reindex_table(t.table);  // silent: library code owns no stdout
 
             // ---- §7 (migrate-0.16-to-0.17.sql): settings cleanup, seq
             // restore, version stamp — after the reindex, before the final
             // FK diff (canonical order; PHASE9).
 
             // PHASE5: the boundary-watermark machinery is deleted with the
-            // session/project rollups; drop their settings rows.
+            // session/project rollups; drop their settings rows, plus the two
+            // dead keys no code reads anymore (S40).
             exec("DELETE FROM settings WHERE key IN "
                  "('session_boundary_watermark_turn_id', "
-                 " 'project_boundary_watermark_turn_id')");
+                 " 'project_boundary_watermark_turn_id', "
+                 " 'phon_weight', 'ini_migrated')");
 
             // Restore the saved AUTOINCREMENT counters (§0 restore; the
             // rebuilds reset sqlite_sequence to MAX(id); the saved watermark

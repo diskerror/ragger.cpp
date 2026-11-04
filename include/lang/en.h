@@ -809,6 +809,7 @@ inline constexpr std::array<std::pair<std::string_view, std::string_view>, 6> MA
     {"=", "equals"},
     {"\xE2\x89\xA0", "not equal to"},  // UTF-8 not-equals (≠, U+2260: E2 89 A0)
     {"\xE2\x89\x88", "approximately equal to"},  // UTF-8 approx-equals (≈, U+2248: E2 89 88)
+    {"\xE2\x88\x92", "minus"},  // UTF-8 minus (−, U+2212: E2 88 92)
 }};
 
 /**

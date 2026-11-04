@@ -3,6 +3,7 @@
  */
 #include "embedder.h"
 #include "config.h"
+#include "util/fs.h"
 #include "lang.h"
 #include "Logger.h"
 #include "tokenizer_wrapper.h"
@@ -363,6 +364,30 @@ Embedder::embed_batch(const std::vector<std::string>& texts) const {
     out.reserve(texts.size());
     for (const auto& t : texts) out.push_back(embed(t));
     return out;
+}
+
+std::unique_ptr<Embedder> make_embedder_from_config(
+    const Config& cfg,
+    const std::string& engine_override,
+    const std::string& model_override,
+    std::optional<int> dims_override) {
+    const std::string engine =
+        engine_override.empty() ? cfg.embedding_engine : engine_override;
+    if (engine == "external") {
+        return std::make_unique<Embedder>(
+            cfg.embedding_external_host,
+            cfg.embedding_external_port,
+            cfg.embedding_external_model,
+            cfg.embedding_external_api_key,
+            dims_override.value_or(cfg.embedding_dimensions));
+    }
+    // Internal (ONNX): every managed model lives at <base>/models/<provider>/
+    // <model>, so an override resolves exactly the way resolved_model_dir()
+    // does for the configured name.
+    const std::string model_dir = model_override.empty()
+        ? cfg.resolved_model_dir()
+        : ragger_base_dir() + "/models/" + model_override;
+    return std::make_unique<Embedder>(model_dir);
 }
 
 } // namespace ragger

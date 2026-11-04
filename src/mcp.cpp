@@ -72,8 +72,11 @@ static std::string mcp_instructions() {
 
 /// MCP tool definitions returned for tools/list.
 /// `capture_turn` and `build_context` are omitted when their respective
-/// features are disabled in settings, so agents don't see hooks they can't use.
-static nlohmann::json tools_list() {
+/// features are disabled, so agents don't see hooks they can't use.
+/// S54: the two flags are parameters (run_mcp passes config()); the old form
+/// read config() internally, which made the gating untestable without
+/// mutating persisted settings.
+static nlohmann::json tools_list(bool capture_turns, bool build_context) {
     nlohmann::json tools = nlohmann::json::array({
         {
             {"name", "store"},
@@ -330,7 +333,7 @@ static nlohmann::json tools_list() {
             }}
         }
     });
-    if (config().capture_turns) {
+    if (capture_turns) {
         tools.push_back({
             {"name", "capture_turn"},
             {"description", "Push a completed conversation turn (user + assistant) "
@@ -361,7 +364,7 @@ static nlohmann::json tools_list() {
             }}
         });
     }
-    if (config().build_context) {
+    if (build_context) {
         tools.push_back({
             {"name", "build_context"},
             {"description", "Assemble a session's context as recipe-shaped chunks "
@@ -382,6 +385,10 @@ static nlohmann::json tools_list() {
         });
     }
     return {{"tools", tools}};
+}
+
+nlohmann::json mcp_tools_list(bool capture_turns, bool build_context) {
+    return tools_list(capture_turns, build_context);
 }
 
 /// Dispatch a tools/call request and return the MCP result object.
@@ -738,7 +745,7 @@ void run_mcp(RaggerMemory& memory) {
                     };
 
                 } else if (method == "tools/list") {
-                    result = tools_list();
+                    result = mcp_tools_list(config().capture_turns, config().build_context);
 
                 } else if (method == "tools/call") {
                     result = mcp_tool_call(memory, params);

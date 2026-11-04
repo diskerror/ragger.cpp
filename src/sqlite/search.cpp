@@ -1,40 +1,8 @@
 #include "sqlite/backend_impl.h"
 #include "embedder.h"
 #include "config.h"
-#include "lang.h"
-#include "util/fs.h"
-#include "util/time.h"
-#include "util/sqlite.h"
-#include "double_metaphone.h"
-#include "fts_tokenize.h"
-#include "sqlite/text_index.h"
-#include "vector_codec.h"
-#include "Logger.h"
-#include <format>
-#include "nlohmann_json.hpp"
 
-#include <sqlite3.h>
-#include <Eigen/Dense>
 
-#include <algorithm>
-#include <cctype>
-#include <chrono>
-#include <cstdlib>
-#include <cstring>
-#include <ctime>
-#include <unordered_map>
-#include <unordered_set>
-#include <iomanip>
-#include <iterator>
-#include <filesystem>
-#include <numeric>
-#include <optional>
-#include <regex>
-#include <set>
-#include <mutex>
-#include <iostream>
-#include <sstream>
-#include <stdexcept>
 
 namespace ragger::sqlite {
 
@@ -52,6 +20,13 @@ namespace fs = std::filesystem;
     // PHASE8: the summaries corpus is gone (notes ride the knowledge
     // corpus). Each SearchResult's metadata["source"] is "turn_summary",
     // "document", "knowledge" or "episode".
+    // S43: single implementation of the weight push (was three copies:
+    // search, search_text_only, agent_search supplement).
+    void Backend::Impl::push_text_weights() {
+        text_index_->set_weights({config().fts_w_unigram, config().fts_w_bigram,
+                                   config().fts_w_metaphone, config().fts_literal_enabled});
+    }
+
     SearchResponse Backend::Impl::search(const std::string& query, int limit,
                           float min_score,
                           std::vector<std::string> /*collections*/) {
@@ -71,8 +46,7 @@ namespace fs = std::filesystem;
 
         // Push the current tunable weights into the engine once per search
         // call (config-agnostic engine; only this backend reads config()).
-        text_index_->set_weights({config().fts_w_unigram, config().fts_w_bigram,
-                                   config().fts_w_metaphone, config().fts_literal_enabled});
+        push_text_weights();
 
         // ---- query embedding ------------------------------------------
         // A null or not-ready embedder here would reach Eigen with an
@@ -230,8 +204,7 @@ namespace fs = std::filesystem;
         using clock = std::chrono::high_resolution_clock;
         auto t_start = clock::now();
 
-        text_index_->set_weights({config().fts_w_unigram, config().fts_w_bigram,
-                                   config().fts_w_metaphone, config().fts_literal_enabled});
+        push_text_weights();
 
         struct Candidate {
             float        score;
@@ -240,19 +213,22 @@ namespace fs = std::filesystem;
         std::vector<Candidate> candidates;
 
         // Score one corpus via the custom TF-IDF text index, then join back
-        // to the source table for text + metadata.
+        // to the source table for text + metadata. S45: `from_clause` lets a
+        // corpus whose row lives behind a JOIN (documents) use this ONE path;
+        // it replaces the bare table name in the FROM when given.
         auto score_text_corpus = [&](
                 const char* table, const char* id_col, const char* text_col,
                 const char* source_label,
                 const char* ts_expr,
-                const char* extra_where = "") {
+                const char* extra_where = "",
+                const char* from_clause = nullptr) {
             std::vector<TextScore> hits = text_index_->score_query(table, query);
             if (hits.empty()) return;
 
             for (const auto& hit : hits) {
                 Stmt s(db, std::format(
                     "SELECT {}, {} FROM {} WHERE {} = ?{}",
-                    text_col, ts_expr, table, id_col, extra_where));
+                    text_col, ts_expr, from_clause ? from_clause : table, id_col, extra_where));
                 s.bind(1, hit.id);
                 if (!s.step()) continue;
                 std::string text = s.column_text(0);
@@ -274,31 +250,12 @@ namespace fs = std::filesystem;
         // document_source_id — pre-existing bug fixed while rewiring this
         // corpus for v0.16: the old code referenced documents.imported_at,
         // a column that has never existed on the documents table itself).
-        {
-            std::vector<TextScore> hits = text_index_->score_query("documents", query);
-            for (const auto& hit : hits) {
-                Stmt s(db,
-                    "SELECT d.text, CASE WHEN ds.imported_at IS NULL THEN '' "
-                    "ELSE datetime(ds.imported_at,'unixepoch','localtime') END "
-                    "FROM documents d LEFT JOIN document_sources ds "
-                    "ON d.document_source_id = ds.document_source_id "
-                    "WHERE d.document_id = ?");
-                s.bind(1, hit.id);
-                if (!s.step()) continue;
-                std::string text = s.column_text(0);
-                std::string ts   = s.column_text(1);
-
-                json meta = json::object();
-                meta["source"] = "document";
-
-                SearchResult sr{hit.id, text, hit.score, meta, ts};
-                sr.vec_score  = -1.0f;
-                sr.bm25_score = hit.score;
-                sr.phon_score = -1.0f;
-                sr.blended    = hit.score;
-                candidates.push_back({hit.score, std::move(sr)});
-            }
-        }
+        score_text_corpus("documents", "d.document_id", "d.text", "document",
+                          "CASE WHEN ds.imported_at IS NULL THEN '' "
+                          "ELSE datetime(ds.imported_at,'unixepoch','localtime') END",
+                          "",
+                          "documents d LEFT JOIN document_sources ds "
+                          "ON d.document_source_id = ds.document_source_id");
         // Knowledge (PHASE7: one corpus replaces decisions + insights). Same
         // status allow-list as ensure_knowledge_cache(): superseded / retired /
         // pending rows are history or unreviewed drafts — they must stay

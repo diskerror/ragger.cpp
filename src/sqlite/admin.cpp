@@ -1,40 +1,9 @@
 #include "sqlite/backend_impl.h"
-#include "embedder.h"
-#include "config.h"
 #include "lang.h"
-#include "util/fs.h"
 #include "util/time.h"
-#include "util/sqlite.h"
-#include "double_metaphone.h"
-#include "fts_tokenize.h"
-#include "sqlite/text_index.h"
-#include "vector_codec.h"
 #include "Logger.h"
-#include <format>
-#include "nlohmann_json.hpp"
 
-#include <sqlite3.h>
-#include <Eigen/Dense>
 
-#include <algorithm>
-#include <cctype>
-#include <chrono>
-#include <cstdlib>
-#include <cstring>
-#include <ctime>
-#include <unordered_map>
-#include <unordered_set>
-#include <iomanip>
-#include <iterator>
-#include <filesystem>
-#include <numeric>
-#include <optional>
-#include <regex>
-#include <set>
-#include <mutex>
-#include <iostream>
-#include <sstream>
-#include <stdexcept>
 
 namespace ragger::sqlite {
 
@@ -107,6 +76,18 @@ namespace fs = std::filesystem;
                 "INSERT OR IGNORE INTO semqlite_config (key, value) "
                 "SELECT '{1}', value FROM settings WHERE key = '{0}'",
                 m.setting, m.semqlite));
+            // If INSERT OR IGNORE discarded a settings value that differs from
+            // what semqlite_config already held, name both before the DELETE
+            // removes the evidence.
+            Stmt s(db, "SELECT value FROM settings WHERE key = ?");
+            s.bind(1, m.setting);
+            if (auto sv = s.step() ? s.column_text_opt(0) : std::nullopt) {
+                if (auto cv = get_semqlite_config(m.semqlite); cv && *cv != *sv) {
+                    Diskerror::Logger::info(std::format(
+                        "settings.{} ({}) superseded by semqlite_config.{} ({})",
+                        m.setting, *sv, m.semqlite, *cv));
+                }
+            }
             exec(std::format("DELETE FROM settings WHERE key = '{0}'", m.setting));
         }
     }
@@ -197,7 +178,7 @@ namespace fs = std::filesystem;
     }
 
 
-    std::optional<std::string> Backend::Impl::get_semqlite_config(const std::string& key) {
+    std::optional<std::string> Backend::Impl::get_semqlite_config(const std::string& key) const {
         // A read-only connection (export) never ran create_user_schema().
         if (!table_exists("semqlite_config")) return std::nullopt;
         Stmt s(db, "SELECT value FROM semqlite_config WHERE key = ?");
@@ -215,7 +196,7 @@ namespace fs = std::filesystem;
     }
 
 
-    std::optional<std::string> Backend::Impl::get_setting(const std::string& key) {
+    std::optional<std::string> Backend::Impl::get_setting(const std::string& key) const {
         // The embedding identity stamps live in semqlite_config now. Fall back
         // to a leftover `settings` row only for a connection that never ran the
         // move (read-only export of a not-yet-opened older file).
@@ -243,7 +224,7 @@ namespace fs = std::filesystem;
 
     // ---- Schema introspection (gap closure) --------------------------------
 
-    std::vector<SchemaObject> Backend::Impl::list_schema_objects() {
+    std::vector<SchemaObject> Backend::Impl::list_schema_objects() const {
         std::vector<SchemaObject> result;
         Stmt s(db,
             "SELECT type, name, tbl_name, sql FROM sqlite_master "
@@ -267,7 +248,7 @@ namespace fs = std::filesystem;
     }
 
 
-    std::vector<std::string> Backend::Impl::table_column_names(const std::string& table) {
+    std::vector<std::string> Backend::Impl::table_column_names(const std::string& table) const {
         std::vector<std::string> names;
         Stmt s(db, "PRAGMA table_info(" + table + ")");
         while (s.step_checked()) {

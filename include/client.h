@@ -36,7 +36,7 @@ public:
     int count();
     
     /// Delete a memory via HTTP.
-    bool delete_memory(int memory_id);
+    bool delete_memory(int knowledge_id);
     
     /// Delete batch via HTTP.
     int delete_batch(const std::vector<int>& memory_ids);

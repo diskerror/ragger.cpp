@@ -16,6 +16,8 @@
 
 namespace ragger {
 
+struct Config;   // config.h — argument source for make_embedder_from_config()
+
 class Embedder : public IEmbedProvider {
 public:
     /// Disabled mode. Constructs successfully but cannot embed: ready() is
@@ -96,5 +98,21 @@ private:
     struct Impl;
     std::unique_ptr<Impl> pImpl;
 };
+
+/// Build an Embedder from configuration: the single mapping from config fields
+/// onto the constructors above (S48 — this assembly existed in four places).
+/// Empty `engine_override` / `model_override` and `dims_override == nullopt`
+/// mean "use the configured values"; the model-switch path passes the desired_*
+/// values it has already resolved. `dims_override` is used verbatim when set,
+/// INCLUDING 0 (= "probe the endpoint"), which is why it is an optional rather
+/// than a 0-means-default int: the switch path must be able to ask for 0 while
+/// the startup paths keep cfg.embedding_dimensions.
+/// Throws what the constructors throw (missing/unreadable model). Choosing the
+/// disabled fallback on failure stays with the caller.
+std::unique_ptr<Embedder> make_embedder_from_config(
+    const Config& cfg,
+    const std::string& engine_override = "",
+    const std::string& model_override = "",
+    std::optional<int> dims_override = std::nullopt);
 
 } // namespace ragger

@@ -76,6 +76,16 @@ add_executable(test_fts_tokenize test_fts_tokenize.cpp)
 target_link_libraries(test_fts_tokenize PRIVATE ragger_core)
 add_test(NAME test_fts_tokenize COMMAND test_fts_tokenize)
 
+# S53 (C §7 items 1/3): live-HTTP route tests against an in-process Server on
+# an ephemeral port (harness/http_fixture.h). The fixture polls /health for up
+# to 5 s; the binary itself runs in a few seconds, so no TIMEOUT property.
+# ${CMAKE_CURRENT_SOURCE_DIR} is on the include path so harness/http_fixture.h
+# finds check.h / test_env.h beside it.
+add_executable(test_http test_http.cpp)
+target_link_libraries(test_http PRIVATE ragger_core)
+target_include_directories(test_http PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME test_http COMMAND test_http)
+
 # Stats logger tests — only built/registered when RAGGER_STATS is ON.
 # (ragger_core carries the RAGGER_STATS compile definition transitively, so
 # the test body's #ifdef sees it; we still gate the target so a default build
@@ -84,4 +94,18 @@ if(RAGGER_STATS)
     add_executable(test_stats test_stats.cpp)
     target_link_libraries(test_stats PRIVATE ragger_core)
     add_test(NAME test_stats COMMAND test_stats)
+endif()
+
+# S52 (C m23): the Hermes-plugin robustness script. It is self-contained — it
+# stubs `agent.memory_provider` and loads `hermes-plugin/__init__.py` by path —
+# so no Hermes install is needed on sys.path. It is a PLAIN SCRIPT, not a
+# unittest/pytest module (no TestCase, no __main__ guard): it runs top to
+# bottom, raises AssertionError via its own check() helper and prints "OK", so
+# the interpreter itself is the runner and its exit status is the verdict.
+# When no interpreter is found the test is simply not registered.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_FOUND)
+    add_test(NAME test_plugin_robustness
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/python/test_plugin_robustness.py)
+    set_tests_properties(test_plugin_robustness PROPERTIES TIMEOUT 120)
 endif()

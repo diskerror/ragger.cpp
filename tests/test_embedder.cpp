@@ -143,6 +143,56 @@ void p9a_test_padding_is_masked(ragger::Embedder& emb) {
     std::println(" OK");
 }
 
+// S48: the four hand-assembled Embedder construction sites (RaggerMemory ctor,
+// the degraded-recovery path, the model switch, `ragger embed`) are now one
+// helper. Pin the argument mapping each site performed:
+//   startup / recovery / embed -> configured engine, model and dimensions
+//   model switch               -> desired_* engine + model, dims passed verbatim
+//                                 (0 = probe later, never inherit the old value)
+// External construction only stores its fields (no network), so the mapping is
+// observable through is_external()/dimensions() without an endpoint.
+void p10_test_make_embedder_from_config(ragger::Embedder& onnx_emb) {
+    std::println("  p10_test_make_embedder_from_config...");
+
+    // Internal, no overrides: resolves to the same model directory this suite
+    // built by hand -> same dimensions, bit-identical vectors.
+    ragger::Config internal{};
+    auto a = ragger::make_embedder_from_config(internal);
+    CHECK(a->ready());
+    CHECK(!a->is_external());
+    CHECK(a->dimensions() == onnx_emb.dimensions());
+    CHECK(a->encode("hello world") == onnx_emb.encode("hello world"));
+
+    // model_override naming the configured model resolves to that same dir.
+    auto b = ragger::make_embedder_from_config(internal, "", internal.embedding_model);
+    CHECK(b->dimensions() == onnx_emb.dimensions());
+
+    // External: configured fields pass through, dims default to the config.
+    ragger::Config ext{};
+    ext.embedding_engine = "external";
+    ext.embedding_external_host = "127.0.0.1";
+    ext.embedding_external_port = 59999;
+    ext.embedding_external_model = "some/embedder";
+    ext.embedding_external_api_key = "k";
+    ext.embedding_dimensions = 42;
+    auto c = ragger::make_embedder_from_config(ext);
+    CHECK(c->is_external());
+    CHECK(c->ready());
+    CHECK(c->dimensions() == 42);
+
+    // dims_override wins over the configured value...
+    CHECK(ragger::make_embedder_from_config(ext, "", "", 7)->dimensions() == 7);
+    // ...including an explicit 0 (the model-switch shape).
+    CHECK(ragger::make_embedder_from_config(ext, "", "", 0)->dimensions() == 0);
+
+    // engine_override routes an internal-default config to the external ctor.
+    auto f = ragger::make_embedder_from_config(internal, "external", "", 3);
+    CHECK(f->is_external());
+    CHECK(f->dimensions() == 3);
+
+    std::println(" OK");
+}
+
 int main() {
     TestEnv env("embedder");  // must be first: isolates from ~/.ragger
     std::println("Running embedder tests:");
@@ -163,6 +213,7 @@ int main() {
     test_long_text(emb);
     test_semantic_similarity(emb);
     p9a_test_padding_is_masked(emb);
+    p10_test_make_embedder_from_config(emb);
 
     std::println("test_embedder: all passed");
     return 0;

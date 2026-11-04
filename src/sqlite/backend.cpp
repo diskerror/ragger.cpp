@@ -163,7 +163,7 @@ std::vector<EpisodeCandidateTurn> Backend::episode_candidate_turns(
     return pImpl->episode_candidate_turns(session_guid, since_ts);
 }
 
-std::vector<std::pair<std::string, int>> Backend::reindex_all(bool progress) {
+std::vector<std::pair<std::string, int>> Backend::reindex_all(const ProgressFn& progress) {
     return pImpl->reindex_all(progress);
 }
 
@@ -226,7 +226,7 @@ std::vector<SearchResult> Backend::load_all(const std::string& collection) {
     return pImpl->load_all(collection);
 }
 
-int Backend::rebuild_embeddings(Embedder& embedder, bool progress, const std::string& table) {
+int Backend::rebuild_embeddings(Embedder& embedder, const ProgressFn& progress, const std::string& table) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->rebuild_embeddings(embedder, progress, table);
 }
@@ -258,7 +258,7 @@ uint8_t Backend::increment_embedding_version() {
     return pImpl->increment_embedding_version();
 }
 
-int Backend::reindex_table(const std::string& table, bool progress) {
+int Backend::reindex_table(const std::string& table, const ProgressFn& progress) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->reindex_table(table, progress);
 }
@@ -266,12 +266,6 @@ int Backend::reindex_table(const std::string& table, bool progress) {
 void Backend::reset_terms_table() {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     pImpl->reset_terms_table();
-}
-
-bool Backend::update_document_embedding(int document_id,
-                                              const std::vector<float>& emb) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->update_document_embedding(document_id, emb);
 }
 
 int Backend::store_decision(const std::string& text,
@@ -342,19 +336,13 @@ std::vector<std::pair<int,float>> Backend::possible_supersedes_for_text(
     return pImpl->possible_supersedes_for_text(text);
 }
 
-bool Backend::update_decision_embedding(int decision_id,
+bool Backend::update_decision_embedding(int knowledge_id,
                                               const std::vector<float>& emb) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->update_decision_embedding(decision_id, emb);
+    return pImpl->update_decision_embedding(knowledge_id, emb);
 }
 
 // PHASE8: the old summary embedding write-back forwarder is gone.
-
-bool Backend::update_turn_embedding(int turn_id,
-                                          const std::vector<float>& emb) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->update_turn_embedding(turn_id, emb);
-}
 
 std::vector<std::string> Backend::collections() const {
     std::lock_guard<std::mutex> lk(pImpl->mu);
@@ -366,9 +354,9 @@ void Backend::close() {
     pImpl->close();
 }
 
-bool Backend::delete_memory(int memory_id) {
+bool Backend::delete_memory(int knowledge_id) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->delete_memory(memory_id);
+    return pImpl->delete_memory(knowledge_id);
 }
 
 int Backend::delete_batch(const std::vector<int>& memory_ids) {
@@ -385,24 +373,7 @@ std::vector<SearchResult> Backend::search_by_metadata(const json& metadata_filte
 
 int Backend::cleanup_old_conversations(float max_age_hours) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    auto cutoff = std::chrono::system_clock::now() -
-        std::chrono::duration_cast<std::chrono::system_clock::duration>(
-            std::chrono::duration<double, std::ratio<3600>>(max_age_hours));
-    int64_t cutoff_epoch = db_epoch(std::chrono::system_clock::to_time_t(cutoff));
-
-    // v2: raw verbatim exchanges (L1 turns) are what age out by retention;
-    // their gist is preserved in turn summaries and episodes. Purge old turns by
-    // timestamp. (Pre-v2 this deleted summaries tagged collection='conversation';
-    // that column is gone in the lean schema.)
-    Stmt stmt(pImpl->db,
-        "DELETE FROM turns WHERE created_at < ?");
-    stmt.bind(1, cutoff_epoch);
-
-    int deleted = 0;
-    if (stmt.exec()) {
-        deleted = static_cast<int>(sqlite3_changes(pImpl->db));
-    }
-    return deleted;
+    return pImpl->cleanup_old_conversations(max_age_hours);
 }
 
 // ---- users / settings CRUD (delegate through mutex) -----------------------

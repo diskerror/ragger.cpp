@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "storage_types.h"
+#include "text_index.h"
 #include "vector_codec.h"
 #include "nlohmann_json.hpp"
 
@@ -110,11 +111,6 @@ public:
     virtual bool finalize_turn(int turn_id,
                                const std::string& assistant_text,
                                const std::string& model_name = "") = 0;
-
-    /// Set a document's embedding (import path: embed chunks out-of-process,
-    /// then write the vectors back). Returns true if a row was updated.
-    virtual bool update_document_embedding(int document_id,
-                                           const std::vector<float>& emb) = 0;
 
     /// Store a curated decision (knowledge kind='decision', trigger NULL).
     /// `status` defaults to "current" and must be creatable
@@ -201,12 +197,11 @@ public:
 
     // --- Embedding write-back (deferred-embedding path) ------------------
 
-    /// Write back a single row's embedding for the remaining context tables
-    /// (documents already covered above). Returns true if a row was updated.
-    virtual bool update_decision_embedding(int decision_id,
+    /// Write back a single row's embedding for an embedded context table.
+    /// Returns true if a row was updated. (S47: the document/turn twins of
+    /// this entry point were deleted — no callers remained.)
+    virtual bool update_decision_embedding(int knowledge_id,
                                            const std::vector<float>& emb) = 0;
-    virtual bool update_turn_embedding(int turn_id,
-                                       const std::vector<float>& emb) = 0;
 
     // PHASE8: the old summary-store and summary embedding write-back are gone
     // with the `summaries` table. Importers write knowledge rows of kind='note' via
@@ -396,8 +391,10 @@ public:
 
     /// Rebuild embeddings for all stored documents, or for one table when
     /// `table` != "all" (turns, turn_summaries, summaries, decisions,
-    /// documents). Returns row count (re-)encoded.
-    virtual int rebuild_embeddings(Embedder& embedder, bool progress = true,
+    /// documents). Returns row count (re-)encoded. `progress` receives
+    /// (table, done, total) per row and (table, -1, total) at each table's end.
+    virtual int rebuild_embeddings(Embedder& embedder,
+                                    const ProgressFn& progress = {},
                                     const std::string& table = "all") = 0;
 
     /// Rebind the backend's embedder. RaggerMemory replaces its Embedder
@@ -429,9 +426,11 @@ public:
     /// <table>_terms junction table, and updates unigram_count/bigram_count.
     /// Idempotent: call multiple times with the same result.
     /// table: one of the registry's text tables (see sqlite/tables.h)
-    /// progress: if true, log progress (e.g., every 100 records)
+    /// progress: called (table, done, total) per record and (table, -1, total)
+    ///           at the end (see ragger::ProgressFn)
     /// Returns: number of records reindexed.
-    virtual int reindex_table(const std::string& table, bool progress = false) = 0;
+    virtual int reindex_table(const std::string& table,
+                              const ProgressFn& progress = {}) = 0;
 
     /// Truncate the shared cross-table `terms` list and reset its
     /// AUTOINCREMENT counter (starts term_ids fresh from 1). ON DELETE
@@ -447,10 +446,11 @@ public:
     // --- Memory operations ---
 
     /// Delete a memory by ID. Returns true if deleted.
-    virtual bool delete_memory(int memory_id) = 0;
+    virtual bool delete_memory(int knowledge_id) = 0;
 
     /// PHASE9B step 5: atomic full text-index rebuild. Returns {table, rows}.
-    virtual std::vector<std::pair<std::string, int>> reindex_all(bool progress) = 0;
+    virtual std::vector<std::pair<std::string, int>> reindex_all(
+        const ProgressFn& progress = {}) = 0;
 
     /// Delete multiple memories by ID. Returns count deleted.
     virtual int delete_batch(const std::vector<int>& memory_ids) = 0;
@@ -464,7 +464,10 @@ public:
     /// Close the backend and release resources.
     virtual void close() = 0;
 
-    /// Delete old conversation entries older than specified hours. Returns count deleted.
+    /// Retention purge of raw L1 turns older than the given age, but ONLY
+    /// turns that already have a turn_summaries row (marker rows count) —
+    /// unsummarized turns are never deleted (S38). Returns count deleted;
+    /// throws on statement failure.
     virtual int cleanup_old_conversations(float max_age_hours) = 0;
 
     // --- Users / settings table CRUD (gap closure: replaces UserStore's own sqlite3* connection) ---

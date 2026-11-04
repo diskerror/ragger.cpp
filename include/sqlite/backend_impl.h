@@ -123,9 +123,9 @@ struct Backend::Impl {
     /// ADD COLUMN migrations (SQLite has no ADD COLUMN IF NOT EXISTS).
     /// The table name is inlined (PRAGMA table_info doesn't take a bound
     /// parameter reliably); callers pass internal constants, never user input.
-    bool column_exists(const std::string& table, const std::string& col);
+    bool column_exists(const std::string& table, const std::string& col) const;
 
-    bool table_exists(const std::string& table);
+    bool table_exists(const std::string& table) const;
 
     void create_schema();
 
@@ -137,7 +137,7 @@ struct Backend::Impl {
     // on this via kExpectedDbVersion below; there is no in-binary migration.
     static constexpr std::string_view kExpectedDbVersion = "0.17";
 
-    std::string db_version();
+    std::string db_version() const;
 
     void set_db_version(const std::string& v);
 
@@ -233,19 +233,19 @@ struct Backend::Impl {
 
     void update_user_token(const std::string& username, const std::string& new_hash);
 
-    std::optional<std::string> get_setting(const std::string& key);
+    std::optional<std::string> get_setting(const std::string& key) const;
 
     void set_setting(const std::string& key, const std::string& value);
 
-    std::optional<std::string> get_semqlite_config(const std::string& key);
+    std::optional<std::string> get_semqlite_config(const std::string& key) const;
 
     void set_semqlite_config(const std::string& key, const std::string& value);
 
     // ---- Schema introspection (gap closure) --------------------------------
 
-    std::vector<SchemaObject> list_schema_objects();
+    std::vector<SchemaObject> list_schema_objects() const;
 
-    std::vector<std::string> table_column_names(const std::string& table);
+    std::vector<std::string> table_column_names(const std::string& table) const;
 
     int iterate_table_rows(const std::string& table,
                            const std::function<void(const ExportRow&)>& cb);
@@ -269,10 +269,11 @@ struct Backend::Impl {
     // which handles the current version-tagged format AND legacy formats (RV1
     // headers, raw f16/f32). On any failure (NULL, deferred-but-unbackfilled
     // row, corruption, or a dimension mismatch) a zero vector is returned;
-    // the first such row per cache load is logged once (table + id).
+    // the failures are counted into `bad_count`; load_cache logs ONE warn line
+    // per load with the first offender and the total (S39).
     std::vector<float> decode_embedding_blob(const void* blob, int blob_bytes,
                                              int dims, const char* table,
-                                             int row_id, bool& warned);
+                                             int row_id, int& bad_count);
 
     // ---- epoch timestamp for INTEGER columns --------------------------
     // resolve_epoch(caller_ts_string): callers (importers) sometimes supply
@@ -409,12 +410,23 @@ struct Backend::Impl {
     /// PHASE9B step 5: rebuild the whole text index atomically. One outer
     /// transaction around reset_terms_table() + every registry table, so the
     /// old index survives any failure. Returns {table, rows} per table.
-    std::vector<std::pair<std::string, int>> reindex_all(bool progress);
+    std::vector<std::pair<std::string, int>> reindex_all(const ProgressFn& progress);
+
+    /// S38: retention purge of raw L1 turns. Deletes turns older than the
+    /// cutoff ONLY where a turn_summaries row exists (marker rows count:
+    /// '' means done/skipped on purpose). A turn that was never summarized
+    /// is never deleted — its raw text would be lost before the gist was
+    /// captured. Throws on any statement failure; returns rows deleted.
+    int cleanup_old_conversations(float max_age_hours);
 
     /// Resolve a session GUID to its compact integer id WITHOUT creating it.
     /// nullopt = no such session. Callers decide whether that is an error
     /// (store, store_episode_close) or merely absent provenance (store_knowledge).
     std::optional<int> find_session(const std::string& guid);
+
+    /// Push the current tunable FTS weights (config()) into the text engine.
+    /// S43: the single implementation behind the three former copies.
+    void push_text_weights();
 
     // Embedding for a turn is over the joined exchange (user + assistant),
     // using the same U+001F unit-separator as chat's summary turns.
@@ -491,8 +503,7 @@ struct Backend::Impl {
                              std::optional<int> session_id,
                              std::optional<int> model_id,
                              int64_t created_at,
-                             const std::vector<float>& emb,
-                             bool defer_embedding);
+                             const std::vector<float>& emb);
 
     // Document source by unique path (null json when absent).
     json find_document_source(const std::string& path);
@@ -526,7 +537,7 @@ struct Backend::Impl {
     std::vector<TurnRecord> unsummarized_turns(int limit);
 
     // ---- turn_id-based turn_summaries helpers (v0.12.0) ----------------
-    bool turn_summary_exists(int turn_id);
+    bool turn_summary_exists(int turn_id) const;
 
     // Housekeeping retry for poison-abandoned turns: mark_turn_summarized()
     // permanently stamps a turn_summaries row with model "bad" and text=''
@@ -542,6 +553,24 @@ struct Backend::Impl {
     // the real summarizer model name, never "bad", so this only targets
     // genuine poison-abandon rows.
     int reset_abandoned_turn_summaries(int limit);
+
+    // S44: the turn-row facts both turn_summaries writers need, read once.
+    // nullopt = no such turn. model_id/session_id are the NULLable columns.
+    struct TurnMeta {
+        int64_t             created_at;
+        std::optional<int>  model_id;
+        std::optional<int>  session_id;
+    };
+    std::optional<TurnMeta> turn_meta(int turn_id);
+
+    // S44: the ONE turn_summaries INSERT (real summary and skip/abandon
+    // marker alike: empty text + empty emb = marker). Performs the S37
+    // contract (UNIQUE -> false, any other failure -> throw), the FTS index
+    // write and the turn-cache invalidation atomically. Returns true on
+    // insert, false on UNIQUE.
+    bool insert_turn_summary(const TurnMeta& meta, int turn_id,
+                             const std::string& text, int summary_model_id,
+                             const std::vector<float>& emb);
 
     bool finalize_turn_summary(int turn_id, const std::string& text,
                                 const std::string& summary_model_name);
@@ -716,17 +745,20 @@ struct Backend::Impl {
     //             at server startup) — a plain indexed integer comparison
     //             against the embedding_version column (db_version 0.15+),
     //             not a per-row blob decode.
-    // When `progress` is set, prints a running "n/total" line to stdout
-    // (interactive CLI). Returns the number of rows (re-)embedded.
+    // When `progress` is set, it receives (table, done, total) per row and
+    // (table, -1, total) at each table's end (see ragger::ProgressFn).
+    // Returns the number of rows (re-)embedded.
     // The embed/index text formulas (documents' title suffix, knowledge's
     // trigger prefix) live in sqlite/tables.h -- the registry is the single
     // source shared with TextIndex::text_select_of() and the store paths.
-    int embed_tables(Embedder& emb_ref, bool only_missing, bool progress,
+    int embed_tables(Embedder& emb_ref, bool only_missing,
+                      const ProgressFn& progress,
                       const std::string& table_filter = "all");
 
-    // Full re-encode of every embedded row (interactive, with progress),
+    // Full re-encode of every embedded row (progress callback optional),
     // or one table when `table` != "all".
-    int rebuild_embeddings(Embedder& emb_ref, bool progress, const std::string& table);
+    int rebuild_embeddings(Embedder& emb_ref, const ProgressFn& progress,
+                           const std::string& table);
 
     // Cheap backfill: embed rows left NULL or with stale version byte,
     // scoped to one table when `table` != "all".
@@ -750,7 +782,7 @@ struct Backend::Impl {
 
     // (Re)build the custom index for a single text table. Delegates to the
     // TextIndex engine (schema + tokenize + TF-IDF live there now).
-    int reindex_table(const std::string& table_name, bool progress);
+    int reindex_table(const std::string& table_name, const ProgressFn& progress = {});
 
     // Truncate the shared `terms` table + reset its AUTOINCREMENT counter.
     // Delegates to TextIndex; see its header comment for the "only
@@ -763,22 +795,17 @@ struct Backend::Impl {
     void invalidate_cache_for(const TextTable& t);
     bool update_embedding(const TextTable& t, int id, const std::vector<float>& emb);
 
-    bool update_document_embedding(int document_id, const std::vector<float>& emb);
-
-    // Per-row embedding write-back for the other two tables named by the
-    // legacy entry points.
-    // Mirrors update_document_embedding; each invalidates the cache that
-    // backs its table's vector search.
-    bool update_decision_embedding(int decision_id, const std::vector<float>& emb);
-
-    bool update_turn_embedding(int turn_id, const std::vector<float>& emb);
+    // S47: the per-table entry points are gone except the one with a live
+    // caller (update_decision_embedding, used by p3_test_update_embedding);
+    // it invalidates the cache that backs its table's vector search.
+    bool update_decision_embedding(int knowledge_id, const std::vector<float>& emb);
 
     std::vector<std::string> collections() const;
 
     // Returns true if the knowledge row exists and has a "keep" tag.
-    bool has_keep_tag(int knowledge_id);
+    bool has_keep_tag(int knowledge_id) const;
 
-    bool delete_memory(int memory_id);
+    bool delete_memory(int knowledge_id);
 
     int delete_batch(const std::vector<int>& memory_ids);
 

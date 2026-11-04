@@ -171,8 +171,10 @@ struct UserInfo {
 };
 
 /// A summary row returned by session-level queries (turn/episode reads).
+/// `id` carries the producer's key: turn_summary_id for l2_summaries_since
+/// and turn_summaries_by_session_desc; episode_id for episodes_by_session_desc.
 struct SummaryRecord {
-    int         summary_id;
+    int         id;
     std::string text;
     std::string status;
     std::string timestamp;

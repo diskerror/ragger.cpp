@@ -115,8 +115,8 @@ int RaggerClient::count() {
     return j.value("count", 0);
 }
 
-bool RaggerClient::delete_memory(int memory_id) {
-    auto resp = http_delete("/memory/" + std::to_string(memory_id));
+bool RaggerClient::delete_memory(int knowledge_id) {
+    auto resp = http_delete("/memory/" + std::to_string(knowledge_id));
     if (resp.status < 200 || resp.status >= 300) {
         return false;
     }

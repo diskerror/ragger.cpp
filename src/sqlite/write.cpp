@@ -5,37 +5,10 @@
 #include "lang.h"
 #include "util/fs.h"
 #include "util/time.h"
-#include "util/sqlite.h"
-#include "double_metaphone.h"
-#include "fts_tokenize.h"
-#include "sqlite/text_index.h"
-#include "vector_codec.h"
 #include "Logger.h"
-#include <format>
-#include "nlohmann_json.hpp"
 
-#include <sqlite3.h>
-#include <Eigen/Dense>
 
-#include <algorithm>
-#include <cctype>
-#include <chrono>
-#include <cstdlib>
-#include <cstring>
-#include <ctime>
-#include <unordered_map>
-#include <unordered_set>
-#include <iomanip>
-#include <iterator>
-#include <filesystem>
-#include <numeric>
-#include <optional>
 #include <regex>
-#include <set>
-#include <mutex>
-#include <iostream>
-#include <sstream>
-#include <stdexcept>
 
 namespace ragger::sqlite {
 
@@ -164,9 +137,7 @@ static std::string tags_from_metadata(const json& metadata) {
     //   model    <- metadata["model"]
     // The returned id is a knowledge_id (string, as before).
     void Backend::Impl::validate_creatable_status(const std::string& status) {
-        bool ok = false;
-        for (auto sv : status::kCreatable) if (status == sv) ok = true;
-        if (!ok)
+        if (!status::is_in(status::kCreatable, status))
             throw std::invalid_argument(
                 "status must be one of: current, provisional, pending");
     }
@@ -228,7 +199,7 @@ static std::string tags_from_metadata(const json& metadata) {
             kind, text, status, tags_str,
             /*trigger=*/"", /*rationale=*/"", /*scope=*/"",
             /*supersedes=*/std::nullopt, session_id, model_id,
-            resolve_epoch(ts_override), emb, defer_embedding);
+            resolve_epoch(ts_override), emb);
         text_index_->index_record("knowledge", id, text);
         txn.commit();
         invalidate_knowledge_cache();
@@ -395,13 +366,10 @@ static std::string tags_from_metadata(const json& metadata) {
         else s.bind(3, chunk.chunk_index);
         s.bind(4, source_id);
         s.bind(5, epoch);
-        if (defer_embedding) {
-            s.bind_null(6);
-            s.bind_null(7);
-        } else {
-            bind_embedding_version(s.raw(), 6, emb);
-            bind_embedding(s.raw(), 7, emb);
-        }
+        // Deferred writes arrive with an empty emb: bind_embedding* is the
+        // single NULL choke point (B m10).
+        bind_embedding_version(s.raw(), 6, emb);
+        bind_embedding(s.raw(), 7, emb);
 
         int doc_id = -1;
         {
@@ -746,8 +714,7 @@ static std::string tags_from_metadata(const json& metadata) {
                                             std::optional<int> session_id,
                                             std::optional<int> model_id,
                                             int64_t created_at,
-                                            const std::vector<float>& emb,
-                                            bool defer_embedding) {
+                                            const std::vector<float>& emb) {
         Stmt ins(db,
             "INSERT INTO knowledge (kind, text, status, tags, trigger, rationale, scope,"
             " supersedes, session_id, model_id, created_at, embedding_version, embedding)"
@@ -763,13 +730,11 @@ static std::string tags_from_metadata(const json& metadata) {
         if (session_id)  ins.bind(9, *session_id); else ins.bind_null(9);
         if (model_id)    ins.bind(10, *model_id);  else ins.bind_null(10);
         ins.bind(11, created_at);
-        if (defer_embedding) {
-            ins.bind_null(12);
-            ins.bind_null(13);
-        } else {
-            bind_embedding_version(ins.raw(), 12, emb);
-            bind_embedding(ins.raw(), 13, emb);
-        }
+        // Deferred writes arrive with an empty emb: bind_embedding* is the
+        // single NULL choke point (B m10 — the old defer_embedding branch
+        // here duplicated what the binders already do).
+        bind_embedding_version(ins.raw(), 12, emb);
+        bind_embedding(ins.raw(), 13, emb);
         if (!ins.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         return static_cast<int>(sqlite3_last_insert_rowid(db));
@@ -802,7 +767,7 @@ static std::string tags_from_metadata(const json& metadata) {
                 /*trigger=*/"", /*rationale=*/"", /*scope=*/"",
                 /*supersedes=*/std::nullopt, /*session_id=*/std::nullopt,
                 /*model_id=*/std::nullopt, resolve_epoch(source_timestamp),
-                emb, defer_embedding);
+                emb);
             text_index_->index_record("knowledge", did, t);
             txn.commit();
         }
@@ -898,7 +863,7 @@ static std::string tags_from_metadata(const json& metadata) {
                 trim(in.scope), in.supersedes, session_id,
                 in.model_name.empty() ? std::optional<int>{}
                                       : std::optional<int>(get_or_create_model(in.model_name)),
-                resolve_epoch(in.source_timestamp), emb, /*defer=*/false);
+                resolve_epoch(in.source_timestamp), emb);
 
             if (in.supersedes) {
                 Stmt up(db, "UPDATE knowledge SET status = 'superseded' WHERE knowledge_id = ?");
@@ -955,7 +920,7 @@ static std::string tags_from_metadata(const json& metadata) {
         if (vnorm <= 1e-12f) return scored;
         const float threshold = config().decision_supersede_threshold;
         const int expected_dims = config().embedding_dimensions;
-        bool blob_warned = false;
+        int blob_bad = 0, bad_first_id = 0, bad_first_bytes = 0;
         std::string sql =
             "SELECT knowledge_id, embedding FROM knowledge WHERE status IN (" +
             status::in_list_sql(status::kSearchActive) + ") ";
@@ -967,15 +932,29 @@ static std::string tags_from_metadata(const json& metadata) {
         for (size_t i = 0; i < exclude_ids.size(); ++i)
             s.bind(static_cast<int>(i) + 1, exclude_ids[i]);
         while (s.step()) {
+            const int bad_before = blob_bad;
             std::vector<float> other = decode_embedding_blob(
                 s.column_blob(1), s.column_bytes(1), expected_dims,
-                "knowledge", s.column_int(0), blob_warned);
+                "knowledge", s.column_int(0), blob_bad);
+            if (blob_bad > bad_before && bad_before == 0) {
+                bad_first_id = s.column_int(0);
+                bad_first_bytes = s.column_bytes(1);
+            }
             if (static_cast<int>(other.size()) != expected_dims) continue;
             Eigen::Map<Eigen::VectorXf> o(other.data(), expected_dims);
             float onorm = o.norm();
             if (onorm <= 1e-12f) continue;   // zero/undecodable vector
             float cos = (v.dot(o)) / (vnorm * onorm);
             if (cos >= threshold) scored.emplace_back(s.column_int(0), cos);
+        }
+        // One warn line per scan: first offender's details plus the total (S39).
+        if (blob_bad > 0) {
+            Diskerror::Logger::warn(std::format(
+                "[cache] knowledge row {}: undecodable embedding blob ({} bytes, "
+                "expected {}-dim {}); using zero vector; "
+                "{} undecodable embedding(s) in knowledge",
+                bad_first_id, bad_first_bytes, expected_dims,
+                vector_codec::to_string(vtype_), blob_bad));
         }
         std::sort(scored.begin(), scored.end(),
                   [](const auto& a, const auto& b) { return a.second > b.second; });
@@ -1032,7 +1011,7 @@ static std::string tags_from_metadata(const json& metadata) {
 
 
     // ---- turn_id-based turn_summaries helpers (v0.12.0) ----------------
-    bool Backend::Impl::turn_summary_exists(int turn_id) {
+    bool Backend::Impl::turn_summary_exists(int turn_id) const {
         Stmt s(db, "SELECT 1 FROM turn_summaries WHERE turn_id = ? LIMIT 1");
         s.bind(1, turn_id);
         return s.step();
@@ -1092,57 +1071,74 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    bool Backend::Impl::finalize_turn_summary(int turn_id, const std::string& text,
-                                const std::string& summary_model_name) {
-        std::string t = normalize_path(text);
-        int model_id = get_or_create_model(summary_model_name);
-        auto emb = require_embedder().encode(t);
-
+    std::optional<Backend::Impl::TurnMeta> Backend::Impl::turn_meta(int turn_id) {
         Stmt g(db, "SELECT created_at, model_id, session_id FROM turns WHERE turn_id = ?");
         g.bind(1, turn_id);
-        if (!g.step()) return false;  // turn_id must exist
-        int64_t turn_dt = g.column_int64(0);
-        bool turn_model_null = g.is_null(1);
-        int turn_model_id = turn_model_null ? 0 : g.column_int(1);
-        bool session_null = g.is_null(2);
-        int session_id = session_null ? 0 : g.column_int(2);
+        if (!g.step()) return std::nullopt;  // turn_id must exist
+        TurnMeta m;
+        m.created_at = g.column_int64(0);
+        if (!g.is_null(1)) m.model_id   = g.column_int(1);
+        if (!g.is_null(2)) m.session_id = g.column_int(2);
+        return m;
+    }
 
+
+    bool Backend::Impl::insert_turn_summary(const TurnMeta& meta, int turn_id,
+                                            const std::string& text,
+                                            int summary_model_id,
+                                            const std::vector<float>& emb) {
         // Plain insert — no placeholder row exists to conflict with anymore
         // (Reid's design decision). The unique partial index
-        // idx_turn_summaries_turn_id_uniq still guards against an accidental
-        // duplicate finalize for the same turn_id: Stmt::exec() just checks
-        // sqlite3_step() == SQLITE_DONE, so a UNIQUE-constraint violation on
-        // a second finalize for the same turn_id naturally falls through to
-        // `return false` below (no exception, no special-case needed) —
-        // matching this file's existing convention of surfacing insert
-        // failures via the bool return rather than throwing.
+        // idx_turn_summaries_turn_id_uniq guards against an accidental
+        // duplicate for the same turn_id. S37: ONLY that UNIQUE violation
+        // returns false ("already summarized"); any other INSERT failure
+        // (disk, FK, injected trigger) throws, so the summarizer cannot
+        // mistake a real error for a duplicate and drop the text.
+        // S44: markers pass empty text/emb — bind_embedding* bind NULL for
+        // an empty vector, matching the marker's former column-less INSERT.
         Stmt s(db,
             "INSERT INTO turn_summaries "
             "(turn_id, text, embedding_version, embedding, session_id, turn_model_id, "
             " summary_model_id, turn_datetime, summarized_on) "
             "VALUES (?,?,?,?,?,?,?,?,unixepoch())");
         s.bind(1, turn_id);
-        s.bind(2, t);
+        s.bind(2, text);
         bind_embedding_version(s.raw(), 3, emb);
         bind_embedding(s.raw(), 4, emb);
-        if (session_null) s.bind_null(5); else s.bind(5, session_id);
-        if (turn_model_null) s.bind_null(6); else s.bind(6, turn_model_id);
-        if (model_id) s.bind(7, model_id); else s.bind_null(7);
-        s.bind(8, turn_dt);
+        if (meta.session_id) s.bind(5, *meta.session_id); else s.bind_null(5);
+        if (meta.model_id)   s.bind(6, *meta.model_id);   else s.bind_null(6);
+        if (summary_model_id) s.bind(7, summary_model_id); else s.bind_null(7);
+        s.bind(8, meta.created_at);
         // The index addresses turn_summaries by turn_summary_id, NOT turn_id
         // (they diverge on any real DB). The INSERT+index pair must be atomic:
         // a failed index rolls the summary row back instead of leaving an
         // unindexed or mis-indexed row.
         Transaction tx(db);
-        bool ok = s.exec();
-        if (ok) {
-            // Read the new rowid BEFORE any other statement runs on db.
-            const int ts_id = static_cast<int>(sqlite3_last_insert_rowid(db));
-            text_index_->index_record("turn_summaries", ts_id, t);
-            tx.commit();
-            invalidate_turn_cache();
+        if (!s.exec()) {
+            if (sqlite3_extended_errcode(db) == SQLITE_CONSTRAINT_UNIQUE)
+                return false;  // already summarized/marked (idx_turn_summaries_turn_id_uniq)
+            throw std::runtime_error(std::format(
+                "turn_summaries INSERT failed: {}", sqlite3_errmsg(db)));
         }
-        return ok;
+        // Read the new rowid BEFORE any other statement runs on db.
+        const int ts_id = static_cast<int>(sqlite3_last_insert_rowid(db));
+        // The empty text indexes to zero terms but set_counts must still
+        // land on THIS row.
+        text_index_->index_record("turn_summaries", ts_id, text);
+        tx.commit();
+        invalidate_turn_cache();
+        return true;
+    }
+
+
+    bool Backend::Impl::finalize_turn_summary(int turn_id, const std::string& text,
+                                const std::string& summary_model_name) {
+        std::string t = normalize_path(text);
+        int model_id = get_or_create_model(summary_model_name);
+        auto emb = require_embedder().encode(t);
+        auto meta = turn_meta(turn_id);
+        if (!meta) return false;  // turn_id must exist
+        return insert_turn_summary(*meta, turn_id, t, model_id, emb);
     }
 
 
@@ -1155,40 +1151,17 @@ static std::string tags_from_metadata(const json& metadata) {
     // Reid's design decision: no placeholder mechanism, so a turn_summaries
     // row now always represents completed work (real summary, trivial-skip,
     // or poison-abandon), never an in-progress sentinel.
+    // S37 contract: false = no such turn, or already marked (UNIQUE);
+    // any other INSERT failure throws; an empty model name is a caller
+    // error (invalid_argument), never a silent false.
     bool Backend::Impl::mark_turn_summarized(int turn_id, const std::string& model_name) {
+        if (model_name.empty())
+            throw std::invalid_argument("model name required");
         int model_id = get_or_create_model(model_name);
-        if (!model_id) return false;
-
-        Stmt g(db, "SELECT created_at, model_id, session_id FROM turns WHERE turn_id = ?");
-        g.bind(1, turn_id);
-        if (!g.step()) return false;  // turn_id must exist
-        int64_t turn_dt = g.column_int64(0);
-        bool turn_model_null = g.is_null(1);
-        int turn_model_id = turn_model_null ? 0 : g.column_int(1);
-        bool session_null = g.is_null(2);
-        int session_id = session_null ? 0 : g.column_int(2);
-
-        Stmt s(db,
-            "INSERT INTO turn_summaries "
-            "(turn_id, text, session_id, turn_model_id, summary_model_id, turn_datetime, summarized_on) "
-            "VALUES (?,'',?,?,?,?,unixepoch())");
-        s.bind(1, turn_id);
-        if (session_null) s.bind_null(2); else s.bind(2, session_id);
-        if (turn_model_null) s.bind_null(3); else s.bind(3, turn_model_id);
-        s.bind(4, model_id);
-        s.bind(5, turn_dt);
-        // Keying + atomicity: see finalize_turn_summary above. The empty text
-        // indexes to zero terms but set_counts must still land on THIS row.
-        Transaction tx(db);
-        bool ok = s.exec();
-        if (ok) {
-            // Read the new rowid BEFORE any other statement runs on db.
-            const int ts_id = static_cast<int>(sqlite3_last_insert_rowid(db));
-            text_index_->index_record("turn_summaries", ts_id, "");
-            tx.commit();
-            invalidate_turn_cache();
-        }
-        return ok;
+        auto meta = turn_meta(turn_id);
+        if (!meta) return false;  // turn_id must exist
+        // S44: the marker is the same INSERT with empty text and no embedding.
+        return insert_turn_summary(*meta, turn_id, "", model_id, {});
     }
 
 
@@ -1255,7 +1228,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // Requires `turn_summaries ts JOIN turns t ON t.turn_id = ts.turn_id`.
     // Rows whose source turn was culled (ts.turn_id NULL) can never be
     // candidates — the JOIN drops them; they cannot close an episode either.
-    std::string pending_episode_l2_conditions(const std::string& epoch_expr) {
+    static std::string pending_episode_l2_conditions(const std::string& epoch_expr) {
         return " AND ts.text != '' "
                " AND ts.episode_id IS NULL "
                " AND ts.turn_datetime > " + epoch_expr + " "
@@ -1291,18 +1264,38 @@ static std::string tags_from_metadata(const json& metadata) {
         s.bind(1, session_guid);
         if (!since_ts.empty()) s.bind(2, resolve_epoch(since_ts));
 
-        bool warned = false;
+        int bad = 0, bad_first_id = 0, bad_first_bytes = 0;
+        const char* bad_first_table = "";
+        auto decode_counted = [&](const void* blob, int bytes, const char* table, int id) {
+            const int before = bad;
+            auto v = decode_embedding_blob(blob, bytes, dims, table, id, bad);
+            if (before == 0 && bad > 0) {
+                bad_first_id = id;
+                bad_first_bytes = bytes;
+                bad_first_table = table;
+            }
+            return v;
+        };
         while (s.step()) {
             EpisodeCandidateTurn ct;
             ct.turn_summary_id   = s.column_int(0);
             ct.summary_text      = s.column_text(1);
             ct.timestamp         = s.column_text(2);
             ct.epoch             = s.column_int64(3);
-            ct.turn_embedding    = decode_embedding_blob(
-                s.column_blob(4), s.column_bytes(4), dims, "turns", ct.turn_summary_id, warned);
-            ct.summary_embedding = decode_embedding_blob(
-                s.column_blob(5), s.column_bytes(5), dims, "turn_summaries", ct.turn_summary_id, warned);
+            ct.turn_embedding    = decode_counted(
+                s.column_blob(4), s.column_bytes(4), "turn_summaries", ct.turn_summary_id);
+            ct.summary_embedding = decode_counted(
+                s.column_blob(5), s.column_bytes(5), "turn_summaries", ct.turn_summary_id);
             out.push_back(std::move(ct));
+        }
+        // One warn line per scan: first offender's details plus the total (S39).
+        if (bad > 0) {
+            Diskerror::Logger::warn(std::format(
+                "[cache] {} row {}: undecodable embedding blob ({} bytes, "
+                "expected {}-dim {}); using zero vector; "
+                "{} undecodable embedding(s) in episode candidates",
+                bad_first_table, bad_first_id, bad_first_bytes, dims,
+                vector_codec::to_string(vtype_), bad));
         }
         return out;
     }
@@ -1391,8 +1384,6 @@ static std::string tags_from_metadata(const json& metadata) {
     std::vector<std::string> Backend::Impl::episodes_needing_close(int idle_minutes) {
         std::vector<std::string> out;
         if (idle_minutes <= 0) return out;
-        const std::string cutoff =
-            std::format("(unixepoch('now','-{} minutes'))", idle_minutes);
         // EXISTS(shared predicate): content L2 past the last episode end,
         // embeddings present on both sides (verified-bug fix for ''-text
         // marker rows included in the predicate). PHASE6 6 additionally
@@ -1418,9 +1409,10 @@ static std::string tags_from_metadata(const json& metadata) {
             "      AND NOT EXISTS (SELECT 1 FROM turn_summaries x "
             "                      WHERE x.turn_id = t2.turn_id)) "
             "  AND (SELECT MAX(t.created_at) FROM turns t "
-            "        WHERE t.session_id = ss.session_id) < " + cutoff + " "
+            "        WHERE t.session_id = ss.session_id) < unixepoch('now', ?) "
             "ORDER BY ss.session_id ASC";
         Stmt s(db, sql);
+        s.bind(1, std::format("-{} minutes", idle_minutes));
         while (s.step()) {
             const auto g = s.column_text(0);
             if (!g.empty()) out.push_back(g);

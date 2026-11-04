@@ -319,8 +319,10 @@ std::expected<void, ConfigSetError> validate_config_value(std::string_view key,
             if (key == "summarizer_prompt") {
                 std::size_t t = 1, c = 2;   // lvalues: libc++ make_format_args rejects rvalues
                 try {
-                    std::vformat(std::string_view(value),
-                                 std::make_format_args(t, c));
+                    // Validation only: vformat throws on a bad spec; the
+                    // formatted string itself is unused.
+                    (void)std::vformat(std::string_view(value),
+                                       std::make_format_args(t, c));
                 } catch (const std::format_error&) {
                     return std::unexpected(ConfigSetError::InvalidValue);
                 }

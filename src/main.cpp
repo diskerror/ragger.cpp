@@ -1378,7 +1378,18 @@ int main(int argc, char **argv) {
                 cfg.embedding_dimensions));
             ragger::RaggerMemory memory(db_path,
                                         /*skip_embedding_guard=*/true);
-            int count = memory.rebuild_embeddings(/*progress=*/true, target);
+            // CLI owns the stdout progress line (library code never prints).
+            int count = memory.rebuild_embeddings(
+                [](const char* table, int done, int total) {
+                    if (done >= 0) {
+                        std::cout << std::format(
+                            ragger::lang::MSG_REBUILD_EMBEDDINGS_PROGRESS,
+                            table, done, total);
+                        std::cout.flush();
+                    } else {
+                        std::cout << "\n";
+                    }
+                }, target);
             // The settings identity records what model/dtype/dims the WHOLE
             // DB's vectors are in -- only promote it on a full "all" run.
             // Re-embedding a single table doesn't change that for the rest
@@ -1440,6 +1451,15 @@ int main(int argc, char **argv) {
 
             ragger::RaggerMemory memory(db_path,
                                         /*skip_embedding_guard=*/true);
+            // CLI owns the stdout progress line (library code never prints).
+            auto print_reindex_progress = [](const char* table, int done, int total) {
+                if (done >= 0) {
+                    std::cout << std::format("\rReindexing {}: {}/{}", table, done, total);
+                    std::cout.flush();
+                } else {
+                    std::cout << "\n";
+                }
+            };
             int total = 0;
             try {
                 if (target == "all") {
@@ -1448,13 +1468,13 @@ int main(int argc, char **argv) {
                     // index is rebuilt or the old one is untouched. Clears out
                     // any orphaned/legacy terms accumulated before a tokenizer
                     // fix and stops term_id from climbing forever.
-                    for (const auto& [table, count] : memory.backend()->reindex_all(/*progress=*/true)) {
+                    for (const auto& [table, count] : memory.backend()->reindex_all(print_reindex_progress)) {
                         std::println("Reindexed {}: {} row(s).", table, count);
                         total += count;
                     }
                     std::println("Reindexed all tables: {} row(s) total.", total);
                 } else {
-                    total = memory.backend()->reindex_table(target, /*progress=*/true);
+                    total = memory.backend()->reindex_table(target, print_reindex_progress);
                     std::println("Reindexed {}: {} row(s).", target, total);
                 }
                 cli_audit_done("reindex", std::format("{} row(s) reindexed", total));
@@ -1480,17 +1500,7 @@ int main(int argc, char **argv) {
                 return 1;
             }
             try {
-                std::unique_ptr<ragger::Embedder> embedder;
-                if (cfg.embedding_engine == "external") {
-                    embedder = std::make_unique<ragger::Embedder>(
-                        cfg.embedding_external_host,
-                        cfg.embedding_external_port,
-                        cfg.embedding_external_model,
-                        cfg.embedding_external_api_key,
-                        cfg.embedding_dimensions);
-                } else {
-                    embedder = std::make_unique<ragger::Embedder>(cfg.resolved_model_dir());
-                }
+                auto embedder = ragger::make_embedder_from_config(cfg);
                 std::vector<float> vec = embedder->encode(text);
                 nlohmann::json arr = vec;
                 std::cout << arr.dump() << "\n";

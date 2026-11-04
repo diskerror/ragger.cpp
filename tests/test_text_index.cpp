@@ -9,6 +9,9 @@
 
 #include "sqlite/text_index.h"
 #include "sqlite/tables.h"
+#include "fts_tokenize.h"
+
+#include <algorithm>
 
 namespace {
 
@@ -205,10 +208,229 @@ void p9_junction_plans() {
 }
 
 
+// S49 (B §6 item 12): the breadth the suite was missing — the `turns`
+// two-column index path, the literal_enabled=false branch, reset_terms_table()
+// against already-cached statements, and score ordering.
+//
+// Each gets its own in-memory DB: reset_terms_table() drops and recreates every
+// junction table, so sharing a handle with the other tests would make the order
+// of main() matter.
+namespace {
+
+sqlite3* p10_open(const char* ddl) {
+    sqlite3* db = nullptr;
+    CHECK(sqlite3_open(":memory:", &db) == SQLITE_OK);
+    CHECK(sqlite3_exec(db, "PRAGMA foreign_keys = ON", nullptr, nullptr, nullptr) == SQLITE_OK);
+    CHECK(sqlite3_exec(db, ddl, nullptr, nullptr, nullptr) == SQLITE_OK);
+    return db;
+}
+
+// Every text table create_schema()'s junctions reference. A DELETE on `terms`
+// with foreign_keys=ON walks the CASCADE clause of ALL five junction tables, so
+// a fixture that deletes a term must have all five parents present (the error
+// is 'no such table: main.episodes', far from the statement's own subject).
+const char* kP10FullDDL =
+    "CREATE TABLE document_sources (document_source_id INTEGER PRIMARY KEY, title TEXT);"
+    "CREATE TABLE turns (turn_id INTEGER PRIMARY KEY, user_text TEXT, assistant_text TEXT,"
+    "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
+    "CREATE TABLE turn_summaries (turn_summary_id INTEGER PRIMARY KEY, text TEXT,"
+    "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
+    "CREATE TABLE episodes (episode_id INTEGER PRIMARY KEY, text TEXT,"
+    "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
+    "CREATE TABLE knowledge (knowledge_id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, text TEXT, trigger TEXT,"
+    "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
+    "CREATE TABLE documents (document_id INTEGER PRIMARY KEY, text TEXT, document_source_id INTEGER,"
+    "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);";
+
+// Ids returned by score_query(), sorted by score descending (the function
+// returns an unsorted map dump — sorting here is what makes an ordering
+// assertion meaningful).
+std::vector<ragger::TextScore> p10_sorted(ragger::sqlite::TextIndex& idx,
+                                          const std::string& table,
+                                          const std::string& query) {
+    auto out = idx.score_query(table, query);
+    std::sort(out.begin(), out.end(), [](const ragger::TextScore& a, const ragger::TextScore& b) {
+        return a.score > b.score;
+    });
+    return out;
+}
+
+bool p10_has(const std::vector<ragger::TextScore>& v, int id) {
+    for (const auto& s : v) if (s.id == id) return true;
+    return false;
+}
+
+// (a) `turns` is the one text table whose indexed text is built from TWO
+// columns (user_text + assistant_text). Terms must be findable from either.
+void p10_turns_two_column_path() {
+    std::println("  p10_turns_two_column_path...");
+    sqlite3* db = p10_open(
+        "CREATE TABLE turns (turn_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  user_text TEXT, assistant_text TEXT,"
+        "  unigram_count INTEGER NOT NULL DEFAULT 0,"
+        "  bigram_count  INTEGER NOT NULL DEFAULT 0);");
+    CHECK(sqlite3_exec(db,
+        "INSERT INTO turns(user_text, assistant_text) VALUES "
+        "('zebra quantum flux','acknowledged'),"
+        "('a plain sentence','the reply explains quantum explicitly'),"
+        "('nothing relevant at all','nope');",
+        nullptr, nullptr, nullptr) == SQLITE_OK);
+
+    ragger::sqlite::TextIndex idx(db);
+    idx.create_schema();
+    CHECK(idx.reindex_table("turns") == 3);
+
+    // 'quantum' sits in user_text of row 1 and assistant_text of row 2: both
+    // must be found, which is only possible if both columns were indexed.
+    auto hits = p10_sorted(idx, "turns", "quantum");
+    CHECK(p10_has(hits, 1) && "term in user_text must be indexed");
+    CHECK(p10_has(hits, 2) && "term in assistant_text must be indexed");
+    CHECK(!p10_has(hits, 3) && "row sharing no term must be absent");
+
+    // Column-exclusive terms resolve to exactly their own row.
+    auto zebra = p10_sorted(idx, "turns", "zebra");
+    CHECK(zebra.size() == 1 && zebra[0].id == 1);
+    auto expl = p10_sorted(idx, "turns", "explicitly");
+    CHECK(expl.size() == 1 && expl[0].id == 2);
+
+    // An empty assistant_text (the partial-turn shape) must not break the
+    // join: the row keeps indexing from user_text alone.
+    CHECK(sqlite3_exec(db, "INSERT INTO turns(turn_id, user_text, assistant_text) "
+                           "VALUES (4, 'kappa partial', NULL)",
+                       nullptr, nullptr, nullptr) == SQLITE_OK);
+    CHECK(idx.reindex_table("turns") == 4);
+    auto kappa = p10_sorted(idx, "turns", "kappa");
+    CHECK(kappa.size() == 1 && kappa[0].id == 4);
+
+    sqlite3_close(db);
+    std::println(" OK");
+}
+
+// (b) literal_enabled = false => DMP-only scoring (the weights reach TextIndex
+// through set_weights(); search.cpp's push_text_weights() is the production
+// caller). The literal-only query is built honestly rather than guessed: the
+// test computes the SAME primary metaphone code the indexer stored and deletes
+// that term (CASCADE empties its junction rows), so 'accuracy' is left findable
+// only through its literal stem. (A symbol word looks tempting but is not
+// literal-only: Double Metaphone does give '+' a code.)
+void p10_literal_disabled_scoring() {
+    std::println("  p10_literal_disabled_scoring...");
+    sqlite3* db = p10_open(kP10FullDDL);
+    CHECK(sqlite3_exec(db,
+        "INSERT INTO knowledge(kind, text) VALUES "
+        "('note', 'speed accuracy'),('note', 'unrelated prose');",
+        nullptr, nullptr, nullptr) == SQLITE_OK);
+
+    ragger::sqlite::TextIndex idx(db);
+    idx.create_schema();
+    CHECK(idx.reindex_table("knowledge") == 2);
+
+    const std::string stem = ragger::fts::stem("accuracy");
+    const std::string meta = ragger::fts::metaphone(stem);
+    CHECK(!stem.empty() && !meta.empty());
+    CHECK(p3_term_id(db, stem) != -1 && p3_term_id(db, meta) != -1);
+
+    // Default weights: both paths live, so the word hits.
+    CHECK(p10_has(p10_sorted(idx, "knowledge", "accuracy"), 1));
+
+    // Drop the phonetic term: what remains for 'accuracy' is literal-only.
+    sqlite3_stmt* s = nullptr;
+    CHECK(sqlite3_prepare_v2(db, "DELETE FROM terms WHERE term = ?", -1, &s, nullptr) == SQLITE_OK);
+    sqlite3_bind_text(s, 1, meta.c_str(), -1, SQLITE_TRANSIENT);
+    CHECK(sqlite3_step(s) == SQLITE_DONE);
+    sqlite3_finalize(s);
+
+    // Literal path on: still hits (through the stem).
+    CHECK(p10_has(p10_sorted(idx, "knowledge", "accuracy"), 1));
+
+    ragger::TextIndexWeights off{};
+    off.literal_enabled = false;
+    idx.set_weights(off);
+
+    // Literal path off: the literal-only query finds nothing...
+    CHECK(p10_sorted(idx, "knowledge", "accuracy").empty());
+    // ...while an ordinary term (its metaphone intact) still hits.
+    CHECK(p10_has(p10_sorted(idx, "knowledge", "prose"), 2));
+
+    sqlite3_close(db);
+    std::println(" OK");
+}
+
+// (c) reset_terms_table() DROPs terms and every junction table and recreates
+// them. The hot paths hold prepared statements across that DDL; this pins the
+// documented "sqlite3_prepare_v2 reprepares transparently" claim.
+void p10_reset_terms_with_cached_stmts() {
+    std::println("  p10_reset_terms_with_cached_stmts...");
+    sqlite3* db = p10_open(kP10FullDDL);
+    CHECK(sqlite3_exec(db,
+        "INSERT INTO knowledge(kind, text) VALUES "
+        "('note', 'alpha bravo'),('note', 'charlie delta');",
+        nullptr, nullptr, nullptr) == SQLITE_OK);
+
+    ragger::sqlite::TextIndex idx(db);
+    idx.create_schema();
+    CHECK(idx.reindex_table("knowledge") == 2);
+
+    // Warm the caches: lookup_term / doc_freq / postings / corpus_size all run.
+    CHECK(p10_has(p10_sorted(idx, "knowledge", "alpha"), 1));
+    CHECK(p10_has(p10_sorted(idx, "knowledge", "charlie"), 2));
+
+    idx.reset_terms_table();
+
+    // terms and every junction row are gone: the same query finds nothing,
+    // through the same (now reprepared) statements.
+    CHECK(p10_sorted(idx, "knowledge", "alpha").empty());
+    CHECK(p3_scalar(db, "SELECT COUNT(*) FROM knowledge_terms") == 0);
+
+    // Re-index one row: it becomes findable again, and only it. term_ids
+    // restart fresh from 1 (AUTOINCREMENT counter went with the DROP).
+    idx.index_record("knowledge", 1, "alpha bravo");
+    auto after = p10_sorted(idx, "knowledge", "alpha");
+    CHECK(after.size() == 1 && after[0].id == 1);
+    CHECK(p3_scalar(db, "SELECT MIN(term_id) FROM terms") == 1);   // counter restarted fresh
+    CHECK(p10_sorted(idx, "knowledge", "charlie").empty());
+
+    sqlite3_close(db);
+    std::println(" OK");
+}
+
+// (d) Score ordering: TF is count/unigram_count, so the row that repeats the
+// query term must rank first, and the returned scores must be strictly
+// descending once sorted (the old assertion only checked non-emptiness).
+void p10_score_ordering_strict() {
+    std::println("  p10_score_ordering_strict...");
+    sqlite3* db = p10_open(kP10FullDDL);
+    CHECK(sqlite3_exec(db,
+        "INSERT INTO knowledge(kind, text) VALUES "
+        "('note', 'widget widget widget'),('note', 'widget alone'),('note', 'no matching prose here');",
+        nullptr, nullptr, nullptr) == SQLITE_OK);
+
+    ragger::sqlite::TextIndex idx(db);
+    idx.create_schema();
+    CHECK(idx.reindex_table("knowledge") == 3);
+
+    auto hits = p10_sorted(idx, "knowledge", "widget");
+    CHECK(hits.size() == 2);                       // row 3 shares no term
+    CHECK(hits[0].id == 1);                        // the repeating row ranks first
+    CHECK(hits[0].score > hits[1].score);          // strictly, not merely >=
+    for (size_t i = 1; i < hits.size(); ++i)
+        CHECK(hits[i - 1].score > hits[i].score);
+
+    sqlite3_close(db);
+    std::println(" OK");
+}
+
+} // namespace
+
+
 int main() {
     p3_registry_checks();
     p9_junction_plans();
     p3_pin_all_tables();
+    p10_turns_two_column_path();
+    p10_literal_disabled_scoring();
+    p10_reset_terms_with_cached_stmts();
+    p10_score_ordering_strict();
 
     sqlite3* db = nullptr;
     CHECK(sqlite3_open(":memory:", &db) == SQLITE_OK);

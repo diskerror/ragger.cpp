@@ -326,7 +326,7 @@ std::vector<TextIndex::Posting> TextIndex::postings(
     return out;
 }
 
-int TextIndex::reindex_table(const std::string& table, bool progress) {
+int TextIndex::reindex_table(const std::string& table, const ProgressFn& progress) {
     validate_table(table);
     const std::string id_col = id_col_of(table);
     const std::string select_sql = text_select_of(table);
@@ -379,15 +379,11 @@ int TextIndex::reindex_table(const std::string& table, bool progress) {
             index_record(table, row.id, row.text);
             last_id = row.id;
             ++done;
-            if (progress) {
-                std::cout << std::format("\rReindexing {}: {}/{}",
-                                         table, done, total);
-                std::cout.flush();
-            }
+            if (progress) progress(table.c_str(), done, total);
         }
         tx.commit();
     }
-    if (progress) std::cout << "\n";
+    if (progress) progress(table.c_str(), -1, total);  // close the line
     return done;
 }
 

@@ -4,6 +4,8 @@
  */
 #include "export.h"
 #include "config.h"
+#include "sqlite/backend.h"
+#include "check.h"
 #include "test_env.h"
 
 #include <sqlite3.h>
@@ -204,6 +206,76 @@ void test_export_roundtrip() {
 }
 
 // -----------------------------------------------------------------------
+// S50 (B §6 item 14): the get_setting() fallback branch.
+//
+// The embedding identity stamps (embedding_model / vector_type / dimensions)
+// normally live in `semqlite_config` under SemanticSQLite's own key names; the
+// one-time move out of `settings` runs in create_user_schema(), which a
+// readonly connection never executes. So a file whose stamps are still only in
+// `settings` — an older DB being exported before anything opened it read-write —
+// must answer through the fallback. Fixtures are built by hand with
+// sqlite3_open (never a live DB) and opened through the same readonly
+// constructor export.cpp uses.
+
+// Fixture: `settings` rows only, no `semqlite_config` table at all.
+void test_get_setting_fallback_settings_only() {
+    std::println("  test_get_setting_fallback_settings_only...");
+    cleanup();
+    sqlite3* db = nullptr;
+    sqlite3_open(TEMP_DB.c_str(), &db);
+    exec(db, "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    exec(db, "INSERT INTO settings (key, value) VALUES "
+             "('embedding_model', 'legacy/model-v1'),('vector_type','float'),('dimensions','384')");
+    sqlite3_close(db);
+
+    ragger::sqlite::Backend ro(TEMP_DB, /*readonly=*/true);
+    // Fallback branch: the mapped keys resolve from the leftover settings rows.
+    auto model = ro.get_setting("embedding_model");
+    CHECK(model && *model == "legacy/model-v1");
+    auto dims = ro.get_setting("dimensions");
+    CHECK(dims && *dims == "384");
+    // A missing table must yield nullopt, not an error, for a mapped key that
+    // has no settings row either.
+    CHECK(!ro.get_setting("embedding_version"));
+
+    cleanup();
+    std::println("    OK");
+}
+
+// The other side of the same branch: when `semqlite_config` exists it WINS
+// (the move is a move, not a copy), under SemanticSQLite's key names; and a key
+// that is not one of the three mapped stamps still reads from `settings` only.
+void test_get_setting_semqlite_precedence() {
+    std::println("  test_get_setting_semqlite_precedence...");
+    cleanup();
+    sqlite3* db = nullptr;
+    sqlite3_open(TEMP_DB.c_str(), &db);
+    exec(db, "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    exec(db, "INSERT INTO settings (key, value) VALUES "
+             "('embedding_model','stale/from-settings'),('desired_embedding_model','staged/v2')");
+    exec(db, "CREATE TABLE semqlite_config (key TEXT PRIMARY KEY, value TEXT)");
+    exec(db, "INSERT INTO semqlite_config (key, value) VALUES "
+             "('embedding_model','stamped/from-semqlite'),('embedding_dims','1024')");
+    sqlite3_close(db);
+
+    ragger::sqlite::Backend ro(TEMP_DB, /*readonly=*/true);
+    auto model = ro.get_setting("embedding_model");
+    CHECK(model && *model == "stamped/from-semqlite");
+    // Mapped key with no semqlite_config row falls through to settings...
+    auto vector_type = ro.get_setting("vector_type");
+    CHECK(!vector_type);
+    // ...and a non-mapped key never looks at semqlite_config: 'staged/v2' is a
+    // settings-only key, while 'embedding_dims' is only reachable AS 'dimensions'.
+    auto staged = ro.get_setting("desired_embedding_model");
+    CHECK(staged && *staged == "staged/v2");
+    auto dims = ro.get_setting("dimensions");
+    CHECK(dims && *dims == "1024");
+
+    cleanup();
+    std::println("    OK");
+}
+
+// -----------------------------------------------------------------------
 
 int main() {
     TestEnv env("export");  // must be first: isolates from ~/.ragger
@@ -215,6 +287,8 @@ int main() {
     test_export_list_tables();
     test_export_null_handling();
     test_export_roundtrip();
+    test_get_setting_fallback_settings_only();
+    test_get_setting_semqlite_precedence();
 
     std::println("test_export: all passed");
     return 0;

@@ -61,9 +61,6 @@ public:
                        const std::string& assistant_text,
                        const std::string& model_name = "");
 
-    /// Write back a document's embedding (import path).
-    bool update_document_embedding(int document_id, const std::vector<float>& emb);
-
     /// Store a curated decision (knowledge kind='decision', no trigger).
     /// Embeds text unless deferred. `status` defaults to "current" and must
     /// be creatable (current | provisional | pending) — legacy words such as
@@ -101,10 +98,6 @@ public:
 
     std::vector<std::pair<int,float>> possible_supersedes_for_text(
         const std::string& text);
-
-    /// Per-row embedding write-back for the remaining context tables.
-    bool update_decision_embedding(int decision_id, const std::vector<float>& emb);
-    bool update_turn_embedding(int turn_id, const std::vector<float>& emb);
 
     /// Purge conversation turns older than max_age_hours. Returns rows deleted.
     int cleanup_old_conversations(float max_age_hours);
@@ -173,10 +166,11 @@ public:
 
     /// Rebuild embeddings for all documents, or one table when `table` !=
     /// "all". Returns row count.
-    /// `progress` writes a \r-updated counter to stdout — right for the CLI,
-    /// wrong for the daemon (it lands in the activity log as one enormous
-    /// line); daemon callers pass false and get periodic Logger lines instead.
-    int rebuild_embeddings(bool progress = true, const std::string& table = "all");
+    /// `progress` receives (table, done, total) per row and (table, -1, total)
+    /// at each table's end — the CLI passes a stdout printer; daemon callers
+    /// pass nothing and get periodic Logger lines instead.
+    int rebuild_embeddings(const ProgressFn& progress = {},
+                           const std::string& table = "all");
 
     // ---- Embedding identity: current vs desired + re-embed control -------
     struct EmbeddingStatus {
@@ -238,7 +232,7 @@ public:
     std::vector<std::string> collections() const;
 
     /// Delete a memory by ID.
-    bool delete_memory(int memory_id);
+    bool delete_memory(int knowledge_id);
 
     /// Delete multiple memories by ID.
     int delete_batch(const std::vector<int>& memory_ids);

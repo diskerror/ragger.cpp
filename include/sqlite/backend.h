@@ -63,10 +63,6 @@ public:
                        const std::string& assistant_text,
                        const std::string& model_name = "") override;
 
-    /// Write back a document's embedding (import path).
-    bool update_document_embedding(int document_id,
-                                   const std::vector<float>& emb) override;
-
     /// Store a curated decision (knowledge kind='decision'). Returns
     /// knowledge_id.
     int store_decision(const std::string& text,
@@ -96,10 +92,8 @@ public:
         const std::string& text) override;
 
     /// Write back a single row's embedding for any embedded context table.
-    bool update_decision_embedding(int decision_id,
+    bool update_decision_embedding(int knowledge_id,
                                    const std::vector<float>& emb) override;
-    bool update_turn_embedding(int turn_id,
-                               const std::vector<float>& emb) override;
 
     bool note_exists_exact(const std::string& text,
                            const std::string& created_at) override;
@@ -168,7 +162,7 @@ public:
     std::vector<SearchResult> load_all(const std::string& collection = "") override;
 
     /// Rebuild embeddings for all stored documents. Returns doc count.
-    int rebuild_embeddings(Embedder& embedder, bool progress = true,
+    int rebuild_embeddings(Embedder& embedder, const ProgressFn& progress = {},
                            const std::string& table = "all") override;
     void set_embedder(Embedder& embedder) override;
     void set_vector_type(vector_codec::VectorType t) override;
@@ -176,17 +170,18 @@ public:
                             const std::string& table = "all") override;
     uint8_t embedding_version() const override;
     uint8_t increment_embedding_version() override;
-    int reindex_table(const std::string& table, bool progress = false) override;
+    int reindex_table(const std::string& table, const ProgressFn& progress = {}) override;
     void reset_terms_table() override;
 
     /// Get distinct collection names.
     std::vector<std::string> collections() const override;
 
     /// Delete a memory by ID. Returns true if deleted.
-    bool delete_memory(int memory_id) override;
+    bool delete_memory(int knowledge_id) override;
 
     /// PHASE9B step 5: atomic full text-index rebuild (see backend_impl.h).
-    std::vector<std::pair<std::string, int>> reindex_all(bool progress) override;
+    std::vector<std::pair<std::string, int>> reindex_all(
+        const ProgressFn& progress = {}) override;
 
     /// Delete multiple memories by ID. Returns count deleted.
     int delete_batch(const std::vector<int>& memory_ids) override;

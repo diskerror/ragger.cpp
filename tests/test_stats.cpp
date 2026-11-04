@@ -10,7 +10,9 @@
  *
  * Strategy: point the logger at a THROWAWAY db (/tmp), log fabricated lookups,
  * then reopen the db read-only and assert the rows landed correctly. No live
- * data, no embedder, no daemon — pure unit test of the logging path.
+ * data, no daemon — unit tests of the logging path. The final S55 test is the
+ * exception: it drives RaggerMemory::search() end-to-end (embedder required,
+ * SKIPped without one) to prove the search path actually calls log_lookup.
  */
 
 #ifdef RAGGER_STATS
@@ -21,6 +23,8 @@
 #include <sqlite3.h>
 
 #include "check.h"
+#include "memory.h"
+#include "test_env.h"
 #include <cmath>
 #include <filesystem>
 #include <limits>
@@ -42,17 +46,25 @@ static void cleanup() {
 }
 
 // Tiny read-only helper: run a single-int aggregate query against the db.
-static int scalar(const std::string& sql) {
+static int scalar_at(const std::string& db_path, const std::string& sql) {
     sqlite3* db = nullptr;
-    CHECK(sqlite3_open(DB.c_str(), &db) == SQLITE_OK);
+    CHECK(sqlite3_open(db_path.c_str(), &db) == SQLITE_OK);
     sqlite3_stmt* st = nullptr;
-    CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+    const int prep = sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr);
+    if (prep != SQLITE_OK) {  // e.g. no such table — surface it, don't CHECK-abort before the message
+        std::println(stderr, "scalar_at: prepare failed ({}): {}",
+                     sqlite3_errmsg(db), sql);
+        sqlite3_close(db);
+        CHECK(false && "prepare failed");
+    }
     int out = -1;
     if (sqlite3_step(st) == SQLITE_ROW) out = sqlite3_column_int(st, 0);
     sqlite3_finalize(st);
     sqlite3_close(db);
     return out;
 }
+
+static int scalar(const std::string& sql) { return scalar_at(DB, sql); }
 
 // Read a single text cell.
 static std::string scalar_text(const std::string& sql) {
@@ -97,7 +109,39 @@ static SearchResult mk(int id, const std::string& text, float score,
     return r;
 }
 
+// S55 (C §7 item 9): end-to-end — RaggerMemory::search() on the vector path
+// writes exactly one lookups row per call into the base's stats.db (the
+// StatsLogger ctor in RaggerMemory's ctor creates it at
+// config().resolved_stats_db_path(), which TestEnv points at the scratch
+// base). Paths that do NOT log today (known gap, 8.2 — nothing asserted):
+//   * search()'s reembedding/repair and degraded/unready-embedder early
+//     returns (memory.cpp returns before the RAGGER_STATS block);
+//   * agent_search (the whole agent surface — MCP + HTTP — never reaches
+//     log_lookup).
+static void p13_search_logs_one_lookup_per_call(TestEnv& env) {
+    std::println("  p13_search_logs_one_lookup_per_call...");
+    const std::string stats_db = env.base() + "/stats.db";
+    {
+        ragger::RaggerMemory mem(env.base() + "/memories.db");
+        CHECK(mem.embeddings_degraded() == false);  // vector path, not degraded
+        mem.store("alpha bravo stats probe row");
+        mem.store("charlie delta another stats row");
+
+        const int before = scalar_at(stats_db, "SELECT COUNT(*) FROM lookups");
+        mem.search("alpha bravo");
+        CHECK(scalar_at(stats_db, "SELECT COUNT(*) FROM lookups") == before + 1);
+        mem.search("charlie delta");
+        mem.search("echo foxtrot");  // no matching text: the lookup row lands regardless
+        CHECK(scalar_at(stats_db, "SELECT COUNT(*) FROM lookups") == before + 3);
+        // The hits child rows follow top_n (default 3): 3 searches, few rows.
+        CHECK(scalar_at(stats_db, "SELECT COUNT(*) FROM hits") >= 1);
+        mem.close();
+    }
+    std::println("    OK");
+}
+
 int main() {
+    TestEnv env("stats");  // must be first: isolates from ~/.ragger (RULES.md #17)
     std::println("Running stats logger tests:");
 
     // --- 1. Construction creates the db + schema -----------------------
@@ -232,6 +276,17 @@ int main() {
         CHECK(scalar("SELECT COUNT(*) FROM lookups") == 200);
     }
     std::println("    OK");
+
+    // S55: end-to-end search()->lookups coverage needs the embedder (the
+    // vector path is the one that logs today). SKIP like the other
+    // model-dependent tests when the model is absent.
+    {
+        const auto model_dir = env.model_dir();
+        if (!fs::exists(model_dir + "/model.onnx") && !fs::exists(model_dir + "/onnx/model.onnx"))
+            std::println("  p13_search_logs_one_lookup_per_call: SKIPPED (no model)");
+        else
+            p13_search_logs_one_lookup_per_call(env);
+    }
 
     cleanup();
     std::println("All stats logger tests passed.");
