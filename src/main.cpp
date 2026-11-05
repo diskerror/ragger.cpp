@@ -28,6 +28,7 @@
 #include <print>
 
 #include "ProgramOptions.h"
+#include "agent_api.h"
 #include "auth.h"
 #include "backfill.h"
 #include "client.h"
@@ -380,30 +381,32 @@ int main(int argc, char **argv) {
             int limit = opts.count("num") ? opts["num"].as<int>() : 3;
             if (limit < 1) limit = 1;
 
-            // Try daemon first (thin client — no model loading)
+            // Try daemon first (thin client — no model loading). The daemon
+            // runs the same agent_search body as this direct path
+            // (LR S72, R4).
             auto token = ragger::load_token();
             ragger::RaggerClient client(host, port, token);
-            ragger::SearchResponse response;
 
+            nlohmann::json results;
             if (client.is_available()) {
-                response = client.search(query, limit,
-                                         cfg.default_min_score, colls);
+                const auto response = client.search(query, limit,
+                                                    cfg.default_min_score, colls);
+                for (const auto& r : response.results)
+                    results.push_back({{"id", r.id}, {"score", r.score},
+                                       {"text", r.text}, {"metadata", r.metadata}});
             }
             else {
-                // Fall back to direct DB access
+                // Fall back to direct DB access — same shared verb body.
                 ragger::RaggerMemory memory(db_path);
-                response = memory.search(query, limit,
-                                         cfg.default_min_score, colls);
+                const auto payload = ragger::agent_search(
+                    memory, nlohmann::json{{"query", query},
+                                           {"limit", limit},
+                                           {"min_score", cfg.default_min_score}});
+                for (const auto& r : payload["results"])
+                    results.push_back({{"id", r["id"]}, {"score", r["score"]},
+                                       {"text", r["text"]}, {"metadata", r["metadata"]}});
             }
-
-            nlohmann::json output = nlohmann::json::array();
-            for (const auto &r: response.results) {
-                output.push_back({
-                    {"id", r.id}, {"score", r.score},
-                    {"text", r.text}, {"metadata", r.metadata}
-                });
-            }
-            std::cout << output.dump(2) << "\n";
+            std::cout << results.dump(2) << "\n";
 
         }
         else if (command == "store") {
@@ -414,22 +417,23 @@ int main(int argc, char **argv) {
             }
             std::string text = join_args(args, 0);
 
-            nlohmann::json meta = {};
-
-            // Try daemon first (thin client — no model loading)
+            // Try daemon first (thin client — no model loading). The daemon
+            // runs the same agent_store body as MCP and this direct path
+            // (LR S70, R4); metadata stays empty from the CLI.
             auto token = ragger::load_token();
             ragger::RaggerClient client(host, port, token);
-            std::string id;
 
             if (client.is_available()) {
-                id = client.store(text, meta);
+                const std::string id = client.store(text, nlohmann::json{});
+                std::cout << std::format(ragger::lang::MSG_STORED_WITH_ID, id) << "\n";
             }
             else {
-                // Fall back to direct DB access
+                // Fall back to direct DB access — same shared verb body.
                 ragger::RaggerMemory memory(db_path);
-                id = memory.store(text, meta);
+                const auto stored = ragger::agent_store(memory, nlohmann::json{{"text", text}}, "cli");
+                std::cout << std::format(ragger::lang::MSG_STORED_WITH_ID,
+                                         stored["id"].get<std::string>()) << "\n";
             }
-            std::cout << std::format(ragger::lang::MSG_STORED_WITH_ID, id) << "\n";
 
         }
         else if (command == "decision") {
@@ -450,8 +454,16 @@ int main(int argc, char **argv) {
                 std::string status = opts["status"].as<std::string>();
                 if (status.empty()) status = "current";
                 std::string tags = opts["tags"].as<std::string>();
-                int id = memory.store_decision(text, status, tags);
-                std::println("Stored decision {} (status: {}).", id, status);
+                // LR S70 (R4): one verb body — the same agent_store used by
+                // HTTP /store and MCP `store` with category=decision (the
+                // row, status validation and text handling are identical to
+                // the old store_decision call).
+                nlohmann::json meta{{"category", "decision"}, {"status", status}};
+                if (!tags.empty()) meta["tags"] = tags;
+                const auto stored = ragger::agent_store(
+                    memory, nlohmann::json{{"text", text}, {"metadata", meta}}, "cli");
+                std::println("Stored decision {} (status: {}).",
+                             stored["id"].get<std::string>(), status);
                 return 0;
             }
             if (sub == "list") {

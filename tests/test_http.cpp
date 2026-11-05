@@ -10,6 +10,7 @@
  */
 #include "harness/http_fixture.h"
 
+#include "mcp.h"
 #include "nlohmann_json.hpp"
 
 #include <print>
@@ -202,6 +203,246 @@ void t_decision_validation_parity(HttpFixture& fx) {
     std::println(" OK");
 }
 
+// LR S70 (R4): `store` is ONE function across transports. For the same
+// arguments the HTTP body and the MCP payload must agree (ids differ per
+// row; that is the only field allowed to). Envelopes stay per-surface (D-4):
+// HTTP 400 "ERROR: <msg>" vs MCP isError with the bare message.
+void t_store_http_mcp_parity(HttpFixture& fx) {
+    std::println("  t_store_http_mcp_parity...");
+    auto mcp_call = [&](const json& args) {
+        return ragger::mcp_tool_call(*fx.mem, {{"name", "store"}, {"arguments", args}});
+    };
+    auto mcp_payload = [&](const json& args) {
+        auto r = mcp_call(args);
+        CHECK(r.contains("content"));
+        CHECK(!r.value("isError", false));
+        return json::parse(r["content"][0]["text"].get<std::string>());
+    };
+
+    // note form: same payload shape and kind on both surfaces
+    const json args{{"text", "lr70 parity note"}};
+    const auto h = post_json(fx, "/store", args);
+    CHECK(h["_status"] == 200);
+    const auto m = mcp_payload(args);
+    CHECK(m["status"] == "stored");
+    CHECK(m["kind"] == "note");
+    CHECK(h["kind"] == m["kind"]);
+    CHECK(!id_of(h).empty() && !id_of(m).empty());
+
+    // decision form: category routes to kind='decision' on both surfaces
+    const json dargs{{"text", "lr70 parity decision"},
+                     {"metadata", {{"category", "decision"}}}};
+    const auto dh = post_json(fx, "/store", dargs);
+    CHECK(dh["_status"] == 200);
+    CHECK(dh["kind"] == "decision");
+    CHECK(mcp_payload(dargs)["kind"] == "decision");
+
+    // bad status: rejected with the SAME message (envelope differs)
+    const json bargs{{"text", "lr70 parity bad status"},
+                     {"metadata", {{"category", "decision"}, {"status", "not-a-status"}}}};
+    const auto bh = post_json(fx, "/store", bargs);
+    CHECK(bh["_status"] == 400);
+    const auto br = mcp_call(bargs);
+    CHECK(br.value("isError", false));
+    const std::string hmsg = bh["_raw"].get<std::string>();
+    CHECK(hmsg.rfind("ERROR: ", 0) == 0);
+    CHECK(br["content"][0]["text"].get<std::string>() == hmsg.substr(7));
+
+    // empty text: one message now (was: HTTP "Missing 'text' field" /
+    // MCP "Error: text parameter required" — intended to disappear)
+    const auto eh = post_json(fx, "/store", json{{"text", ""}});
+    CHECK(eh["_status"] == 400);
+    CHECK(eh["_raw"] == "ERROR: text is required");
+    const auto er = mcp_call(json{{"text", ""}});
+    CHECK(er.value("isError", false));
+    CHECK(er["content"][0]["text"] == "text is required");
+
+    // metadata.collection type validation now reaches MCP too (was HTTP-only)
+    const auto cr = mcp_call(json{{"text", "lr70 typed meta"},
+                                  {"metadata", {{"collection", 5}}}});
+    CHECK(cr.value("isError", false));
+    CHECK(cr["content"][0]["text"].get<std::string>().find("must be a string") != std::string::npos);
+    std::println(" OK");
+}
+
+// LR S71 (R4): read verbs moved into agent_api — one body per verb. The
+// differential pins (scratch capture, pre/post move) proved byte-identity;
+// this test pins the two UNIFIED behaviors: empty query is now rejected on
+// every surface with one message (was: MCP-only check on memory_search,
+// HTTP-only "Missing 'query' field" on /search, MCP "Error: query parameter
+// required").
+void t_read_verbs_parity_s71(HttpFixture& fx) {
+    std::println("  t_read_verbs_parity_s71...");
+    auto mcp_err = [&](const char* tool, const json& args) {
+        auto r = ragger::mcp_tool_call(*fx.mem, {{"name", tool}, {"arguments", args}});
+        CHECK(r.value("isError", false));
+        return r["content"][0]["text"].get<std::string>();
+    };
+
+    const auto ms = post_json(fx, "/memory/search", {{"query", ""}});
+    CHECK(ms["_status"] == 400);
+    CHECK(ms["_raw"] == "ERROR: query is required");
+    CHECK(mcp_err("memory_search", {{"query", ""}}) == "query is required");
+
+    const auto s = post_json(fx, "/search", {{"query", ""}});
+    CHECK(s["_status"] == 400);
+    CHECK(s["_raw"] == "ERROR: query is required");
+    CHECK(mcp_err("search", {{"query", ""}}) == "query is required");
+
+    // happy paths still agree between surfaces (shape, not values — scores
+    // differ slightly between the daemon and standalone embedder paths)
+    const auto mh = post_json(fx, "/memory/search", {{"query", "lr70 parity note"}});
+    CHECK(mh["_status"] == 200);
+    auto mr = ragger::mcp_tool_call(*fx.mem, {{"name", "memory_search"},
+                                              {"arguments", {{"query", "lr70 parity note"}}}});
+    CHECK(!mr.value("isError", false));
+    const auto mp = json::parse(mr["content"][0]["text"].get<std::string>());
+    CHECK(mp.contains("results"));
+    CHECK(mp["results"].size() == mh["results"].size());
+    if (!mp["results"].empty()) {
+        const auto& a = mp["results"][0];
+        for (const char* k : {"id", "layer", "score", "matched_by", "created", "snippet", "extra"})
+            CHECK(a.contains(k));
+    }
+    std::println(" OK");
+}
+
+// LR S72 (R4): the write verbs, turn and session are ONE function across
+// transports — the permanent R4 regression. For the same arguments the HTTP
+// body and the MCP payload must agree (ids differ per row; source
+// provenance differs per surface by design). Error messages agree too;
+// only the envelope differs (D-4).
+void t_write_verbs_parity_s72(HttpFixture& fx) {
+    std::println("  t_write_verbs_parity_s72...");
+    auto mcp_call = [&](const char* tool, const json& args) {
+        auto r = ragger::mcp_tool_call(*fx.mem, {{"name", tool}, {"arguments", args}});
+        return std::make_pair(r.value("isError", false),
+                              r["content"][0]["text"].get<std::string>());
+    };
+    // MCP error text == HTTP body minus the "ERROR: " prefix
+    auto err_parity = [&](const char* tool, const json& args, const json& http_resp) {
+        CHECK(http_resp["_status"] == 400);
+        const auto [is_err, text] = mcp_call(tool, args);
+        CHECK(is_err);
+        const std::string raw = http_resp["_raw"].get<std::string>();
+        CHECK(raw.rfind("ERROR: ", 0) == 0);
+        CHECK(text == raw.substr(7));
+    };
+
+    // ---- memory_note (plain) --------------------------------------------
+    const json note_args{{"text", "lr72 note parity"}, {"tags", "lr72"}};
+    const auto nh = post_json(fx, "/memory/note", note_args);
+    CHECK(nh["_status"] == 200);
+    const auto [nerr, ntext] = mcp_call("memory_note", note_args);
+    CHECK(!nerr);
+    const auto nm = json::parse(ntext);
+    CHECK(nm["status"] == nh["status"]);
+    CHECK(nm.contains("id") && nh.contains("id"));
+    CHECK(nm.contains("possible_supersedes") == nh.contains("possible_supersedes"));
+    CHECK(!nm.contains("kind") && !nh.contains("kind")); // plain path shape unchanged
+
+    // ---- memory_note (insight) — seed an L2 row to point at -------------
+    const std::string db_path = fx.env.base() + "/http_test.db";
+    const int turn = fx.mem->store_turn("lr72 q", "lr72 a", "", false, "lr72-sess");
+    CHECK(turn > 0);
+    long long tsid = -1;
+    {
+        RawDb db(db_path);
+        db.exec("INSERT INTO turn_summaries (text, turn_id, session_id, turn_datetime) "
+                "SELECT 'lr72 evidence summary', " + std::to_string(turn) +
+                ", session_id, created_at FROM turns WHERE turn_id = " + std::to_string(turn));
+        tsid = db.scalar("SELECT turn_summary_id FROM turn_summaries WHERE turn_id = "
+                         + std::to_string(turn));
+    }
+    CHECK(tsid > 0);
+    const json ins_args{{"text", "lr72 parity insight"},
+                        {"evidence", json::array({tsid})},
+                        {"trigger", "when probing s72 parity"}};
+    const auto ih = post_json(fx, "/memory/note", ins_args);
+    CHECK(ih["_status"] == 200);
+    CHECK(ih["kind"] == "insight");
+    const auto [ierr, itext] = mcp_call("memory_note", ins_args);
+    CHECK(!ierr);
+    const auto im = json::parse(itext);
+    CHECK(im["kind"] == "insight");
+    CHECK(im.contains("superseded") == ih.contains("superseded"));
+    // trigger on a plain note: same message everywhere (D-3 rule)
+    err_parity("memory_note", {{"text", "lr72 bad trigger"}, {"trigger", "nope"}},
+               post_json(fx, "/memory/note", {{"text", "lr72 bad trigger"}, {"trigger", "nope"}}));
+
+    // ---- memory_decision --------------------------------------------------
+    const json dec_args{{"text", "lr72 parity decision"},
+                        {"trigger", "when probing s72 decision parity"}};
+    const auto dh = post_json(fx, "/decision", dec_args);
+    CHECK(dh["_status"] == 200);
+    CHECK(dh["kind"] == "decision");
+    const auto [derr, dtext] = mcp_call("memory_decision", dec_args);
+    CHECK(!derr);
+    const auto dm = json::parse(dtext);
+    CHECK(dm["kind"] == "decision");
+    CHECK(dm["status"] == dh["status"]);
+    CHECK(dm.contains("superseded") == dh.contains("superseded"));
+    CHECK(dm.contains("possible_supersedes") == dh.contains("possible_supersedes"));
+    err_parity("memory_decision", {{"text", "lr72 decision no trigger"}},
+               post_json(fx, "/decision", {{"text", "lr72 decision no trigger"}}));
+
+    // ---- memory_update (tags on each surface's own note; text rejected) --
+    const auto uh = post_json(fx, "/memory/update",
+                              {{"id", "knowledge:" + id_of(nh)}, {"tags", "lr72,updated"}});
+    CHECK(uh["_status"] == 200);
+    const auto [uerr, utext] = mcp_call("memory_update",
+                                        {{"id", "knowledge:" + nm["id"].get<std::string>()},
+                                         {"tags", "lr72,updated"}});
+    CHECK(!uerr);
+    const auto um = json::parse(utext);
+    // agent_update answers the updated row: same key set, same tags
+    CHECK(um.size() + 2 == uh.size());   // uh carries _status/_raw bookkeeping
+    CHECK(um.value("tags", "") == uh.value("tags", ""));
+    err_parity("memory_update", {{"id", "knowledge:1"}, {"text", "no in-place edit"}},
+               post_json(fx, "/memory/update", {{"id", "knowledge:1"}, {"text", "no in-place edit"}}));
+
+    // ---- memory_review ----------------------------------------------------
+    const auto rh = post_json(fx, "/memory/review", {{"action", "list"}});
+    CHECK(rh["_status"] == 200);
+    const auto [rerr, rtext] = mcp_call("memory_review", {{"action", "list"}});
+    CHECK(!rerr);
+    auto rh_clean = rh;
+    rh_clean.erase("_status");
+    rh_clean.erase("_raw");
+    CHECK(json::parse(rtext) == rh_clean);   // empty queue: byte-equal payloads
+    err_parity("memory_review", {{"action", "explode"}},
+               post_json(fx, "/memory/review", {{"action", "explode"}}));
+
+    // ---- turn (capture_turn) ----------------------------------------------
+    const json targs{{"user", "lr72 turn user"}, {"assistant", "lr72 turn assistant"},
+                     {"session_id", "lr72-sess-turn"}};
+    const auto th = post_json(fx, "/turn", targs);
+    CHECK(th["_status"] == 200);
+    CHECK(th["status"] == "captured");   // capture_turns defaults on
+    const auto [cerr, ctext] = mcp_call("capture_turn", targs);
+    CHECK(!cerr);
+    const auto cm = json::parse(ctext);
+    CHECK(cm["status"] == th["status"]);
+    CHECK(cm.contains("turn_id"));
+    // missing user: unified message + channel (D16: was a JSON error body on
+    // HTTP, 'Error: user parameter required' on MCP)
+    const auto mu = post_json(fx, "/turn", json{{"assistant", "x"}});
+    CHECK(mu["_status"] == 400);
+    CHECK(mu["_raw"] == "ERROR: user is required");
+    const auto [merr, mtext] = mcp_call("capture_turn", json{{"assistant", "x"}});
+    CHECK(merr);
+    CHECK(mtext == "user is required");
+
+    // ---- session (build_context) ------------------------------------------
+    auto sr = fx.client.get(fx.url("/session/lr72-sess"), fx.auth());
+    CHECK(sr.ok());
+    const auto sh = json::parse(sr.body);
+    const auto [berr, btext] = mcp_call("build_context", {{"session_id", "lr72-sess"}});
+    CHECK(!berr);
+    CHECK(json::parse(btext) == sh);    // fixture leaves build_context off: {status:"disabled"}
+    std::println(" OK");
+}
+
 // An unrouted path is a 404, not a 500 or an auth failure.
 void t_unknown_route(HttpFixture& fx) {
     std::println("  t_unknown_route...");
@@ -306,6 +547,9 @@ int main() {
     t_store_metadata_type_error(fx);
     t_memory_search_bad_limit(fx);
     t_decision_validation_parity(fx);
+    t_store_http_mcp_parity(fx);
+    t_read_verbs_parity_s71(fx);
+    t_write_verbs_parity_s72(fx);
     t_unknown_route(fx);
     t_delete_routes_gone(fx);
     t_memory_note_trigger_session(fx);

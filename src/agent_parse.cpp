@@ -118,6 +118,13 @@ void validate_note_request(const json& a) {
         throw std::invalid_argument("trigger is only valid on an insight (pass evidence)");
 }
 
+std::pair<std::string, std::vector<std::string>> parse_review_request(const json& a) {
+    std::vector<std::string> ids;
+    if (a.contains("ids"))
+        ids = a["ids"].get<std::vector<std::string>>();
+    return {a.value("action", ""), std::move(ids)};
+}
+
 json supersedes_json(const std::vector<std::pair<int, float>>& ps) {
     json out = json::array();
     for (const auto& [id, score] : ps)

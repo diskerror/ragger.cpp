@@ -5,8 +5,7 @@
 #include "build_info.h"
 #include "server.h"
 #include "memory.h"
-#include "store_kind.h"
-#include "agent_parse.h"
+#include "agent_api.h"
 #include "user_store.h"
 #include "sqlite/backend.h"
 #include "lang.h"
@@ -483,69 +482,26 @@ struct Server::Impl {
 
     // ---- Route handlers (named for navigability) ---------------------------
 
+    // LR S70 (R4): the verb body is agent_store (agent_api.h), shared with
+    // MCP `store` and the CLI. This handler is envelope only: parse, call,
+    // respond. Validation failures throw std::invalid_argument and map to
+    // 400 "ERROR: <msg>" via guarded() (D-4: mapping shared, envelope kept).
     void handle_store(const UserInfo& user, const httplib::Request& req,
                       httplib::Response& res) {
         auto body = json::parse(req.body);
-        std::string text = body.value("text", "");
-        json metadata = body.value("metadata", json::object());
-        if (text.empty()) {
-            Diskerror::Logger::debug("POST /store 400");
-            res.status = 400;
-            res.set_content(lang::HTTP_MISSING_TEXT, "text/plain");
-            return;
-        }
-        // S27 (C §4): a non-string collection/source is a client error with
-        // a clear message (was: nlohmann's type-error text via json::exception).
-        if (metadata.contains("collection") && !metadata["collection"].is_string())
-            throw std::invalid_argument("metadata.collection must be a string");
-        if (metadata.contains("source") && !metadata["source"].is_string())
-            throw std::invalid_argument("metadata.source must be a string");
-        if (!metadata.contains("collection") || metadata["collection"].get<std::string>().empty())
-            metadata["collection"] = "memory";
-        if (!metadata.contains("source") || metadata["source"].get<std::string>().empty())
-            metadata["source"] = user.username;
-        auto& mem = memory;
-
-        // PHASE9B step 6: ONE function per verb. store() decides the kind
-        // itself (store_kind_for: category=="decision" -> kind='decision',
-        // everything else -> note), so HTTP and MCP cannot disagree. The
-        // old special case bypassed store()'s status validation and its
-        // transaction.
-        std::string id = mem.store(text, metadata);
-        Diskerror::Logger::debug("POST /store 200");
-        respond_json(res, json{{"id", id},
-                               {"status", "stored"},
-                               {"kind", std::string(store_kind_for(metadata))}});
+        respond_json(res, agent_store(memory, body, user.username));
     }
 
     // POST /decision -- structured decision (agent API Phase 1, db 0.17).
     // Body: {text, trigger, rationale?, scope?, tags?, status?, supersedes?,
     //        session?, evidence?: [turn_summary_id,...]}
     // tags may be a string ("a,b") or an array of strings.
-    // Validation failures are 400 with the message; they are caller errors,
-    // not server faults, so they must not fall through to guarded()'s 500.
+    // LR S72 (R4): verb body moved to agent_memory_decision (agent_api.h);
+    // validation failures map to 400 "ERROR: <msg>" via guarded() (D-4).
     void handle_decision(const UserInfo& /*user*/, const httplib::Request& req,
                          httplib::Response& res) {
         auto body = json::parse(req.body);
-        auto& mem = memory;
-        // Project (Phase 3): explicit name/path wins; otherwise infer from
-        // cwd (longest-prefix match). No match leaves it empty — not an
-        // error. Shared with the MCP surface via parse_decision_input.
-        KnowledgeInput in = parse_decision_input(body);
-        try {
-            auto r = mem.store_knowledge(in);
-            Diskerror::Logger::debug("POST /decision 200");
-            respond_json(res, json{
-                {"id", r.id},
-                {"kind", r.kind},
-                {"status", "stored"},
-                {"superseded", r.superseded ? json(*r.superseded) : json(nullptr)},
-                {"possible_supersedes", supersedes_json(r.possible_supersedes)}});
-        } catch (const std::invalid_argument& e) {
-            Diskerror::Logger::debug("POST /decision 400");
-            res.status = 400;
-            res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
-        }
+        respond_json(res, agent_memory_decision(memory, body));
     }
 
     // POST /memory/note — agent note (agent API Phase 3).
@@ -557,252 +513,115 @@ struct Server::Impl {
     // store_knowledge(kind="insight") instead — a synthesized insight linked
     // to its sources, and the response carries "kind":"insight". Without evidence nothing
     // changes.
+    // LR S72 (R4): the whole body — including the insight routing that used
+    // to be written twice (inventory D14) — lives in agent_memory_note
+    // (agent_api.h). The empty-text 400 message unified there too (D6).
     void handle_memory_note(const UserInfo& user, const httplib::Request& req,
                             httplib::Response& res) {
         auto body = json::parse(req.body);
-        std::string text = body.value("text", "");
-        if (text.empty()) {
-            Diskerror::Logger::debug("POST /memory/note 400");
-            res.status = 400;
-            res.set_content(lang::HTTP_MISSING_TEXT, "text/plain");
-            return;
-        }
-        // LR S59 (D-3): a trigger without evidence is a client error.
-        try {
-            validate_note_request(body);
-        } catch (const std::invalid_argument& e) {
-            Diskerror::Logger::debug("POST /memory/note 400 (trigger)");
-            res.status = 400;
-            res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
-            return;
-        }
-
-        json metadata = json::object();
-        metadata["source"] = user.username;
-        if (body.contains("tags"))
-            metadata["tags"] = body["tags"];
-        // LR S59: plain notes carry session provenance (GUID lookup only,
-        // unknown GUID stores with NULL session — Impl::store's rule).
-        if (body.contains("session") && body["session"].is_string())
-            metadata["session"] = body["session"];
-
-        auto& mem = memory;
-
-        // ---- insight routing (Phase 5; PHASE7 kind="insight") -----------
-        if (body.contains("evidence") && body["evidence"].is_array()) {
-            KnowledgeInput in = parse_note_insight(body, text);
-            try {
-                auto r = mem.store_knowledge(in);
-                Diskerror::Logger::debug("POST /memory/note 200 (insight)");
-                respond_json(res, json{
-                    {"id", r.id},
-                    {"kind", r.kind},
-                    {"status", "stored"},
-                    {"superseded", r.superseded ? json(*r.superseded) : json(nullptr)},
-                    {"possible_supersedes", supersedes_json(r.possible_supersedes)}});
-            } catch (const std::invalid_argument& e) {
-                Diskerror::Logger::debug("POST /memory/note 400 (insight)");
-                res.status = 400;
-                res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
-            }
-            return;
-        }
-
-        try {
-            std::string id = mem.store(text, metadata);
-            Diskerror::Logger::debug("POST /memory/note 200");
-            respond_json(res, json{
-                {"id", id},
-                {"status", "stored"},
-                {"possible_supersedes", supersedes_json(mem.possible_supersedes_for_text(text))}});
-        } catch (const std::invalid_argument& e) {
-            Diskerror::Logger::debug("POST /memory/note 400");
-            res.status = 400;
-            res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
-        }
+        respond_json(res, agent_memory_note(memory, body, user.username));
     }
 
     // POST /memory/timeline — deterministic newest-first range scan
     // (agent API Phase 4). Body: {session?, since?, until?,
     // granularity?, limit?, cursor?}. Returns {items, next_cursor}.
+    // LR S71 (R4): verb body moved to agent_memory_timeline (agent_api.h).
     void handle_memory_timeline(const UserInfo& /*user*/, const httplib::Request& req,
                                 httplib::Response& res) {
         auto body = json::parse(req.body);
-        auto& mem = memory;
-        TimelineQuery q = parse_timeline_query(body);
-        try {
-            Diskerror::Logger::debug("POST /memory/timeline 200");
-            respond_json(res, mem.agent_timeline(q));
-        } catch (const std::invalid_argument& e) {
-            Diskerror::Logger::debug("POST /memory/timeline 400");
-            res.status = 400;
-            res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
-        }
+        respond_json(res, agent_memory_timeline(memory, body));
+        Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "POST", "/memory/timeline", "200"));
     }
 
     // POST /memory/update — metadata-only curation (agent API Phase 4).
     // Body: {id, status?, tags?, text?}. `text` present is always
     // rejected: text changes go through a new decision/note with supersedes.
+    // LR S72 (R4): verb body moved to agent_memory_update (agent_api.h).
     void handle_memory_update(const UserInfo& /*user*/, const httplib::Request& req,
                               httplib::Response& res) {
         auto body = json::parse(req.body);
-        UpdateRequest u = parse_update_request(body);
-        auto& mem = memory;
-        try {
-            Diskerror::Logger::debug("POST /memory/update 200");
-            respond_json(res, mem.agent_update(u));
-        } catch (const std::invalid_argument& e) {
-            Diskerror::Logger::debug("POST /memory/update 400");
-            res.status = 400;
-            res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
-        }
+        respond_json(res, agent_memory_update(memory, body));
     }
 
     // POST /memory/review — pending-decision queue (agent API Phase 4).
     // Body: {action: list|approve|reject, ids?: [handles]}.
+    // LR S72 (R4): verb body moved to agent_memory_review (agent_api.h);
+    // the action/ids extraction moved to parse_review_request (D18).
     void handle_memory_review(const UserInfo& /*user*/, const httplib::Request& req,
                               httplib::Response& res) {
         auto body = json::parse(req.body);
-        const std::string action = body.value("action", "");
-        std::vector<std::string> ids;
-        if (body.contains("ids"))
-            ids = body["ids"].get<std::vector<std::string>>();
-
-        auto& mem = memory;
-        try {
-            Diskerror::Logger::debug("POST /memory/review 200");
-            respond_json(res, mem.agent_review(action, ids));
-        } catch (const std::invalid_argument& e) {
-            Diskerror::Logger::debug("POST /memory/review 400");
-            res.status = 400;
-            res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
-        }
+        respond_json(res, agent_memory_review(memory, body));
     }
 
     // POST /memory/search — layered agent search (agent API Phase 2).
     // Body = AgentSearchQuery fields: {query, layers?: [..], since?, until?,
     // status?, session?, exclude_session?, limit?, max_tokens?}.
     // Returns {"results":[AgentHit...]}. Validation failures are 400.
+    // LR S71 (R4): verb body moved to agent_memory_search (agent_api.h).
     void handle_memory_search(const UserInfo& /*user*/, const httplib::Request& req,
                               httplib::Response& res) {
         auto body = json::parse(req.body);
-        // Shared with the MCP surface via parse_agent_search_query.
-        auto& mem = memory;
-        AgentSearchQuery q = parse_agent_search_query(body);
-        try {
-            auto hits = mem.agent_search(q);
-            json arr = json::array();
-            for (const auto& h : hits) {
-                arr.push_back({{"id", h.id}, {"layer", h.layer},
-                               {"score", h.score}, {"matched_by", h.matched_by},
-                               {"created", h.created}, {"snippet", h.snippet},
-                               {"extra", h.extra}});
-            }
-            Diskerror::Logger::debug("POST /memory/search 200");
-            respond_json(res, json{{"results", std::move(arr)}});
-        } catch (const std::invalid_argument& e) {
-            Diskerror::Logger::debug("POST /memory/search 400");
-            res.status = 400;
-            res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
-        }
+        respond_json(res, agent_memory_search(memory, body));
+        Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "POST", "/memory/search", "200"));
     }
 
     // POST /memory/get — agent row reads (agent API Phase 2).
     // Body = AgentGetQuery fields: {ids?: [handles], expand?, session?,
     // after_turn?, before_turn?, limit?}. Exactly one mode per call.
+    // LR S71 (R4): verb body moved to agent_memory_get (agent_api.h).
     void handle_memory_get(const UserInfo& /*user*/, const httplib::Request& req,
                            httplib::Response& res) {
         auto body = json::parse(req.body);
-        AgentGetQuery q = parse_agent_get_query(body);
-        auto& mem = memory;
-        try {
-            Diskerror::Logger::debug("POST /memory/get 200");
-            respond_json(res, mem.agent_get(q));
-        } catch (const std::invalid_argument& e) {
-            Diskerror::Logger::debug("POST /memory/get 400");
-            res.status = 400;
-            res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
-        }
+        respond_json(res, agent_memory_get(memory, body));
+        Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "POST", "/memory/get", "200"));
     }
 
+    // LR S71 (R4): flat search body moved to agent_search (agent_api.h).
+    // The empty-query 400 message unified there ("query is required").
     void handle_search(const UserInfo& /*user*/, const httplib::Request& req,
                        httplib::Response& res) {
         auto body = json::parse(req.body);
-        std::string query = body.value("query", "");
-        if (query.empty()) {
-            Diskerror::Logger::debug("POST /search 400");
-            res.status = 400; res.set_content(lang::HTTP_MISSING_QUERY, "text/plain"); return;
-        }
-        int limit       = body.value("limit", config().default_search_limit);
-        float min_score = body.value("min_score", config().default_min_score);
-        auto collections = body.value("collections", std::vector<std::string>{});
-        auto t0 = std::chrono::high_resolution_clock::now();
-        auto& mem = memory;
-        auto sr = mem.search(query, limit, min_score, collections);
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::high_resolution_clock::now() - t0).count();
-        json timing = sr.timing;
-        timing["total_ms"] = ms;
-        Diskerror::Logger::trace(std::format(lang::DBG_QUERY_LOG, query, sr.results.size(), ms));
+        respond_json(res, agent_search(memory, body));
         Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "POST", "/search", "200"));
-        respond_json(res, json{{"results", search_results_to_json(sr.results)},
-                             {"timing",  timing}});
     }
 
     // POST /turn: ingest one agent-pushed conversation turn for background
     // summarization. No-op unless [server] capture_turns is true.
+    // LR S72 (R4): arg rules + capture + payload via agent_capture_turn
+    // (the missing-user 400 body unified into the shared mapping, D16).
+    // The eager summarizer handoff stays HTTP-only (D17: MCP turns are
+    // found by the daemon's periodic tick — no in-process summarizer).
     void handle_turn(const UserInfo& /*user*/, const httplib::Request& req,
                      httplib::Response& res) {
         auto body = json::parse(req.body);
-        std::string user_text  = body.value("user", "");
-        std::string assistant  = body.value("assistant", "");
-        std::string model      = body.value("model", "");
-        std::string session_id = body.value("session_id", "");
-        std::string session_name = body.value("session_name", "");
-        std::string name_source  = body.value("name_source", "");
-        if (user_text.empty()) {
-            Diskerror::Logger::debug("POST /turn 400");
-                        respond_json(res, json{{"error", "missing required field: user"}}, 400);
-            return;
-        }
-        auto& mem = memory;
-        auto result = capture_turn(mem, user_text, assistant, model, session_id,
-                                   session_name, name_source);
+        const auto result = agent_capture_turn(memory, body);
         // PHASE6 2.2: hand the fresh turn straight to the summarizer so L2
         // runs as soon as the single worker is free (the periodic tick is
         // the safety net, not the primary path). Non-blocking: enqueue only,
         // the request never waits for inference. summarizer_ is assigned in
         // serve() before the listeners start, so every request thread sees a
-        // fully-constructed pointer without locking. MCP capture (no daemon
-        // summarizer in-process) is unchanged: the daemon's tick finds those.
-        if (result.captured && !assistant.empty() && summarizer_)
-            summarizer_->enqueue_turn(result.turn_id, result.clean_user, assistant,
-                                      model, session_id, /*source_timestamp=*/"");
-
+        // fully-constructed pointer without locking.
+        if (result.captured && summarizer_) {
+            const std::string assistant = body.value("assistant", std::string());
+            if (!assistant.empty())
+                summarizer_->enqueue_turn(result.turn_id, result.clean_user, assistant,
+                                          body.value("model", std::string()),
+                                          body.value("session_id", std::string()),
+                                          /*source_timestamp=*/"");
+        }
+        respond_json(res, capture_turn_payload(result));
         Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "POST", "/turn", "200"));
-        respond_json(res, json{{"status",  result.captured ? "captured" : "disabled"},
-                             {"turn_id", result.turn_id}});
     }
 
     // GET /session/<guid>[?recipe=name]: assemble a recipe-shaped context payload.
+    // LR S72 (R4): verb body moved to agent_build_context (agent_api.h);
+    // the handler only maps path + query onto the shared args object (D21).
     void handle_session(const UserInfo& /*user*/, const httplib::Request& req,
                         httplib::Response& res) {
-        std::string sid = req.matches[1];
-        std::string recipe_name = req.get_param_value("recipe");
-        auto& mem = memory;
-        auto ctx = build_context(mem, sid, recipe_name);
-        if (!ctx.enabled) {
-            respond_json(res, json{{"status", "disabled"}});
-            return;
-        }
-        json chunks = json::array();
-        for (const auto& c : ctx.chunks)
-            chunks.push_back({{"kind", c.kind}, {"text", c.text}, {"timestamp", c.timestamp}});
+        json args{{"session_id", std::string(req.matches[1])},
+                  {"recipe", req.get_param_value("recipe")}};
+        respond_json(res, agent_build_context(memory, args));
         Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "GET", "/session", "200"));
-        respond_json(res, json{{"status",     "ok"},
-                             {"session_id", sid},
-                             {"recipe",     ctx.recipe_name},
-                             {"chunks",     chunks}});
     }
 
     void handle_search_by_metadata(const UserInfo& /*user*/, const httplib::Request& req,

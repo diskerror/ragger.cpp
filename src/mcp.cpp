@@ -19,8 +19,7 @@
 #include "lang.h"
 #include "Logger.h"
 #include "memory.h"
-#include "store_kind.h"
-#include "agent_parse.h"
+#include "agent_api.h"
 #include "sqlite/backend.h"
 #include "sqlite/status.h"
 #include "util/fs.h"
@@ -424,183 +423,103 @@ static nlohmann::json tool_call(RaggerMemory& memory,
     };
 
     if (tool_name == "store") {
-        const auto text = arguments.value("text", "");
-        if (text.empty())
-            return error_result(ragger::lang::ERR_MCP_TEXT_REQUIRED);
-        const auto metadata = arguments.value("metadata", nlohmann::json::object());
-        // PHASE9B step 6: same single implementation as HTTP /store; the
-        // reply gains `kind` additively so both transports report it.
-        const auto id = memory.store(text, metadata);
-        return text_result(nlohmann::json({{"id", id}, {"status", "stored"},
-                                           {"kind", std::string(ragger::store_kind_for(metadata))}}).dump());
+        // LR S70 (R4): shared body with HTTP /store and the CLI (agent_api.h).
+        // The MCP-only text check and reply shaping are gone; every surface
+        // now produces the same payload {id, status, kind} and the same
+        // validation messages.
+        try {
+            return text_result(ragger::agent_store(memory, arguments, "mcp").dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
 
     } else if (tool_name == "memory_decision") {
-        // Shared with HTTP POST /decision via parse_decision_input (tags
-        // accept array or string form).
-        KnowledgeInput in = parse_decision_input(arguments);
+        // LR S72 (R4): shared body with HTTP POST /decision (agent_api.h).
         try {
-            const auto r = memory.store_knowledge(in);
-            return text_result(nlohmann::json({
-                {"id", r.id}, {"kind", r.kind}, {"status", "stored"},
-                {"superseded", r.superseded ? nlohmann::json(*r.superseded)
-                                            : nlohmann::json(nullptr)},
-                {"possible_supersedes", supersedes_json(r.possible_supersedes)}}).dump());
+            return text_result(ragger::agent_memory_decision(memory, arguments).dump());
         } catch (const std::invalid_argument& e) {
             return error_result(e.what());
         }
 
     } else if (tool_name == "memory_search") {
-        const auto query = arguments.value("query", "");
-        if (query.empty())
-            return error_result(ragger::lang::ERR_MCP_QUERY_REQUIRED);
-        // Shared with HTTP POST /memory/search via parse_agent_search_query.
-        AgentSearchQuery q = parse_agent_search_query(arguments);
+        // LR S71 (R4): shared body with HTTP /memory/search (agent_api.h).
         try {
-            const auto hits = memory.agent_search(q);
-            nlohmann::json arr = nlohmann::json::array();
-            for (const auto& h : hits) {
-                arr.push_back({{"id", h.id}, {"layer", h.layer},
-                               {"score", h.score}, {"matched_by", h.matched_by},
-                               {"created", h.created}, {"snippet", h.snippet},
-                               {"extra", h.extra}});
-            }
-            return text_result(nlohmann::json({{"results", std::move(arr)}}).dump());
+            return text_result(ragger::agent_memory_search(memory, arguments).dump());
         } catch (const std::invalid_argument& e) {
             return error_result(e.what());
         }
 
     } else if (tool_name == "memory_get") {
-        AgentGetQuery q = parse_agent_get_query(arguments);
+        // LR S71 (R4): shared body with HTTP /memory/get.
         try {
-            return text_result(memory.agent_get(q).dump());
+            return text_result(ragger::agent_memory_get(memory, arguments).dump());
         } catch (const std::invalid_argument& e) {
             return error_result(e.what());
         }
 
     } else if (tool_name == "memory_note") {
-        // Notes land in knowledge (kind='note') via store(); evidence
-        // present => stored as an insight instead (see HTTP /memory/note for
-        // the shared contract). LR S59: trigger only on insights; session is
-        // recorded on both paths.
-        const auto text = arguments.value("text", "");
-        if (text.empty())
-            return error_result(ragger::lang::ERR_MCP_TEXT_REQUIRED);
+        // LR S72 (R4): shared body with HTTP /memory/note (agent_api.h) —
+        // the insight/plain routing that used to be written twice (D14)
+        // exists once now. Provenance stays per-surface ("mcp" here).
         try {
-            validate_note_request(arguments);
-        } catch (const std::invalid_argument& e) {
-            return error_result(e.what());
-        }
-        json metadata = json::object();
-        metadata["source"] = "mcp";
-        if (arguments.contains("tags"))
-            metadata["tags"] = arguments["tags"];
-        if (arguments.contains("session") && arguments["session"].is_string())
-            metadata["session"] = arguments["session"];
-        try {
-            if (arguments.contains("evidence") && arguments["evidence"].is_array()) {
-                KnowledgeInput in = parse_note_insight(arguments, text);
-                const auto r = memory.store_knowledge(in);
-                return text_result(json({{"id", r.id}, {"kind", r.kind},
-                                         {"status", "stored"},
-                                         {"superseded", r.superseded ? json(*r.superseded) : json(nullptr)},
-                                         {"possible_supersedes", supersedes_json(r.possible_supersedes)}}).dump());
-            }
-            const auto id = memory.store(text, metadata);
-            return text_result(json({{"id", id}, {"status", "stored"},
-                                     {"possible_supersedes",
-                                      supersedes_json(memory.possible_supersedes_for_text(text))}}).dump());
+            return text_result(ragger::agent_memory_note(memory, arguments, "mcp").dump());
         } catch (const std::invalid_argument& e) {
             return error_result(e.what());
         }
 
     } else if (tool_name == "memory_timeline") {
-        TimelineQuery q = parse_timeline_query(arguments);
+        // LR S71 (R4): shared body with HTTP /memory/timeline.
         try {
-            return text_result(memory.agent_timeline(q).dump());
+            return text_result(ragger::agent_memory_timeline(memory, arguments).dump());
         } catch (const std::invalid_argument& e) {
             return error_result(e.what());
         }
 
     } else if (tool_name == "memory_update") {
-        // Shared with HTTP POST /memory/update. `text` is now forwarded and
-        // rejected with the canonical message (it used to be dropped
-        // silently, letting a caller's text pass without effect).
-        UpdateRequest req = parse_update_request(arguments);
+        // LR S72 (R4): shared body with HTTP POST /memory/update.
         try {
-            return text_result(memory.agent_update(req).dump());
+            return text_result(ragger::agent_memory_update(memory, arguments).dump());
         } catch (const std::invalid_argument& e) {
             return error_result(e.what());
         }
 
     } else if (tool_name == "memory_review") {
-        const auto action = arguments.value("action", "");
-        std::vector<std::string> ids;
-        if (arguments.contains("ids"))
-            ids = arguments["ids"].get<std::vector<std::string>>();
+        // LR S72 (R4): shared body with HTTP POST /memory/review; the
+        // action/ids extraction moved to parse_review_request (D18).
         try {
-            return text_result(memory.agent_review(action, ids).dump());
+            return text_result(ragger::agent_memory_review(memory, arguments).dump());
         } catch (const std::invalid_argument& e) {
             return error_result(e.what());
         }
 
     } else if (tool_name == "search") {
-        const auto query = arguments.value("query", "");
-        if (query.empty())
-            return error_result(ragger::lang::ERR_MCP_QUERY_REQUIRED);
-        const int   limit     = arguments.value("limit", config().default_search_limit);
-        const float min_score = arguments.value("min_score", config().default_min_score);
-        const auto  colls     = arguments.value("collections",
-                                                std::vector<std::string>{});
-        const auto  response  = memory.search(query, limit, min_score, colls);
-
-        nlohmann::json arr = nlohmann::json::array();
-        for (const auto& r : response.results) {
-            arr.push_back({
-                {"id",        r.id},
-                {"text",      r.text},
-                {"score",     r.score},
-                {"metadata",  r.metadata},
-                {"timestamp", r.timestamp}
-            });
+        // LR S71 (R4): shared body with HTTP /search and the CLI. The MCP
+        // envelope stays what it always was: the bare results array, no
+        // timing block (inventory D1 — preserved, not unified, by this step).
+        try {
+            return text_result(ragger::agent_search(memory, arguments)["results"].dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
         }
-        return text_result(arr.dump());
 
     } else if (tool_name == "capture_turn") {
-        const auto user = arguments.value("user", "");
-        if (user.empty())
-            return error_result(ragger::lang::ERR_MCP_USER_REQUIRED);
-        const auto assistant = arguments.value("assistant", "");
-        const auto model     = arguments.value("model", "");
-        const auto session   = arguments.value("session_id", "");
-        const auto sess_name = arguments.value("session_name", "");
-        const auto n_source  = arguments.value("name_source", "");
-        const auto result    = capture_turn(memory, user, assistant, model, session,
-                                            sess_name, n_source);
-        return text_result(nlohmann::json({
-            {"status",  result.captured ? "captured" : "disabled"},
-            {"turn_id", result.turn_id}
-        }).dump());
+        // LR S72 (R4): shared body with HTTP POST /turn (agent_api.h).
+        // The missing-user message unified ('user is required', D16). No
+        // summarizer enqueue here (D17): the daemon's tick finds MCP turns.
+        try {
+            return text_result(ragger::capture_turn_payload(
+                ragger::agent_capture_turn(memory, arguments)).dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
 
     } else if (tool_name == "build_context") {
-        const auto session = arguments.value("session_id", "");
-        const auto recipe  = arguments.value("recipe", "");
-        const auto ctx = build_context(memory, session, recipe);
-        if (!ctx.enabled)
-            return text_result(nlohmann::json({{"status", "disabled"}}).dump());
-        nlohmann::json chunks = nlohmann::json::array();
-        for (const auto& c : ctx.chunks) {
-            chunks.push_back({
-                {"kind",      c.kind},
-                {"text",      c.text},
-                {"timestamp", c.timestamp}
-            });
+        // LR S72 (R4): shared body with HTTP GET /session/<guid>.
+        try {
+            return text_result(ragger::agent_build_context(memory, arguments).dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
         }
-        return text_result(nlohmann::json({
-            {"status",     "ok"},
-            {"session_id", session},
-            {"recipe",     ctx.recipe_name},
-            {"chunks",     chunks}
-        }).dump());
 
     } else if (tool_name == "get_config") {
         const auto key = arguments.value("key", "");

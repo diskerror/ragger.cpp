@@ -41,6 +41,13 @@ TimelineQuery parse_timeline_query(const nlohmann::json& a);
 /// canonical "store a new row with supersedes" message.
 UpdateRequest parse_update_request(const nlohmann::json& a);
 
+/// POST /memory/review body / memory_review arguments -> (action, ids).
+/// LR S72: this extraction was inline-duplicated on both surfaces
+/// (inventory D18); it lives here now. Action validation stays in the
+/// backend (agent_review throws on an unknown action).
+std::pair<std::string, std::vector<std::string>> parse_review_request(
+    const nlohmann::json& a);
+
 /// POST /decision body / memory_decision arguments -> KnowledgeInput
 /// (kind="decision").
 KnowledgeInput parse_decision_input(const nlohmann::json& a);
