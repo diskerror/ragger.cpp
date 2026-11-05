@@ -115,6 +115,14 @@ struct Backend::Impl {
 
     ~Impl();
 
+    // LR S66/S67: the back-fill candidate structs are declared on the
+    // StorageBackend interface; a nested class does not see the enclosing
+    // class's *inherited* names by lookup, so re-export them here.
+    using L2BackfillCandidate = StorageBackend::L2BackfillCandidate;
+    using TriggerCandidate    = StorageBackend::TriggerCandidate;
+    using StrandedCandidate   = StorageBackend::StrandedCandidate;
+    using SessionNameCandidate = StorageBackend::SessionNameCandidate;
+
     // ---- helpers -------------------------------------------------------
     void exec(const char* sql);
     void exec(const std::string& sql);
@@ -553,6 +561,22 @@ struct Backend::Impl {
     // the real summarizer model name, never "bad", so this only targets
     // genuine poison-abandon rows.
     int reset_abandoned_turn_summaries(int limit);
+
+    // ---- LR S66/S67 back-fill primitives (see storage_backend.h) --------
+    std::vector<L2BackfillCandidate> l2_backfill_candidates(
+        const std::string& kind, const std::string& model_name,
+        const std::vector<int>& ids);
+    bool apply_l2_text(int turn_summary_id, const std::string& text,
+                       const std::string& summary_model_name,
+                       bool overwrite);
+    std::vector<TriggerCandidate> trigger_backfill_candidates();
+    bool apply_trigger(int knowledge_id, const std::string& trigger);
+    std::vector<StrandedCandidate> stranded_l2_candidates(int& ties);
+    bool attach_stranded_l2(int turn_summary_id, int episode_id);
+    int stranded_open_tail_count();
+    std::vector<SessionNameCandidate> unnamed_session_candidates();
+    bool apply_session_name(int session_id, const std::string& name,
+                            const std::string& name_source);
 
     // S44: the turn-row facts both turn_summaries writers need, read once.
     // nullopt = no such turn. model_id/session_id are the NULLable columns.

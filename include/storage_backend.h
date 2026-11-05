@@ -283,9 +283,96 @@ public:
     /// on the next catch-up pass.
     /// Housekeeping retry for turns that hit max_turn_failures before
     /// whatever caused the failures was fixed. Returns rows deleted.
-    /// Does NOT touch legitimate trivial-turn skips (tagged with the real
-    /// summarizer model name, never "bad").
+    /// Only touches poison-abandon rows (model "bad"); LR S63 removed the
+    /// trivial-turn skip, so no other marker exists on new writes.
     virtual int reset_abandoned_turn_summaries(int limit = 0) = 0;
+
+    // --- LR S66/S67 back-fill candidates + in-place writers -------------
+    // Reid runs every data operation (rule 17); these are the primitives
+    // ragger::backfill_* (src/backfill.cpp) drives from `ragger backfill`.
+    // Selection is pure SELECT; the writers touch ONLY the columns the
+    // step's in-place rules allow (turn_datetime/turn_id/session_id/
+    // episode_id/summarized_on never change; knowledge: trigger only).
+
+    /// One `turn_summaries` row selected for an L2 back-fill kind, joined
+    /// against its turn (the raw texts the summarizer consumes).
+    struct L2BackfillCandidate {
+        int         turn_summary_id;
+        int         turn_id;
+        std::string user_text;
+        std::string assistant_text;
+        std::string turn_model_name;  // provenance for a floor/shorter copy
+    };
+    /// kind 'null': text IS NULL whose turn still exists.
+    /// kind 'empty': text = '' AND model not 'bad' AND the turn has real
+    ///   content (D6: a truly-empty turn keeps its '').
+    /// kind 'regenerate': rows picked by an explicit filter — model name
+    ///   (matches turn_model OR summary_model) and/or explicit
+    ///   turn_summary_ids. NO filter = empty result (the verb refuses;
+    ///   addendum 5: regeneration is eligible, not run by default).
+    virtual std::vector<L2BackfillCandidate> l2_backfill_candidates(
+        const std::string& kind, const std::string& model_name,
+        const std::vector<int>& ids) = 0;
+
+    /// Rewrite one L2 row in place: text, embedding, embedding_version,
+    /// summary_model_id, terms. `overwrite=false` (kinds null/empty) guards
+    /// `text IS NULL OR text = ''` so a concurrent real write is never
+    /// clobbered; returns false when the guard rejects the row.
+    /// `overwrite=true` (kind regenerate) replaces derived text by design.
+    /// Embeds OUTSIDE the transaction; UPDATE + index inside (S37 order).
+    virtual bool apply_l2_text(int turn_summary_id, const std::string& text,
+                               const std::string& summary_model_name,
+                               bool overwrite) = 0;
+
+    /// `knowledge` rows of kind decision|insight with no trigger yet.
+    struct TriggerCandidate {
+        int         knowledge_id;
+        std::string kind;
+        std::string text;
+    };
+    virtual std::vector<TriggerCandidate> trigger_backfill_candidates() = 0;
+
+    /// Fill a NULL/empty trigger in place and re-embed + re-index the row:
+    /// knowledge embeds trigger + '\n' + text (kKnowledgeEmbedTextSQL), so
+    /// adding a trigger CHANGES the vector and the terms — both must be
+    /// rewritten in the same call or the row's search identity drifts.
+    /// Guarded on (trigger IS NULL OR trigger = '') — text, status,
+    /// supersedes never change. Returns false when the guard rejects.
+    virtual bool apply_trigger(int knowledge_id, const std::string& trigger) = 0;
+
+    /// Stranded L2 rows (R12/#7): episode_id IS NULL, text != '', whose
+    /// turn_datetime lies INSIDE a closed episode span of the SAME session.
+    /// Where two spans cover the time, the episode with the greatest
+    /// span_start <= t wins; `ties` counts the ambiguous rows.
+    struct StrandedCandidate {
+        int turn_summary_id;
+        int episode_id;
+    };
+    virtual std::vector<StrandedCandidate> stranded_l2_candidates(int& ties) = 0;
+
+    /// Membership-only attach (no change to the episode's text/span/
+    /// embedding/terms). Guarded on episode_id IS NULL AND text != ''.
+    virtual bool attach_stranded_l2(int turn_summary_id, int episode_id) = 0;
+
+    /// Content L2 rows left alone by the stranded pass: no episode, and no
+    /// closed span of their session covers their time (the open tail after
+    /// the last span, rows in a gap between spans, and sessions with no
+    /// episodes at all). Counted for the report, never touched.
+    virtual int stranded_open_tail_count() = 0;
+
+    /// Sessions with name IS NULL that have at least one content L2 row
+    /// (D5: the L2 texts are the title corpus).
+    struct SessionNameCandidate {
+        int         session_id;
+        std::string guid;
+        std::vector<std::string> l2_texts;  // oldest-first
+    };
+    virtual std::vector<SessionNameCandidate> unnamed_session_candidates() = 0;
+
+    /// Fill a NULL session name in place (a user/agent name always wins:
+    /// guarded on name IS NULL).
+    virtual bool apply_session_name(int session_id, const std::string& name,
+                                    const std::string& name_source) = 0;
 
     // --- episode layer (db 0.17) ---
     /// The span end of the most recent episode for this session (rendered

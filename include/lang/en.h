@@ -420,6 +420,14 @@ Commands:
                      tables: turns, knowledge, documents, turn_summaries,
                      episodes, or "all" ("all" also resets the shared
                      terms table + its id counter, clearing orphaned terms)
+  backfill <kind>    Repair/back-fill stored data (each kind supports --dry-run):
+                     l2-null        summarize turn_summaries rows with NULL text
+                     l2-empty       fill legacy '' rows whose turn has content
+                     l2-regenerate  re-summarize rows selected by --model or --ids
+                                    (refuses with no filter)
+                     triggers       draft missing decision/insight triggers
+                     stranded       attach L2 rows lying inside a closed episode span
+                     session-names  draft titles for unnamed sessions
   show-embedding-model  Show current embedding model info
   embed               Embed text from stdin, write JSON array to stdout
   help               Show this help
@@ -702,6 +710,9 @@ inline constexpr std::array<ConfigMeta, 62> kConfigSchema = {{
     {"summarizer_max_pct", "summarizer", "Max %", CfgType::Integer, CfgEdit::Live,
      "60", "",
      "Hard cap as % of raw turn; 0 = 60%. Always >= target %."},
+    {"summarizer_min_words", "summarizer", "Min Words Floor", CfgType::Integer, CfgEdit::Live,
+     "20", "",
+     "A source with at most this many words is copied verbatim into the summary store without calling the summarizer model (LR S62). 0 disables the floor."},
     {"summarizer_prompt", "summarizer", "Prompt", CfgType::Text, CfgEdit::Live,
      "", "",
      "System prompt sent to the summarizer. Empty uses the built-in default. A single space suppresses the system prompt entirely. Two {} placeholders are required (target chars, hard cap)."},

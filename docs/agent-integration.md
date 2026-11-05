@@ -44,7 +44,8 @@ Once turn capture is on, the daemon-resident summarizer takes care of:
 - **Graceful inference failure.** If the summarizer model is
   unreachable, the turn simply stays unsummarized and is retried with
   exponential backoff (5 min base, 6 h cap) until inference returns;
-  trivial turns are marked even with the model down. The agent never
+  short turns (at or under the Min Words Floor) are copied verbatim
+  into a real summary row even with the model down. The agent never
   blocks on a model that's down.
 
 The agent does *not* have to summarize, schedule, retry, or worry

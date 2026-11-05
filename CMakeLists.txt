@@ -243,6 +243,7 @@ add_library(ragger_core STATIC
     src/util/http_client.cpp
     src/summarizer.cpp
     src/summarizer_service.cpp
+    src/backfill.cpp
     src/episode_boundaries.cpp
     src/recipe.cpp
     src/recipe_cli.cpp

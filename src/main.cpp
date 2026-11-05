@@ -5,6 +5,7 @@
  * No verb or 'help' prints usage.
  */
 #include "build_info.h"
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <format>
@@ -28,6 +29,7 @@
 
 #include "ProgramOptions.h"
 #include "auth.h"
+#include "backfill.h"
 #include "client.h"
 #include "config.h"
 #include "config_access.h"
@@ -83,7 +85,7 @@ struct DbChangeNotifier {
     explicit DbChangeNotifier(const std::string& command) {
         static const char* const kMayWrite[] = {
             "store", "decision", "import-docs", "delete-doc",
-            "import-conversations", "import", "re-embed", "reindex"};
+            "import-conversations", "import", "re-embed", "reindex", "backfill"};
         armed = false;
         for (auto c : kMayWrite) if (command == c) armed = true;
     }
@@ -201,6 +203,9 @@ int main(int argc, char **argv) {
             // admin flags removed — sudo is the admin gate
             ("yes,y", CLI_YES)
             ("json,j", "config get: format output as JSON")
+            ("dry-run", "backfill: print candidate counts, write nothing")
+            ("model", "backfill l2-regenerate: only rows whose turn or summary model has this name")
+            ("ids", "backfill l2-regenerate: comma-separated turn_summary_ids to regenerate")
             ("browser,b", "dashboard: open the URL in the default browser")
             ("embeddings,e", CLI_EMBEDDINGS)
             ("output,o", Diskerror::po::value<std::string>(), "Output file");
@@ -1542,6 +1547,96 @@ int main(int argc, char **argv) {
         }
         else if (command == "passwd") {
             return ragger::cmd_passwd(opts, cfg.resolved_db_path());
+        }
+        else if (command == "backfill") {
+            // LR S66/S67: Reid-run data back-fill (rule 17). Every kind has
+            // --dry-run (counts only, writes nothing). Progress goes to
+            // stdout (the library never prints); any failed row makes the
+            // pass exit non-zero after reporting the counts.
+            auto args = opts.getParams("args");
+            static const std::vector<std::string> kKinds = {
+                "l2-null", "l2-empty", "l2-regenerate",
+                "triggers", "stranded", "session-names"};
+            if (args.size() != 1 ||
+                std::find(kKinds.begin(), kKinds.end(), args[0]) == kKinds.end()) {
+                std::string names;
+                for (const auto& k : kKinds) names += (names.empty() ? "" : ", ") + k;
+                Diskerror::Logger::error(std::format(
+                    "Usage: ragger backfill <kind> [--dry-run]  (kinds: {})", names));
+                return 1;
+            }
+            const std::string kind = args[0];
+            const bool dry_run = opts.count("dry-run") > 0;
+            const std::string model =
+                opts.count("model") ? opts["model"].as<std::string>() : "";
+            std::vector<int> ids;
+            if (opts.count("ids")) {
+                // Strict parse: comma-separated positive integers, nothing else.
+                const std::string raw = opts["ids"].as<std::string>();
+                size_t pos = 0;
+                while (pos < raw.size()) {
+                    auto comma = raw.find(',', pos);
+                    const auto part = raw.substr(
+                        pos, comma == std::string::npos ? std::string::npos : comma - pos);
+                    if (part.empty() ||
+                        !std::all_of(part.begin(), part.end(), ::isdigit)) {
+                        Diskerror::Logger::error(std::format(
+                            "--ids must be comma-separated positive integers (bad part '{}')", part));
+                        return 1;
+                    }
+                    ids.push_back(std::stoi(part));
+                    if (comma == std::string::npos) break;
+                    pos = comma + 1;
+                }
+            }
+
+            AuditScope audit("backfill", std::format("{}{}", kind, dry_run ? " (dry-run)" : ""));
+            ragger::RaggerMemory memory(db_path, /*skip_embedding_guard=*/true);
+            auto backend = memory.backend();
+            auto inference = ragger::InferenceClient::from_config(cfg);
+
+            // One progress line per row, newline at the pass end (re-embed style).
+            auto progress = [](const char* name, int done, int total) {
+                if (done >= 0) {
+                    std::cout << std::format("\rBackfilling {}: {}/{}", name, done, total);
+                    std::cout.flush();
+                } else {
+                    std::cout << "\n";
+                }
+            };
+
+            ragger::BackfillResult res;
+            try {
+                if (kind == "l2-null" || kind == "l2-empty" || kind == "l2-regenerate")
+                    res = ragger::backfill_l2(*backend, inference, kind.substr(3),
+                                              dry_run, model, ids, progress);
+                else if (kind == "triggers")
+                    res = ragger::backfill_triggers(*backend, inference, dry_run, progress);
+                else if (kind == "stranded")
+                    res = ragger::backfill_stranded(*backend, dry_run, progress);
+                else
+                    res = ragger::backfill_session_names(*backend, inference, dry_run, progress);
+            } catch (const std::invalid_argument& e) {
+                // Unfiltered regenerate / inference not configured: a refusal,
+                // not a partial run. The DB is untouched.
+                Diskerror::Logger::error(e.what());
+                return 1;
+            }
+
+            if (dry_run) {
+                std::println("{}: {} candidate(s){}{}",
+                             kind, res.candidates,
+                             res.ties ? std::format(", {} tie(s)", res.ties) : "",
+                             res.open_tail ? std::format(", {} left alone (open tail)", res.open_tail) : "");
+                audit.done(std::format("{} dry-run: {} candidate(s)", kind, res.candidates));
+                return res.failed > 0 ? 1 : 0;
+            }
+            std::println("{}: {} candidate(s), {} applied, {} skipped, {} failed{}{}",
+                         kind, res.candidates, res.applied, res.skipped, res.failed,
+                         res.ties ? std::format(", {} tie(s)", res.ties) : "",
+                         res.open_tail ? std::format(", {} left alone (open tail)", res.open_tail) : "");
+            audit.done(std::format("{}: {} applied, {} failed", kind, res.applied, res.failed));
+            return res.failed > 0 ? 1 : 0;
         }
         else if (command == "housekeeping") {
             // Send SIGUSR1 to the running daemon via the shared PID-file

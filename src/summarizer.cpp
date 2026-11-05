@@ -77,6 +77,37 @@ std::string system_prompt(const SummaryBudget& b) {
     return build_system_prompt(config().summarizer_prompt, b.target_chars, b.hard_cap);
 }
 
+// LR S64: summarize_texts gets its OWN template (R9 / new gap 8). The L2
+// prompt reused verbatim over concatenated L2 texts produced narrative
+// junk ("The assistant confirmed...", wrapping quotes, wrong pronouns)
+// because it never said the input is a SPAN OF SUMMARIES. {N} is
+// substituted with the member count before vformat; the two remaining {}
+// slots are the same target/cap pair as the L2 prompt, filled the same
+// way, under the same vformat-in-try rule (PHASE9B 3a: a format error must
+// not escape — behave like an inference failure).
+constexpr std::string_view kEpisodePromptTemplate =
+    "You are given {N} consecutive summaries of one conversation span. "
+    "Write a single standalone summary of the whole span that keeps every "
+    "decision, configuration choice, technical fact, name, and date. Do "
+    "not invent anything that is not present in the input. Do not use "
+    "headers, do not wrap the text in quotation marks, and refer to the "
+    "parties by role (the user, the assistant), never by pronoun. The "
+    "summary must never be longer than the input. Target about {} "
+    "characters; never exceed {}.";
+
+std::string build_episode_prompt(std::size_t n, const SummaryBudget& b) {
+    try {
+        std::string t(kEpisodePromptTemplate);
+        const auto pos = t.find("{N}");
+        if (pos != std::string::npos)
+            t.replace(pos, 3, std::to_string(n));
+        return std::vformat(t, std::make_format_args(b.target_chars, b.hard_cap));
+    } catch (const std::exception& e) {
+        Diskerror::Logger::warn(std::format(lang::WARN_SUMMARY, e.what()));
+        return "";
+    }
+}
+
 constexpr std::string_view kSystemMarkers[] = {
     "[System note:",
     "[Note: model was just switched",
@@ -134,6 +165,50 @@ std::string strip_thinking(const std::string& s) {
         out.clear();
 
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// LR S62: shorter-text rule (see include/summarizer.h).
+// ---------------------------------------------------------------------------
+
+size_t count_words(const std::string& s) {
+    size_t n = 0;
+    bool in_token = false;
+    for (const char c : s) {
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v')
+            in_token = false;
+        else if (!in_token) { in_token = true; ++n; }
+    }
+    return n;
+}
+
+namespace {
+// Unicode code-point count (UTF-8 lead bytes; continuation bytes skipped).
+size_t count_codepoints(const std::string& s) {
+    size_t n = 0;
+    for (const unsigned char c : s)
+        if ((c & 0xC0) != 0x80) ++n;
+    return n;
+}
+} // namespace
+
+SummaryChoice choose_summary(const std::string& source, const std::string& summary) {
+    // An empty summary is not a valid summary: hand it back untouched so the
+    // caller's existing empty-check treats it as a failure (as today).
+    if (summary.empty()) return {summary, false};
+
+    const size_t src_words = count_words(source);
+    if (src_words <= 1) {
+        // One-token source (e.g. CJK text without spaces): words are
+        // meaningless, compare code points instead.
+        if (count_codepoints(summary) >= count_codepoints(source))
+            return {source, true};
+        return {summary, false};
+    }
+    // Summary wins only when STRICTLY shorter; ties keep the source.
+    if (count_words(summary) >= src_words)
+        return {source, true};
+    return {summary, false};
 }
 
 bool is_system_injected_turn(const std::string& user_text) {
@@ -296,11 +371,13 @@ std::string summarize_texts(
 
     if (source_chars == 0) return "";
 
-    // Same size contract as summarize_transcript (S26: one implementation).
+    // Same size contract as summarize_transcript (S26: one implementation),
+    // but its OWN episode prompt (LR S64): the input is a span of N
+    // summaries, not a conversation.
     const SummaryBudget budget = make_budget(source_chars);
     const std::size_t hard_cap = budget.hard_cap;
 
-    const std::string system_text = system_prompt(budget);
+    const std::string system_text = build_episode_prompt(texts.size(), budget);
 
     std::vector<Message> messages;
     if (!system_text.empty())

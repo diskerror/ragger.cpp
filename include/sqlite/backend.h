@@ -118,6 +118,22 @@ public:
     bool mark_turn_summarized(int turn_id, const std::string& model_name) override;
     int  reset_abandoned_turn_summaries(int limit = 0) override;
 
+    // --- LR S66/S67 back-fill primitives (see storage_backend.h) ---------
+    std::vector<L2BackfillCandidate> l2_backfill_candidates(
+        const std::string& kind, const std::string& model_name,
+        const std::vector<int>& ids) override;
+    bool apply_l2_text(int turn_summary_id, const std::string& text,
+                       const std::string& summary_model_name,
+                       bool overwrite) override;
+    std::vector<TriggerCandidate> trigger_backfill_candidates() override;
+    bool apply_trigger(int knowledge_id, const std::string& trigger) override;
+    std::vector<StrandedCandidate> stranded_l2_candidates(int& ties) override;
+    bool attach_stranded_l2(int turn_summary_id, int episode_id) override;
+    int stranded_open_tail_count() override;
+    std::vector<SessionNameCandidate> unnamed_session_candidates() override;
+    bool apply_session_name(int session_id, const std::string& name,
+                            const std::string& name_source) override;
+
     std::string last_episode_end(const std::string& session_guid) override;
     std::vector<SummaryRecord> l2_summaries_since(
         const std::string& session_guid, const std::string& since_ts) override;

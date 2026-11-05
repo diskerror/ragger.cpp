@@ -30,6 +30,24 @@ std::string summarize_texts(
     InferenceClient& inference,
     const std::vector<std::string>& texts);
 
+/// LR S62 (shorter-text rule): whitespace-token count of the trimmed
+/// string. A single-token source measures 1.
+size_t count_words(const std::string& s);
+
+/// LR S62 (shorter-text rule, addenda 2/3): decide between the source text
+/// and the model's summary. Measurement is the whitespace-token count of the
+/// trimmed strings; when the source has no whitespace at all (one token —
+/// words are meaningless there) both sides are compared by Unicode code
+/// points instead. The summary wins only when it measures STRICTLY less:
+/// longer summaries and ties keep the source (a copy). An empty summary is
+/// not a valid summary — it is returned with copied=false so the caller
+/// treats it as a failure, exactly as today.
+struct SummaryChoice {
+    std::string text;
+    bool        copied;   // true = the source was kept, not the model's text
+};
+SummaryChoice choose_summary(const std::string& source, const std::string& summary);
+
 /// True when the user side of a turn is *entirely* a Hermes system-injected
 /// annotation rather than something the human typed — model-switch notes,
 /// context-compaction handoffs, interruption notices, background-process

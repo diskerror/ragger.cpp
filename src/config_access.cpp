@@ -63,6 +63,7 @@ const std::unordered_map<std::string_view, int Config::*>& int_fields() {
         {"summarizer_max_tokens", &Config::summarizer_max_tokens},
         {"summarizer_target_pct", &Config::summarizer_target_pct},
         {"summarizer_max_pct",    &Config::summarizer_max_pct},
+        {"summarizer_min_words",  &Config::summarizer_min_words},
         {"log_max_age_days",      &Config::log_max_age_days},
         {"housekeeping_interval", &Config::housekeeping_interval},
         {"episode_idle_minutes",  &Config::episode_idle_minutes},

@@ -191,12 +191,109 @@ void p10_endpoint_is_local() {
     std::println(" ok");
 }
 
+namespace {
+
+// Minimal OpenAI-style stub: counts chat calls, replies with fixed content.
+struct StubChat {
+    int ls = -1;
+    int port = 0;
+    std::atomic<bool> running{true};
+    std::atomic<int> calls{0};
+    std::string reply;
+    mutable std::mutex bmu;   // read from system_of() on a const stub
+    std::vector<std::string> bodies;
+    std::thread srv;
+    explicit StubChat(std::string reply_text) : reply(std::move(reply_text)) {
+        ls = ::socket(AF_INET, SOCK_STREAM, 0);
+        CHECK(ls >= 0);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        a.sin_port = 0;
+        CHECK(::bind(ls, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0);
+        CHECK(::listen(ls, 8) == 0);
+        socklen_t len = sizeof a;
+        ::getsockname(ls, reinterpret_cast<sockaddr*>(&a), &len);
+        port = ntohs(a.sin_port);
+        srv = std::thread([this] {
+            while (running.load()) {
+                int c = ::accept(ls, nullptr, nullptr);
+                if (c < 0) break;
+                std::string req;
+                char buf[8192];
+                size_t hdr_end = std::string::npos;
+                long long cl = -1;
+                while (true) {
+                    ssize_t n = ::recv(c, buf, sizeof buf, 0);
+                    if (n <= 0) break;
+                    req.append(buf, static_cast<size_t>(n));
+                    if (hdr_end == std::string::npos) {
+                        hdr_end = req.find("\r\n\r\n");
+                        if (hdr_end != std::string::npos) {
+                            std::string head = req.substr(0, hdr_end);
+                            for (auto& ch : head) ch = static_cast<char>(::tolower(ch));
+                            auto p = head.find("content-length:");
+                            if (p != std::string::npos)
+                                cl = std::stoll(head.substr(p + 15));
+                        }
+                    }
+                    if (cl >= 0 && req.size() >= hdr_end + 4 + static_cast<size_t>(cl))
+                        break;
+                }
+                if (cl >= 0) {
+                    std::string body = req.substr(hdr_end + 4, static_cast<size_t>(cl));
+                    if (body.find("\"messages\"") != std::string::npos) {
+                        ++calls;
+                        std::lock_guard<std::mutex> lk(bmu);
+                        bodies.push_back(std::move(body));
+                    }
+                }
+                const std::string body =
+                    R"({"choices":[{"message":{"content":")" + reply + R"("}}]})";
+                const std::string resp =
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                    "Content-Length: " + std::to_string(body.size()) +
+                    "\r\nConnection: close\r\n\r\n" + body;
+                ::send(c, resp.data(), resp.size(), 0);
+                ::close(c);
+            }
+        });
+    }
+    ~StubChat() {
+        running.store(false);
+        ::close(ls);
+        if (srv.joinable()) srv.join();
+    }
+    std::shared_ptr<ragger::InferenceClient> client() const {
+        auto c = std::make_shared<ragger::InferenceClient>(
+            std::vector<ragger::Endpoint>{ragger::Endpoint(
+                "stub", "http://127.0.0.1:" + std::to_string(port) + "/v1")},
+            "stub-model", 64);
+        c->memory_model = "stub-model";
+        c->timeout_sec = 5;
+        return c;
+    }
+    // System-message content of the Nth captured chat request.
+    std::string system_of(size_t idx) const {
+        std::lock_guard<std::mutex> lk(bmu);
+        if (idx >= bodies.size()) return {};
+        nlohmann::json j = nlohmann::json::parse(bodies[idx]);
+        for (auto& m : j["messages"])
+            if (m.value("role", "") == "system")
+                return m["content"].get<std::string>();
+        return {};
+    }
+};
+
+} // namespace
+
+
 // PHASE1 Step 6: the summarizer resolves the inference client through a
 // provider ONCE PER JOB — a job enqueued after the provider starts handing
-// out a different client must observe the new one (C §1.3). Hermetic: the
-// clients have no endpoints, and the turns are trivial (<80 chars), so the
-// L2 path only marks them summarized with the client's memory_model — no
-// network, no model.
+// out a different client must observe the new one (C §1.3). LR S63: the
+// turns used to be trivial and rode the "(skipped)" marker path; that skip
+// is gone, so the turns are now long enough to reach the model path (a stub
+// endpoint answers) and each row records its job's client memory_model.
 void test_summarizer_provider_per_job(const std::string& base) {
     std::println("  test_summarizer_provider_per_job...");
 
@@ -209,11 +306,11 @@ void test_summarizer_provider_per_job(const std::string& base) {
     ragger::Embedder emb;  // default: disabled — no embedding needed here
     ragger::sqlite::Backend backend(emb, db_path);
 
+    StubChat stub("SUMMARY");
     int calls = 0;
-    auto provider = [&calls]() -> std::shared_ptr<ragger::InferenceClient> {
+    auto provider = [&calls, &stub]() -> std::shared_ptr<ragger::InferenceClient> {
         ++calls;
-        auto c = std::make_shared<ragger::InferenceClient>(
-            std::vector<ragger::Endpoint>{}, "", 4096);  // no endpoints
+        auto c = stub.client();
         c->memory_model = "prov-model-" + std::to_string(calls);
         return c;
     };
@@ -222,12 +319,17 @@ void test_summarizer_provider_per_job(const std::string& base) {
     svc.start();
 
     // Store turns AFTER start so the startup catch-up scan (empty DB)
-    // cannot race them; enqueue explicitly.
-    int t1 = backend.store_turn("ping one", "reply one is long enough ok");
-    int t2 = backend.store_turn("ping two", "reply two is long enough ok");
+    // cannot race them; enqueue explicitly. 20+20 words and >120 combined
+    // chars: above the S62 floor AND past summarize_transcript's verbatim
+    // shortcut, so the model path actually runs.
+    std::string u, a;
+    for (int i = 0; i < 20; ++i) u += "ques" + std::to_string(i) + " ";
+    for (int i = 0; i < 20; ++i) a += "resp" + std::to_string(i) + " ";
+    int t1 = backend.store_turn(u, a);
+    int t2 = backend.store_turn(u + "x", a);
     CHECK(t1 > 0 && t2 > 0);
-    svc.enqueue_turn(t1, "ping one", "reply one is long enough ok", "", "", "");
-    svc.enqueue_turn(t2, "ping two", "reply two is long enough ok", "", "", "");
+    svc.enqueue_turn(t1, u, a, "", "", "");
+    svc.enqueue_turn(t2, u + "x", a, "", "", "");
 
     auto wait_for = [&](int turn_id) {
         for (int i = 0; i < 200 && !backend.turn_summary_exists(turn_id); ++i)
@@ -266,37 +368,47 @@ void test_summarizer_provider_per_job(const std::string& base) {
     std::println(" OK (jobs saw {} and {})", m1, m2);
 }
 
-// PHASE6 2.4 + 3: a live-enqueued trivial turn is consumed by the worker
-// and marked WITHOUT any inference server (provider -> nullptr): marker row
-// exists, model is the "(skipped)" pseudo-model, and a second enqueue
-// creates no second row.
-void p6_test_live_enqueue_skipped(const std::string& base) {
-    std::println("  p6_test_live_enqueue_skipped...");
+// LR S63 (replaces p6_test_live_enqueue_skipped): the trivial-turn skip is
+// gone. A one-word exchange with NO inference server (provider -> nullptr)
+// now goes through the S62 floor and lands a REAL turn_summaries row:
+// text = the source, embedding/terms like any L2, summary_model_id = the
+// turn's model (never the "(skipped)" pseudo-model, never text=''). The turn
+// still leaves the unsummarized queue (the PHASE6 3 invariant, now carried
+// by the floor), and the row is a normal row: an episode candidate.
+void lr63_test_pleasantries_real_rows(const std::string& base, const std::string& model_dir) {
+    std::println("  lr63_test_pleasantries_real_rows...");
 
     namespace fs = std::filesystem;
-    const std::string dir = base + "/p6live";
+    const std::string dir = base + "/lr63pleasant";
     fs::remove_all(dir);
     fs::create_directories(dir);
     const std::string db_path = dir + "/memories.db";
 
-    ragger::Embedder emb;  // disabled — trivial path needs no embedding
-    ragger::sqlite::Backend backend(emb, db_path);
+    // Real embedder when the model is present (the episode-candidate
+    // predicate requires non-NULL embeddings); disabled otherwise and that
+    // one assertion is skipped (never silently).
+    const bool have_model = fs::exists(model_dir + "/model.onnx") ||
+                            fs::exists(model_dir + "/onnx/model.onnx");
+    std::unique_ptr<ragger::Embedder> emb = have_model
+        ? std::make_unique<ragger::Embedder>(model_dir)
+        : std::make_unique<ragger::Embedder>();
+    ragger::sqlite::Backend backend(*emb, db_path);
 
     ragger::SummarizerService svc(backend, [] { return std::shared_ptr<ragger::InferenceClient>(nullptr); });
     svc.start();
 
-    // Trivial: combined < 80 chars.
-    int t = backend.store_turn("hi", "ok");
+    const std::string guid = "lr63-session";
+    int t = backend.store_turn("hi", "ok", "", false, guid);
     CHECK(t > 0);
-    svc.enqueue_turn(t, "hi", "ok", "", "", "");
+    svc.enqueue_turn(t, "hi", "ok", "turn-model-z", guid, "");
 
     bool marked = false;
     for (int i = 0; i < 100 && !backend.turn_summary_exists(t); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     marked = backend.turn_summary_exists(t);
-    CHECK(marked);   // consumed WITHOUT inference (pre-Phase 6 this never happened)
+    CHECK(marked);   // consumed WITHOUT inference (floor needs no endpoint)
 
-    svc.enqueue_turn(t, "hi", "ok", "", "", "");   // duplicate: must no-op
+    svc.enqueue_turn(t, "hi", "ok", "turn-model-z", guid, "");   // dup: no-op
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     svc.stop();
 
@@ -309,11 +421,31 @@ void p6_test_live_enqueue_skipped(const std::string& base) {
         sqlite3_finalize(st);
         return v;
     };
+    // A REAL row, not a marker: text is the source, model is the turn's.
     CHECK(scalar("SELECT COUNT(*) FROM turn_summaries WHERE turn_id = " +
-                 std::to_string(t) + " AND text = ''") == 1);
+                 std::to_string(t) + " AND text = 'hi | ok'") == 1);
+    CHECK(scalar("SELECT COUNT(*) FROM turn_summaries WHERE turn_id = " +
+                 std::to_string(t) + " AND text = ''") == 0);
     CHECK(scalar("SELECT COUNT(*) FROM turn_summaries ts JOIN models m "
-                 "ON m.model_id = ts.summary_model_id WHERE m.name = '(skipped)'") == 1);
+                 "ON m.model_id = ts.summary_model_id WHERE m.name = '(skipped)'") == 0);
+    CHECK(scalar("SELECT COUNT(*) FROM turn_summaries ts JOIN models m "
+                 "ON m.model_id = ts.summary_model_id WHERE ts.turn_id = " +
+                 std::to_string(t) + " AND m.name = 'turn-model-z'") == 1);
     sqlite3_close(db);
+
+    // Leaves the unsummarized queue (PHASE6 3 invariant).
+    auto un = backend.unsummarized_turns(0);
+    for (const auto& u : un) CHECK(u.turn_id != t);
+
+    // A normal row: episode candidate (the candidate query excludes '' rows
+    // and requires embeddings — needs the real model, see have_model above).
+    if (have_model) {
+        auto cands = backend.episode_candidate_turns(guid, "");
+        CHECK(cands.size() == 1);
+        CHECK(cands[0].summary_text == "hi | ok");
+    } else {
+        std::println("    (episode-candidate check skipped: no model)");
+    }
     backend.close();
     std::println(" OK");
 }
@@ -372,13 +504,14 @@ void p10_summarizer_no_endpoint(const std::string& base) {
 }
 
 // S26 (C m12): pin the EXACT system-prompt text produced by the shared
-// budget formula for both public summarize entry points. The expected
-// strings were captured from the pre-refactor code; the extraction of
-// SummaryBudget/make_budget/system_prompt must keep them byte-identical.
+// budget formula for both public summarize entry points. The transcript
+// expectation was captured pre-refactor; the TEXTS expectation is the
+// LR S64 episode template (its own prompt, {N} substituted, same budget
+// fill). Extraction of SummaryBudget/make_budget must keep the arithmetic.
 void p10_summarizer_budget_prompt() {
     std::println("  p10_summarizer_budget_prompt...");
 
-    // --- canned expectations (captured pre-refactor) ----------------------
+    // --- canned expectations ------------------------------------------------
     static const std::string EXPECTED_TRANSCRIPT_PROMPT =
         "Summarize this conversation into a concise memory entry. Extract key "
         "facts, decisions, questions asked, topics discussed. Write in third "
@@ -386,11 +519,14 @@ void p10_summarizer_budget_prompt() {
         "the exchange is trivial (a single command like /exit, a one-line "
         "greeting), respond with a short phrase, not a full sentence.";
     static const std::string EXPECTED_TEXTS_PROMPT =
-        "Summarize this conversation into a concise memory entry. Extract key "
-        "facts, decisions, questions asked, topics discussed. Write in third "
-        "person past tense. Target about 40 characters; never exceed 58. If "
-        "the exchange is trivial (a single command like /exit, a one-line "
-        "greeting), respond with a short phrase, not a full sentence.";
+        "You are given 2 consecutive summaries of one conversation span. "
+        "Write a single standalone summary of the whole span that keeps every "
+        "decision, configuration choice, technical fact, name, and date. Do "
+        "not invent anything that is not present in the input. Do not use "
+        "headers, do not wrap the text in quotation marks, and refer to the "
+        "parties by role (the user, the assistant), never by pronoun. The "
+        "summary must never be longer than the input. Target about 40 "
+        "characters; never exceed 58.";
 
     // --- fake OpenAI endpoint: captures request bodies, replies SUMMARY ---
     int ls = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -742,6 +878,299 @@ void p9b_test_bad_prompt_no_escape(const std::string& base) {
     std::println(" OK");
 }
 
+// ---------------------------------------------------------------------------
+// LR S62: shorter-text rule.
+// ---------------------------------------------------------------------------
+
+
+// LR S62: the pure shorter-text rule (step's expected-value table).
+void lr62_test_choose_summary() {
+    std::println("  lr62_test_choose_summary...");
+    using ragger::choose_summary;
+    using ragger::count_words;
+
+    const std::string src5 = "one two three four five";
+    CHECK(count_words("  padded   words \n") == 2);
+    CHECK(count_words("") == 0);
+
+    auto c = choose_summary(src5, "a b c d e f");     // 5 / 6 -> source
+    CHECK(c.copied && c.text == src5);
+    c = choose_summary(src5, "a b c d e");            // 5 / 5 tie -> source
+    CHECK(c.copied && c.text == src5);
+
+    std::string big, small;
+    for (int i = 0; i < 100; ++i) big += "w" + std::to_string(i) + " ";
+    for (int i = 0; i < 40; ++i)  small += "s" + std::to_string(i) + " ";
+    c = choose_summary(big, small);                   // 100 / 40 -> summary
+    CHECK(!c.copied && c.text == small);
+
+    // One-token source: compare Unicode code points, not words.
+    const std::string jp = "日本語のテキスト";          // 8 code points, no whitespace
+    CHECK(count_words(jp) == 1);
+    c = choose_summary(jp, "日本語");                  // 3 < 8 -> summary
+    CHECK(!c.copied && c.text == "日本語");
+    c = choose_summary(jp, "日本語のテキストです");      // 9 >= 8 -> source
+    CHECK(c.copied && c.text == jp);
+
+    // Empty summary: not a valid summary — caller treats it as failure.
+    c = choose_summary(src5, "");
+    CHECK(!c.copied && c.text.empty());
+    std::println(" ok");
+}
+
+// LR S62: the floor. A source at/below summarizer_min_words (default 20)
+// is copied with NO model call; one word over calls the model once. The
+// copy records the TURN's model (addendum 3), the model summary records the
+// summarizer's model.
+void lr62_test_floor_copies_without_model(const std::string& base) {
+    std::println("  lr62_test_floor_copies_without_model...");
+
+    namespace fs = std::filesystem;
+    const std::string dir = base + "/lr62floor";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    ragger::Embedder emb;   // disabled: rows land with NULL embeddings
+    ragger::sqlite::Backend backend(emb, dir + "/memories.db");
+
+    StubChat stub("SUMMARY");
+    ragger::SummarizerService svc(backend, [&stub] { return stub.client(); });
+    svc.start();
+
+    // 9 + 10 words + the join's "|" token = exactly 20 -> floor.
+    const std::string u = "one two three four five six seven eight nine";
+    const std::string a20 = "ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen";
+    const std::string a21 = a20 + " twenty";
+    int t20 = backend.store_turn(u, a20);
+    int t21 = backend.store_turn(u, a21);
+    CHECK(t20 > 0 && t21 > 0);
+    svc.enqueue_turn(t20, u, a20, "turn-model-x", "", "");
+    for (int i = 0; i < 100 && !backend.turn_summary_exists(t20); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(backend.turn_summary_exists(t20));
+    CHECK(stub.calls.load() == 0);   // floor: NO model call
+
+    svc.enqueue_turn(t21, u, a21, "turn-model-x", "", "");
+    for (int i = 0; i < 100 && !backend.turn_summary_exists(t21); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(backend.turn_summary_exists(t21));
+    CHECK(stub.calls.load() == 1);   // 21 words: the model IS called
+    svc.stop();
+
+    sqlite3* db = nullptr;
+    CHECK(sqlite3_open((dir + "/memories.db").c_str(), &db) == SQLITE_OK);
+    auto row = [&](int turn_id) -> std::pair<std::string, std::string> {
+        sqlite3_stmt* st = nullptr;
+        sqlite3_prepare_v2(db,
+            "SELECT ts.text, COALESCE(m.name,'') FROM turn_summaries ts "
+            "LEFT JOIN models m ON m.model_id = ts.summary_model_id "
+            "WHERE ts.turn_id = ?", -1, &st, nullptr);
+        sqlite3_bind_int(st, 1, turn_id);
+        std::pair<std::string, std::string> r;
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            r.first  = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+            r.second = reinterpret_cast<const char*>(sqlite3_column_text(st, 1));
+        }
+        sqlite3_finalize(st);
+        return r;
+    };
+    const auto r20 = row(t20);
+    CHECK(r20.first == u + " | " + a20);       // the source, verbatim
+    CHECK(r20.second == "turn-model-x");       // copy provenance: the TURN's model
+    const auto r21 = row(t21);
+    CHECK(r21.first == "SUMMARY");             // model's shorter summary won
+    CHECK(r21.second == "stub-model");         // model provenance: the summarizer
+    sqlite3_close(db);
+    backend.close();
+    std::println(" ok");
+}
+
+// LR S62 (addendum 3): when the model's summary measures LONGER than the
+// source, the source is copied and the row records the turn's model.
+void lr62_test_copy_provenance(const std::string& base) {
+    std::println("  lr62_test_copy_provenance...");
+
+    namespace fs = std::filesystem;
+    const std::string dir = base + "/lr62prov";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    ragger::Embedder emb;
+    ragger::sqlite::Backend backend(emb, dir + "/memories.db");
+
+    // Stub replies with 30 words — longer than the 25-word source.
+    std::string long_reply;
+    for (int i = 0; i < 30; ++i) long_reply += "r" + std::to_string(i) + " ";
+    StubChat stub(long_reply);
+    ragger::SummarizerService svc(backend, [&stub] { return stub.client(); });
+    svc.start();
+
+    // 12 + 12 + "|" = 25 words: above the floor, so the model runs once.
+    // Tokens are long enough that the (still present, removed in S63)
+    // trivial-turn filter does not fire.
+    std::string u, a;
+    for (int i = 0; i < 12; ++i) u += "user" + std::to_string(i) + " ";
+    for (int i = 0; i < 12; ++i) a += "asst" + std::to_string(i) + " ";
+    int t = backend.store_turn(u, a);
+    CHECK(t > 0);
+    svc.enqueue_turn(t, u, a, "turn-model-y", "", "");
+    for (int i = 0; i < 100 && !backend.turn_summary_exists(t); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(backend.turn_summary_exists(t));
+    CHECK(stub.calls.load() == 1);
+    svc.stop();
+
+    sqlite3* db = nullptr;
+    CHECK(sqlite3_open((dir + "/memories.db").c_str(), &db) == SQLITE_OK);
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(db,
+        "SELECT ts.text, COALESCE(m.name,'') FROM turn_summaries ts "
+        "LEFT JOIN models m ON m.model_id = ts.summary_model_id "
+        "WHERE ts.turn_id = ?", -1, &st, nullptr);
+    sqlite3_bind_int(st, 1, t);
+    std::string text, model;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        text  = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+        model = reinterpret_cast<const char*>(sqlite3_column_text(st, 1));
+    }
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    CHECK(text == u + " | " + a);       // bloated summary rejected: source kept
+    CHECK(model == "turn-model-y");     // copy provenance: the TURN's model
+    backend.close();
+    std::println(" ok");
+}
+
+// LR S64: summarize_texts gets its OWN episode prompt (the L2 prompt
+// reused verbatim over concatenated summaries produced narrative junk).
+// The prompt must: name the input as N consecutive summaries of one span
+// (N substituted), demand a standalone summary keeping decisions /
+// configuration / technical facts / names / dates, forbid invention,
+// headers, wrapping quotes, demand role references, forbid longer-than-
+// input, and carry the two filled size slots. summarize_transcript keeps
+// the L2 prompt (pinned by p10_summarizer_budget_prompt).
+void lr64_test_episode_prompt() {
+    std::println("  lr64_test_episode_prompt...");
+    StubChat stub("SUMMARY");
+    auto inf = stub.client();
+
+    const std::vector<std::string> texts = {
+        "First summary about the Beelink deployment and its Vulkan builds.",
+        "Second summary about llama.cpp server flags and ctx sizes.",
+        "Third summary about the release checklist for version nudge."};
+    const auto out = ragger::summarize_texts(*inf, texts);
+    CHECK(out == "SUMMARY");
+    CHECK(stub.calls.load() == 1);
+
+    const std::string p = stub.system_of(0);
+    // Not the L2 prompt anymore.
+    CHECK(p.find("Summarize this conversation into a concise memory entry") ==
+          std::string::npos);
+    // N substituted: three inputs -> "3 consecutive summaries".
+    CHECK(p.find("3 consecutive summaries") != std::string::npos);
+    // The required clauses.
+    CHECK(p.find("standalone") != std::string::npos);
+    CHECK(p.find("decision") != std::string::npos);
+    CHECK(p.find("configuration") != std::string::npos);
+    CHECK(p.find("technical fact") != std::string::npos);
+    CHECK(p.find("name") != std::string::npos);
+    CHECK(p.find("date") != std::string::npos);
+    CHECK(p.find("invent") != std::string::npos);
+    CHECK(p.find("header") != std::string::npos);
+    CHECK(p.find("quotation mark") != std::string::npos);
+    CHECK(p.find("role") != std::string::npos);
+    CHECK(p.find("longer than the input") != std::string::npos);
+    // The two size slots are filled (budget: 183 chars -> target 54, cap 109).
+    CHECK(p.find("Target about 54 characters") != std::string::npos);
+    CHECK(p.find("never exceed 109") != std::string::npos);
+    // No unfilled placeholder survived.
+    CHECK(p.find('{') == std::string::npos);
+    CHECK(p.find('}') == std::string::npos);
+    std::println(" ok");
+}
+
+// LR S65 (D-5 check): the poison-abandon path stays. With an endpoint that
+// is configured but UNREACHABLE (connection refused — "unreachable", not
+// "not configured"), a long turn failing max_turn_failures (3) times gets
+// EXACTLY ONE turn_summaries row: text = '' and model = 'bad'. It leaves
+// the unsummarized queue; reset_abandoned_turn_summaries removes it and
+// re-queues the turn.
+void lr65_test_abandon_marker(const std::string& base) {
+    std::println("  lr65_test_abandon_marker...");
+
+    namespace fs = std::filesystem;
+    const std::string dir = base + "/lr65abandon";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const std::string db_path = dir + "/memories.db";
+
+    ragger::Embedder emb;  // disabled — no row with text is written here
+    ragger::sqlite::Backend backend(emb, db_path);
+
+    // A port that was bound and closed: connections are refused.
+    int probe = ::socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    CHECK(::bind(probe, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0);
+    socklen_t len = sizeof a;
+    ::getsockname(probe, reinterpret_cast<sockaddr*>(&a), &len);
+    const int dead_port = ntohs(a.sin_port);
+    ::close(probe);
+
+    ragger::SummarizerService svc(backend, [dead_port] {
+        auto c = std::make_shared<ragger::InferenceClient>(
+            std::vector<ragger::Endpoint>{ragger::Endpoint(
+                "dead", "http://127.0.0.1:" + std::to_string(dead_port) + "/v1")},
+            "dead-model", 64);
+        c->memory_model = "dead-model";
+        c->timeout_sec = 2;
+        return c;
+    });
+    svc.start();
+
+    // Long turn: above the S62 floor and the trivial thresholds (the old
+    // filter would have skipped it before the failure counter existed).
+    std::string u, a2;
+    for (int i = 0; i < 20; ++i) u += "ques" + std::to_string(i) + " ";
+    for (int i = 0; i < 20; ++i) a2 += "resp" + std::to_string(i) + " ";
+    int t = backend.store_turn(u, a2);
+    CHECK(t > 0);
+
+    // max_turn_failures default is 3: the 3rd failure abandons.
+    for (int round = 0; round < 4; ++round) {
+        svc.enqueue_turn(t, u, a2, "", "", "");
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+    svc.stop();
+
+    sqlite3* db = nullptr;
+    CHECK(sqlite3_open(db_path.c_str(), &db) == SQLITE_OK);
+    auto scalar = [&](const std::string& sql) -> long long {
+        sqlite3_stmt* st = nullptr;
+        sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr);
+        long long v = (sqlite3_step(st) == SQLITE_ROW) ? sqlite3_column_int64(st, 0) : -1;
+        sqlite3_finalize(st);
+        return v;
+    };
+    // EXACTLY one row, empty text, model 'bad'.
+    CHECK(scalar("SELECT COUNT(*) FROM turn_summaries WHERE turn_id = " +
+                 std::to_string(t)) == 1);
+    CHECK(scalar("SELECT COUNT(*) FROM turn_summaries ts JOIN models m "
+                 "ON m.model_id = ts.summary_model_id WHERE ts.turn_id = " +
+                 std::to_string(t) + " AND ts.text = '' AND m.name = 'bad'") == 1);
+    sqlite3_close(db);
+
+    // Gone after reset, and back in the unsummarized candidate set.
+    CHECK(backend.reset_abandoned_turn_summaries(0) == 1);
+    CHECK(!backend.turn_summary_exists(t));
+    bool found = false;
+    for (auto& p : backend.unsummarized_turns(0))
+        if (p.turn_id == t) found = true;
+    CHECK(found);
+    backend.close();
+    std::println(" ok");
+}
+
 int main() {
     TestEnv env("summarizer");
     std::println("test_summarizer:");
@@ -754,9 +1183,14 @@ int main() {
     test_summarizer_provider_per_job(env.base());
     p6_test_backoff();
     p6_test_episode_boundaries();
-    p6_test_live_enqueue_skipped(env.base());
+    lr63_test_pleasantries_real_rows(env.base(), env.model_dir());
     p10_summarizer_no_endpoint(env.base());
     p10_summarizer_budget_prompt();
+    lr62_test_choose_summary();
+    lr62_test_floor_copies_without_model(env.base());
+    lr62_test_copy_provenance(env.base());
+    lr64_test_episode_prompt();
+    lr65_test_abandon_marker(env.base());
     p6_test_single_scan(env.base());
     p9b_test_utf8_safe_prefix();
     p9b_test_bad_prompt_no_escape(env.base());

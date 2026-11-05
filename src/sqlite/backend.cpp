@@ -124,6 +124,60 @@ int Backend::reset_abandoned_turn_summaries(int limit) {
     return pImpl->reset_abandoned_turn_summaries(limit);
 }
 
+// LR S66/S67: back-fill primitives (see storage_backend.h for contracts).
+std::vector<StorageBackend::L2BackfillCandidate>
+Backend::l2_backfill_candidates(const std::string& kind,
+                                const std::string& model_name,
+                                const std::vector<int>& ids) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->l2_backfill_candidates(kind, model_name, ids);
+}
+
+bool Backend::apply_l2_text(int turn_summary_id, const std::string& text,
+                            const std::string& summary_model_name, bool overwrite) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->apply_l2_text(turn_summary_id, text, summary_model_name, overwrite);
+}
+
+std::vector<StorageBackend::TriggerCandidate>
+Backend::trigger_backfill_candidates() {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->trigger_backfill_candidates();
+}
+
+bool Backend::apply_trigger(int knowledge_id, const std::string& trigger) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->apply_trigger(knowledge_id, trigger);
+}
+
+std::vector<StorageBackend::StrandedCandidate>
+Backend::stranded_l2_candidates(int& ties) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->stranded_l2_candidates(ties);
+}
+
+bool Backend::attach_stranded_l2(int turn_summary_id, int episode_id) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->attach_stranded_l2(turn_summary_id, episode_id);
+}
+
+int Backend::stranded_open_tail_count() {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->stranded_open_tail_count();
+}
+
+std::vector<StorageBackend::SessionNameCandidate>
+Backend::unnamed_session_candidates() {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->unnamed_session_candidates();
+}
+
+bool Backend::apply_session_name(int session_id, const std::string& name,
+                                 const std::string& name_source) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->apply_session_name(session_id, name, name_source);
+}
+
 // PHASE8: the old summary tag-setter / recent-list forwarders are gone.
 
 std::vector<std::string> Backend::current_decisions(int limit) {

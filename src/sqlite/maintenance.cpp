@@ -386,8 +386,9 @@ namespace fs = std::filesystem;
     // S38: moved from the Backend wrapper (B §2). v2: raw verbatim exchanges
     // (L1 turns) are what age out by retention; their gist is preserved in
     // turn summaries and episodes. Only delete turns that HAVE a
-    // turn_summaries row (marker rows count: '' means done/skipped on
-    // purpose) — a turn with no summary row is never deleted, so a disabled
+    // turn_summaries row (marker rows count: '' means done — since LR S63
+    // poison-abandoned; legacy DBs may hold old trivial-skip markers) — a
+    // turn with no summary row is never deleted, so a disabled
     // summarizer cannot silently destroy unsummarized history. The FK
     // (turn_summaries.turn_id ON DELETE SET NULL) leaves the summary behind.
     int Backend::Impl::cleanup_old_conversations(float max_age_hours) {

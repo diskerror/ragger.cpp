@@ -156,6 +156,10 @@ struct Config {
     // Hard cap as a percentage of the raw turn size (1-100).
     // 0 = use built-in default of 60%. Always >= target_pct after clamping.
     int         summarizer_max_pct     = 0;
+    // LR S62 floor: a source with at most this many whitespace words is
+    // copied verbatim (turn summary / episode text) WITHOUT a model call.
+    // 0 disables the floor (only the empty source then copies trivially).
+    int         summarizer_min_words   = 20;
     // System-prompt sent to the summarizer model. Empty (or missing in the
     // INI) uses the built-in default. Any non-empty value is passed through
     // as-is — set to a single space " " to suppress the system prompt entirely.

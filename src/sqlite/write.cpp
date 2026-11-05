@@ -1046,9 +1046,10 @@ static std::string tags_from_metadata(const json& metadata) {
     // Deleting the abandoned row here lets the turn fall back into
     // unsummarized_turns()'s normal candidate set on the very next
     // enqueue_catch_up() pass, giving it a fresh set of max_turn_failures
-    // attempts. Trivial-turn skips are NOT touched -- those are tagged with
-    // a real model name or the "(skipped)" pseudo-model (PHASE6 3), never
-    // "bad", so this only targets genuine poison-abandon rows.
+    // attempts. LR S63: the trivial-turn skip is gone, so the ONLY writer
+    // of ''-text rows is this poison-abandon path (model "bad"); legacy DBs
+    // may still hold old "(skipped)" markers, which are likewise NOT touched
+    // (never "bad"), so this only targets genuine poison-abandon rows.
     //
     // PHASE9A: a row whose text IS NULL is also reset. NULL means "unset" (an
     // '' row means "known empty"/done), and the 29 legacy rows in this state
@@ -1086,6 +1087,218 @@ static std::string tags_from_metadata(const json& metadata) {
                                                  sqlite3_errmsg(db)));
         invalidate_turn_cache();
         return static_cast<int>(ids.size());
+    }
+
+
+    // ---- LR S66/S67 back-fill primitives ---------------------------------
+    // Selection is pure SELECT (a --dry-run pass counts these and stops).
+    // The writers follow the repo's established order: embed OUTSIDE the
+    // transaction, UPDATE + index_record INSIDE it, so a failed index never
+    // leaves a committed row with stale terms (S37 contract).
+    std::vector<Backend::Impl::L2BackfillCandidate>
+    Backend::Impl::l2_backfill_candidates(const std::string& kind,
+                                          const std::string& model_name,
+                                          const std::vector<int>& ids) {
+        std::vector<L2BackfillCandidate> out;
+        std::string sql =
+            "SELECT ts.turn_summary_id, ts.turn_id, t.user_text, t.assistant_text, "
+            "       ifnull(tm2.name,'') "
+            "FROM turn_summaries ts "
+            "JOIN turns t ON t.turn_id = ts.turn_id "
+            "LEFT JOIN models sm ON sm.model_id = ts.summary_model_id "
+            "LEFT JOIN models tm ON tm.model_id = ts.turn_model_id "
+            "LEFT JOIN models tm2 ON tm2.model_id = t.model_id ";
+        if (kind == "null") {
+            // Legacy NULL-text rows whose turn still exists (the JOIN).
+            sql += "WHERE ts.text IS NULL ORDER BY ts.turn_summary_id ASC";
+        } else if (kind == "empty") {
+            // D6: '' rows that are NOT poison-abandon markers and whose
+            // turn carries real content. A truly-empty turn keeps its ''.
+            sql += "WHERE ts.text = '' "
+                   "  AND ifnull(sm.name,'') != 'bad' "
+                   "  AND (ifnull(t.user_text,'') != '' OR ifnull(t.assistant_text,'') != '') "
+                   "ORDER BY ts.turn_summary_id ASC";
+        } else if (kind == "regenerate") {
+            // Addendum 5: eligible, never selected by default. The caller
+            // (backfill_l2) refuses before reaching here when both filters
+            // are empty; the belt below keeps a direct call honest.
+            if (model_name.empty() && ids.empty()) return out;
+            std::vector<std::string> conds;
+            if (!model_name.empty())
+                conds.push_back("(ifnull(sm.name,'') = ? OR ifnull(tm.name,'') = ?)");
+            if (!ids.empty()) {
+                std::string ph;
+                for (size_t i = 0; i < ids.size(); ++i) ph += (i ? ",?" : "?");
+                conds.push_back("ts.turn_summary_id IN (" + ph + ")");
+            }
+            sql += "WHERE " + conds[0];
+            for (size_t i = 1; i < conds.size(); ++i) sql += " OR " + conds[i];
+            sql += " ORDER BY ts.turn_summary_id ASC";
+        } else {
+            throw std::invalid_argument("l2_backfill_candidates: unknown kind '" + kind + "'");
+        }
+        Stmt s(db, sql);
+        int p = 1;
+        if (!model_name.empty()) { s.bind(p, model_name); ++p; s.bind(p, model_name); ++p; }
+        for (int id : ids) { s.bind(p, id); ++p; }
+        while (s.step())
+            out.push_back({s.column_int(0), s.column_int(1),
+                           s.column_text(2), s.column_text(3), s.column_text(4)});
+        return out;
+    }
+
+    bool Backend::Impl::apply_l2_text(int turn_summary_id, const std::string& text,
+                                      const std::string& summary_model_name,
+                                      bool overwrite) {
+        if (text.empty())
+            throw std::invalid_argument("apply_l2_text: empty text");
+        const std::string t = normalize_path(text);
+        const int model_id = get_or_create_model(summary_model_name);
+        // Encode outside the transaction (model call must not hold the lock).
+        auto emb = require_embedder().encode(t);
+        Stmt u(db,
+            "UPDATE turn_summaries SET text = ?, embedding_version = ?, embedding = ?, "
+            "summary_model_id = ? WHERE turn_summary_id = ? "
+            "AND (? OR text IS NULL OR text = '')");
+        u.bind(1, t);
+        bind_embedding_version(u.raw(), 2, emb);
+        bind_embedding(u.raw(), 3, emb);
+        if (model_id) u.bind(4, model_id); else u.bind_null(4);
+        u.bind(5, turn_summary_id);
+        u.bind(6, overwrite ? 1 : 0);
+        Transaction tx(db);
+        if (!u.exec())
+            throw std::runtime_error(std::format("apply_l2_text UPDATE: {}", sqlite3_errmsg(db)));
+        if (sqlite3_changes(db) == 0) return false;  // guard rejected (or no such row)
+        text_index_->index_record("turn_summaries", turn_summary_id, t);
+        tx.commit();
+        return true;
+    }
+
+    std::vector<Backend::Impl::TriggerCandidate>
+    Backend::Impl::trigger_backfill_candidates() {
+        std::vector<TriggerCandidate> out;
+        Stmt s(db,
+            "SELECT knowledge_id, kind, text FROM knowledge "
+            "WHERE kind IN ('decision','insight') "
+            "  AND (trigger IS NULL OR trigger = '') "
+            "ORDER BY knowledge_id ASC");
+        while (s.step())
+            out.push_back({s.column_int(0), s.column_text(1), s.column_text(2)});
+        return out;
+    }
+
+    bool Backend::Impl::apply_trigger(int knowledge_id, const std::string& trigger) {
+        if (trigger.empty())
+            throw std::invalid_argument("apply_trigger: empty trigger");
+        // The row's text is needed to rebuild the embed/index text exactly
+        // as store_knowledge computes it (trigger + '\n' + text).
+        Stmt g(db, "SELECT text FROM knowledge WHERE knowledge_id = ?");
+        g.bind(1, knowledge_id);
+        if (!g.step()) return false;  // no such row
+        const std::string text = g.column_text(0);
+        const std::string embed_text = trigger + "\n" + text;
+        auto emb = require_embedder().encode(embed_text);
+        Stmt u(db,
+            "UPDATE knowledge SET trigger = ?, embedding_version = ?, embedding = ? "
+            "WHERE knowledge_id = ? AND (trigger IS NULL OR trigger = '')");
+        u.bind(1, trigger);
+        bind_embedding_version(u.raw(), 2, emb);
+        bind_embedding(u.raw(), 3, emb);
+        u.bind(4, knowledge_id);
+        Transaction tx(db);
+        if (!u.exec())
+            throw std::runtime_error(std::format("apply_trigger UPDATE: {}", sqlite3_errmsg(db)));
+        if (sqlite3_changes(db) == 0) return false;  // guard rejected
+        text_index_->index_record("knowledge", knowledge_id, embed_text);
+        tx.commit();
+        return true;
+    }
+
+    std::vector<Backend::Impl::StrandedCandidate>
+    Backend::Impl::stranded_l2_candidates(int& ties) {
+        std::vector<StrandedCandidate> out;
+        ties = 0;
+        // Best episode per row = the one with the greatest span_start <= t
+        // (correlated subselect). HAVING COUNT(*) > 1 flags rows where more
+        // than one span covers the time — counted, and the best still wins.
+        Stmt s(db,
+            "SELECT ts.turn_summary_id, ("
+            "  SELECT e.episode_id FROM episodes e "
+            "  WHERE e.session_id = ts.session_id "
+            "    AND ts.turn_datetime >= e.span_start AND ts.turn_datetime <= e.span_end "
+            "  ORDER BY e.span_start DESC LIMIT 1"
+            ") AS best, ("
+            "  SELECT COUNT(*) FROM episodes e "
+            "  WHERE e.session_id = ts.session_id "
+            "    AND ts.turn_datetime >= e.span_start AND ts.turn_datetime <= e.span_end"
+            ") AS covering "
+            "FROM turn_summaries ts "
+            "WHERE ts.episode_id IS NULL AND ts.text != '' AND ts.turn_datetime IS NOT NULL "
+            "  AND best IS NOT NULL "
+            "ORDER BY ts.turn_summary_id ASC");
+        while (s.step()) {
+            out.push_back({s.column_int(0), s.column_int(1)});
+            if (s.column_int(2) > 1) ++ties;
+        }
+        return out;
+    }
+
+    bool Backend::Impl::attach_stranded_l2(int turn_summary_id, int episode_id) {
+        Stmt u(db,
+            "UPDATE turn_summaries SET episode_id = ? "
+            "WHERE turn_summary_id = ? AND episode_id IS NULL AND text != ''");
+        u.bind(1, episode_id).bind(2, turn_summary_id);
+        if (!u.exec())
+            throw std::runtime_error(std::format("attach_stranded_l2: {}", sqlite3_errmsg(db)));
+        return sqlite3_changes(db) > 0;
+    }
+
+    int Backend::Impl::stranded_open_tail_count() {
+        Stmt s(db,
+            "SELECT COUNT(*) FROM turn_summaries ts "
+            "WHERE ts.episode_id IS NULL AND ts.text != '' AND ts.turn_datetime IS NOT NULL "
+            "  AND NOT EXISTS (SELECT 1 FROM episodes e "
+            "                  WHERE e.session_id = ts.session_id "
+            "                    AND ts.turn_datetime >= e.span_start "
+            "                    AND ts.turn_datetime <= e.span_end)");
+        if (!s.step()) return 0;
+        return s.column_int(0);
+    }
+
+    std::vector<Backend::Impl::SessionNameCandidate>
+    Backend::Impl::unnamed_session_candidates() {
+        std::vector<SessionNameCandidate> out;
+        Stmt s(db,
+            "SELECT ss.session_id, ss.guid FROM sessions ss "
+            "WHERE ss.name IS NULL "
+            "  AND EXISTS (SELECT 1 FROM turn_summaries ts "
+            "              WHERE ts.session_id = ss.session_id AND ts.text != '') "
+            "ORDER BY ss.session_id ASC");
+        while (s.step())
+            out.push_back({s.column_int(0), s.column_text(1), {}});
+        for (auto& c : out) {
+            Stmt t(db,
+                "SELECT text FROM turn_summaries "
+                "WHERE session_id = ? AND text != '' "
+                "ORDER BY turn_datetime ASC, turn_summary_id ASC");
+            t.bind(1, c.session_id);
+            while (t.step()) c.l2_texts.push_back(t.column_text(0));
+        }
+        return out;
+    }
+
+    bool Backend::Impl::apply_session_name(int session_id, const std::string& name,
+                                           const std::string& name_source) {
+        if (name.empty())
+            throw std::invalid_argument("apply_session_name: empty name");
+        Stmt u(db,
+            "UPDATE sessions SET name = ?, name_source = ? "
+            "WHERE session_id = ? AND name IS NULL");
+        u.bind(1, name).bind(2, name_source).bind(3, session_id);
+        if (!u.exec())
+            throw std::runtime_error(std::format("apply_session_name: {}", sqlite3_errmsg(db)));
+        return sqlite3_changes(db) > 0;
     }
 
 
@@ -1161,14 +1374,16 @@ static std::string tags_from_metadata(const json& metadata) {
 
 
     // Create a turn_summaries row marking a turn as "done" with no summary
-    // text (trivial-turn skip, or poison-turn abandonment) — mirrors
+    // text — since LR S63 the ONLY writer of this shape is poison-turn
+    // abandonment (mirrors
     // finalize_turn_summary's turns lookup, just with text left as ''
     // (empty string, not NULL -- an empty string unambiguously means
     // "intentionally blank"; NULL in this column would look like a data
     // integrity error rather than a deliberate skip/abandon marker).
     // Reid's design decision: no placeholder mechanism, so a turn_summaries
-    // row now always represents completed work (real summary, trivial-skip,
-    // or poison-abandon), never an in-progress sentinel.
+    // row now always represents completed work (real summary/copy, or since
+    // LR S63 poison-abandon as the only ''-marker), never an in-progress
+    // sentinel.
     // S37 contract: false = no such turn, or already marked (UNIQUE);
     // any other INSERT failure throws; an empty model name is a caller
     // error (invalid_argument), never a silent false.
@@ -1270,10 +1485,12 @@ static std::string tags_from_metadata(const json& metadata) {
             "       datetime(ts.turn_datetime,'unixepoch','localtime'), "
             "       ts.turn_datetime, "
             "       t.embedding,  "  // raw turn embedding
-            "       ts.embedding "   // turn-summary embedding
+            "       ts.embedding, "  // turn-summary embedding
+            "       m.name "         // L2's summarizer model (LR S62 provenance)
             "FROM turn_summaries ts "
             "JOIN turns t ON ts.turn_id = t.turn_id "
             "JOIN sessions ss ON ts.session_id = ss.session_id "
+            "LEFT JOIN models m ON m.model_id = ts.summary_model_id "
             "WHERE ss.guid = ? " +
             pending_episode_l2_conditions(epoch_expr) +
             "ORDER BY ts.turn_datetime ASC, ts.turn_summary_id ASC";
@@ -1300,6 +1517,7 @@ static std::string tags_from_metadata(const json& metadata) {
             ct.summary_text      = s.column_text(1);
             ct.timestamp         = s.column_text(2);
             ct.epoch             = s.column_int64(3);
+            ct.summary_model_name = s.column_text(6);
             ct.turn_embedding    = decode_counted(
                 s.column_blob(4), s.column_bytes(4), "turn_summaries", ct.turn_summary_id);
             ct.summary_embedding = decode_counted(

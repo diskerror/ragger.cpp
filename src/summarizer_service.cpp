@@ -73,7 +73,10 @@ void SummarizerService::enqueue_turn(int turn_id,
         }
         queue_.push_back(std::move(j));
     }
-    cv_.notify_one();
+    // notify_ALL: two threads wait on cv_ (worker_loop and pause_timer_loop);
+    // notify_one can be stolen by the pause timer (predicate false -> back to
+    // sleep), leaving the job queued and the worker asleep forever.
+    cv_.notify_all();
 }
 
 size_t SummarizerService::queue_size() const {
@@ -261,49 +264,50 @@ void SummarizerService::handle_l2(const Job& j) {
     std::string eff_user = is_system_injected_turn(j.user_text)
                                ? std::string{} : j.user_text;
 
-    // Trivial-turn filter: skip inference (and skip writing any summary row)
-    // when the turn is too short to contain real information. "test | test",
-    // one-word pings, and similar noise don't belong in the summary store.
-    // The raw turn row is still kept for audit purposes; we just don't waste
-    // an inference call or pollute the search index with near-empty rows.
-    // Threshold: combined user+assistant text under 80 chars, OR assistant
-    // text alone under 20 chars. Both are tuned to catch single-word/phrase
-    // exchanges while keeping real single-sentence answers. Uses the
-    // effective (system-note-stripped) user text so an interrupted turn with
-    // a real answer still qualifies.
-    {
-        const size_t combined = eff_user.size() + j.assistant_text.size();
-        if (combined < 80 || j.assistant_text.size() < 20) {
-            // Trivial turn: don't spend an inference call. Mark it done via
-            // mark_turn_summarized so it leaves the unsummarized queue —
-            // PHASE6 3: unconditionally, even with inference down. The old
-            // gate on a non-empty model name meant trivial turns were never
-            // marked while inference was down and got re-queued every tick
-            // forever. Model name: the real summarizer model when known,
-            // else the pseudo-model "(skipped)" — never "bad", which
-            // reset_abandoned_turn_summaries() deletes.
-            const std::string summarizer_model =
-                inf && !inf->memory_model.empty() ? inf->memory_model
-                                                  : std::string("(skipped)");
-            backend_.mark_turn_summarized(j.turn_id, summarizer_model);
-            Diskerror::Logger::info(std::format(
-                "[summarizer] skipping trivial turn (turn_id={}, session={}, ts={}, "
-                "combined_chars={})",
-                j.turn_id, j.session_guid.empty() ? "-" : j.session_guid,
-                j.source_timestamp, combined));
-            return;
-        }
-    }
+    // LR S63: the old "trivial turn" filter (combined < 80 chars or
+    // assistant < 20 chars -> mark_turn_summarized with the "(skipped)"
+    // pseudo-model) is GONE. Short exchanges now ride the normal path: the
+    // S62 floor copies their source into a REAL turn_summaries row (text,
+    // embedding, terms, the turn's model) without an inference call. The
+    // only remaining ''-marker writer is poison-abandon below (D-5).
 
     // Idempotency guard. The live enqueue (capture path) and the pause-timer
     // catch-up scan can both queue the same turn. turn_summary_exists() is a
     // plain row-existence check — no placeholder mechanism exists anymore, so
-    // any turn_summaries row for this turn_id means it's already done (either
-    // a real summary, a trivial-skip marker, or a poison-abandon marker). The
+    // any turn_summaries row for this turn_id means it's already done (a
+    // real summary/copy, or a poison-abandon marker; legacy DBs may also
+    // hold old trivial-skip markers). The
     // worker is single-threaded, so by the time a duplicate job runs, the
     // first has already inserted the row.
     if (backend_.turn_summary_exists(j.turn_id))
         return;
+
+    // LR S62: the exact text the summarizer would see for this turn (the
+    // system-injected user side already blanked). Doubles as the copy text
+    // for the floor and the shorter-text rule below.
+    const std::string source = eff_user.empty()
+        ? j.assistant_text
+        : eff_user + " | " + j.assistant_text;
+
+    // LR S62 floor: a source at/below summarizer_min_words words is copied
+    // verbatim with NO model call — this path needs no endpoint at all, so
+    // short turns still leave the unsummarized queue with inference down
+    // (the PHASE6 3 invariant, now carried by the floor instead of the
+    // trivial-skip marker). Provenance of a copy is the TURN's model
+    // (addendum 3; NULL = unknown allowed).
+    if (count_words(source) <= static_cast<size_t>(std::max(0, config().summarizer_min_words))) {
+        if (!backend_.finalize_turn_summary(j.turn_id, source, j.model_name)) {
+            Diskerror::Logger::warn(std::format(
+                "[summarizer] floor-copy finalize_turn_summary failed for turn_id={} "
+                "(session={}, ts={})", j.turn_id,
+                j.session_guid.empty() ? "-" : j.session_guid, j.source_timestamp));
+            return;
+        }
+        Diskerror::Logger::info(std::format(
+            "[summarizer] L2 floor copy ({} words, no model call) for session {}",
+            count_words(source), j.session_guid.empty() ? "-" : j.session_guid));
+        return;
+    }
 
     // S25 (C M10): "not configured" is not "unreachable". With no inference
     // endpoint there is nothing to retry against: counting failures here
@@ -360,8 +364,13 @@ void SummarizerService::handle_l2(const Job& j) {
         return;
     }
 
-    // Insert the turn_summaries row: real summary text + summarizer model.
-    bool ok = backend_.finalize_turn_summary(j.turn_id, summary, summarizer_model);
+    // Insert the turn_summaries row. LR S62 (shorter-text rule): a summary
+    // that measures >= its source (ties included) is rejected in favor of a
+    // verbatim copy — and a copy records the TURN's model, not the
+    // summarizer's (addendum 3).
+    const auto choice = choose_summary(source, summary);
+    const std::string& row_model = choice.copied ? j.model_name : summarizer_model;
+    bool ok = backend_.finalize_turn_summary(j.turn_id, choice.text, row_model);
     if (!ok) {
         Diskerror::Logger::warn(std::format(
             "[summarizer] finalize_turn_summary failed for turn_id={} "
@@ -440,6 +449,7 @@ void SummarizerService::handle_episode_close(const Job& j) {
 
     struct EpisodeSegment {
         std::string summary;
+        std::string model;      // provenance written to episodes.model_id
         size_t      start, end;   // candidate index range [start, end)
         size_t      turn_count;
     };
@@ -454,15 +464,44 @@ void SummarizerService::handle_episode_close(const Job& j) {
 
         std::vector<std::string> texts;
         texts.reserve(end - start);
+        std::string single_model;
         for (size_t k = start; k < end; ++k)
-            if (!candidates[k].summary_text.empty())
+            if (!candidates[k].summary_text.empty()) {
                 texts.push_back(candidates[k].summary_text);
+                single_model = candidates[k].summary_model_name;
+            }
         if (texts.empty()) continue;
 
-        std::string summary = summarize_texts(*inf, texts);
-        if (summary.empty()) return;  // inference failed — retry ALL next pass
+        // LR S62 (shorter-text rule, addenda 2/3), episode side. The source
+        // is the segment's L2 texts joined exactly the way summarize_texts
+        // joins them. Provenance of a copy: a ONE-member segment copies that
+        // L2's summary_model_id (no model call at all — summarizing a single
+        // summary is waste); a MULTI-member copy (floor, or the concatenation
+        // beating the summary) records the summarizer's model — there is no
+        // single original.
+        std::string summary;
+        std::string model = summarizer_model;
+        if (texts.size() == 1) {
+            summary = texts.front();
+            model   = single_model;
+        } else {
+            std::string joined;
+            for (const auto& t : texts) {
+                if (!joined.empty()) joined += "\n\n";
+                joined += t;
+            }
+            if (count_words(joined) <=
+                    static_cast<size_t>(std::max(0, config().summarizer_min_words))) {
+                summary = joined;   // floor: no model call
+            } else {
+                summary = summarize_texts(*inf, texts);
+                if (summary.empty()) return;  // inference failed — retry ALL next pass
+                summary = choose_summary(joined, summary).text;
+            }
+        }
 
-        segments.push_back({std::move(summary), start, end, texts.size()});
+        segments.push_back({std::move(summary), std::move(model),
+                            start, end, texts.size()});
     }
 
     if (segments.empty()) return;
@@ -479,7 +518,7 @@ void SummarizerService::handle_episode_close(const Job& j) {
     for (const auto& seg : segments) {
         EpisodeClose ec;
         ec.text         = seg.summary;
-        ec.model_name   = summarizer_model;
+        ec.model_name   = seg.model;
         ec.session_guid = j.session_guid;
         ec.span_start   = candidates[seg.start].epoch;
         ec.span_end     = candidates[seg.end - 1].epoch;

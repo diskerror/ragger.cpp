@@ -5,7 +5,9 @@
  * Uses a temp DB that's deleted after the test.
  */
 #include "config.h"
+#include "backfill.h"
 #include "embedder.h"
+#include "inference.h"
 #include "sqlite/backend.h"
 #include "store_kind.h"
 #include "sqlite/status.h"
@@ -29,7 +31,12 @@
 #include <set>
 #include <vector>
 #include <algorithm>
+#include <atomic>
 #include <optional>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 // LR S57: the shared same-exchange merge rule lives in src/sqlite/write.cpp
 // (deliberately not in a header); declared here so the test pins its values.
@@ -6009,6 +6016,566 @@ static void sq_test_semqlite_config() {
     std::println(" ok");
 }
 
+// ---------------------------------------------------------------------------
+// LR S66/S67 — back-fill passes (see src/backfill.cpp). These run against a
+// stub inference endpoint (bf_stub: same shape as test_summarizer's StubChat)
+// on the shared TEMP_DB fixture. Reid runs the real passes (rule 17); the
+// executor's job is that the code exists and is pinned here: counts, written
+// values, in-place column rules, dry-run byte-identity, rerun-is-no-op,
+// failure injection, and the trigger re-embed invariant.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct bf_stub {
+    int ls = -1;
+    int port = 0;
+    std::atomic<bool> running{true};
+    std::atomic<int> calls{0};
+    std::string reply;
+    std::thread srv;
+    explicit bf_stub(std::string reply_text) : reply(std::move(reply_text)) {
+        ls = ::socket(AF_INET, SOCK_STREAM, 0);
+        CHECK(ls >= 0);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        a.sin_port = 0;
+        CHECK(::bind(ls, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0);
+        CHECK(::listen(ls, 8) == 0);
+        socklen_t len = sizeof a;
+        ::getsockname(ls, reinterpret_cast<sockaddr*>(&a), &len);
+        port = ntohs(a.sin_port);
+        srv = std::thread([this] {
+            while (running.load()) {
+                int c = ::accept(ls, nullptr, nullptr);
+                if (c < 0) break;
+                std::string req;
+                char buf[8192];
+                size_t hdr_end = std::string::npos;
+                long long cl = -1;
+                while (true) {
+                    ssize_t n = ::recv(c, buf, sizeof buf, 0);
+                    if (n <= 0) break;
+                    req.append(buf, static_cast<size_t>(n));
+                    if (hdr_end == std::string::npos) {
+                        hdr_end = req.find("\r\n\r\n");
+                        if (hdr_end != std::string::npos) {
+                            std::string head = req.substr(0, hdr_end);
+                            for (auto& ch : head) ch = static_cast<char>(::tolower(ch));
+                            auto p = head.find("content-length:");
+                            if (p != std::string::npos)
+                                cl = std::stoll(head.substr(p + 15));
+                        }
+                    }
+                    if (cl >= 0 && req.size() >= hdr_end + 4 + static_cast<size_t>(cl))
+                        break;
+                }
+                if (cl >= 0) {
+                    const std::string body = req.substr(hdr_end + 4, static_cast<size_t>(cl));
+                    if (body.find("\"messages\"") != std::string::npos)
+                        ++calls;
+                }
+                const std::string out =
+                    R"({"choices":[{"message":{"content":")" + reply + R"("}}]})";
+                const std::string resp =
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                    "Content-Length: " + std::to_string(out.size()) +
+                    "\r\nConnection: close\r\n\r\n" + out;
+                ::send(c, resp.data(), resp.size(), 0);
+                ::close(c);
+            }
+        });
+    }
+    ~bf_stub() {
+        running.store(false);
+        ::close(ls);
+        if (srv.joinable()) srv.join();
+    }
+    ragger::InferenceClient client() const {
+        ragger::InferenceClient c(
+            {ragger::Endpoint("stub", "http://127.0.0.1:" + std::to_string(port) + "/v1")},
+            "stub-model", 64);
+        c.memory_model = "stub-model";
+        c.timeout_sec = 5;
+        return c;
+    }
+};
+
+// Full-content dump of the tables the back-fill may touch — a dry-run pass
+// must leave this string byte-identical.
+std::string bf_dump(sqlite3* raw) {
+    static const char* tables[] = {"turn_summaries", "knowledge", "sessions", "episodes",
+                                   "turn_summaries_terms", "knowledge_terms", "models"};
+    std::string out;
+    for (const char* t : tables) {
+        char* err = nullptr;
+        char** rows = nullptr;
+        int nrows = 0, ncols = 0;
+        const std::string sql = std::string("SELECT * FROM ") + t + " ORDER BY 1";
+        CHECK(sqlite3_get_table(raw, sql.c_str(), &rows, &nrows, &ncols, &err) == SQLITE_OK);
+        out += std::format("{}:{}x{}\n", t, nrows, ncols);
+        for (int i = 0; i <= nrows; ++i)
+            for (int j = 0; j < ncols; ++j) {
+                const char* v = rows[i * ncols + j];
+                out += (v ? v : "<NULL>");
+                out += '\x1f';
+            }
+        sqlite3_free_table(rows);
+    }
+    return out;
+}
+
+int bf_ts_id(sqlite3* raw, int turn_id) {
+    return static_cast<int>(p1_scalar_int(
+        raw, "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(turn_id)));
+}
+
+} // namespace
+
+// S66 kinds l2-null / l2-empty / l2-regenerate: counts, written values, the
+// in-place column rules (turn_datetime/session_id/episode_id/summarized_on
+// never change), floor copy without a model call, guard behavior, rerun
+// no-op, dry-run byte-identity, failure injection, unfiltered-regenerate
+// refusal, and the not-configured refusal.
+void lr66_test_backfill_l2(ragger::Embedder& emb) {
+    std::println("  lr66_test_backfill_l2...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    sqlite3* raw = p1_open_raw();
+
+    // (1) NULL-text row on a LONG turn -> model path; stub's 2-word reply
+    // is strictly shorter -> summary wins, model = stub-model.
+    const std::string long_u = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima ";
+    const std::string long_a = "mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu ";
+    const int t_null = db.store_turn(long_u, long_a, "turn-model", false, "bf-l2-a");
+    {
+        ragger::Stmt s(raw, "INSERT INTO turn_summaries (turn_id, text, turn_datetime, summarized_on) "
+                    "VALUES (?, NULL, (SELECT created_at FROM turns WHERE turn_id = ?), 1700000000)");
+        s.bind(1, t_null).bind(2, t_null);
+        CHECK(s.exec());
+    }
+    const int ts_null = bf_ts_id(raw, t_null);
+    CHECK(p1_scalar_int(raw, std::format("SELECT summarized_on FROM turn_summaries WHERE turn_summary_id = {}", ts_null)) == 1700000000);
+
+    // (2) '' row (legacy skip, model not 'bad') on a long turn -> candidate.
+    const int t_empty = db.store_turn(long_u + " extra", long_a + " more", "turn-model", false, "bf-l2-a");
+    CHECK(db.mark_turn_summarized(t_empty, "old-model"));
+    const int ts_empty = bf_ts_id(raw, t_empty);
+
+    // (3) poison-abandon '' row -> never an l2-empty candidate.
+    const int t_bad = db.store_turn(long_u, long_a, "turn-model", false, "bf-l2-a");
+    CHECK(db.mark_turn_summarized(t_bad, "bad"));
+
+    // (4) truly-empty turn ('' row, turn content blanked) -> stays ''.
+    const int t_blank = db.store_turn("short q", "short a", "turn-model", false, "bf-l2-a");
+    CHECK(db.mark_turn_summarized(t_blank, "old-model"));
+    {
+        ragger::Stmt s(raw, "UPDATE turns SET user_text = '', assistant_text = '' WHERE turn_id = ?");
+        s.bind(1, t_blank);
+        CHECK(s.exec());
+    }
+
+    {
+        bf_stub stub("Brief summary.");
+        auto client = stub.client();
+        // Dry-run first: byte-identical DB.
+        const std::string before = bf_dump(raw);
+        auto dry = ragger::backfill_l2(db, client, "null", /*dry_run=*/true);
+        CHECK(dry.candidates == 1);
+        CHECK(dry.applied == 0);
+        CHECK(bf_dump(raw) == before);
+
+        auto res = ragger::backfill_l2(db, client, "null", false);
+        CHECK(res.candidates == 1);
+        CHECK(res.applied == 1);
+        CHECK(stub.calls == 1);   // long source: exactly one model call
+        CHECK(p1_scalar_text(raw, "SELECT text FROM turn_summaries WHERE turn_summary_id = " + std::to_string(ts_null)) == "Brief summary.");
+        CHECK(p1_scalar_int(raw, "SELECT summary_model_id FROM turn_summaries ts JOIN models m ON m.model_id = ts.summary_model_id WHERE ts.turn_summary_id = " + std::to_string(ts_null)) > 0);
+        CHECK(p1_scalar_text(raw, "SELECT m.name FROM turn_summaries ts JOIN models m ON m.model_id = ts.summary_model_id WHERE ts.turn_summary_id = " + std::to_string(ts_null)) == "stub-model");
+        CHECK(p1_scalar_int(raw, "SELECT embedding IS NOT NULL FROM turn_summaries WHERE turn_summary_id = " + std::to_string(ts_null)) == 1);
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turn_summaries_terms WHERE turn_summary_id = " + std::to_string(ts_null)) > 0);
+        // In-place rules: summarized_on untouched (D-8), turn_datetime kept.
+        CHECK(p1_scalar_int(raw, "SELECT summarized_on FROM turn_summaries WHERE turn_summary_id = " + std::to_string(ts_null)) == 1700000000);
+        CHECK(p1_scalar_int(raw, "SELECT ts.turn_datetime == t.created_at FROM turn_summaries ts JOIN turns t ON t.turn_id = ts.turn_id WHERE ts.turn_summary_id = " + std::to_string(ts_null)) == 1);
+
+        // Rerun: nothing left to fix.
+        auto again = ragger::backfill_l2(db, client, "null", false);
+        CHECK(again.candidates == 0);
+    }
+
+    // l2-empty: only the legacy '' row (not 'bad', not the blanked turn).
+    {
+        bf_stub stub("Concise recap.");
+        auto client = stub.client();
+        auto res = ragger::backfill_l2(db, client, "empty", false);
+        CHECK(res.candidates == 1);
+        CHECK(res.applied == 1);
+        CHECK(p1_scalar_text(raw, "SELECT text FROM turn_summaries WHERE turn_summary_id = " + std::to_string(ts_empty)) == "Concise recap.");
+        // The blanked turn's '' row and the poison row are untouched.
+        CHECK(p1_scalar_text(raw, "SELECT text FROM turn_summaries WHERE turn_id = " + std::to_string(t_blank)).empty());
+        CHECK(p1_scalar_text(raw, "SELECT text FROM turn_summaries WHERE turn_id = " + std::to_string(t_bad)).empty());
+        auto again = ragger::backfill_l2(db, client, "empty", false);
+        CHECK(again.candidates == 0);
+    }
+
+    // Floor copy: NULL-text row at/below summarizer_min_words words -> copied
+    // verbatim with the TURN's model, ZERO model calls. The source is kept
+    // OVER summarize_transcript's 120-char trivial shortcut on purpose: with
+    // the floor disabled the model WOULD be called, so the stub.calls == 0
+    // CHECK is a real pin (a shorter source is answered by the shortcut and
+    // hides the difference — found by negative control).
+    {
+        const std::string fu = "configuration authentication rotation configuration authentication rotation configuration authentication rotation";
+        const std::string fa = "please revisit";
+        const int t_short = db.store_turn(fu, fa, "turn-model", false, "bf-l2-b");
+        {
+            ragger::Stmt s(raw, "INSERT INTO turn_summaries (turn_id, text, turn_datetime, summarized_on) "
+                        "VALUES (?, NULL, (SELECT created_at FROM turns WHERE turn_id = ?), 1700000001)");
+            s.bind(1, t_short).bind(2, t_short);
+            CHECK(s.exec());
+        }
+        const int ts_short = bf_ts_id(raw, t_short);
+        bf_stub stub("NEVER USED");
+        auto client = stub.client();
+        auto res = ragger::backfill_l2(db, client, "null", false);
+        CHECK(res.candidates == 1);
+        CHECK(res.applied == 1);
+        CHECK(stub.calls == 0);   // floor: no model call at all
+        CHECK(p1_scalar_text(raw, "SELECT text FROM turn_summaries WHERE turn_summary_id = " + std::to_string(ts_short)) == fu + " | " + fa);
+        CHECK(p1_scalar_text(raw, "SELECT m.name FROM turn_summaries ts JOIN models m ON m.model_id = ts.summary_model_id WHERE ts.turn_summary_id = " + std::to_string(ts_short)) == "turn-model");
+    }
+
+    // l2-regenerate: refuses with no filter; --ids and --model select.
+    {
+        bf_stub stub("Regenerated text.");
+        auto client = stub.client();
+        bool threw = false;
+        try { ragger::backfill_l2(db, client, "regenerate", false); }
+        catch (const std::invalid_argument&) { threw = true; }
+        CHECK(threw);
+        auto res = ragger::backfill_l2(db, client, "regenerate", false, "", {ts_null});
+        CHECK(res.candidates == 1);
+        CHECK(res.applied == 1);
+        CHECK(p1_scalar_text(raw, "SELECT text FROM turn_summaries WHERE turn_summary_id = " + std::to_string(ts_null)) == "Regenerated text.");
+        // By model: every row whose summary_model is 'stub-model'.
+        auto by_model = ragger::backfill_l2(db, client, "regenerate", false, "stub-model");
+        CHECK(by_model.candidates >= 2);
+        CHECK(by_model.applied == by_model.candidates);
+    }
+
+    // Failure injection: an ABORT trigger on one row -> that row unchanged,
+    // the pass reports it and continues with the rest.
+    {
+        const int t_x = db.store_turn(long_u, long_a, "turn-model", false, "bf-l2-c");
+        {
+            ragger::Stmt s(raw, "INSERT INTO turn_summaries (turn_id, text, turn_datetime, summarized_on) "
+                        "VALUES (?, NULL, (SELECT created_at FROM turns WHERE turn_id = ?), 1700000002)");
+            s.bind(1, t_x).bind(2, t_x);
+            CHECK(s.exec());
+        }
+        const int ts_x = bf_ts_id(raw, t_x);
+        CHECK(sqlite3_exec(raw, std::format(
+            "CREATE TRIGGER bf_fail BEFORE UPDATE ON turn_summaries "
+            "WHEN old.turn_summary_id = {} BEGIN SELECT RAISE(ABORT, 'bf injected'); END",
+            ts_x).c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+        bf_stub stub("Injected-fail summary.");
+        auto client = stub.client();
+        auto res = ragger::backfill_l2(db, client, "null", false);
+        CHECK(res.candidates == 1);
+        CHECK(res.applied == 0);
+        CHECK(res.failed == 1);
+        CHECK(p1_scalar_int(raw, "SELECT text IS NULL FROM turn_summaries WHERE turn_summary_id = " + std::to_string(ts_x)) == 1);
+        CHECK(sqlite3_exec(raw, "DROP TRIGGER bf_fail", nullptr, nullptr, nullptr) == SQLITE_OK);
+        // With the trigger gone the same pass fixes it (resumable).
+        auto res2 = ragger::backfill_l2(db, client, "null", false);
+        CHECK(res2.candidates == 1);
+        CHECK(res2.applied == 1);
+    }
+
+    // Not configured: refusal, nothing written.
+    {
+        ragger::InferenceClient none({}, "", 64);
+        const std::string before = bf_dump(raw);
+        bool threw = false;
+        try { ragger::backfill_l2(db, none, "empty", false); }
+        catch (const std::invalid_argument& e) {
+            threw = true;
+            CHECK(std::string(e.what()) == "inference not configured");
+        }
+        CHECK(threw);
+        CHECK(bf_dump(raw) == before);
+    }
+
+    sqlite3_close(raw);
+    db.close();
+    cleanup();
+    std::println(" ok");
+}
+
+// S66 kind triggers: decision/insight rows with no trigger get one drafted
+// into the NULL column ONLY, and the row is re-embedded + re-indexed to the
+// trigger+text formula (kKnowledgeEmbedTextSQL). The vector invariant is
+// pinned by rebuild-stability: rebuild_embeddings() re-encodes from that SQL
+// expression, so an identical blob proves the stored vector was computed
+// from the same text (same pattern as the rebuild-stability pins above).
+void lr66_test_backfill_triggers(ragger::Embedder& emb) {
+    std::println("  lr66_test_backfill_triggers...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    sqlite3* raw = p1_open_raw();
+
+    const std::string dtext =
+        "we chose SQLite FTS5 custom terms index over FTS because stemming and phonetics are ours";
+    const int d1 = db.store_decision(dtext, "current", "tech", "");
+    // A decision that already has a trigger: never touched.
+    ragger::KnowledgeInput in;
+    in.kind = "decision";
+    in.text = "pin-first tests catch regressions the suite cannot see";
+    in.trigger = "Use when choosing a test order";
+    const auto d2 = db.store_knowledge(in);
+    // An insight without a trigger: also a candidate.
+    {
+        ragger::Stmt s(raw, "INSERT INTO knowledge (kind, text, status, tags, created_at) "
+                    "VALUES ('insight', 'episode spans must keep both embedding signals', 'current', '', unixepoch())");
+        CHECK(s.exec());
+    }
+    // A note: never a trigger candidate.
+    db.store("plain note about the garden", ragger::json{{"tags", {"x"}}});
+
+    // Dry-run: counts only.
+    {
+        bf_stub stub("whentriggerdraft short");
+        auto client = stub.client();
+        const std::string before = bf_dump(raw);
+        auto dry = ragger::backfill_triggers(db, client, true);
+        CHECK(dry.candidates == 2);   // d1 + the insight (not d2, not the note)
+        CHECK(bf_dump(raw) == before);
+        CHECK(stub.calls == 0);
+    }
+
+    {
+        bf_stub stub("whentriggerdraft short");
+        auto client = stub.client();
+        auto res = ragger::backfill_triggers(db, client, false);
+        CHECK(res.candidates == 2);
+        CHECK(res.applied == 2);
+        CHECK(stub.calls == 2);
+        CHECK(p1_scalar_text(raw, "SELECT trigger FROM knowledge WHERE knowledge_id = " + std::to_string(d1)) == "whentriggerdraft short");
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge_terms kt JOIN terms t ON t.term_id = kt.term_id WHERE kt.knowledge_id = " + std::to_string(d1) + " AND t.term = 'whentriggerdraft'") >= 1);
+        // d2's trigger untouched; text/status never change anywhere.
+        CHECK(p1_scalar_text(raw, "SELECT trigger FROM knowledge WHERE knowledge_id = " + std::to_string(d2.id)) == "Use when choosing a test order");
+        // Vector invariant: stored embedding == encode(trigger || '\n' || text).
+        // Pinned via rebuild-stability (see header comment).
+        const std::string hex_before = p1_scalar_text(raw, "SELECT hex(embedding) FROM knowledge WHERE knowledge_id = " + std::to_string(d1));
+        CHECK(!hex_before.empty());
+        db.rebuild_embeddings(emb, {}, "knowledge");
+        CHECK(p1_scalar_text(raw, "SELECT hex(embedding) FROM knowledge WHERE knowledge_id = " + std::to_string(d1)) == hex_before);
+        // Rerun: nothing left.
+        auto again = ragger::backfill_triggers(db, client, false);
+        CHECK(again.candidates == 0);
+    }
+
+    sqlite3_close(raw);
+    db.close();
+    cleanup();
+    std::println(" ok");
+}
+
+// S67 kind stranded: membership-only attach of L2 rows inside a closed span
+// of the SAME session; the greatest-span_start episode wins on overlap (ties
+// counted); the open tail is counted and left alone; rerun is a no-op.
+void lr67_test_backfill_stranded(ragger::Embedder& emb) {
+    std::println("  lr67_test_backfill_stranded...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    sqlite3* raw = p1_open_raw();
+
+    const std::string g = "bf-strand-a";
+    auto m = p5_seed_members(db, g, {"2026-05-01 10:00:00", "2026-05-01 10:05:00",
+                                     "2026-05-01 10:10:00"});
+    ragger::EpisodeClose ec;
+    ec.text = "bf-strand ep1";
+    ec.model_name = "summarizer-model";
+    ec.session_guid = g;
+    ec.span_start = p5_epoch("2026-05-01 10:00:00");
+    ec.span_end   = p5_epoch("2026-05-01 10:05:00");
+    ec.member_turn_summary_ids = {m[0], m[1]};
+    const int ep1 = db.store_episode_close(ec);
+    CHECK(ep1 > 0);
+
+    // A late L2 inside ep1's span (stranded), and one after the last span
+    // (open tail).
+    auto late = p5_seed_members(db, g, {"2026-05-01 10:02:00", "2026-05-01 10:20:00"});
+
+    // A second, overlapping episode (earlier span_start) for the tie case.
+    auto m2 = p5_seed_members(db, g, {"2026-05-01 09:55:00"});
+    ragger::EpisodeClose ec2;
+    ec2.text = "bf-strand ep2";
+    ec2.model_name = "summarizer-model";
+    ec2.session_guid = g;
+    ec2.span_start = p5_epoch("2026-05-01 09:55:00");
+    ec2.span_end   = p5_epoch("2026-05-01 10:04:00");
+    ec2.member_turn_summary_ids = {m2[0]};
+    const int ep2 = db.store_episode_close(ec2);
+    CHECK(ep2 > 0);
+
+    // Another session covering the same time: never attached across sessions.
+    const std::string g2 = "bf-strand-b";
+    auto other = p5_seed_members(db, g2, {"2026-05-01 10:02:00"});
+
+    // Dry-run: counts, nothing written.
+    {
+        const std::string before = bf_dump(raw);
+        auto dry = ragger::backfill_stranded(db, true);
+        CHECK(dry.candidates == 1);            // late[0] (inside ep1/ep2)
+        CHECK(dry.ties == 1);                  // covered by both spans
+        CHECK(dry.open_tail >= 1);             // late[1] after the last span (+ session b's row)
+        CHECK(bf_dump(raw) == before);
+    }
+
+    auto res = ragger::backfill_stranded(db, false);
+    CHECK(res.candidates == 1);
+    CHECK(res.applied == 1);
+    // Greatest span_start <= t wins: ep1 (10:00) over ep2 (09:55).
+    CHECK(p1_scalar_int(raw, "SELECT episode_id FROM turn_summaries WHERE turn_summary_id = " + std::to_string(late[0])) == ep1);
+    // Open tail untouched; foreign session untouched.
+    CHECK(p1_scalar_int(raw, "SELECT episode_id FROM turn_summaries WHERE turn_summary_id = " + std::to_string(late[1])) == 0 /* NULL reads as 0 */);
+    CHECK(p1_scalar_int(raw, "SELECT episode_id IS NULL FROM turn_summaries WHERE turn_summary_id = " + std::to_string(other[0])) == 1);
+    // The episode itself is unchanged (membership-only).
+    CHECK(p1_scalar_text(raw, "SELECT text FROM episodes WHERE episode_id = " + std::to_string(ep1)) == "bf-strand ep1");
+
+    auto again = ragger::backfill_stranded(db, false);
+    CHECK(again.candidates == 0);
+
+    sqlite3_close(raw);
+    db.close();
+    cleanup();
+    std::println(" ok");
+}
+
+// S67 kind session-names: unnamed sessions with L2 content get a drafted
+// title with name_source='summarizer'; a named session is never touched;
+// rerun is a no-op.
+void lr67_test_backfill_session_names(ragger::Embedder& emb) {
+    std::println("  lr67_test_backfill_session_names...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    sqlite3* raw = p1_open_raw();
+
+    // Unnamed session with one L2 row.
+    const int t1 = db.store_turn("bf-name question", "bf-name answer about the pipeline",
+                                 "test-model", false, "bf-name-a");
+    CHECK(db.finalize_turn_summary(t1, "bf-name summary", "summarizer-model"));
+    // Named session with L2 rows: never touched.
+    const int t2 = db.store_turn("bf-name2 q", "bf-name2 a", "test-model", false,
+                                 "bf-name-b", "", "user-given-title", "hermes_title");
+    CHECK(db.finalize_turn_summary(t2, "bf-name2 summary", "summarizer-model"));
+    // Unnamed session with NO L2 rows: not a candidate.
+    db.store_turn("bf-name3 q", "bf-name3 a", "test-model", false, "bf-name-c");
+
+    {
+        const std::string before = bf_dump(raw);
+        ragger::InferenceClient none({}, "", 64);
+        auto dry = ragger::backfill_session_names(db, none, true);   // dry-run: inference unused
+        CHECK(dry.candidates == 1);
+        CHECK(bf_dump(raw) == before);
+    }
+    {
+        bf_stub stub("Pipeline discussion");
+        auto client = stub.client();
+        auto res = ragger::backfill_session_names(db, client, false);
+        CHECK(res.candidates == 1);
+        CHECK(res.applied == 1);
+        CHECK(stub.calls == 1);
+        CHECK(p1_scalar_text(raw, "SELECT name FROM sessions WHERE guid = 'bf-name-a'") == "Pipeline discussion");
+        CHECK(p1_scalar_text(raw, "SELECT name_source FROM sessions WHERE guid = 'bf-name-a'") == "summarizer");
+        CHECK(p1_scalar_text(raw, "SELECT name FROM sessions WHERE guid = 'bf-name-b'") == "user-given-title");
+        CHECK(p1_scalar_int(raw, "SELECT name IS NULL FROM sessions WHERE guid = 'bf-name-c'") == 1);
+        auto again = ragger::backfill_session_names(db, client, false);
+        CHECK(again.candidates == 0);
+        // Direct guard pin (selection alone cannot show it): the writer must
+        // refuse a non-NULL name even when called with the id.
+        const int sid_b = static_cast<int>(p1_scalar_int(
+            raw, "SELECT session_id FROM sessions WHERE guid = 'bf-name-b'"));
+        CHECK(!db.apply_session_name(sid_b, "clobbered", "summarizer"));
+        CHECK(p1_scalar_text(raw, "SELECT name FROM sessions WHERE guid = 'bf-name-b'") == "user-given-title");
+    }
+
+    sqlite3_close(raw);
+    db.close();
+    cleanup();
+    std::println(" ok");
+}
+
+// S68 (rule 18): the time invariants as one scenario — L2 turn_datetime
+// always equals its turn's created_at (before AND after a regenerate
+// back-fill), episodes carry created_at = span_end, and copy rows record
+// the S62 provenance model.
+void lr68_test_time_invariants(ragger::Embedder& emb) {
+    std::println("  lr68_test_time_invariants...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    sqlite3* raw = p1_open_raw();
+
+    const std::string g = "bf-time-a";
+    auto m = p5_seed_members(db, g, {"2026-06-01 09:00:00", "2026-06-01 09:10:00"});
+    CHECK(p1_scalar_int(raw,
+        "SELECT COUNT(*) FROM turn_summaries ts JOIN turns t ON t.turn_id = ts.turn_id "
+        "WHERE ts.turn_datetime != t.created_at") == 0);
+
+    ragger::EpisodeClose ec;
+    ec.text = "bf-time episode";
+    ec.model_name = "summarizer-model";
+    ec.session_guid = g;
+    ec.span_start = p5_epoch("2026-06-01 09:00:00");
+    ec.span_end   = p5_epoch("2026-06-01 09:10:00");
+    ec.member_turn_summary_ids = m;
+    const int ep = db.store_episode_close(ec);
+    CHECK(ep > 0);
+    CHECK(p1_scalar_int(raw, "SELECT created_at FROM episodes WHERE episode_id = " + std::to_string(ep))
+          == p5_epoch("2026-06-01 09:10:00"));
+
+    // Regenerate both rows: turn_datetime (and episode membership) unchanged.
+    {
+        bf_stub stub("Regenerated time text.");
+        auto client = stub.client();
+        auto res = ragger::backfill_l2(db, client, "regenerate", false, "", {m[0], m[1]});
+        CHECK(res.candidates == 2);
+        CHECK(res.applied == 2);
+    }
+    CHECK(p1_scalar_int(raw,
+        "SELECT COUNT(*) FROM turn_summaries ts JOIN turns t ON t.turn_id = ts.turn_id "
+        "WHERE ts.turn_datetime != t.created_at") == 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turn_summaries WHERE episode_id = " + std::to_string(ep)) == 2);
+
+    // Copy provenance (S62 table): a floor copy records the TURN's model.
+    const int t_short = db.store_turn("tiny", "yes", "turn-model-x", false, "bf-time-b");
+    {
+        ragger::Stmt s(raw, "INSERT INTO turn_summaries (turn_id, text, turn_datetime, summarized_on) "
+                    "VALUES (?, NULL, (SELECT created_at FROM turns WHERE turn_id = ?), 1700000003)");
+        s.bind(1, t_short).bind(2, t_short);
+        CHECK(s.exec());
+    }
+    {
+        bf_stub stub("unused");
+        auto client = stub.client();
+        auto res = ragger::backfill_l2(db, client, "null", false);
+        CHECK(res.applied == 1);
+    }
+    CHECK(p1_scalar_text(raw,
+        "SELECT m.name FROM turn_summaries ts JOIN models m ON m.model_id = ts.summary_model_id "
+        "WHERE ts.turn_id = " + std::to_string(t_short)) == "turn-model-x");
+    CHECK(p1_scalar_int(raw,
+        "SELECT ts.turn_datetime == t.created_at FROM turn_summaries ts JOIN turns t ON t.turn_id = ts.turn_id "
+        "WHERE ts.turn_id = " + std::to_string(t_short)) == 1);
+
+    sqlite3_close(raw);
+    db.close();
+    cleanup();
+    std::println(" ok");
+}
+
 int main() {
     TestEnv env("sqlite_backend");  // must be first: isolates from ~/.ragger
     // Need config for model dir
@@ -6143,6 +6710,11 @@ int main() {
     p5_test_episodes_needing_close(emb);
     p5_test_episode_reads(emb);
     p6_test_pending_predicate(emb);
+    lr66_test_backfill_l2(emb);
+    lr66_test_backfill_triggers(emb);
+    lr67_test_backfill_stranded(emb);
+    lr67_test_backfill_session_names(emb);
+    lr68_test_time_invariants(emb);
 
     std::println("test_sqlite_backend: all passed");
     return 0;

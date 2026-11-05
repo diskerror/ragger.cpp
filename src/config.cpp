@@ -540,6 +540,7 @@ int reload_config() {
     RELOAD(summarizer_max_tokens);
     RELOAD(summarizer_target_pct);
     RELOAD(summarizer_max_pct);
+    RELOAD(summarizer_min_words);
     RELOAD(summarizer_prompt);
     // Endpoints: replace entirely if different
     if (cfg.inference_endpoints.size() != fresh.inference_endpoints.size()) {
