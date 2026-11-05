@@ -131,11 +131,6 @@ std::vector<std::string> Backend::current_decisions(int limit) {
     return pImpl->current_decisions(limit);
 }
 
-bool Backend::set_decision_status(int decision_id, const std::string& status) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->set_decision_status(decision_id, status);
-}
-
 std::vector<std::string> Backend::decisions_by_status(const std::string& status, int limit) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->decisions_by_status(status, limit);
@@ -352,16 +347,6 @@ std::vector<std::string> Backend::collections() const {
 void Backend::close() {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     pImpl->close();
-}
-
-bool Backend::delete_memory(int knowledge_id) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->delete_memory(knowledge_id);
-}
-
-int Backend::delete_batch(const std::vector<int>& memory_ids) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->delete_batch(memory_ids);
 }
 
 std::vector<SearchResult> Backend::search_by_metadata(const json& metadata_filter, int limit,

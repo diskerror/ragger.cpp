@@ -97,25 +97,6 @@ void test_count() {
     std::println(" OK");
 }
 
-void test_delete() {
-    std::println("  test_delete...");
-    cleanup_all();
-
-    ragger::RaggerMemory mem(TEMP_DB1);
-    std::string id1 = mem.store("To be deleted.");
-    mem.store("To be kept.");
-    assert(mem.count() == 2);
-
-    bool deleted = mem.delete_memory(std::stoi(id1));
-    assert(deleted);
-    assert(mem.count() == 1);
-
-    mem.close();
-    cleanup_all();
-    std::println(" OK");
-}
-
-
 void test_empty_db_path_throws() {
     std::println("  test_empty_db_path_throws...");
 
@@ -290,7 +271,6 @@ int main() {
     test_store_and_search();
     test_store_with_tags();
     test_count();
-    test_delete();
     test_empty_db_path_throws();
 
     std::println("test_memory: all passed");

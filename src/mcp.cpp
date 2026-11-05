@@ -219,7 +219,9 @@ static nlohmann::json tools_list(bool capture_turns, bool build_context) {
              "(hint only — nothing was changed; review them, and record a real "
              "ruling with memory_decision instead). Pass evidence (turn_summary "
              "ids from search) when you are recording a synthesized insight; it "
-             "is stored as an insight linked to those sources."},
+             "is stored as an insight linked to those sources. `trigger` is only "
+             "valid on an insight (with evidence); `session` records which "
+             "session the note came from."},
             {"inputSchema", {
                 {"type", "object"},
                 {"properties", {
@@ -228,7 +230,11 @@ static nlohmann::json tools_list(bool capture_turns, bool build_context) {
                     {"tags",    {{"type", "array"}, {"items", {{"type", "string"}}},
                                  {"description", "Optional tags."}}},
                     {"evidence",{{"type", "array"}, {"items", {{"type", "integer"}}},
-                                 {"description", "turn_summary ids this note synthesizes. When present the note is stored as an insight (response carries \"kind\":\"insight\") instead of a plain note."}}}
+                                 {"description", "turn_summary ids this note synthesizes. When present the note is stored as an insight (response carries \"kind\":\"insight\") instead of a plain note."}}},
+                    {"trigger", {{"type", "string"},
+                                 {"description", "When this insight applies, in the vocabulary of a future query. Only valid together with evidence; on a plain note it is a 400."}}},
+                    {"session", {{"type", "string"},
+                                 {"description", "Session GUID to record as provenance (stored on the row; unknown GUID stores without a link, not an error)."}}}
                 }},
                 {"required", nlohmann::json::array({"text"})}
             }}
@@ -474,14 +480,22 @@ static nlohmann::json tool_call(RaggerMemory& memory,
     } else if (tool_name == "memory_note") {
         // Notes land in knowledge (kind='note') via store(); evidence
         // present => stored as an insight instead (see HTTP /memory/note for
-        // the shared contract).
+        // the shared contract). LR S59: trigger only on insights; session is
+        // recorded on both paths.
         const auto text = arguments.value("text", "");
         if (text.empty())
             return error_result(ragger::lang::ERR_MCP_TEXT_REQUIRED);
+        try {
+            validate_note_request(arguments);
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
         json metadata = json::object();
         metadata["source"] = "mcp";
         if (arguments.contains("tags"))
             metadata["tags"] = arguments["tags"];
+        if (arguments.contains("session") && arguments["session"].is_string())
+            metadata["session"] = arguments["session"];
         try {
             if (arguments.contains("evidence") && arguments["evidence"].is_array()) {
                 KnowledgeInput in = parse_note_insight(arguments, text);

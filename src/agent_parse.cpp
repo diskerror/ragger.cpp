@@ -101,11 +101,21 @@ KnowledgeInput parse_decision_input(const json& a) {
 
 KnowledgeInput parse_note_insight(const json& a, const std::string& text) {
     KnowledgeInput in;
-    in.kind     = "insight";
-    in.text     = text;
-    in.evidence = a["evidence"].get<std::vector<int>>();
-    in.tags     = tags_to_comma_string(a);
+    in.kind         = "insight";
+    in.text         = text;
+    in.evidence     = a["evidence"].get<std::vector<int>>();
+    in.tags         = tags_to_comma_string(a);
+    in.trigger      = a.value("trigger", "");        // LR S59 (Q6)
+    in.session_guid = a.value("session", "");
     return in;
+}
+
+void validate_note_request(const json& a) {
+    // LR S59 (D-3): a trigger on a plain note is a client error; insights
+    // (evidence present) are the only rows that carry one.
+    if (a.contains("trigger") && !a.value("trigger", std::string{}).empty() &&
+        !(a.contains("evidence") && a["evidence"].is_array()))
+        throw std::invalid_argument("trigger is only valid on an insight (pass evidence)");
 }
 
 json supersedes_json(const std::vector<std::pair<int, float>>& ps) {

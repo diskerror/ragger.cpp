@@ -47,9 +47,15 @@ KnowledgeInput parse_decision_input(const nlohmann::json& a);
 
 /// /memory/note insight routing (Phase 5; PHASE7 kind="insight"): the
 /// evidence-array branch of the note body. `text` comes from the caller
-/// (the note body shares it with the plain-store branch).
+/// (the note body shares it with the plain-store branch). LR S59: also
+/// carries the optional `trigger` and `session` into the KnowledgeInput.
 KnowledgeInput parse_note_insight(const nlohmann::json& a,
                                   const std::string& text);
+
+/// LR S59 (Q6/D-3): `trigger` is only valid on an insight. Both surfaces
+/// call this before routing a memory_note; a trigger without evidence is
+/// std::invalid_argument (HTTP 400 / MCP error_result).
+void validate_note_request(const nlohmann::json& a);
 
 /// possible_supersedes hint list -> the shared response shape
 /// [{"id":N,"score":f}...].

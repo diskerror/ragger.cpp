@@ -157,8 +157,8 @@ static std::string tags_from_metadata(const json& metadata) {
         const std::string kind(store_kind_for(metadata));
 
         // tags: accept a JSON array or a plain string. `keep`/`bad` are
-        // flag-tags folded into the tags column — a row tagged "keep" is
-        // protected from deletion (see delete_memory).
+        // flag-tags folded into the tags column — the hard-delete paths that
+        // honoured "keep" were removed (LR S58); the tag itself is kept.
         std::string tags_str = tags_from_metadata(metadata);
         const std::string level = metadata.value("level", std::string());
         if (!level.empty() && level != "note") {
@@ -484,6 +484,23 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
+    // LR S57: the ONE definition of the same-exchange merge rule for a turn's
+    // assistant text (store_turn's probe and finalize_turn share it). Returns
+    // the text to store, or nullopt for "no change". Order matters:
+    //   prev empty                     -> next (fill a partial turn)
+    //   next identical to / in prev    -> no change (repeat capture)
+    //   next starts with prev          -> next  (cumulative resend, superset)
+    //   anything else                  -> prev + blank line + next (continuation;
+    //                                     a rewritten draft cannot be told apart)
+    std::optional<std::string> merge_assistant_text(const std::string& prev,
+                                                    const std::string& next) {
+        if (prev.empty()) return next;
+        if (next == prev || prev.find(next) != std::string::npos) return std::nullopt;
+        if (next.rfind(prev, 0) == 0) return next;
+        return prev + "\n\n" + next;
+    }
+
+
     // Store a raw L1 turn. An empty assistant_text writes a *partial* row
     // (assistant + embedding NULL) for the prompt-arrival/finalize flow;
     // otherwise the exchange is embedded unless defer_embedding. The text
@@ -546,23 +563,18 @@ static std::string tags_from_metadata(const json& metadata) {
                 (db_epoch() - p.column_int64(3)) <= 300) {
                 const int prev_id        = p.column_int(0);
                 const std::string prev_a = p.column_text(2);   // "" when NULL
-                std::string merged;
-                if (prev_a.empty() || (a.size() >= prev_a.size() && a.rfind(prev_a, 0) == 0)) {
-                    merged = a;                                 // fill / superset
-                } else if (prev_a.find(a) != std::string::npos) {
-                    return prev_id;                             // already held
-                } else {
-                    merged = prev_a + "\n\n" + a;               // continuation
-                }
-                if (merged == prev_a) return prev_id;
+                // LR S57: the rule itself is merge_assistant_text (shared with
+                // finalize_turn); nullopt = already held, nothing to write.
+                const std::optional<std::string> merged = merge_assistant_text(prev_a, a);
+                if (!merged) return prev_id;
                 std::vector<float> emb2;
                 if (!defer_embedding)
-                    emb2 = require_embedder().encode(turn_embed_text(u, merged));
+                    emb2 = require_embedder().encode(turn_embed_text(u, *merged));
                 Transaction tx(db);
                 Stmt up(db,
                     "UPDATE turns SET assistant_text = ?, embedding_version = ?, embedding = ?, "
                     "model_id = COALESCE(model_id, ?) WHERE turn_id = ?");
-                up.bind(1, merged);
+                up.bind(1, *merged);
                 if (defer_embedding) {
                     up.bind_null(2);
                     up.bind_null(3);
@@ -574,7 +586,7 @@ static std::string tags_from_metadata(const json& metadata) {
                 up.bind(5, prev_id);
                 if (!up.exec())
                     throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-                text_index_->index_record("turns", prev_id, u + "\n" + merged);
+                text_index_->index_record("turns", prev_id, u + "\n" + *merged);
                 tx.commit();
                 return prev_id;
             }
@@ -659,21 +671,27 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // Finalize a partial turn: set assistant_text, (re)embed the exchange,
-    // and record the model. Returns false if the turn doesn't exist.
+    // Finalize a partial turn: merge assistant_text with the shared same-
+    // exchange rule (LR S57 — never overwrite differing content), (re)embed
+    // the exchange, and record the model. Returns false if the turn doesn't
+    // exist. Re-embed/index happen only when the stored text changed.
     bool Backend::Impl::finalize_turn(int turn_id, const std::string& assistant_text,
                        const std::string& model_name) {
-        Stmt g(db, "SELECT user_text FROM turns WHERE turn_id = ?");
+        Stmt g(db, "SELECT user_text, assistant_text FROM turns WHERE turn_id = ?");
         g.bind(1, turn_id);
-        std::string u;
+        std::string u, prev_a;
         bool found = false;
         if (g.step()) {
             found = true;
             u = g.column_text(0);
+            prev_a = g.column_text(1);          // "" when NULL
         }
         if (!found) return false;
 
-        std::string a = normalize_path(assistant_text);
+        const std::optional<std::string> merged =
+            merge_assistant_text(prev_a, normalize_path(assistant_text));
+        if (!merged) return true;               // already held: no write, no re-embed
+        const std::string a = *merged;
         int model_id  = get_or_create_model(model_name);
         auto emb = require_embedder().encode(turn_embed_text(u, a));
 
@@ -1329,16 +1347,20 @@ static std::string tags_from_metadata(const json& metadata) {
         auto emb = require_embedder().encode(t);
 
         Transaction tx(db);
+        // LR S56 (time rule): created_at is the time of the LAST member turn
+        // (= span_end), not the close moment; the DEFAULT unixepoch() stays in
+        // the DDL for rows written outside this path.
         Stmt ins(db,
             "INSERT INTO episodes (text, tags, session_id, model_id, "
-            "span_start, span_end, embedding_version, embedding) "
-            "VALUES (?,?,?,?,?,?,?,?)");
+            "span_start, span_end, embedding_version, embedding, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)");
         ins.bind(1, t).bind(2, std::string(""));
         ins.bind(3, session_id);
         if (model_id) ins.bind(4, model_id); else ins.bind_null(4);
         ins.bind(5, close.span_start).bind(6, close.span_end);
         bind_embedding_version(ins.raw(), 7, emb);
         bind_embedding(ins.raw(), 8, emb);
+        ins.bind(9, close.span_end);
         if (!ins.exec()) {
             if (sqlite3_extended_errcode(db) == SQLITE_CONSTRAINT_UNIQUE) {
                 // Someone already closed this (session, span_start): not an
@@ -1677,31 +1699,9 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // Set a decision's status (ragger decision set-status), e.g. mark a
-    // stale one "retired". Same status discipline as agent_update's status
-    // path (S10): the word must be one of kAgentSettable ('roadmap' and
-    // 'deprecated' are legacy words, no longer offered; 'superseded' is
-    // never reachable here), and the transition must exist in the table.
-    // Returns false only when no such decision row exists.
-    bool Backend::Impl::set_decision_status(int decision_id, const std::string& status) {
-        if (!status::is_in(status::kAgentSettable, status))
-            throw std::invalid_argument(std::format(
-                "unknown decision status: '{}' (choose from: {})",
-                status, std::string(status::in_list_sql(status::kAgentSettable))));
-        Stmt f(db, "SELECT status FROM knowledge WHERE kind = 'decision' AND knowledge_id = ?");
-        f.bind(1, decision_id);
-        if (!f.step())
-            return false;
-        const std::string from = f.column_text(0);
-        if (!status::transition_ok(from, status))
-            throw std::invalid_argument(std::format(
-                "illegal decision status transition: {} -> {}", from, status));
-        Stmt s(db, "UPDATE knowledge SET status = ? WHERE kind = 'decision' AND knowledge_id = ?");
-        s.bind(1, status).bind(2, decision_id);
-        bool ok = s.exec() && sqlite3_changes(db) > 0;
-        if (ok) invalidate_knowledge_cache();
-        return ok;
-    }
+    // LR S60: the old CLI-only status setter is gone — `decision
+    // set-status` now goes through agent_update on knowledge:<id>, like
+    // every other status change. One write path, one status discipline.
 
 
     // Decisions with an arbitrary status, most recent first — e.g.

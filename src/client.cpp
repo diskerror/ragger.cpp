@@ -115,29 +115,6 @@ int RaggerClient::count() {
     return j.value("count", 0);
 }
 
-bool RaggerClient::delete_memory(int knowledge_id) {
-    auto resp = http_delete("/memory/" + std::to_string(knowledge_id));
-    if (resp.status < 200 || resp.status >= 300) {
-        return false;
-    }
-    
-    auto j = json::parse(resp.body);
-    return j.value("status", "") == "deleted";
-}
-
-int RaggerClient::delete_batch(const std::vector<int>& memory_ids) {
-    json payload;
-    payload["ids"] = memory_ids;
-    
-    auto resp = http_post("/delete_batch", payload.dump());
-    if (resp.status < 200 || resp.status >= 300) {
-        throw std::runtime_error(std::format(lang::ERR_CLIENT_DELETE_BATCH, resp.status));
-    }
-    
-    auto j = json::parse(resp.body);
-    return j.value("deleted", 0);
-}
-
 std::vector<SearchResult> RaggerClient::search_by_metadata(const json& metadata_filter, int limit) {
     json payload;
     payload["metadata"] = metadata_filter;
@@ -163,10 +140,6 @@ RaggerClient::HttpResponse RaggerClient::http_get(const std::string& path) const
 RaggerClient::HttpResponse RaggerClient::http_post(const std::string& path,
                                                      const std::string& body) const {
     return http_request("POST", path, body);
-}
-
-RaggerClient::HttpResponse RaggerClient::http_delete(const std::string& path) const {
-    return http_request("DELETE", path);
 }
 
 RaggerClient::HttpResponse RaggerClient::http_request(const std::string& method,

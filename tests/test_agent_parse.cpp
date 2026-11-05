@@ -183,6 +183,32 @@ void test_decision_input_parsing() {
     CHECK(ni.text == "note text");
     CHECK(ni.evidence.size() == 1);
     CHECK(ni.tags == "n1,n2");
+
+    // LR S59: the insight branch also carries trigger + session.
+    auto ni2 = ragger::parse_note_insight(
+        json{{"evidence", {1}}, {"trigger", "when probing"}, {"session", "guid-3"}},
+        "note text");
+    CHECK(ni2.trigger == "when probing");
+    CHECK(ni2.session_guid == "guid-3");
+
+    // LR S59 (D-3): trigger without evidence is a client error; with
+    // evidence or absent it passes.
+    bool threw = false;
+    try { ragger::validate_note_request(json{{"text", "t"}, {"trigger", "x"}}); }
+    catch (const std::invalid_argument& e) {
+        threw = true;
+        CHECK(std::string(e.what()).find("only valid on an insight") != std::string::npos);
+    }
+    CHECK(threw);
+    threw = false;
+    try { ragger::validate_note_request(json{{"text", "t"}, {"trigger", "x"},
+                                             {"evidence", {1}}}); }
+    catch (const std::invalid_argument&) { threw = true; }
+    CHECK(!threw);
+    threw = false;
+    try { ragger::validate_note_request(json{{"text", "t"}}); }
+    catch (const std::invalid_argument&) { threw = true; }
+    CHECK(!threw);
     std::println(" OK");
 }
 

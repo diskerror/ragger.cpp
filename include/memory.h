@@ -115,10 +115,6 @@ public:
                    const std::string& session_guid = "");
     std::vector<std::string> current_decisions(int limit);
 
-    /// Set a decision's status (e.g. mark a stale one "retired").
-    /// Returns false if no row matched.
-    bool set_decision_status(int decision_id, const std::string& status);
-
     /// Decisions with the given status, most recent first. Any stored status
     /// can be filtered, including legacy words (roadmap, deprecated).
     std::vector<std::string> decisions_by_status(const std::string& status, int limit);
@@ -230,12 +226,6 @@ public:
 
     /// Get distinct collection names.
     std::vector<std::string> collections() const;
-
-    /// Delete a memory by ID.
-    bool delete_memory(int knowledge_id);
-
-    /// Delete multiple memories by ID.
-    int delete_batch(const std::vector<int>& memory_ids);
 
     /// Search by metadata field matching.
     std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit = 0,

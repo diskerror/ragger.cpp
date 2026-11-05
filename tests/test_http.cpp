@@ -13,6 +13,7 @@
 #include "nlohmann_json.hpp"
 
 #include <print>
+#include <sqlite3.h>
 #include <string>
 
 using nlohmann::json;
@@ -40,6 +41,39 @@ json post_json(HttpFixture& fx, const std::string& path, const json& body,
 }
 
 } // namespace
+
+// Minimal read/write access to the fixture DB for row-level assertions
+// (LR S59). Same process, same WAL — committed daemon writes are visible.
+struct RawDb {
+    sqlite3* h = nullptr;
+    explicit RawDb(const std::string& path) {
+        CHECK(sqlite3_open(path.c_str(), &h) == SQLITE_OK);
+    }
+    ~RawDb() { if (h) sqlite3_close(h); }
+    RawDb(const RawDb&) = delete;
+    RawDb& operator=(const RawDb&) = delete;
+    void exec(const std::string& sql) {
+        char* err = nullptr;
+        const int rc = sqlite3_exec(h, sql.c_str(), nullptr, nullptr, &err);
+        if (rc != SQLITE_OK) {
+            std::println(stderr, "RawDb exec failed: {} ({})", sql, err ? err : "?");
+            CHECK(false);
+        }
+    }
+    long long scalar(const std::string& sql) {
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(h, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        long long v = -999;
+        if (sqlite3_step(st) == SQLITE_ROW) v = sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+        return v;
+    }
+};
+
+// id fields differ per path (plain note: string; insight: int) — normalize.
+std::string id_of(const json& j) {
+    return j["id"].is_string() ? j["id"].get<std::string>() : j["id"].dump();
+}
 
 // GET /health is the unauthenticated readiness probe.
 void t_health_no_token(HttpFixture& fx) {
@@ -177,6 +211,89 @@ void t_unknown_route(HttpFixture& fx) {
     std::println(" OK");
 }
 
+// LR S58: the legacy hard-delete surface is gone — DELETE /memory/<id> and
+// POST /delete_batch are unknown routes now (404 like any other), not 200/400.
+void t_delete_routes_gone(HttpFixture& fx) {
+    std::println("  t_delete_routes_gone...");
+    auto d = fx.client.request("DELETE", fx.url("/memory/1"), "", fx.auth());
+    CHECK(d.ok());
+    CHECK(d.status == 404);
+    auto b = fx.client.post(fx.url("/delete_batch"), R"({"ids":[1]})", fx.auth());
+    CHECK(b.ok());
+    CHECK(b.status == 404);
+    std::println(" OK");
+}
+
+// LR S59: memory_note accepts trigger (insights only) and session.
+void t_memory_note_trigger_session(HttpFixture& fx) {
+    std::println("  t_memory_note_trigger_session...");
+    const std::string db_path = fx.env.base() + "/http_test.db";
+
+    // Seed a session + turn through the shared backend, then its L2 row raw
+    // (the fixture runs no summarizer).
+    const int turn = fx.mem->store_turn("lr59 q", "lr59 a", "", false, "lr59-sess");
+    CHECK(turn > 0);
+    long long tsid = -1;
+    {
+        RawDb db(db_path);
+        db.exec("INSERT INTO turn_summaries (text, turn_id, session_id, turn_datetime) "
+                "SELECT 'lr59 evidence summary', " + std::to_string(turn) +
+                ", session_id, created_at FROM turns WHERE turn_id = " + std::to_string(turn));
+        tsid = db.scalar("SELECT turn_summary_id FROM turn_summaries WHERE turn_id = "
+                         + std::to_string(turn));
+    }
+    CHECK(tsid > 0);
+
+    // Insight with trigger -> stored with trigger; memory_search echoes it.
+    auto ins = post_json(fx, "/memory/note",
+                         {{"text", "lr59 synthesized insight"},
+                          {"evidence", json::array({tsid})},
+                          {"trigger", "when probing note triggers"}});
+    CHECK(ins["_status"] == 200);
+    CHECK(ins["kind"] == "insight");
+    {
+        RawDb db(db_path);
+        CHECK(db.scalar("SELECT COUNT(*) FROM knowledge WHERE knowledge_id = " + id_of(ins) +
+                        " AND trigger = 'when probing note triggers'") == 1);
+    }
+    auto found = post_json(fx, "/memory/search", {{"query", "lr59 synthesized insight"}});
+    CHECK(found["_status"] == 200);
+    bool saw_trigger = false;
+    for (const auto& hit : found.value("results", json::array()))
+        if (hit.contains("extra") &&
+            hit["extra"].value("trigger", "") == "when probing note triggers")
+            saw_trigger = true;
+    CHECK(saw_trigger);
+
+    // Plain note with session -> knowledge.session_id set.
+    auto note = post_json(fx, "/memory/note",
+                          {{"text", "lr59 note with session"}, {"session", "lr59-sess"}});
+    CHECK(note["_status"] == 200);
+    {
+        RawDb db(db_path);
+        CHECK(db.scalar("SELECT session_id IS NOT NULL FROM knowledge WHERE knowledge_id = "
+                        + id_of(note)) == 1);
+    }
+
+    // Trigger on a plain note -> 400 naming the rule.
+    auto bad = post_json(fx, "/memory/note",
+                         {{"text", "lr59 note with trigger"}, {"trigger", "nope"}});
+    CHECK(bad["_status"] == 400);
+    CHECK(bad["_raw"].get<std::string>().find("only valid on an insight") != std::string::npos);
+
+    // Unknown session GUID -> stored with NULL session, no error.
+    auto unk = post_json(fx, "/memory/note",
+                         {{"text", "lr59 note unknown session"},
+                          {"session", "lr59-no-such-guid"}});
+    CHECK(unk["_status"] == 200);
+    {
+        RawDb db(db_path);
+        CHECK(db.scalar("SELECT session_id IS NULL FROM knowledge WHERE knowledge_id = "
+                        + id_of(unk)) == 1);
+    }
+    std::println(" OK");
+}
+
 int main() {
     HttpFixture fx("http");
     CHECK(fx.ready);
@@ -190,6 +307,8 @@ int main() {
     t_memory_search_bad_limit(fx);
     t_decision_validation_parity(fx);
     t_unknown_route(fx);
+    t_delete_routes_gone(fx);
+    t_memory_note_trigger_session(fx);
 
     std::println("test_http: all passed");
     return 0;

@@ -284,10 +284,6 @@ std::vector<std::string> RaggerMemory::current_decisions(int limit) {
     return backend_->current_decisions(limit);
 }
 
-bool RaggerMemory::set_decision_status(int decision_id, const std::string& status) {
-    return backend_->set_decision_status(decision_id, status);
-}
-
 std::vector<std::string> RaggerMemory::decisions_by_status(const std::string& status, int limit) {
     return backend_->decisions_by_status(status, limit);
 }
@@ -715,14 +711,6 @@ int RaggerMemory::backfill_embeddings() {
 
 std::vector<std::string> RaggerMemory::collections() const {
     return backend_->collections();
-}
-
-bool RaggerMemory::delete_memory(int knowledge_id) {
-    return backend_->delete_memory(knowledge_id);
-}
-
-int RaggerMemory::delete_batch(const std::vector<int>& memory_ids) {
-    return backend_->delete_batch(memory_ids);
 }
 
 std::vector<SearchResult> RaggerMemory::search_by_metadata(const json& metadata_filter, int limit,

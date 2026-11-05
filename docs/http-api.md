@@ -83,7 +83,7 @@ unknown statuses, illegal transitions) are always `400`, never `500`.
 
 ## Endpoints
 
-36 routes are registered; each `###` heading below is one route.
+34 routes are registered; each `###` heading below is one route.
 
 ### GET /health
 
@@ -393,26 +393,6 @@ cross-session items).
 curl http://localhost:8432/session/sess-abc-123
 curl http://localhost:8432/session/sess-abc-123?recipe=reconnect
 ```
-
----
-
-### DELETE /memory/&lt;id&gt;
-
-Delete one knowledge row by numeric id (the path segment must be digits;
-anything else matches no route).
-
-**Response:** `{"id": 123, "status": "deleted"}`; `404` (text/plain
-`Memory not found`) when no row matched.
-
----
-
-### POST /delete_batch
-
-Delete many knowledge rows at once.
-
-**Request:** `{"ids": [1, 2, 3]}` — array of integers.
-**Response:** `{"deleted": <count>}`
-**Status codes:** `400` missing/invalid `ids` (text/plain).
 
 ---
 
@@ -767,9 +747,6 @@ Documented as-is; no fixes promised here:
   return `text/plain` (`Unauthorized`, `Missing 'text' field`,
   `ERROR: ...`, `JSON error: ...`), while config/models/`/turn` handlers
   return `application/json` `{"error": ...}`. Clients must handle both.
-- **`DELETE /memory/<id>` and `/delete_batch` are on the legacy numeric
-  surface** (bare rowids of knowledge rows), while every other agent
-  write/read path uses typed handles (`knowledge:N`).
 - **`collections` is inert** on `/search` and MCP `search` (accepted,
   ignored — the lean schema has no collection column).
 - **`/health` is unauthenticated** and exposes `commit`/`built` to any

@@ -37,8 +37,9 @@ With the layered tools:
   neighbouring turns (`context`), a row's evidence (`sources`), or a decision's
   full supersede lineage (`chain`).
 - `memory_timeline` answers "what did we do recently / last session": a
-  newest-first list, not a ranked search. Use `session='current'` to look at
-  this conversation only.
+  newest-first list, not a ranked search. Pass an explicit session GUID to
+  scope it to one conversation; `current` resolves only through the Hermes
+  plugin.
 - Search hides superseded and retired knowledge by default. Pass `status='any'`
   only when you need the history.
 
@@ -56,7 +57,9 @@ Pick the tool by the shape of the thing:
 - **A fact, preference or lesson** -> `memory_note` (or `store`). Tag project
   facts `project:<name>`. If you are synthesizing something from earlier
   results, pass their turn_summary ids as `evidence` and it is stored as an
-  insight linked to its sources.
+  insight linked to its sources. `trigger` is only valid on such an insight
+  (a plain note with a trigger is rejected); `session` (a GUID) is recorded
+  on the stored row as provenance.
 - **An insight**: a conclusion you drew by combining several earlier
   memories (a pattern across sessions, a recurring cause, how two facts fit
   together). Find the sources with `memory_search` or `memory_timeline`, then

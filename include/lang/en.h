@@ -468,10 +468,8 @@ constexpr const char* DBG_QUERY_LOG             = "query=\"{}\" results={} time=
 constexpr const char* HTTP_UNAUTHORIZED         = "Unauthorized";
 constexpr const char* HTTP_MISSING_TEXT         = "Missing 'text' field";
 constexpr const char* HTTP_MISSING_QUERY        = "Missing 'query' field";
-constexpr const char* HTTP_MISSING_IDS          = "Missing or invalid 'ids' field";
 constexpr const char* HTTP_MISSING_METADATA     = "Missing or invalid 'metadata' field";
 constexpr const char* HTTP_JSON_ERROR           = "JSON error: {}";
-constexpr const char* HTTP_MEMORY_NOT_FOUND     = "Memory not found";
 constexpr const char* HTTP_SYSTEM_USER_NOT_FOUND = "system user not found";
 constexpr const char* HTTP_NO_TOKEN_FILE        = "no token file";
 
@@ -501,7 +499,6 @@ constexpr const char* ERR_MCP_METHOD_NOT_FOUND  = "Method not found: {}";
 constexpr const char* ERR_CLIENT_STORE        = "Store failed: HTTP {}";
 constexpr const char* ERR_CLIENT_SEARCH       = "Search failed: HTTP {}";
 constexpr const char* ERR_CLIENT_COUNT        = "Count failed: HTTP {}";
-constexpr const char* ERR_CLIENT_DELETE_BATCH = "Delete batch failed: HTTP {}";
 constexpr const char* ERR_CLIENT_SEARCH_META  = "Search by metadata failed: HTTP {}";
 constexpr const char* ERR_CLIENT_REGISTER     = "Register failed: HTTP {}";  // S12: register_user removed; constant kept for message-history continuity
 constexpr const char* ERR_CLIENT_SOCKET       = "Failed to create socket: {}";

@@ -678,10 +678,6 @@ struct Backend::Impl {
     // table.)
     std::vector<std::string> current_decisions(int limit);
 
-    // Set a decision's status (e.g. "roadmap" -> "current" once planned
-    // work is done, or -> "superseded"/"deprecated" once stale).
-    bool set_decision_status(int decision_id, const std::string& status);
-
     // Decisions with an arbitrary status, most recent first — e.g.
     // status="roadmap" to list planned/future work explicitly (roadmap
     // entries are deliberately excluded from current_decisions()'s
@@ -804,10 +800,6 @@ struct Backend::Impl {
 
     // Returns true if the knowledge row exists and has a "keep" tag.
     bool has_keep_tag(int knowledge_id) const;
-
-    bool delete_memory(int knowledge_id);
-
-    int delete_batch(const std::vector<int>& memory_ids);
 
     std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit,
                                                  const std::string& after = "",

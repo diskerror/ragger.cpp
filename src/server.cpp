@@ -567,11 +567,24 @@ struct Server::Impl {
             res.set_content(lang::HTTP_MISSING_TEXT, "text/plain");
             return;
         }
+        // LR S59 (D-3): a trigger without evidence is a client error.
+        try {
+            validate_note_request(body);
+        } catch (const std::invalid_argument& e) {
+            Diskerror::Logger::debug("POST /memory/note 400 (trigger)");
+            res.status = 400;
+            res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
+            return;
+        }
 
         json metadata = json::object();
         metadata["source"] = user.username;
         if (body.contains("tags"))
             metadata["tags"] = body["tags"];
+        // LR S59: plain notes carry session provenance (GUID lookup only,
+        // unknown GUID stores with NULL session — Impl::store's rule).
+        if (body.contains("session") && body["session"].is_string())
+            metadata["session"] = body["session"];
 
         auto& mem = memory;
 
@@ -792,35 +805,6 @@ struct Server::Impl {
                              {"chunks",     chunks}});
     }
 
-    void handle_delete_memory(const UserInfo& /*user*/, const httplib::Request& req,
-                               httplib::Response& res) {
-        int id = 0;
-        if (!util::parse_positive_int(std::string(req.matches[1]), id))
-            throw std::invalid_argument("memory id must be a positive integer");
-        auto& mem = memory;
-        if (mem.delete_memory(id)) {
-            Diskerror::Logger::debug("DELETE /memory 200");
-            respond_json(res, json{{"id", id}, {"status", "deleted"}});
-        } else {
-            Diskerror::Logger::debug("DELETE /memory 404");
-            res.status = 404; res.set_content(lang::HTTP_MEMORY_NOT_FOUND, "text/plain");
-        }
-    }
-
-    void handle_delete_batch(const UserInfo& /*user*/, const httplib::Request& req,
-                              httplib::Response& res) {
-        auto body = json::parse(req.body);
-        if (!body.contains("ids") || !body["ids"].is_array()) {
-            Diskerror::Logger::debug("POST /delete_batch 400");
-            res.status = 400; res.set_content(lang::HTTP_MISSING_IDS, "text/plain"); return;
-        }
-        auto ids = body["ids"].get<std::vector<int>>();
-        auto& mem = memory;
-        int deleted = mem.delete_batch(ids);
-        Diskerror::Logger::debug("POST /delete_batch 200");
-        respond_json(res, json{{"deleted", deleted}});
-    }
-
     void handle_search_by_metadata(const UserInfo& /*user*/, const httplib::Request& req,
                                     httplib::Response& res) {
         auto body = json::parse(req.body);
@@ -910,8 +894,6 @@ struct Server::Impl {
         svr.Post("/memory/review",      guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_review(u, req, res); }));
         svr.Post("/turn",               guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_turn(u, req, res); }));
         svr.Get(R"(/session/([^/]+))",  guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_session(u, req, res); }));
-        svr.Delete(R"(/memory/(\d+))",  guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_delete_memory(u, req, res); }));
-        svr.Post("/delete_batch",       guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_delete_batch(u, req, res); }));
         svr.Post("/search_by_metadata", guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_search_by_metadata(u, req, res); }));
 
         svr.Get("/user/token", guarded([this](const UserInfo& user, const httplib::Request&,

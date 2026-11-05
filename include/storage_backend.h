@@ -259,10 +259,6 @@ public:
     /// Current (active) decisions, newest first.
     virtual std::vector<std::string> current_decisions(int limit) = 0;
 
-    /// Set a decision's status (e.g. mark a stale one "retired").
-    /// Returns false if no row matched.
-    virtual bool set_decision_status(int decision_id, const std::string& status) = 0;
-
     /// Decisions with the given status, most recent first. Any stored status
     /// can be filtered, including legacy words (roadmap, deprecated).
     virtual std::vector<std::string> decisions_by_status(const std::string& status,
@@ -445,15 +441,9 @@ public:
 
     // --- Memory operations ---
 
-    /// Delete a memory by ID. Returns true if deleted.
-    virtual bool delete_memory(int knowledge_id) = 0;
-
     /// PHASE9B step 5: atomic full text-index rebuild. Returns {table, rows}.
     virtual std::vector<std::pair<std::string, int>> reindex_all(
         const ProgressFn& progress = {}) = 0;
-
-    /// Delete multiple memories by ID. Returns count deleted.
-    virtual int delete_batch(const std::vector<int>& memory_ids) = 0;
 
     /// Search by metadata field matching with optional temporal filtering.
     virtual std::vector<SearchResult> search_by_metadata(const json& metadata_filter,

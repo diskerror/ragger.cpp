@@ -474,10 +474,29 @@ int main(int argc, char **argv) {
                     Diskerror::Logger::error("decision set-status: <decision_id> must be a number");
                     return 1;
                 }
-                std::string status = args[2];
-                if (!memory.set_decision_status(decision_id, status)) {
+                const std::string status = args[2];
+                // LR S60: one write path — agent_update on knowledge:<id>.
+                // The verb is decision-scoped while agent_update accepts any
+                // knowledge row, so confirm the kind first (same "no
+                // decision" message as before).
+                const std::string handle = "knowledge:" + std::to_string(decision_id);
+                ragger::AgentGetQuery probe;
+                probe.ids = {handle};
+                const auto found = memory.agent_get(probe);
+                const auto items = found.value("items", nlohmann::json::array());
+                if (items.empty() || items[0].contains("error") ||
+                    items[0].value("kind", "") != "decision") {
                     Diskerror::Logger::error(
                         "decision set-status: no decision with id " + args[1]);
+                    return 1;
+                }
+                ragger::UpdateRequest req;
+                req.id = handle;
+                req.status = status;
+                try {
+                    memory.agent_update(req);
+                } catch (const std::invalid_argument& e) {
+                    Diskerror::Logger::error(e.what());
                     return 1;
                 }
                 std::println("Decision {} set to status \"{}\".", decision_id, status);

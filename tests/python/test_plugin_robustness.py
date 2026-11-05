@@ -45,14 +45,17 @@ _spec.loader.exec_module(plugin)
 
 # --- stub daemon -------------------------------------------------------
 
-_state = {"status": 400, "body": "ERROR: bad"}
+_state = {"status": 400, "body": "ERROR: bad", "last_path": "", "last_body": ""}
 
 
 class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length", 0) or 0)
+        body = ""
         if length:
-            self.rfile.read(length)
+            body = self.rfile.read(length).decode()
+            _state["last_path"] = self.path
+            _state["last_body"] = body
         self.send_response(_state["status"])
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
@@ -149,6 +152,26 @@ for t in threads:
     t.join()
 check(p4._failures >= 5, "failures must be counted, got %d" % p4._failures)
 check(p4._breaker_open(), "the breaker must be open after concurrent failures")
+
+# --- 5. memory_note sends session provenance + trigger (LR S59) ---------
+
+_state["status"] = 200
+_state["body"] = '{"id": "1", "status": "stored"}'
+p5 = make_provider()
+p5._session_id = "sess-59"
+p5.handle_tool_call("memory_note", {"text": "n1", "trigger": "when probing"})
+sent = json.loads(_state["last_body"])
+check(_state["last_path"] == "/memory/note", "routed to /memory/note, got %r" % _state["last_path"])
+check(sent.get("session") == "sess-59",
+      "memory_note must send session provenance like memory_decision: %r" % sent)
+check(sent.get("trigger") == "when probing", "trigger must be forwarded: %r" % sent)
+p5.handle_tool_call("memory_note", {"text": "n2", "session": "current", "evidence": [3]})
+sent = json.loads(_state["last_body"])
+check(sent.get("session") == "sess-59", "'current' resolves to the Hermes session: %r" % sent)
+check(sent.get("evidence") == [3], "evidence forwarded: %r" % sent)
+p5.handle_tool_call("memory_note", {"text": "n3", "session": "explicit-guid"})
+sent = json.loads(_state["last_body"])
+check(sent.get("session") == "explicit-guid", "an explicit GUID passes through: %r" % sent)
 
 _server.shutdown()
 print("OK")

@@ -29,6 +29,14 @@
 #include <set>
 #include <vector>
 #include <algorithm>
+#include <optional>
+
+// LR S57: the shared same-exchange merge rule lives in src/sqlite/write.cpp
+// (deliberately not in a header); declared here so the test pins its values.
+namespace ragger::sqlite {
+std::optional<std::string> merge_assistant_text(const std::string& prev,
+                                                const std::string& next);
+}
 
 namespace fs = std::filesystem;
 
@@ -339,67 +347,6 @@ void test_search_timing(ragger::Embedder& emb) {
     cleanup();
 }
 
-void test_delete_memory(ragger::Embedder& emb) {
-    cleanup();
-    ragger::sqlite::Backend db(emb, TEMP_DB);
-
-    // Store a memory
-    std::string id1 = db.store("Memory to delete.");
-    std::string id2 = db.store("Memory to keep.");
-    CHECK(db.count() == 2);
-
-    // Delete the first memory
-    bool deleted = db.delete_memory(std::stoi(id1));
-    CHECK(deleted);
-    CHECK(db.count() == 1);
-
-    // Verify the correct one was deleted
-    auto all = db.load_all();
-    CHECK(all.size() == 1);
-    CHECK(all[0].text == "Memory to keep.");
-
-    // Try deleting non-existent ID
-    deleted = db.delete_memory(99999);
-    CHECK(!deleted);
-    CHECK(db.count() == 1);
-
-    db.close();
-    cleanup();
-}
-
-void test_delete_batch(ragger::Embedder& emb) {
-    cleanup();
-    ragger::sqlite::Backend db(emb, TEMP_DB);
-
-    // Store 3 memories
-    std::string id1 = db.store("First memory.");
-    std::string id2 = db.store("Second memory.");
-    std::string id3 = db.store("Third memory.");
-    CHECK(db.count() == 3);
-
-    // Delete 2 by ID
-    std::vector<int> to_delete = {std::stoi(id1), std::stoi(id3)};
-    int deleted_count = db.delete_batch(to_delete);
-    CHECK(deleted_count == 2);
-    CHECK(db.count() == 1);
-
-    // Verify the correct one remains
-    auto all = db.load_all();
-    CHECK(all.size() == 1);
-    CHECK(all[0].text == "Second memory.");
-
-    // Empty vector → returns 0
-    deleted_count = db.delete_batch({});
-    CHECK(deleted_count == 0);
-
-    // Delete with non-existent IDs
-    deleted_count = db.delete_batch({99999, 88888});
-    CHECK(deleted_count == 0);
-
-    db.close();
-    cleanup();
-}
-
 void test_search_by_metadata(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
@@ -474,71 +421,6 @@ void test_user_management(ragger::Embedder& emb) {
     user_opt = umgr.get_user_by_username("nonexistent");
     CHECK(!user_opt.has_value());
 
-    cleanup();
-}
-
-void test_delete_respects_keep(ragger::Embedder& emb) {
-    cleanup();
-    ragger::sqlite::Backend db(emb, TEMP_DB);
-
-    int initial_count = db.count();
-    
-    // Store a memory with {"keep": true} in metadata
-    ragger::json meta = {{"keep", true}, {"collection", "memory"}};
-    auto id = db.store("protected memory", meta);
-    
-    // Try to delete — should return false
-    CHECK(!db.delete_memory(std::stoi(id)));
-    
-    // Memory should still exist
-    CHECK(db.count() == initial_count + 1);
-    
-    // Store without keep
-    auto id2 = db.store("deletable memory", {{"collection", "memory"}});
-    
-    // Delete should work
-    CHECK(db.delete_memory(std::stoi(id2)));
-    
-    // Only the protected one should remain
-    CHECK(db.count() == initial_count + 1);
-    
-    db.close();
-    cleanup();
-}
-
-void test_delete_batch_respects_keep(ragger::Embedder& emb) {
-    cleanup();
-    ragger::sqlite::Backend db(emb, TEMP_DB);
-
-    // Store mix of keep and non-keep
-    ragger::json keep_meta = {{"keep", true}, {"collection", "memory"}};
-    ragger::json normal_meta = {{"collection", "memory"}};
-    
-    auto id1 = db.store("keep me", keep_meta);
-    auto id2 = db.store("delete me", normal_meta);
-    auto id3 = db.store("delete me too", normal_meta);
-    
-    int initial_count = db.count();
-    
-    // Batch delete all three
-    int deleted = db.delete_batch({std::stoi(id1), std::stoi(id2), std::stoi(id3)});
-    
-    // Only 2 should be deleted (not the keep one)
-    CHECK(deleted == 2);
-    CHECK(db.count() == initial_count - 2);
-    
-    // Verify the protected one remains
-    auto all = db.load_all();
-    bool found_protected = false;
-    for (const auto& mem : all) {
-        if (mem.text == "keep me") {
-            found_protected = true;
-            break;
-        }
-    }
-    CHECK(found_protected);
-    
-    db.close();
     cleanup();
 }
 
@@ -2804,47 +2686,6 @@ void test_p7_legacy_handles_rejected(ragger::Embedder& emb) {
     cleanup();
 }
 
-// PHASE8 D.5: delete_batch deletes plain notes; refuses a keep-tagged note,
-// a note another row supersedes, and a decision id; returns the true count.
-void test_p8_delete_batch(ragger::Embedder& emb) {
-    cleanup();
-    ragger::sqlite::Backend db(emb, TEMP_DB);
-
-    const int plain1 = std::stoi(db.store("Batch delete me one."));
-    const int plain2 = std::stoi(db.store("Batch delete me two."));
-    const int kept   = std::stoi(db.store("Keep me.", {{"tags", "keep"}}));
-
-    ragger::KnowledgeInput target;
-    target.kind = "note";
-    target.text = "Superseded note (delete_batch refuses).";
-    const int target_id = db.store_knowledge(target).id;
-    ragger::KnowledgeInput sup;
-    sup.kind = "note";
-    sup.text = "Superseding note.";
-    sup.supersedes = target_id;
-    db.store_knowledge(sup);
-
-    ragger::KnowledgeInput dec;
-    dec.kind = "decision";
-    dec.text = "Batch ruling (delete_batch refuses).";
-    dec.trigger = "Use when testing delete_batch guards";
-    const int dec_id = db.store_knowledge(dec).id;
-
-    const int deleted = db.delete_batch({plain1, plain2, kept, target_id, dec_id});
-    CHECK(deleted == 2);
-
-    sqlite3* raw = p1_open_raw();
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge WHERE knowledge_id IN ("
-                              + std::to_string(plain1) + "," + std::to_string(plain2) + ")") == 0);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge WHERE knowledge_id IN ("
-                              + std::to_string(kept) + "," + std::to_string(target_id) + ","
-                              + std::to_string(dec_id) + ")") == 3);
-    sqlite3_close(raw);
-
-    db.close();
-    cleanup();
-}
-
 // PHASE8 D.6: notes are found via layers ["knowledge"] + kinds ["note"];
 // layers ["summary"] is rejected with a message pointing at knowledge;
 // agent_get on a `summary:<id>` handle is rejected.
@@ -4999,16 +4840,24 @@ void p10_test_agent_settable_targets() {
     std::println(" ok");
 }
 
-// S10: set_decision_status gains the agent_update status discipline:
-// unknown word -> invalid_argument naming the word; illegal transition ->
-// invalid_argument; false only for "no such id"; superseded unreachable.
-void p10_test_set_decision_status(ragger::Embedder& emb) {
-    std::println("  p10_test_set_decision_status...");
+// LR S60: the CLI's decision status path is agent_update on knowledge:<id>
+// (the parallel CLI-only setter chain is gone). Same discipline:
+// unknown word -> invalid_argument; superseded -> invalid_argument;
+// same-status -> invalid_argument (not a listed edge); unknown id ->
+// invalid_argument (not false).
+void lr60_test_decision_status_via_agent_update(ragger::Embedder& emb) {
+    std::println("  lr60_test_decision_status_via_agent_update...");
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
-    int id = db.store_decision("p10 vocabulary decision", "current", "", "", true);
+    int id = db.store_decision("lr60 vocabulary decision", "current", "", "", true);
+    auto update = [&](const char* to) {
+        ragger::UpdateRequest req;
+        req.id = "knowledge:" + std::to_string(id);
+        req.status = to;
+        db.agent_update(req);
+    };
     auto throws_iav = [&](const char* to) {
-        try { db.set_decision_status(id, to); }
+        try { update(to); }
         catch (const std::invalid_argument&) { return true; }
         return false;
     };
@@ -5016,7 +4865,7 @@ void p10_test_set_decision_status(ragger::Embedder& emb) {
     CHECK(throws_iav("nonsense"));     // unknown word
     CHECK(throws_iav("superseded"));   // never reachable here
     CHECK(throws_iav("current"));      // same-status is not a listed edge
-    CHECK(db.set_decision_status(id, "provisional"));
+    update("provisional");
     {
         sqlite3* raw = p1_open_raw();
         sqlite3_stmt* s = nullptr;
@@ -5028,9 +4877,20 @@ void p10_test_set_decision_status(ragger::Embedder& emb) {
         sqlite3_close(raw);
         CHECK(got == "provisional");
     }
-    CHECK(db.set_decision_status(id, "retired"));   // legal edge
-    CHECK(throws_iav("current"));                   // retired is terminal
-    CHECK(!db.set_decision_status(999999, "current")); // no such id -> false
+    update("retired");                            // legal edge
+    CHECK(throws_iav("current"));                 // retired is terminal
+    {
+        ragger::UpdateRequest req;
+        req.id = "knowledge:999999";              // no such id -> throws
+        req.status = "current";
+        bool threw = false;
+        try { db.agent_update(req); }
+        catch (const std::invalid_argument& e) {
+            threw = true;
+            CHECK(std::string(e.what()).find("not found") != std::string::npos);
+        }
+        CHECK(threw);
+    }
     db.close(); cleanup();
     std::println(" ok");
 }
@@ -5434,6 +5294,90 @@ void p9b_test_episode_close_unknown_session(ragger::Embedder& emb) {
     std::println(" OK");
 }
 
+// LR S56 (time rule): an episode's created_at is the time of its LAST member
+// turn (= span_end), not the moment it was closed. Pin first: the old INSERT
+// omits created_at, so it falls to DEFAULT unixepoch() (close time, which is
+// "now" in a test run — far from a seeded 2026-05-01 span).
+void lr56_test_episode_created_at_is_span_end(ragger::Embedder& emb) {
+    std::println("  lr56_test_episode_created_at_is_span_end...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    const std::string guid = "lr56ec-a";
+    auto m = p5_seed_members(db, guid, {"2026-05-01 10:00:00", "2026-05-01 10:10:00"});
+    CHECK(m.size() == 2);
+
+    ragger::EpisodeClose ec;
+    ec.text = "lr56ec episode";
+    ec.model_name = "summarizer-model";
+    ec.session_guid = guid;
+    ec.span_start = p5_epoch("2026-05-01 10:00:00");
+    ec.span_end   = p5_epoch("2026-05-01 10:10:00");
+    ec.member_turn_summary_ids = m;
+    const int ep = db.store_episode_close(ec);
+    CHECK(ep > 0);
+
+    sqlite3* raw = p1_open_raw();
+    CHECK(p1_scalar_int(raw, "SELECT created_at FROM episodes WHERE episode_id = "
+                             + std::to_string(ep)) == ec.span_end);
+    // The close must not move a member's turn_datetime (rule 18).
+    CHECK(p1_scalar_int(raw, "SELECT turn_datetime FROM turn_summaries WHERE turn_summary_id = "
+                             + std::to_string(m[0])) == p5_epoch("2026-05-01 10:00:00"));
+    CHECK(p1_scalar_int(raw, "SELECT turn_datetime FROM turn_summaries WHERE turn_summary_id = "
+                             + std::to_string(m[1])) == p5_epoch("2026-05-01 10:10:00"));
+    sqlite3_close(raw);
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+// LR S57: finalize_turn applies the shared merge rule (merge_assistant_text)
+// instead of overwriting assistant_text. Pin first: the old code UPDATEs
+// unconditionally, so a differing resend replaced the stored text.
+void lr57_test_finalize_turn_merges(ragger::Embedder& emb) {
+    std::println("  lr57_test_finalize_turn_merges...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    // The step's expected helper values.
+    CHECK(ragger::sqlite::merge_assistant_text("", "A") == std::optional<std::string>("A"));
+    CHECK(ragger::sqlite::merge_assistant_text("A", "A") == std::nullopt);
+    CHECK(ragger::sqlite::merge_assistant_text("AB", "A") == std::nullopt);
+    CHECK(ragger::sqlite::merge_assistant_text("A", "AB") == std::optional<std::string>("AB"));
+    CHECK(ragger::sqlite::merge_assistant_text("A", "B") == std::optional<std::string>("A\n\nB"));
+
+    const auto stored = [&](int turn_id) {
+        sqlite3* raw = p1_open_raw();
+        std::string v = p1_scalar_text(raw, "SELECT assistant_text FROM turns WHERE turn_id = "
+                                 + std::to_string(turn_id));
+        sqlite3_close(raw);
+        return v;
+    };
+
+    // Partial turn -> fill; repeat -> no change; superset -> replace;
+    // contained -> no change (old code: OVERWRITE); differing -> append.
+    const int t = db.store_turn("lr57 q", "", "test-model", false, "lr57-a");
+    CHECK(t > 0);
+    CHECK(db.finalize_turn(t, "A", "m1"));
+    CHECK(stored(t) == "A");
+    CHECK(db.finalize_turn(t, "A", "m1"));
+    CHECK(stored(t) == "A");
+    CHECK(db.finalize_turn(t, "AB", "m1"));
+    CHECK(stored(t) == "AB");
+    CHECK(db.finalize_turn(t, "A", "m1"));
+    CHECK(stored(t) == "AB");
+    CHECK(db.finalize_turn(t, "C", "m1"));
+    CHECK(stored(t) == "AB\n\nC");
+
+    // Unknown turn still returns false.
+    CHECK(!db.finalize_turn(99999, "x", "m1"));
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
 // PHASE9B step 2: reads return local wall-time strings, never raw epochs.
 void p9b_test_timestamp_formats(ragger::Embedder& emb) {
     std::println("  p9b_test_timestamp_formats...");
@@ -5557,22 +5501,6 @@ void p9b_test_checked_writes(ragger::Embedder& emb) {
         p9b_trigger("DROP TRIGGER p9b_boom_settings");
         db.set_setting("p9b_k", "v");   // works again
         CHECK(db.get_setting("p9b_k") == std::optional<std::string>("v"));
-        db.close(); cleanup();
-    }
-
-    // --- delete_memory: error is not "no such row" -------------------------
-    {
-        cleanup();
-        ragger::sqlite::Backend db(emb, TEMP_DB);
-        const int id = std::stoi(db.store("p9b delete me"));
-        p9b_trigger("CREATE TRIGGER p9b_boom_knowledge BEFORE DELETE ON knowledge "
-                    "BEGIN SELECT RAISE(ABORT, 'p9b injected'); END");
-        bool threw = false;
-        try { db.delete_memory(id); } catch (const std::runtime_error&) { threw = true; }
-        CHECK(threw);
-        p9b_trigger("DROP TRIGGER p9b_boom_knowledge");
-        CHECK(db.delete_memory(id));
-        CHECK(!db.delete_memory(id));
         db.close(); cleanup();
     }
 
@@ -6114,11 +6042,7 @@ int main() {
     test_rebuild_embeddings_count_matches(emb);
     test_search_text_only(emb);
     test_search_timing(emb);
-    test_delete_memory(emb);
-    test_delete_batch(emb);
     test_search_by_metadata(emb);
-    test_delete_respects_keep(emb);
-    test_delete_batch_respects_keep(emb);
     test_timestamp_format(emb);
     test_v2_summaries_backing(emb);
     test_store_document(emb);
@@ -6159,7 +6083,6 @@ int main() {
     test_p7_cross_kind_supersedes(emb);
     test_p7_kinds_filter(emb);
     test_p7_legacy_handles_rejected(emb);
-    test_p8_delete_batch(emb);
     test_p8_summary_layer_gone(emb);
     test_p4_timeline_order_and_paging(emb);
     test_p4_timeline_session_fallback(emb);
@@ -6210,11 +6133,13 @@ int main() {
     p4_session_span(emb);
     p5_test_episode_close(emb);
     p9b_test_episode_close_unknown_session(emb);
+    lr56_test_episode_created_at_is_span_end(emb);
+    lr57_test_finalize_turn_merges(emb);
     p9b_test_timestamp_formats(emb);
     p9b_test_checked_writes(emb);
     p9b_test_reindex_atomic(emb);
     p9b_test_store_one_function(emb);
-    p10_test_set_decision_status(emb);
+    lr60_test_decision_status_via_agent_update(emb);
     p5_test_episodes_needing_close(emb);
     p5_test_episode_reads(emb);
     p6_test_pending_predicate(emb);

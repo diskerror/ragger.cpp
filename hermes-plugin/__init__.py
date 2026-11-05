@@ -335,7 +335,9 @@ MEMORY_NOTE_SCHEMA = {
         "decisions this note may contradict (hint only -- nothing was changed; "
         "review them and use memory_decision for a real ruling). Pass evidence "
         "(turn_summary ids from search) when you are recording a synthesized "
-        "insight; it is stored as an insight linked to those sources."
+        "insight; it is stored as an insight linked to those sources. "
+        "`trigger` is only valid on an insight (with evidence); `session` is "
+        "recorded on the stored row."
     ),
     "parameters": {
         "type": "object",
@@ -345,6 +347,10 @@ MEMORY_NOTE_SCHEMA = {
                      "description": "Optional tags (use `project:<name>` to scope)."},
             "evidence": {"type": "array", "items": {"type": "integer"},
                          "description": "turn_summary ids this note synthesizes. When present the note is stored as an insight (response carries \"kind\":\"insight\") instead of a plain note."},
+            "trigger": {"type": "string",
+                        "description": "When this insight applies, in the vocabulary of a future query. Only valid together with evidence; on a plain note the server rejects it."},
+            "session": {"type": "string",
+                        "description": "Session GUID to record as provenance ('current' resolves to this Hermes session)."},
         },
         "required": ["text"],
     },
@@ -1018,9 +1024,16 @@ class RaggerMemoryProvider(MemoryProvider):
             text = str(args.get("text", "")).strip()
             if not text:
                 return json.dumps({"error": "Missing required parameter: text"})
-            payload = {"text": text}
+            # LR S59: session provenance the way memory_decision sends it;
+            # 'current' resolves to this Hermes session.
+            payload = {"text": text, "session": self._session_id}
             if args.get("tags"):
                 payload["tags"] = [str(t) for t in args["tags"]]
+            if args.get("trigger"):
+                payload["trigger"] = str(args["trigger"])
+            if args.get("session"):
+                s = str(args["session"])
+                payload["session"] = self._session_id if s == "current" else s
             if args.get("evidence"):
                 # Phase 5: evidence routes the write to store_insight server-side.
                 try:

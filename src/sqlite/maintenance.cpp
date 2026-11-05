@@ -470,62 +470,6 @@ namespace fs = std::filesystem;
     }
 
 
-    // PHASE8: HARD deletes (Phase 11 removes these from the HTTP/MCP
-    // surface, TODO Q2). Restricted to kind='note' rows that no other row
-    // `supersedes` — deleting a superseded parent would dangle the chain —
-    // and that carry no `keep` tag. Returns whether a row was deleted.
-    // S43: the single deletable-note predicate shared by delete_memory and
-    // delete_batch — the two surfaces must agree on what may be deleted.
-    constexpr const char* kDeletableNoteWhere =
-        "kind = 'note'"
-        " AND (tags IS NULL OR tags NOT LIKE '%keep%')"
-        " AND NOT EXISTS (SELECT 1 FROM knowledge c WHERE c.supersedes = knowledge.knowledge_id)";
-
-    bool Backend::Impl::delete_memory(int knowledge_id) {
-        Stmt stmt(db,
-            std::string("DELETE FROM knowledge WHERE knowledge_id = ? AND ") + kDeletableNoteWhere);
-        stmt.bind(1, knowledge_id);
-        // PHASE9B step 4b: an error is not "nothing to delete".
-        if (!stmt.exec())
-            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-        int changes = sqlite3_changes(db);
-        if (changes > 0) {
-            invalidate_knowledge_cache();
-            return true;
-        }
-        return false;
-    }
-
-
-    int Backend::Impl::delete_batch(const std::vector<int>& memory_ids) {
-        if (memory_ids.empty()) return 0;
-        // Single atomic DELETE filtered by kind/keep/supersedes, entirely in
-        // SQL. RAII: a throw between BEGIN and COMMIT used to leave the
-        // connection inside an open transaction.
-        std::string sql = std::string("DELETE FROM knowledge WHERE ") + kDeletableNoteWhere +
-                          " AND knowledge_id IN (";
-        for (size_t i = 0; i < memory_ids.size(); ++i) {
-            if (i > 0) sql += ",";
-            sql += "?";
-        }
-        sql += ")";
-        int changes = 0;
-        {
-            Transaction tx(db);
-            Stmt stmt(db, sql);
-            for (size_t i = 0; i < memory_ids.size(); ++i)
-                stmt.bind(static_cast<int>(i + 1), memory_ids[i]);
-            // PHASE9B step 4b: read changes() only after a successful DELETE.
-            if (!stmt.exec())
-                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-            changes = sqlite3_changes(db);
-            tx.commit();
-        }
-        if (changes > 0) invalidate_knowledge_cache();
-        return changes;
-    }
-
-
     std::vector<SearchResult> Backend::Impl::search_by_metadata(const json& metadata_filter, int limit,
                                                  const std::string& after,
                                                  const std::string& before) {
