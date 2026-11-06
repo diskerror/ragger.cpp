@@ -220,17 +220,24 @@ Hybrid search (vector cosine + custom text index) over the four corpora.
 
 ### POST /memory/search
 
-Layered agent search across turns, turn summaries, episodes, documents,
-and knowledge.
+Layered agent search across turn summaries, episodes, and knowledge.
+Documents are **not** searched here (since v0.17, S76) — use
+`POST /memory/documents`.
 
 **Request fields:** `query` (required), `layers` (subset of
-`turn | turn_summary | episode | document | knowledge`; the input aliases
-`decision` / `insight` restrict knowledge to that kind; empty = all),
+`turn | turn_summary | episode | knowledge`; `turn` is raw exchange text,
+searched only when named explicitly; naming `document` is a `400` pointing to
+`/memory/documents`; the input aliases `decision` / `insight` restrict
+knowledge to that kind; empty = all),
 `kinds` (`decision | insight | note` filter), `since` / `until`
 (`YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS`, or relative `30d` / `12h`),
 `status` (knowledge only: `active` (default = current+provisional) |
 `any` | one exact status), `session`, `exclude_session`, `limit`
-(default 10), `max_tokens` (0 = no budget).
+(default 10), `max_tokens` (0 = no budget), `mode` (`hybrid` (default) |
+`semantic` (vector only; 400 without a ready embedder) | `keyword`
+(text index only)), `tags` (array or comma string; knowledge rows must
+carry ALL listed tags — AND rule, trimmed, case-insensitive; layers
+without tags are excluded).
 
 **Response:** `{"results": [AgentHit]}` where each hit is
 `{"id": "<layer>:<rowid>", "layer", "score", "matched_by":
@@ -239,6 +246,22 @@ layer-specific: knowledge → `{status, trigger}`, turn_summary →
 `{turn_id, session}`, …).
 
 **Status codes:** `400` on unknown layer/kind or bad time format.
+
+---
+
+### POST /memory/documents
+
+Search imported documents — their own verb (v0.17, S76). Same hybrid scoring
+and hit shape as `/memory/search`, restricted to the documents corpus.
+
+**Request fields:** `query` (required), `source` (only documents whose stored
+source path contains this substring, case-insensitive), `limit` (default 10,
+max 50), `mode` (`hybrid` | `semantic` | `keyword`, as for `/memory/search`).
+
+**Response:** `{"results": [AgentHit]}` with `id: "document:<rowid>"` and
+`extra: {title, source_path, chunk_index}`.
+
+**Status codes:** `400` when `query` is missing.
 
 ---
 
@@ -253,7 +276,8 @@ one mode per call.
 
 **Response:** `{"items": [...]}` — full row objects per handle (or
 `{"id", "error": "not found"}` entries); mode 2 returns the session's
-turns.
+turns, each carrying `turn_summary_id` and `episode_id` (`null` when the
+turn has none) so a reader can fill `evidence[]` handles.
 
 **Status codes:** `400` if both or neither mode is set, or a handle is
 malformed.
@@ -284,9 +308,10 @@ Deterministic newest-first range scan (no embeddings).
 
 **Request fields:** `session` (GUID; empty = all), `since` / `until`
 (same formats as `/memory/search`), `granularity`:
-`turn | episode | session` (default `episode`), `limit` (default 20,
-clamped [1,100]), `cursor` (opaque `"<created_epoch>:<rowid>"` from the
-previous page; empty = newest first page).
+`turn | episode | session | knowledge` (default `episode`), `limit`
+(default 20, clamped [1,100]), `cursor` (opaque
+`"<created_epoch>:<rowid>"` from the previous page; empty = newest first
+page).
 
 **Response:** `{"items": [...], "next_cursor": "<...>" | null}`
 
@@ -298,8 +323,9 @@ Metadata-only curation of a knowledge row. Text is never edited in place.
 
 **Request fields:** `id` (typed handle `knowledge:<n>`), `status`
 (must be agent-settable and a legal transition from the row's current
-status; `superseded` is never settable here), `tags` (replaces the whole
-tag string), `text` (present ⇒ always rejected).
+status; `superseded` is never settable here), `tags` (array or
+comma-separated string; replaces the whole tag set), `text` (present ⇒
+always rejected).
 
 **Response:** the updated row (same shape as `/memory/get` items).
 

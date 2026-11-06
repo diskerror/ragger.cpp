@@ -404,7 +404,11 @@ namespace fs = std::filesystem;
         if (!stmt.exec())
             throw std::runtime_error(std::format(
                 "cleanup_old_conversations: DELETE failed: {}", sqlite3_errmsg(db)));
-        return static_cast<int>(sqlite3_changes(db));
+        const int removed = static_cast<int>(sqlite3_changes(db));
+        // LR S75: raw turns are a warm cache now — dropped rows must not
+        // survive in it.
+        if (removed > 0) invalidate_raw_turn_cache();
+        return removed;
     }
 
 
@@ -420,7 +424,10 @@ namespace fs = std::filesystem;
         if (name == "documents")            invalidate_doc_cache();
         else if (name == "knowledge")       invalidate_knowledge_cache();
         else if (name == "episodes")        invalidate_episode_cache();
-        // turns / turn_summaries: no vector cache keyed on these blobs.
+        // LR S75: turns now have a warm cache (opt-in `turn` corpus) — the
+        // embedding write-back path must refresh it.
+        else if (name == "turns")           invalidate_raw_turn_cache();
+        // turn_summaries: no vector cache keyed on these blobs.
     }
 
     bool Backend::Impl::update_embedding(const TextTable& t, int id,
@@ -452,6 +459,7 @@ namespace fs = std::filesystem;
         invalidate_knowledge_cache();
         invalidate_turn_cache();
         invalidate_episode_cache();
+        invalidate_raw_turn_cache();
     }
 
     std::vector<std::string> Backend::Impl::collections() const {

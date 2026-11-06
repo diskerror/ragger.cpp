@@ -240,6 +240,10 @@ std::vector<AgentHit> RaggerMemory::agent_search(const AgentSearchQuery& q) {
     return backend_->agent_search(q);
 }
 
+std::vector<AgentHit> RaggerMemory::agent_document_search(const DocumentSearchQuery& q) {
+    return backend_->agent_document_search(q);
+}
+
 json RaggerMemory::agent_get(const AgentGetQuery& q) {
     return backend_->agent_get(q);
 }

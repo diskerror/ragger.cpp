@@ -535,6 +535,72 @@ void t_memory_note_trigger_session(HttpFixture& fx) {
     std::println(" OK");
 }
 
+// LR S76 (D-7): document_search is one function across transports, and the
+// document layer is rejected on both with the same pointer message.
+void t_document_search_parity_s76(HttpFixture& fx) {
+    std::println("  t_document_search_parity_s76...");
+    ragger::DocumentChunk d;
+    d.text = "The lr76 harbor ledger lists otter sightings.";
+    d.title = "lr76 ledger";
+    d.path = "/docs/lr76-ledger.md";
+    d.chunk_index = 1;
+    CHECK(fx.mem->store_document(d) > 0);
+
+    const auto dh = post_json(fx, "/memory/documents",
+                              {{"query", "harbor ledger otter"}});
+    CHECK(dh["_status"] == 200);
+    CHECK(!dh["results"].empty());
+    {
+        bool found = false;
+        for (const auto& h : dh["results"])
+            if (h.value("layer", "") == "document" &&
+                h["extra"].value("source_path", "") == "/docs/lr76-ledger.md")
+                found = true;
+        CHECK(found);
+    }
+
+    auto mr = ragger::mcp_tool_call(*fx.mem, {{"name", "document_search"},
+                                              {"arguments", {{"query", "harbor ledger otter"}}}});
+    CHECK(!mr.value("isError", false));
+    const auto mp = json::parse(mr["content"][0]["text"].get<std::string>());
+    CHECK(mp["results"].size() == dh["results"].size());
+
+    // source filter narrows on both surfaces.
+    const auto dn = post_json(fx, "/memory/documents",
+                              {{"query", "harbor ledger otter"}, {"source", "no-such"}});
+    CHECK(dn["_status"] == 200);
+    CHECK(dn["results"].empty());
+
+    // Missing query: same message, both surfaces (D-4 mapping).
+    const auto bad = post_json(fx, "/memory/documents", {{"query", ""}});
+    CHECK(bad["_status"] == 400);
+    CHECK(bad["_raw"] == "ERROR: query is required");
+
+    // LR S77: unknown mode -> 400 with the same message on both surfaces.
+    const auto bm = post_json(fx, "/memory/documents",
+                              {{"query", "otter"}, {"mode", "astrology"}});
+    CHECK(bm["_status"] == 400);
+    CHECK(bm["_raw"].get<std::string>().find("hybrid, semantic, keyword") != std::string::npos);
+    auto br = ragger::mcp_tool_call(*fx.mem, {{"name", "document_search"},
+                                              {"arguments", {{"query", "otter"},
+                                                             {"mode", "astrology"}}}});
+    CHECK(br.value("isError", false));
+    CHECK(br["content"][0]["text"].get<std::string>().find("hybrid, semantic, keyword")
+              != std::string::npos);
+
+    // The document layer is rejected with the pointer on both surfaces.
+    const auto ml = post_json(fx, "/memory/search",
+                              {{"query", "otter"}, {"layers", json::array({"document"})}});
+    CHECK(ml["_status"] == 400);
+    CHECK(ml["_raw"].get<std::string>().find("document_search") != std::string::npos);
+    auto er = ragger::mcp_tool_call(*fx.mem, {{"name", "memory_search"},
+                                              {"arguments", {{"query", "otter"},
+                                                             {"layers", json::array({"document"})}}}});
+    CHECK(er.value("isError", false));
+    CHECK(er["content"][0]["text"].get<std::string>().find("document_search") != std::string::npos);
+    std::println(" OK");
+}
+
 int main() {
     HttpFixture fx("http");
     CHECK(fx.ready);
@@ -553,6 +619,7 @@ int main() {
     t_unknown_route(fx);
     t_delete_routes_gone(fx);
     t_memory_note_trigger_session(fx);
+    t_document_search_parity_s76(fx);
 
     std::println("test_http: all passed");
     return 0;

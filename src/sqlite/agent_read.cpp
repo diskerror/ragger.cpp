@@ -22,6 +22,7 @@
 #include <Eigen/Dense>
 
 #include <algorithm>
+#include <cctype>
 #include <ctime>
 #include <limits>
 #include <map>
@@ -35,6 +36,19 @@ namespace ragger::sqlite {
 using json = nlohmann::json;
 
 namespace {
+
+// LR S78 (logic §2): tag normalization — trim ASCII whitespace and casefold;
+// applied to both the stored comma-list elements and the requested filter
+// tags, so matching is trimmed + case-insensitive per the contract.
+std::string norm_tag(std::string_view s) {
+    auto b = s.begin(), e = s.end();
+    while (b != e && (unsigned char)*b <= ' ') ++b;
+    while (e != b && (unsigned char)e[-1] <= ' ') --e;
+    std::string out(b, e);
+    for (auto& c : out)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return out;
+}
 
 // ---- since/until resolution -------------------------------------------
 // Accepted formats (PHASE2-STEPS step 3): "YYYY-MM-DD",
@@ -122,6 +136,12 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
             throw std::invalid_argument(
                 "layer 'summary' no longer exists — notes are knowledge "
                 "rows, use layers:[\"knowledge\"] with kinds:[\"note\"]");
+        } else if (l == "document") {
+            // LR S76 (D-7): documents left memory_search's layer list; they
+            // have their own verb.
+            throw std::invalid_argument(
+                "layer 'document' is not searched here — use document_search "
+                "(or the flat search tool), which covers documents");
         } else if (!is_known_agent_layer(l)) {
             throw std::invalid_argument("unknown layer: '" + l + "'");
         } else want_layers.insert(l);
@@ -144,15 +164,49 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
     const std::string until_b = q.until.empty() ? "" : resolve_agent_time_bound(q.until, true);
     const int limit = std::clamp(q.limit, 1, 50);
 
-    // ---- 2. wide-pool hybrid search --------------------------------------
-    // Degraded (no usable embedder) mirrors RaggerMemory::search's fallback:
-    // text-only scoring across the same four corpora.
+    // LR S77 (Q-A): mode selection. hybrid = today's blend (byte-identical);
+    // semantic = vector only (needs a ready embedder); keyword = text index
+    // only (works degraded too).
+    if (q.mode != "hybrid" && q.mode != "semantic" && q.mode != "keyword")
+        throw std::invalid_argument("mode must be one of: hybrid, semantic, keyword");
+    if (q.mode == "semantic" && !(embedder && embedder->ready()))
+        throw std::invalid_argument("semantic search needs an embedder");
+
+    // ---- session filter helpers ------------------------------------------
+    // GUID -> sessions.session_id once per filter. Ruling 2026-11-05
+    // (FINDING NOTES-GROUP-E): an unknown `session` GUID matches NOTHING —
+    // the intent the comments always stated; the old code fell through to
+    // "no filter" instead. `exclude_session` with an unknown GUID excludes
+    // nothing. S43: find_session is the single lookup-only helper (never
+    // creates). Resolved before the pools so the empty case costs no scoring.
+    std::optional<int> sess_id, excl_id;
+    if (!q.session.empty())         sess_id = find_session(q.session);
+    if (!q.exclude_session.empty()) excl_id = find_session(q.exclude_session);
+    if (!q.session.empty() && !sess_id)
+        return {};
+
+    // ---- 2. per-corpus candidate pools (LR S74, review #2) --------------
+    // Each requested corpus is scored on its own (the min-max normalization
+    // has always been per corpus) and contributes its OWN pool of
+    // max(limit*5, 50); one merged pool let a big corpus starve a narrow
+    // filter (live probe: layers:[turn_summary] + session -> 0 hits at
+    // limit 3). Empty layers keeps the default corpus set (conversation log
+    // = turn_summary + episode, plus knowledge; documents stay until S76
+    // moves them to their own verb). Degraded (no usable embedder) mirrors
+    // the contract with text-only scoring per corpus.
     const int pool = std::max(limit * 5, 50);
+    std::set<std::string> corpora = want_layers;
+    if (corpora.empty())
+        corpora = {"turn_summary", "episode", "knowledge"};  // LR S76: document left
     std::vector<SearchResult> cands;
-    if (embedder && embedder->ready())
-        cands = search(q.query, pool, 0.0f, {}).results;
-    else
-        cands = search_text_only(q.query, pool).results;
+    {
+        auto pools = (q.mode == "keyword" || !embedder || !embedder->ready())
+            ? text_pools(q.query, corpora, pool)
+            : hybrid_pools(q.query, corpora, pool, q.mode == "hybrid");
+        for (auto& [src, v] : pools)
+            cands.insert(cands.end(), std::make_move_iterator(v.begin()),
+                         std::make_move_iterator(v.end()));
+    }
 
     // Knowledge status comes from the rows, never from cache
     // metadata: the hybrid cache only holds active rows and the text-only
@@ -194,14 +248,6 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
         supplement("knowledge", "knowledge_id", "knowledge");
     }
 
-    // ---- session filter helpers ------------------------------------------
-    // GUID -> sessions.session_id once per filter (unknown GUID -> nullopt:
-    // `session` then matches nothing, `exclude_session` excludes nothing).
-    // S43: find_session is the single lookup-only helper (never creates).
-    std::optional<int> sess_id, excl_id;
-    if (!q.session.empty())         sess_id = find_session(q.session);
-    if (!q.exclude_session.empty()) excl_id = find_session(q.exclude_session);
-
     // ---- batched per-layer lookups (review 3A) ----------------------------
     // One "WHERE <pk> IN (...)" query per layer per lookup instead of one
     // prepared query per candidate hit (pool is up to 250 ids). Ids are
@@ -221,25 +267,26 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
         return out;
     };
 
-    // kind + status + trigger for the knowledge corpus (the trigger read was
-    // the same N+1 pattern as the status read).
-    std::unordered_map<int, std::string> kno_kind, kno_status, kno_trigger;
+    // kind + status + trigger + tags for the knowledge corpus (the trigger
+    // read was the same N+1 pattern as the status read).
+    std::unordered_map<int, std::string> kno_kind, kno_status, kno_trigger, kno_tags;
     {
         auto it = ids_by_layer.find("knowledge");
         if (it != ids_by_layer.end() && !it->second.empty()) {
             Stmt s(db, std::format(
-                "SELECT knowledge_id, kind, status, ifnull(trigger,'') "
+                "SELECT knowledge_id, kind, status, ifnull(trigger,''), ifnull(tags,'') "
                 "FROM knowledge WHERE knowledge_id IN ({})", in_clause(it->second)));
             while (s.step()) {
                 kno_kind[s.column_int(0)]    = s.column_text(1);
                 kno_status[s.column_int(0)]  = s.column_text(2);
                 kno_trigger[s.column_int(0)] = s.column_text(3);
+                kno_tags[s.column_int(0)]    = s.column_text(4);
             }
         }
     }
 
-    // Owning session per layer (documents have neither; the turn layer is
-    // never produced by the search corpora). Only fetched when a session
+    // Owning session per layer (documents have neither; the raw-turn layer
+    // is produced only when opted into, LR S75). Only fetched when a session
     // filter is active.
     std::map<std::string, std::unordered_map<int, int>> session_of;
     auto fill_owning = [&](std::map<std::string, std::unordered_map<int, int>>& out,
@@ -255,13 +302,35 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
                     "SELECT turn_summary_id, session_id FROM turn_summaries WHERE turn_summary_id");
         fill_owning(session_of, "knowledge",
                     "SELECT knowledge_id, session_id FROM knowledge WHERE knowledge_id");
+        // LR S73 (R13): episodes carry their own session_id, so the session
+        // filter reaches the episode layer too (it used to match nothing).
+        fill_owning(session_of, "episode",
+                    "SELECT episode_id, session_id FROM episodes WHERE episode_id");
+        // LR S75: same for the opt-in raw-turn corpus.
+        fill_owning(session_of, "turn",
+                    "SELECT turn_id, session_id FROM turns WHERE turn_id");
     }
-    // Session GUIDs for turn_summary extras — one query for the whole pool.
+    // LR S73: spans for episode-hit extras — one batched read for the pool
+    // (needed whether or not a session filter is active).
+    std::unordered_map<int, std::pair<long long, long long>> ep_span;
+    {
+        auto it = ids_by_layer.find("episode");
+        if (it != ids_by_layer.end() && !it->second.empty()) {
+            Stmt s(db, std::format(
+                "SELECT episode_id, span_start, span_end FROM episodes WHERE episode_id IN ({})",
+                in_clause(it->second)));
+            while (s.step())
+                ep_span[s.column_int(0)] = {s.column_int64(1), s.column_int64(2)};
+        }
+    }
+    // Session GUIDs for turn_summary / episode extras — one query for the whole pool.
     std::unordered_map<int, std::string> guid_of_session;
     {
         std::vector<int> sids;
         for (const auto& r : cands)
-            if (r.metadata.value("source", "") == "turn_summary" &&
+            if ((r.metadata.value("source", "") == "turn_summary" ||
+                 r.metadata.value("source", "") == "episode" ||
+                 r.metadata.value("source", "") == "turn") &&   // LR S75
                 r.metadata.contains("session_id"))
                 sids.push_back(r.metadata["session_id"].get<int>());
         if (!sids.empty()) {
@@ -295,6 +364,31 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
             } else if (q.status != "any" && row_status != q.status) {
                 continue;
             }
+        }
+
+        // LR S78 (logic §2): tags filter — AND rule over knowledge rows: every
+        // listed tag must be a trimmed, case-insensitive element of the stored
+        // comma list (`project:x` is just a tag). Layers that carry no tags
+        // (turn, turn_summary, episode) are excluded while the filter is on.
+        if (!q.tags.empty()) {
+            if (layer != "knowledge") continue;
+            std::set<std::string> have;
+            if (auto tit = kno_tags.find(r.id); tit != kno_tags.end()) {
+                const std::string& stored = tit->second;
+                std::string::size_type start = 0;
+                while (start <= stored.size()) {
+                    auto comma = stored.find(',', start);
+                    const auto end = comma == std::string::npos ? stored.size() : comma;
+                    if (auto t = norm_tag(stored.substr(start, end - start)); !t.empty())
+                        have.insert(t);
+                    if (comma == std::string::npos) break;
+                    start = comma + 1;
+                }
+            }
+            bool all = true;
+            for (const auto& want : q.tags)
+                if (auto t = norm_tag(want); !t.empty() && !have.count(t)) { all = false; break; }
+            if (!all) continue;
         }
 
         if (!since_b.empty() && r.timestamp <  since_b) continue;
@@ -334,8 +428,28 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
                 h.extra["session"] = it != guid_of_session.end()
                     ? it->second : std::string();
             }
-        } else if (layer == "document") {
-            h.extra = json{{"title", r.metadata.value("title", "")}};
+        } else if (layer == "episode") {
+            // LR S73 (Q5): episode hits carry their session and span (the
+            // spans rendered like memory_timeline's `created`).
+            h.extra = json::object();
+            if (r.metadata.contains("session_id")) {
+                auto it = guid_of_session.find(r.metadata["session_id"].get<int>());
+                h.extra["session"] = it != guid_of_session.end()
+                    ? it->second : std::string();
+            }
+            auto sp = ep_span.find(r.id);
+            if (sp != ep_span.end()) {
+                h.extra["span_start"] = db_timestamp(static_cast<std::time_t>(sp->second.first));
+                h.extra["span_end"]   = db_timestamp(static_cast<std::time_t>(sp->second.second));
+            }
+        } else if (layer == "turn") {
+            // LR S75: raw-turn hits carry their session GUID.
+            h.extra = json::object();
+            if (r.metadata.contains("session_id")) {
+                auto it = guid_of_session.find(r.metadata["session_id"].get<int>());
+                h.extra["session"] = it != guid_of_session.end()
+                    ? it->second : std::string();
+            }
         }
         hits.push_back(std::move(h));
     }
@@ -357,6 +471,89 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
         out.push_back(std::move(h));
     }
     return out;
+}
+
+
+// =======================================================================
+// agent_document_search — LR S76 (D-7): documents are their own verb.
+// Same pool sizing and blend conventions as agent_search's per-corpus
+// pools; `source` filters case-insensitively on document_sources.path.
+// =======================================================================
+std::vector<AgentHit> Backend::Impl::agent_document_search(const DocumentSearchQuery& q) {
+    if (q.query.empty())
+        throw std::invalid_argument("query is required");
+    // LR S77: same mode contract as agent_search.
+    if (q.mode != "hybrid" && q.mode != "semantic" && q.mode != "keyword")
+        throw std::invalid_argument("mode must be one of: hybrid, semantic, keyword");
+    if (q.mode == "semantic" && !(embedder && embedder->ready()))
+        throw std::invalid_argument("semantic search needs an embedder");
+    const int limit = std::clamp(q.limit, 1, 50);
+    const int pool = std::max(limit * 5, 50);
+
+    std::vector<SearchResult> cands;
+    {
+        auto pools = (q.mode == "keyword" || !embedder || !embedder->ready())
+            ? text_pools(q.query, {"document"}, pool)
+            : hybrid_pools(q.query, {"document"}, pool, q.mode == "hybrid");
+        for (auto& [src, v] : pools)
+            cands.insert(cands.end(), std::make_move_iterator(v.begin()),
+                         std::make_move_iterator(v.end()));
+    }
+    if (cands.empty()) return {};
+
+    // chunk_index + source path for the pool — one batched read.
+    std::unordered_map<int, std::pair<int, std::string>> chunk_path;
+    {
+        std::vector<int> ids;
+        ids.reserve(cands.size());
+        for (const auto& r : cands) ids.push_back(r.id);
+        std::string placeholders;
+        for (int id : ids) {
+            if (!placeholders.empty()) placeholders += ',';
+            placeholders += std::to_string(id);
+        }
+        Stmt s(db, std::format(
+            "SELECT d.document_id, ifnull(d.chunk_index, 0), ifnull(ds.path, '') "
+            "FROM documents d LEFT JOIN document_sources ds "
+            "  ON d.document_source_id = ds.document_source_id "
+            "WHERE d.document_id IN ({})", placeholders));
+        while (s.step())
+            chunk_path[s.column_int(0)] = {s.column_int(1), s.column_text(2)};
+    }
+
+    auto lower = [](std::string v) {
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        return v;
+    };
+    const std::string src_needle = lower(q.source);
+    std::vector<AgentHit> hits;
+    for (const auto& r : cands) {
+        auto it = chunk_path.find(r.id);
+        if (it == chunk_path.end()) continue;   // row vanished mid-search
+        if (!src_needle.empty()) {
+            const std::string path = lower(it->second.second);
+            if (path.find(src_needle) == std::string::npos) continue;
+        }
+        AgentHit h;
+        h.id    = "document:" + std::to_string(r.id);
+        h.layer = "document";
+        h.score = r.blended;
+        if (r.vec_score > 0.0f && r.bm25_score > 0.0f)      h.matched_by = "both";
+        else if (r.bm25_score > 0.0f)                       h.matched_by = "lexical";
+        else                                                h.matched_by = "vector";
+        h.created = r.timestamp;
+        h.snippet = agent_snippet(r.text);
+        h.extra = json{{"title", r.metadata.value("title", "")},
+                       {"source_path", it->second.second},
+                       {"chunk_index", it->second.first}};
+        hits.push_back(std::move(h));
+    }
+
+    std::sort(hits.begin(), hits.end(),
+              [](const AgentHit& a, const AgentHit& b) { return a.score > b.score; });
+    if (static_cast<int>(hits.size()) > limit) hits.resize(static_cast<size_t>(limit));
+    return hits;
 }
 
 
@@ -413,9 +610,10 @@ long long bound_to_epoch(const std::string& bound) {
 } // anonymous namespace
 
 json Backend::Impl::agent_timeline(const TimelineQuery& q) {
-    static const std::set<std::string> kGranularities = {"turn", "episode", "session"};
+    static const std::set<std::string> kGranularities = {"turn", "episode", "session", "knowledge"};
     if (!kGranularities.count(q.granularity))
-        throw std::invalid_argument("granularity must be one of: turn, episode, session");
+        throw std::invalid_argument(
+            "granularity must be one of: turn, episode, session, knowledge");
     const int limit = std::clamp(q.limit, 1, 100);
 
     long long since_e = 0, until_e = 0;
@@ -430,11 +628,13 @@ json Backend::Impl::agent_timeline(const TimelineQuery& q) {
         cur_row = r;
     }
 
-    // Session filter: unknown GUID matches nothing (nullopt).
-    // S43: find_session is the single lookup-only helper (never creates).
+    // Session filter: Ruling 2026-11-05 — an unknown GUID matches NOTHING
+    // (see agent_search). S43: find_session is the single lookup-only helper.
     std::optional<int> sess_id;
     if (!q.session.empty())
         sess_id = find_session(q.session);
+    if (!q.session.empty() && !sess_id)
+        return json{{"items", json::array()}, {"next_cursor", nullptr}};
 
     // Each granularity builds one SELECT over (created_epoch, rowid, text,
     // session_guid) with the same filter/cursor plumbing, ordered newest
@@ -480,6 +680,22 @@ json Backend::Impl::agent_timeline(const TimelineQuery& q) {
             "FROM episodes sm WHERE sm.text != ''";
         if (sess_id) {
             sql += " AND sm.session_id = ?";
+            int_binds.push_back({static_cast<int>(int_binds.size()) + 1, *sess_id});
+        }
+    } else if (q.granularity == "knowledge") {
+        // LR S79: knowledge rows newest-first by created_at. No span, so the
+        // date filter degenerates to plain created_at bounds (the overlap
+        // rule with itself).
+        first_expr = "k.created_at";
+        row_expr = "k.knowledge_id";
+        since_expr = "k.created_at";
+        sql =
+            "SELECT k.created_at, k.knowledge_id, k.text, "
+            "  COALESCE((SELECT guid FROM sessions WHERE session_id = k.session_id), ''), "
+            "  k.kind, k.status "
+            "FROM knowledge k WHERE 1=1";
+        if (sess_id) {
+            sql += " AND k.session_id = ?";
             int_binds.push_back({static_cast<int>(int_binds.size()) + 1, *sess_id});
         }
     } else { // session
@@ -558,11 +774,17 @@ json Backend::Impl::agent_timeline(const TimelineQuery& q) {
             // by agent_get even when the entry shows summary text.
             {"id",      q.granularity == "turn"
                            ? std::format("turn:{}", last_row)
-                           : std::format("episode:{}", last_row)},
+                           : q.granularity == "knowledge"
+                               ? std::format("knowledge:{}", last_row)
+                               : std::format("episode:{}", last_row)},
             {"created", db_timestamp(static_cast<std::time_t>(last_epoch))},
             {"session", s.column_text(3)},
             {"text",    agent_snippet(text)},
         };
+        if (q.granularity == "knowledge") {   // LR S79
+            item["kind"]   = s.column_text(4);
+            item["status"] = s.column_text(5);
+        }
         items.push_back(std::move(item));
     }
 
@@ -624,18 +846,35 @@ json Backend::Impl::agent_get(const AgentGetQuery& q) {
                         if (!t.step() || t.is_null(0)) anchor = -1;
                         else anchor = t.column_int(0);
                     }
+                    // LR S79 (P10): neighbors are the session order
+                    // (created_at, turn_id), not raw ids — ids interleave
+                    // across sessions and out-of-order inserts reorder them.
+                    int anchor_sess = 0;
+                    long long anchor_ts = 0;
                     if (anchor >= 0) {
-                        Stmt c(db, "SELECT turn_id FROM turns "
-                                   "WHERE session_id = (SELECT session_id FROM turns WHERE turn_id = ?) "
-                                   "  AND session_id IS NOT NULL "
-                                   "  AND turn_id BETWEEN ? AND ? AND turn_id != ? "
-                                   "ORDER BY turn_id");
-                        c.bind(1, anchor);
-                        c.bind(2, anchor - 2);
-                        c.bind(3, anchor + 2);
-                        c.bind(4, anchor);
-                        while (c.step())
-                            expanded.push_back(fetch_agent_row(db, "turn", c.column_int(0)));
+                        Stmt a(db, "SELECT session_id, created_at FROM turns WHERE turn_id = ?");
+                        a.bind(1, anchor);
+                        if (!a.step() || a.is_null(0)) anchor = -1;
+                        else { anchor_sess = a.column_int(0); anchor_ts = a.column_int64(1); }
+                    }
+                    if (anchor >= 0) {
+                        std::vector<int> before;
+                        Stmt c(db, "SELECT turn_id FROM turns WHERE session_id = ? "
+                                   "AND (created_at < ? OR (created_at = ? AND turn_id < ?)) "
+                                   "ORDER BY created_at DESC, turn_id DESC LIMIT 2");
+                        c.bind(1, anchor_sess).bind(2, anchor_ts)
+                         .bind(3, anchor_ts).bind(4, anchor);
+                        while (c.step()) before.push_back(c.column_int(0));
+                        std::reverse(before.begin(), before.end());
+                        for (int id : before)
+                            expanded.push_back(fetch_agent_row(db, "turn", id));
+                        Stmt n(db, "SELECT turn_id FROM turns WHERE session_id = ? "
+                                   "AND (created_at > ? OR (created_at = ? AND turn_id > ?)) "
+                                   "ORDER BY created_at ASC, turn_id ASC LIMIT 2");
+                        n.bind(1, anchor_sess).bind(2, anchor_ts)
+                         .bind(3, anchor_ts).bind(4, anchor);
+                        while (n.step())
+                            expanded.push_back(fetch_agent_row(db, "turn", n.column_int(0)));
                     }
                 } else if (layer == "document") {
                     // chunk_index ±1 from the same document_source_id.
@@ -743,6 +982,12 @@ json Backend::Impl::agent_get(const AgentGetQuery& q) {
         "SELECT t.turn_id, t.user_text, t.assistant_text, "
         "       datetime(t.created_at,'unixepoch','localtime'), "
         "       (SELECT text FROM turn_summaries ts "
+        "         WHERE ts.turn_id = t.turn_id AND ts.text != '' LIMIT 1), "
+        // LR S79 (P10): the hierarchy above each turn, so a reader can fill
+        // evidence[] with turn_summary:<id> / episode:<id> handles.
+        "       (SELECT ts.turn_summary_id FROM turn_summaries ts "
+        "         WHERE ts.turn_id = t.turn_id AND ts.text != '' LIMIT 1), "
+        "       (SELECT ts.episode_id FROM turn_summaries ts "
         "         WHERE ts.turn_id = t.turn_id AND ts.text != '' LIMIT 1) "
         "FROM turns t JOIN sessions s ON s.session_id = t.session_id "
         "WHERE s.guid = ?";
@@ -770,6 +1015,8 @@ json Backend::Impl::agent_get(const AgentGetQuery& q) {
             {"assistant", s.is_null(2) ? json(nullptr) : json(s.column_text(2))},
             {"created",   s.column_text(3)},
             {"summary",   s.is_null(4) ? json(nullptr) : json(s.column_text(4))},
+            {"turn_summary_id", s.is_null(5) ? json(nullptr) : json(s.column_int(5))},
+            {"episode_id",      s.is_null(6) ? json(nullptr) : json(s.column_int(6))},
         };
         last_turn_id = s.column_int(0);
         turns.push_back(std::move(t));

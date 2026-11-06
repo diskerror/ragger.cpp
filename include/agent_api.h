@@ -43,6 +43,10 @@ nlohmann::json agent_search(RaggerMemory& mem, const nlohmann::json& args);
 /// on MCP (inventory D12); it is now one rule on every surface.
 nlohmann::json agent_memory_search(RaggerMemory& mem, const nlohmann::json& args);
 
+/// LR S76 (D-7): documents' own verb (HTTP POST /memory/documents, MCP tool
+/// document_search). {query, source?, limit?} -> {results: [hits]}.
+nlohmann::json agent_document_search(RaggerMemory& mem, const nlohmann::json& args);
+
 /// Agent row reads (HTTP POST /memory/get, MCP tool memory_get).
 nlohmann::json agent_memory_get(RaggerMemory& mem, const nlohmann::json& args);
 

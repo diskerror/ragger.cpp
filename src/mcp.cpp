@@ -149,9 +149,10 @@ static nlohmann::json tools_list(bool capture_turns, bool build_context) {
         {
             {"name", "memory_search"},
             {"description",
-             "Layered search across all memory corpora. Returns handles + snippets only — "
-             "call memory_get with chosen handles for full text. `layers` narrows by layer "
-             "(turn, turn_summary, episode, document, knowledge); empty = all. "
+             "Layered search across the conversation and knowledge corpora. Returns handles + "
+             "snippets only — call memory_get with chosen handles for full text. `layers` narrows by layer "
+             "(turn_summary, episode, knowledge); empty = all. Documents are NOT searched here — "
+             "use document_search. "
              "`kinds` narrows knowledge hits (decision, insight, note). Legacy layer names "
              "'decision'/'insight' are accepted and mean knowledge restricted to that kind. "
              "status: 'active' (default) hides superseded/retired knowledge, 'any' includes them. "
@@ -163,7 +164,11 @@ static nlohmann::json tools_list(bool capture_turns, bool build_context) {
                     {"query",           {{"type", "string"},
                                           {"description", "The search query."}}},
                     {"layers",          {{"type", "array"}, {"items", {{"type", "string"}}},
-                                          {"description", "Restrict to these layers."}}},
+                                          {"description", "Restrict to these layers "
+                                           "(turn_summary, episode, knowledge). "
+                                           "'turn' is raw exchange text, searched only "
+                                           "when named explicitly; prefer the summaries. "
+                                           "Documents use document_search."}}},
                     {"since",           {{"type", "string"},
                                           {"description", "Only results at/after this time."}}},
                     {"until",           {{"type", "string"},
@@ -178,6 +183,34 @@ static nlohmann::json tools_list(bool capture_turns, bool build_context) {
                                           {"description", "Max results (default 10, max 50)."}}},
                     {"max_tokens",      {{"type", "integer"},
                                           {"description", "Token budget (~chars/4) over snippets; 0 = none."}}},
+                    {"mode",            {{"type", "string"},
+                                          {"description", "hybrid (default) | semantic (vector only; needs an embedder) | keyword (text index only)."}}},
+                    {"tags",            {{"type", nlohmann::json::array({"array", "string"})},
+                                          {"items", {{"type", "string"}}},
+                                          {"description", "Knowledge rows must carry ALL listed tags "
+                                           "(AND rule; trimmed, case-insensitive; `project:<name>` is just a tag). "
+                                           "A comma string is accepted. Layers without tags are excluded."}}},
+                }},
+                {"required", nlohmann::json::array({"query"})}
+            }}
+        },
+        {
+            {"name", "document_search"},
+            {"description",
+             "Search imported documents (their own verb; memory_search does not cover them). "
+             "Returns document:<N> handles + snippets — call memory_get with chosen handles for "
+             "full text. `source` narrows to paths containing this substring (case-insensitive)."},
+            {"inputSchema", {
+                {"type", "object"},
+                {"properties", {
+                    {"query",  {{"type", "string"},
+                                 {"description", "The search query."}}},
+                    {"source", {{"type", "string"},
+                                 {"description", "Only documents whose stored source path contains this."}}},
+                    {"limit",  {{"type", "integer"},
+                                 {"description", "Max results (default 10, max 50)."}}},
+                    {"mode",   {{"type", "string"},
+                                 {"description", "hybrid (default) | semantic (vector only; needs an embedder) | keyword (text index only)."}}},
                 }},
                 {"required", nlohmann::json::array({"query"})}
             }}
@@ -245,7 +278,8 @@ static nlohmann::json tools_list(bool capture_turns, bool build_context) {
              "search ranking). granularity 'turn' = per-exchange summaries "
              "(falling back to raw user text), 'episode' = episode summaries "
              "(default), 'session' = one row per session (guid, name, turn "
-             "span, episode count, newest episode text). Filters: session GUID, since/until ('YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', "
+             "span, episode count, newest episode text), 'knowledge' = stored "
+             "knowledge rows newest first (id, kind, status). Filters: session GUID, since/until ('YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', "
              "or relative '30d'/'12h'). Page through with the returned "
              "next_cursor; null means the end."},
             {"inputSchema", {
@@ -258,8 +292,8 @@ static nlohmann::json tools_list(bool capture_turns, bool build_context) {
                     {"until",       {{"type", "string"},
                                      {"description", "Upper time bound (bare date = end of day)."}}},
                     {"granularity", {{"type", "string"},
-                                     {"enum", nlohmann::json::array({"turn", "episode", "session"})},
-                                     {"description", "turn | episode | session (default episode)."}}},
+                                     {"enum", nlohmann::json::array({"turn", "episode", "session", "knowledge"})},
+                                     {"description", "turn | episode | session | knowledge (default episode)."}}},
                     {"limit",       {{"type", "integer"},
                                      {"description", "Page size (default 20, max 100)."}}},
                     {"cursor",      {{"type", "string"},
@@ -285,8 +319,9 @@ static nlohmann::json tools_list(bool capture_turns, bool build_context) {
                                 {"description", "Typed handle '<layer>:<rowid>'."}}},
                     {"status", {{"type", "string"},
                                 {"description", "Knowledge status: current | provisional | pending | retired."}}},
-                    {"tags",   {{"type", "string"},
-                                {"description", "Replacement tag string (comma-separated)."}}},
+                    {"tags",   {{"type", nlohmann::json::array({"array", "string"})},
+                                {"items", {{"type", "string"}}},
+                                {"description", "Replacement tags (array) or comma-separated string; replaces the whole set."}}},
                 }},
                 {"required", nlohmann::json::array({"id"})}
             }}
@@ -445,6 +480,14 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         // LR S71 (R4): shared body with HTTP /memory/search (agent_api.h).
         try {
             return text_result(ragger::agent_memory_search(memory, arguments).dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
+
+    } else if (tool_name == "document_search") {
+        // LR S76 (D-7): shared body with HTTP /memory/documents.
+        try {
+            return text_result(ragger::agent_document_search(memory, arguments).dump());
         } catch (const std::invalid_argument& e) {
             return error_result(e.what());
         }

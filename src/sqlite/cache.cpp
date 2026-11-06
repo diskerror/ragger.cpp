@@ -107,6 +107,7 @@ void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
     void Backend::Impl::invalidate_turn_cache() { turn_cache_.valid = false; }
 
     void Backend::Impl::invalidate_episode_cache() { episode_cache_.valid = false; }
+    void Backend::Impl::invalidate_raw_turn_cache() { raw_turn_cache_.valid = false; }
 
 
     // Shared body of the five loaders (PHASE3 Step 5). The loop shape is
@@ -254,6 +255,31 @@ void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
                 if (!s.is_null(6)) meta["model_id"] = s.column_int(6);
             });
         episode_cache_.valid = true;
+    }
+
+
+    // LR S75: raw exchanges for the OPT-IN `turn` corpus. Display text joins
+    // user + assistant with a blank line (the embedding was computed over
+    // turn_embed_text's unit-separator form; the separator must not reach a
+    // snippet). Truly empty rows (both sides empty/NULL) are excluded — they
+    // carry nothing to find. NULL embeddings (deferred) load as zero vectors
+    // like every other corpus; the text index still finds them.
+    void Backend::Impl::ensure_raw_turn_cache() {
+        if (raw_turn_cache_.valid) return;
+        load_cache(raw_turn_cache_, "turns",
+            "SELECT turn_id, "
+            "       ifnull(user_text,'') || CASE "
+            "         WHEN ifnull(assistant_text,'') = '' THEN '' "
+            "         ELSE char(10) || char(10) || assistant_text END, "
+            "       embedding, session_id, 0, "
+            "       datetime(created_at,'unixepoch','localtime') "
+            "FROM turns "
+            "WHERE ifnull(user_text,'') != '' OR ifnull(assistant_text,'') != ''",
+            [](Stmt& s, json& meta) {
+                meta["source"] = "turn";
+                if (!s.is_null(3)) meta["session_id"] = s.column_int(3);
+            });
+        raw_turn_cache_.valid = true;
     }
 
 

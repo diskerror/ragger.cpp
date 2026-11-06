@@ -37,10 +37,39 @@ AgentSearchQuery parse_agent_search_query(const json& a) {
     q.exclude_session = a.value("exclude_session", "");
     q.limit           = a.value("limit", 10);
     q.max_tokens      = a.value("max_tokens", 0);
+    q.mode            = a.value("mode", "hybrid");
     if (a.contains("layers"))
         q.layers = a["layers"].get<std::vector<std::string>>();
     if (a.contains("kinds"))
         q.kinds = a["kinds"].get<std::vector<std::string>>();
+    // LR S78 (logic §2): tags filter — array form, or a comma string for
+    // compatibility (same accepted shapes as tags_to_comma_string on write).
+    if (a.contains("tags") && !a["tags"].is_null()) {
+        const auto& t = a["tags"];
+        if (t.is_array()) {
+            for (const auto& x : t)
+                if (x.is_string()) q.tags.push_back(x.get<std::string>());
+        } else if (t.is_string()) {
+            const std::string s = t.get<std::string>();
+            std::string::size_type start = 0;
+            while (start <= s.size()) {
+                auto comma = s.find(',', start);
+                const auto end = comma == std::string::npos ? s.size() : comma;
+                if (end > start) q.tags.push_back(s.substr(start, end - start));
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+            }
+        }
+    }
+    return q;
+}
+
+DocumentSearchQuery parse_document_search_query(const json& a) {
+    DocumentSearchQuery q;
+    q.query  = a.value("query", "");
+    q.source = a.value("source", "");
+    q.limit  = a.value("limit", 10);
+    q.mode   = a.value("mode", "hybrid");
     return q;
 }
 
@@ -72,8 +101,9 @@ UpdateRequest parse_update_request(const json& a) {
     u.id = a.value("id", "");
     if (a.contains("status") && !a["status"].is_null())
         u.status = a["status"].get<std::string>();
+    // LR S78: memory_update accepts the same array/string forms as store.
     if (a.contains("tags") && !a["tags"].is_null())
-        u.tags = a["tags"].get<std::string>();
+        u.tags = tags_to_comma_string(a);
     // Forwarded when present; agent_update rejects any text change with the
     // canonical message. (MCP previously dropped the field silently, letting
     // a caller's text pass without effect -- now both surfaces reject.)

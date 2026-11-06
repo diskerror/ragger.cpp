@@ -364,7 +364,8 @@ MEMORY_TIMELINE_SCHEMA = {
         "search ranking). granularity 'turn' = per-exchange summaries "
         "(falling back to raw user text), 'episode' = episode summaries "
         "(default), 'session' = one row per session (guid, name, turn span, "
-        "episode count, newest episode text). Filters: session GUID ('current' = this conversation), since/until "
+        "episode count, newest episode text), 'knowledge' = stored knowledge "
+        "rows newest first (id, kind, status). Filters: session GUID ('current' = this conversation), since/until "
         "('YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or relative '30d'/'12h'). "
         "Page through with the returned next_cursor; null means the end."
     ),
@@ -374,8 +375,8 @@ MEMORY_TIMELINE_SCHEMA = {
             "session": {"type": "string", "description": "Only this session GUID ('current' = this one)."},
             "since": {"type": "string", "description": "Lower time bound."},
             "until": {"type": "string", "description": "Upper time bound (bare date = end of day)."},
-            "granularity": {"type": "string", "enum": ["turn", "episode", "session"],
-                            "description": "turn | episode | session (default episode)."},
+            "granularity": {"type": "string", "enum": ["turn", "episode", "session", "knowledge"],
+                            "description": "turn | episode | session | knowledge (default episode)."},
             "limit": {"type": "integer", "description": "Page size (default 20, max 100)."},
             "cursor": {"type": "string", "description": "Opaque next_cursor from the previous page."},
         },
@@ -401,7 +402,8 @@ MEMORY_UPDATE_SCHEMA = {
             "id": {"type": "string", "description": "Typed handle '<layer>:<rowid>'."},
             "status": {"type": "string",
                        "description": "Knowledge status: current | provisional | pending | retired."},
-            "tags": {"type": "string", "description": "Replacement tag string (comma-separated)."},
+            "tags": {"type": ["array", "string"], "items": {"type": "string"},
+                     "description": "Replacement tags (array) or comma-separated string; replaces the whole set."},
         },
         "required": ["id"],
     },
@@ -433,9 +435,10 @@ MEMORY_REVIEW_SCHEMA = {
 MEMORY_SEARCH_SCHEMA = {
     "name": "memory_search",
     "description": (
-        "Layered search across all memory corpora (turns, turn summaries, "
-        "episodes, documents, knowledge). Returns typed handles "
+        "Layered search across the conversation and knowledge corpora (turn "
+        "summaries, episodes, knowledge). Returns typed handles "
         "+ snippets only -- call memory_get with chosen handles for full text. "
+        "Documents are NOT searched here -- use document_search. "
         "`layers` narrows by layer; omit for all. `kinds` narrows knowledge "
         "hits (decision, insight, note). Pass session='current' to search "
         "only this conversation, or exclude_session='current' to skip it. "
@@ -448,7 +451,7 @@ MEMORY_SEARCH_SCHEMA = {
         "properties": {
             "query": {"type": "string", "description": "What to search for."},
             "layers": {"type": "array", "items": {"type": "string"},
-                       "description": "Subset of: turn, turn_summary, episode, document, knowledge. Legacy 'decision'/'insight' are accepted and mean knowledge of that kind."},
+                       "description": "Subset of: turn_summary, episode, knowledge. 'turn' is raw exchange text, searched only when named explicitly (prefer turn_summary/episode). Documents use document_search. Legacy 'decision'/'insight' are accepted and mean knowledge of that kind."},
             "kinds": {"type": "array", "items": {"type": "string"},
                       "description": "Narrow knowledge hits: decision, insight, note."},
             "since": {"type": "string", "description": "Only results at/after this time."},
@@ -462,6 +465,33 @@ MEMORY_SEARCH_SCHEMA = {
             "limit": {"type": "integer", "description": "Max results (default 10, max 50)."},
             "max_tokens": {"type": "integer",
                            "description": "Token budget (~chars/4) over snippets; 0 = none."},
+            "mode": {"type": "string",
+                     "description": "hybrid (default) | semantic (vector only; needs an embedder) | keyword (text index only)."},
+            "tags": {"type": ["array", "string"], "items": {"type": "string"},
+                     "description": "Knowledge rows must carry ALL listed tags (AND rule; trimmed, case-insensitive; `project:<name>` is just a tag). A comma string is accepted. Layers without tags are excluded."},
+        },
+        "required": ["query"],
+    },
+}
+
+
+DOCUMENT_SEARCH_SCHEMA = {
+    "name": "document_search",
+    "description": (
+        "Search imported documents (their own verb; memory_search does not "
+        "cover them). Returns document:<N> handles + snippets -- call "
+        "memory_get with chosen handles for full text. `source` narrows to "
+        "paths containing this substring (case-insensitive)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "What to search for."},
+            "source": {"type": "string",
+                       "description": "Only documents whose stored source path contains this."},
+            "limit": {"type": "integer", "description": "Max results (default 10, max 50)."},
+            "mode": {"type": "string",
+                     "description": "hybrid (default) | semantic (vector only; needs an embedder) | keyword (text index only)."},
         },
         "required": ["query"],
     },
@@ -897,7 +927,7 @@ class RaggerMemoryProvider(MemoryProvider):
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [SEARCH_SCHEMA, STORE_SCHEMA, DECISION_SCHEMA,
-                MEMORY_SEARCH_SCHEMA, MEMORY_GET_SCHEMA,
+                MEMORY_SEARCH_SCHEMA, DOCUMENT_SEARCH_SCHEMA, MEMORY_GET_SCHEMA,
                 MEMORY_NOTE_SCHEMA,
                 MEMORY_TIMELINE_SCHEMA, MEMORY_UPDATE_SCHEMA,
                 MEMORY_REVIEW_SCHEMA]
@@ -997,13 +1027,16 @@ class RaggerMemoryProvider(MemoryProvider):
             if not query:
                 return json.dumps({"error": "Missing required parameter: query"})
             payload: dict = {"query": query}
-            for key in ("since", "until", "status"):
+            for key in ("since", "until", "status", "mode"):
                 if args.get(key):
                     payload[key] = str(args[key])
             if args.get("layers"):
                 payload["layers"] = [str(x) for x in args["layers"]]
             if args.get("kinds"):
                 payload["kinds"] = [str(x) for x in args["kinds"]]
+            if args.get("tags"):
+                t = args["tags"]
+                payload["tags"] = [str(x) for x in t] if isinstance(t, list) else str(t)
             # 'current' resolves to this Hermes session before posting.
             if args.get("session"):
                 s = str(args["session"])
@@ -1018,6 +1051,23 @@ class RaggerMemoryProvider(MemoryProvider):
                         return json.dumps({"error": err})
                     payload[key] = v
             got = self._post_status("/memory/search", payload)
+            return self._agent_tool_result(got)
+
+        elif tool_name == "document_search":
+            query = str(args.get("query", "")).strip()
+            if not query:
+                return json.dumps({"error": "Missing required parameter: query"})
+            payload = {"query": query}
+            if args.get("source"):
+                payload["source"] = str(args["source"])
+            if args.get("mode"):
+                payload["mode"] = str(args["mode"])
+            if args.get("limit") is not None:
+                v, err = _int_or_error(args["limit"], "limit")
+                if err:
+                    return json.dumps({"error": err})
+                payload["limit"] = v
+            got = self._post_status("/memory/documents", payload)
             return self._agent_tool_result(got)
 
         elif tool_name == "memory_note":
@@ -1067,7 +1117,10 @@ class RaggerMemoryProvider(MemoryProvider):
             payload = {"id": rid}
             for key in ("status", "tags"):
                 if args.get(key) is not None:
-                    payload[key] = str(args[key])
+                    v = args[key]
+                    # LR S78: tags may be an array or a comma string; str() on a
+                    # list would send Python repr, so pass lists through.
+                    payload[key] = [str(x) for x in v] if isinstance(v, list) else str(v)
             got = self._post_status("/memory/update", payload)
             return self._agent_tool_result(got)
 

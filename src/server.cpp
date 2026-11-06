@@ -565,6 +565,15 @@ struct Server::Impl {
         Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "POST", "/memory/search", "200"));
     }
 
+    // POST /memory/documents — LR S76 (D-7): documents' own search verb.
+    // Body = {query, source?, limit?}; same hit shape as /memory/search.
+    void handle_memory_documents(const UserInfo& /*user*/, const httplib::Request& req,
+                                 httplib::Response& res) {
+        auto body = json::parse(req.body);
+        respond_json(res, agent_document_search(memory, body));
+        Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "POST", "/memory/documents", "200"));
+    }
+
     // POST /memory/get — agent row reads (agent API Phase 2).
     // Body = AgentGetQuery fields: {ids?: [handles], expand?, session?,
     // after_turn?, before_turn?, limit?}. Exactly one mode per call.
@@ -706,6 +715,7 @@ struct Server::Impl {
         svr.Post("/decision",           guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_decision(u, req, res); }));
         svr.Post("/search",             guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_search(u, req, res); }));
         svr.Post("/memory/search",      guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_search(u, req, res); }));
+        svr.Post("/memory/documents",   guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_documents(u, req, res); }));
         svr.Post("/memory/get",         guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_get(u, req, res); }));
         svr.Post("/memory/note",        guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_note(u, req, res); }));
         svr.Post("/memory/timeline",    guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_timeline(u, req, res); }));

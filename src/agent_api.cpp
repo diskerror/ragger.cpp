@@ -110,6 +110,14 @@ nlohmann::json agent_memory_get(RaggerMemory& mem, const nlohmann::json& args) {
     return mem.agent_get(parse_agent_get_query(args));
 }
 
+nlohmann::json agent_document_search(RaggerMemory& mem, const nlohmann::json& args) {
+    const auto hits = mem.agent_document_search(parse_document_search_query(args));
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& h : hits)
+        arr.push_back(agent_hit_to_json(h));
+    return nlohmann::json{{"results", std::move(arr)}};
+}
+
 nlohmann::json agent_memory_timeline(RaggerMemory& mem, const nlohmann::json& args) {
     return mem.agent_timeline(parse_timeline_query(args));
 }

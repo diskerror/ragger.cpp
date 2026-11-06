@@ -15,10 +15,13 @@
 #include "nlohmann_json.hpp"
 #include <sqlite3.h>
 #include <Eigen/Dense>
+#include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace ragger::sqlite {
@@ -96,6 +99,10 @@ struct Backend::Impl {
     EmbeddingCache knowledge_cache_; // knowledge (L6; PHASE7 replaces dec+ins)
     EmbeddingCache turn_cache_;      // turn_summaries (L2)
     EmbeddingCache episode_cache_;   // episodes (db 0.17, PHASE5 B.3)
+    // LR S75: raw exchanges (turns) as an OPT-IN agent corpus — loaded and
+    // scored only when layers explicitly names `turn`, never in the default
+    // set, so existing results are unchanged.
+    EmbeddingCache raw_turn_cache_;
 
     // Serializes all public-API access (H1): two httplib thread pools, the
     // housekeeping timer, and the SummarizerService worker share one backend.
@@ -298,6 +305,7 @@ struct Backend::Impl {
     void invalidate_knowledge_cache();
     void invalidate_turn_cache();
     void invalidate_episode_cache();
+    void invalidate_raw_turn_cache();
     /// Drop all four warm caches (documents, knowledge, turn_summaries,
     /// episodes). Use after any write that can change rows across several
     /// tables (embedding backfill/rebuild) so no table's stale rows survive.
@@ -333,12 +341,14 @@ struct Backend::Impl {
     /// Episode corpus (db 0.17, PHASE5 B.3): loaded from `episodes` through
     /// the shared load_cache(); marker rows (text='') never load.
     void ensure_episode_cache();
+    void ensure_raw_turn_cache();
 
     // --- agent API Phase 2 reads (src/sqlite/agent_read.cpp) ---
 
     // Layered hybrid search over all caches with post-filters; see
     // StorageBackend::agent_search for the contract.
     std::vector<AgentHit> agent_search(const AgentSearchQuery& q);
+    std::vector<AgentHit> agent_document_search(const DocumentSearchQuery& q);
 
     // Full-row reads / hierarchy expansion / history paging; see
     // StorageBackend::agent_get for the contract.
@@ -733,6 +743,34 @@ struct Backend::Impl {
     // corpora. No embedding caches, no embedder call. Used when embeddings
     // are degraded (drift mismatch at startup).
     SearchResponse search_text_only(const std::string& query, int limit);
+
+    // ---- shared corpus scoring (LR S74) ---------------------------------
+    // Blend one hybrid corpus (every row, unsorted): raw cosine + text-index
+    // signal, each min-max normalized WITHIN the corpus. One implementation
+    // shared by search() (merged pools) and hybrid_pools() (per-corpus pools
+    // for agent_search).
+    std::vector<SearchResult> blend_hybrid_corpus(
+        const EmbeddingCache& c, const Eigen::VectorXf& q_norm,
+        const std::unordered_map<int, float>& kw);
+    // Per-corpus hybrid pools (agent_search, review #2): one pass per
+    // requested source label, each corpus capped at its OWN pool (blended
+    // desc); the query is embedded once. Throws runtime_error when the
+    // embedder is not ready (search()'s gate). `use_kw=false` (LR S77
+    // semantic mode) drops the text-index signal: pure normalized cosine.
+    std::map<std::string, std::vector<SearchResult>>
+        hybrid_pools(const std::string& query,
+                     const std::set<std::string>& sources, int pool,
+                     bool use_kw = true);
+    // Score one text corpus: text-index hits joined back to the row's text
+    // + timestamp. Shared by search_text_only() and text_pools().
+    std::vector<SearchResult> text_score_corpus(
+        const std::string& query, const char* table, const char* id_col,
+        const char* text_col, const char* source_label, const char* ts_expr,
+        const std::string& extra_where, const char* from_clause);
+    // Text-only counterpart of hybrid_pools (degraded path, no embedder).
+    std::map<std::string, std::vector<SearchResult>>
+        text_pools(const std::string& query,
+                   const std::set<std::string>& sources, int pool);
 
     // --- maintenance ---
 

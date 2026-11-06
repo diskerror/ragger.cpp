@@ -157,6 +157,10 @@ public:
     /// unknown layer name or a malformed since/until bound.
     virtual std::vector<AgentHit> agent_search(const AgentSearchQuery& q) = 0;
 
+    /// LR S76 (D-7): documents are searched through their own verb, never
+    /// through agent_search's layer list.
+    virtual std::vector<AgentHit> agent_document_search(const DocumentSearchQuery& q) = 0;
+
     /// Agent row reads (agent API Phase 2): full rows by typed handle with
     /// optional hierarchy expansion (mode 1), or paged conversation history
     /// for one session (mode 2). Exactly one mode per call; both or neither

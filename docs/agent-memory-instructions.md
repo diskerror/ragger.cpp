@@ -34,12 +34,29 @@ it. Do not invent memories.
 With the layered tools:
 - `memory_search` returns **handles and snippets only**. Pick the relevant
   ones and call `memory_get` with the handles for full text. `expand` can add
-  neighbouring turns (`context`), a row's evidence (`sources`), or a decision's
-  full supersede lineage (`chain`).
+  neighbouring turns (`context`, in session time order), a row's evidence
+  (`sources`), or a decision's
+  full supersede lineage (`chain`). The default layers are turn summaries,
+  episodes and knowledge; raw `turn` text is searched **only** when you name
+  `turn` explicitly — prefer the summaries, which are denser.
+- `memory_get(session=...)` history pages carry each turn's
+  `turn_summary_id` and `episode_id` (`null` when absent), so a reader can
+  fill `evidence[]` handles without extra lookups.
 - `memory_timeline` answers "what did we do recently / last session": a
-  newest-first list, not a ranked search. Pass an explicit session GUID to
+  newest-first list, not a ranked search. `granularity` also accepts
+  `knowledge` (stored rows newest first). Pass an explicit session GUID to
   scope it to one conversation; `current` resolves only through the Hermes
   plugin.
+- `document_search` searches **imported documents** (their own verb;
+  `memory_search` does not cover them). Optional `source` narrows to stored
+  source paths containing a substring. Hits are `document:<N>` handles with
+  `extra: {source_path, chunk_index}`.
+- Both search verbs take `mode`: `hybrid` (default), `semantic` (vector only,
+  needs an embedder) or `keyword` (text index only).
+- `memory_search` takes `tags` (array, or a comma string): knowledge rows must
+  carry **all** listed tags (trimmed, case-insensitive; `project:<name>` is
+  just a tag). Layers without tags (turns, summaries, episodes) are excluded
+  while a tags filter is on.
 - Search hides superseded and retired knowledge by default. Pass `status='any'`
   only when you need the history.
 

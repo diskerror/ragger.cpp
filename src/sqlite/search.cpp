@@ -27,6 +27,80 @@ namespace fs = std::filesystem;
                                    config().fts_w_metaphone, config().fts_literal_enabled});
     }
 
+    // ---- shared corpus scoring (LR S74) ----------------------------------
+    // Blend one hybrid corpus into scored results (every row, unsorted):
+    // raw cosine blended with the custom text-index TF-IDF signal (literal +
+    // metaphone folded together by score_query()). Each signal is min-max
+    // normalized WITHIN this corpus then weighted-summed. Extracted from
+    // search()'s score_corpus lambda so the per-corpus pool path
+    // (agent_search) shares ONE blend implementation; search() merges the
+    // four corpora's outputs exactly as the lambda used to accumulate them.
+    std::vector<SearchResult> Backend::Impl::blend_hybrid_corpus(
+            const EmbeddingCache& c, const Eigen::VectorXf& q_norm,
+            const std::unordered_map<int, float>& kw) {
+        const auto& ids = c.ids;
+        const auto& texts = c.texts;
+        const auto& cache_emb = c.embeddings;
+        const auto& meta = c.metadata;
+        const auto& ts = c.timestamps;
+        int n = static_cast<int>(ids.size());
+        std::vector<SearchResult> out;
+        if (n == 0) return out;
+        out.reserve(static_cast<size_t>(n));
+
+        // cache_emb rows are L2-normalized at cache-build time, and q_norm
+        // is the normalized query vector, so this product is raw cosine.
+        Eigen::VectorXf similarities = cache_emb * q_norm;   // raw cosine, reported
+
+        auto norm_minmax = [](Eigen::VectorXf& v) {
+            float mn = v.minCoeff(), mx = v.maxCoeff();
+            if (mx > mn) v = (v.array() - mn) / (mx - mn);
+        };
+        auto gather = [&](const std::unordered_map<int, float>& m) {
+            Eigen::VectorXf v(n);
+            for (int i = 0; i < n; ++i) {
+                auto it = m.find(ids[i]);
+                v(i) = (it == m.end()) ? 0.0f : it->second;
+            }
+            return v;
+        };
+
+        bool use_kw = config().bm25_enabled && !kw.empty();
+
+        // Normalized [0,1] signal vectors. vec is always computed; kw
+        // only when the text-index signal is active. When it doesn't
+        // contribute, ranking falls back to raw cosine (combined) so the
+        // vec-only path behaves exactly as before.
+        Eigen::VectorXf vec_norm = similarities;
+        Eigen::VectorXf kw_norm;
+        Eigen::VectorXf combined = similarities;
+        if (use_kw) {
+            norm_minmax(vec_norm);
+            combined = config().vector_weight * vec_norm;
+            kw_norm = gather(kw);
+            norm_minmax(kw_norm);
+            combined += config().bm25_weight * kw_norm;
+        }
+
+        for (int i = 0; i < n; ++i) {
+            SearchResult sr{ids[i], texts[i], similarities(i), meta[i], ts[i]};
+            // Per-signal breakdown for RAGGER_STATS. -1 marks an inactive
+            // signal so the analysis can tell "0 contribution" apart from
+            // "not part of this search". vec_score is the normalized cosine
+            // that actually fed the blend (== raw cosine on the vec-only
+            // path, since no min-max is applied there). phon_score is no
+            // longer an independent signal (folded into bm25_score by
+            // score_query()); kept at -1 for API/stats-schema compat.
+            sr.vec_score  = vec_norm(i);
+            sr.bm25_score = use_kw   ? kw_norm(i) : -1.0f;
+            sr.phon_score = -1.0f;
+            sr.blended    = combined(i);
+            out.push_back(std::move(sr));
+        }
+        return out;
+    }
+
+
     SearchResponse Backend::Impl::search(const std::string& query, int limit,
                           float min_score,
                           std::vector<std::string> /*collections*/) {
@@ -63,84 +137,16 @@ namespace fs = std::filesystem;
         Eigen::Map<Eigen::VectorXf> q(q_vec.data(), static_cast<int>(q_vec.size()));
         Eigen::VectorXf q_norm = q.normalized();
 
-        // A scored candidate: raw cosine is reported as the score, the blended
-        // value drives ranking. Both corpora produce these and are merged.
-        struct Candidate {
-            float        blended;
-            SearchResult result;
-        };
-        std::vector<Candidate> candidates;
+        std::vector<SearchResult> candidates;
         candidates.reserve(static_cast<size_t>(n_doc + n_kno + n_turn + n_ep));
-
-        // Score one corpus: vector cosine blended with the custom text-index
-        // TF-IDF signal (literal + metaphone folded together by score_query()).
-        // Each signal is min-max normalized to [0,1] then weighted-summed.
-        // Shared by the summaries/documents/decisions/turns passes so the
-        // blend logic lives in exactly one place.
-        auto score_corpus =
-            [&](const EmbeddingCache& c,
-                const std::unordered_map<int, float>& kw) {
-            const auto& ids = c.ids;
-            const auto& texts = c.texts;
-            const auto& cache_emb = c.embeddings;
-            const auto& meta = c.metadata;
-            const auto& ts = c.timestamps;
-            int n = static_cast<int>(ids.size());
-            if (n == 0) return;
-
-            // cache_emb rows are L2-normalized at cache-build time, and q_norm
-            // is the normalized query vector, so this product is raw cosine.
-            Eigen::VectorXf similarities = cache_emb * q_norm;   // raw cosine, reported
-
-            auto norm_minmax = [](Eigen::VectorXf& v) {
-                float mn = v.minCoeff(), mx = v.maxCoeff();
-                if (mx > mn) v = (v.array() - mn) / (mx - mn);
-            };
-            auto gather = [&](const std::unordered_map<int, float>& m) {
-                Eigen::VectorXf v(n);
-                for (int i = 0; i < n; ++i) {
-                    auto it = m.find(ids[i]);
-                    v(i) = (it == m.end()) ? 0.0f : it->second;
-                }
-                return v;
-            };
-
-            bool use_kw   = config().bm25_enabled && !kw.empty();
-
-            // Normalized [0,1] signal vectors. vec is always computed; kw
-            // only when the text-index signal is active. When it doesn't
-            // contribute, ranking falls back to raw cosine (combined) so the
-            // vec-only path behaves exactly as before.
-            Eigen::VectorXf vec_norm = similarities;
-            Eigen::VectorXf kw_norm;
-            Eigen::VectorXf combined = similarities;
-            if (use_kw) {
-                norm_minmax(vec_norm);
-                combined = config().vector_weight * vec_norm;
-                kw_norm = gather(kw);
-                norm_minmax(kw_norm);
-                combined += config().bm25_weight * kw_norm;
-            }
-
-            for (int i = 0; i < n; ++i) {
-                SearchResult sr{ids[i], texts[i], similarities(i), meta[i], ts[i]};
-                // Per-signal breakdown for RAGGER_STATS. -1 marks an inactive
-                // signal so the analysis can tell "0 contribution" apart from
-                // "not part of this search". vec_score is the normalized cosine
-                // that actually fed the blend (== raw cosine on the vec-only
-                // path, since no min-max is applied there). phon_score is no
-                // longer an independent signal (folded into bm25_score by
-                // score_query()); kept at -1 for API/stats-schema compat.
-                sr.vec_score  = vec_norm(i);
-                sr.bm25_score = use_kw   ? kw_norm(i) : -1.0f;
-                sr.phon_score = -1.0f;
-                sr.blended    = combined(i);
-                candidates.push_back({combined(i), std::move(sr)});
-            }
+        auto append = [&](std::vector<SearchResult>&& v) {
+            candidates.insert(candidates.end(),
+                              std::make_move_iterator(v.begin()),
+                              std::make_move_iterator(v.end()));
         };
 
         // Convert a text_index_ score vector into the id->score map the
-        // blend lambda expects.
+        // blend expects.
         auto to_map = [](const std::vector<TextScore>& v) {
             std::unordered_map<int, float> m;
             m.reserve(v.size());
@@ -149,14 +155,16 @@ namespace fs = std::filesystem;
         };
         auto no_scores = std::unordered_map<int, float>{};
         bool bm25_on = config().bm25_enabled;
-        score_corpus(doc_cache_,
-                     bm25_on ? to_map(text_index_->score_query("documents", query)) : no_scores);
-        score_corpus(knowledge_cache_,
-                     bm25_on ? to_map(text_index_->score_query("knowledge", query)) : no_scores);
-        score_corpus(turn_cache_,
-                     bm25_on ? to_map(text_index_->score_query("turn_summaries", query)) : no_scores);
-        score_corpus(episode_cache_,
-                     bm25_on ? to_map(text_index_->score_query("episodes", query)) : no_scores);
+        append(blend_hybrid_corpus(doc_cache_, q_norm,
+                     bm25_on ? to_map(text_index_->score_query("documents", query)) : no_scores));
+        // Knowledge (PHASE7: one corpus replaces decisions + insights). Same
+        // status allow-list as ensure_knowledge_cache().
+        append(blend_hybrid_corpus(knowledge_cache_, q_norm,
+                     bm25_on ? to_map(text_index_->score_query("knowledge", query)) : no_scores));
+        append(blend_hybrid_corpus(turn_cache_, q_norm,
+                     bm25_on ? to_map(text_index_->score_query("turn_summaries", query)) : no_scores));
+        append(blend_hybrid_corpus(episode_cache_, q_norm,
+                     bm25_on ? to_map(text_index_->score_query("episodes", query)) : no_scores));
         auto t_search_end = clock::now();
 
         // ---- merged top-k selection -----------------------------------
@@ -167,7 +175,7 @@ namespace fs = std::filesystem;
         std::vector<int> ranking;
         ranking.reserve(candidates.size());
         for (int i = 0; i < static_cast<int>(candidates.size()); ++i) {
-            if (candidates[i].result.score >= min_score)
+            if (candidates[i].score >= min_score)
                 ranking.push_back(i);
         }
         int total = static_cast<int>(ranking.size());
@@ -181,7 +189,7 @@ namespace fs = std::filesystem;
 
         std::vector<SearchResult> results;
         for (int k = 0; k < top_k; ++k) {
-            results.push_back(candidates[ranking[k]].result);
+            results.push_back(candidates[ranking[k]]);
         }
 
         auto ms = [](auto a, auto b) {
@@ -197,6 +205,151 @@ namespace fs = std::filesystem;
     }
 
 
+    // LR S74: per-corpus hybrid pools for agent_search. One pass per
+    // requested source label; each corpus is capped at its OWN pool (blended
+    // desc) instead of competing for slots in one merged pool. The query is
+    // embedded once for all corpora. Same embedder gate as search().
+    std::map<std::string, std::vector<SearchResult>>
+    Backend::Impl::hybrid_pools(const std::string& query,
+                                const std::set<std::string>& sources, int pool,
+                                bool use_kw) {
+        if (sources.count("document"))     ensure_doc_cache();
+        if (sources.count("knowledge"))    ensure_knowledge_cache();
+        if (sources.count("turn_summary")) ensure_turn_cache();
+        if (sources.count("episode"))      ensure_episode_cache();
+        if (sources.count("turn"))         ensure_raw_turn_cache();
+        if (!embedder || !embedder->ready())
+            throw std::runtime_error("semantic search unavailable: embedder not ready");
+        push_text_weights();
+        auto q_vec = embedder->encode(query);
+        Eigen::Map<Eigen::VectorXf> q(q_vec.data(), static_cast<int>(q_vec.size()));
+        Eigen::VectorXf q_norm = q.normalized();
+
+        std::map<std::string, std::vector<SearchResult>> out;
+        auto one = [&](const char* source, EmbeddingCache& c, const char* table) {
+            std::unordered_map<int, float> kw;
+            if (use_kw && config().bm25_enabled)
+                for (const auto& s : text_index_->score_query(table, query))
+                    kw[s.id] = s.score;
+            auto v = blend_hybrid_corpus(c, q_norm, kw);
+            std::sort(v.begin(), v.end(),
+                      [](const SearchResult& a, const SearchResult& b) {
+                          return a.blended > b.blended;
+                      });
+            if (static_cast<int>(v.size()) > pool) v.resize(static_cast<size_t>(pool));
+            out.emplace(source, std::move(v));
+        };
+        if (sources.count("document"))     one("document", doc_cache_, "documents");
+        if (sources.count("knowledge"))    one("knowledge", knowledge_cache_, "knowledge");
+        if (sources.count("turn_summary")) one("turn_summary", turn_cache_, "turn_summaries");
+        if (sources.count("episode"))      one("episode", episode_cache_, "episodes");
+        // LR S75: raw exchanges, opt-in only (agent_search never puts `turn`
+        // in the default corpus set).
+        if (sources.count("turn"))         one("turn", raw_turn_cache_, "turns");
+        return out;
+    }
+
+
+    // Score one text corpus: text-index hits joined back to the row's text +
+    // timestamp. S45: `from_clause` lets a corpus whose row lives behind a
+    // JOIN (documents) use this ONE path; it replaces the bare table name in
+    // the FROM when given. LR S74: extracted from search_text_only() so the
+    // per-corpus pool path shares the join logic (and its fixes).
+    std::vector<SearchResult> Backend::Impl::text_score_corpus(
+            const std::string& query, const char* table, const char* id_col,
+            const char* text_col, const char* source_label, const char* ts_expr,
+            const std::string& extra_where, const char* from_clause) {
+        std::vector<SearchResult> out;
+        std::vector<TextScore> hits = text_index_->score_query(table, query);
+        if (hits.empty()) return out;
+
+        for (const auto& hit : hits) {
+            Stmt s(db, std::format(
+                "SELECT {}, {} FROM {} WHERE {} = ?{}",
+                text_col, ts_expr, from_clause ? from_clause : table, id_col, extra_where));
+            s.bind(1, hit.id);
+            if (!s.step()) continue;
+            std::string text = s.column_text(0);
+            std::string ts   = s.column_text(1);
+
+            json meta = json::object();
+            meta["source"] = source_label;
+
+            SearchResult sr{hit.id, text, hit.score, meta, ts};
+            sr.vec_score  = -1.0f;  // no vector signal
+            sr.bm25_score = hit.score;
+            sr.phon_score = -1.0f;  // folded into bm25_score by score_query()
+            sr.blended    = hit.score;
+            out.push_back(std::move(sr));
+        }
+        return out;
+    }
+
+
+    namespace {
+    // One row per text corpus: how to join a text_index_ hit back to the
+    // row's text + timestamp. Shared by search_text_only() and text_pools()
+    // so the corpora (and their join fixes) live in exactly one list.
+    struct TextCorpusSpec {
+        const char* source;       // metadata source label / agent layer
+        const char* table;        // text_index_ table name
+        const char* id_col;
+        const char* text_col;
+        const char* ts_expr;
+        std::string extra_where;
+        const char* from_clause;  // nullptr = bare table name
+        // LR S75: corpora the OPT-IN agent layer scores but the flat quick
+        // search (and the degraded all-corpora path) must never include.
+        bool agent_only = false;
+    };
+    const std::vector<TextCorpusSpec>& text_corpora() {
+        static const std::vector<TextCorpusSpec> kCorpora = [] {
+            std::vector<TextCorpusSpec> v;
+            // Documents (imported_at lives on document_sources, joined via
+            // document_source_id — pre-existing bug fixed while rewiring this
+            // corpus for v0.16: the old code referenced documents.imported_at,
+            // a column that has never existed on the documents table itself).
+            v.push_back({"document", "documents", "d.document_id", "d.text",
+                "CASE WHEN ds.imported_at IS NULL THEN '' "
+                "ELSE datetime(ds.imported_at,'unixepoch','localtime') END",
+                "",
+                "documents d LEFT JOIN document_sources ds "
+                "ON d.document_source_id = ds.document_source_id"});
+            // Knowledge (PHASE7: one corpus replaces decisions + insights). Same
+            // status allow-list as ensure_knowledge_cache(): superseded / retired /
+            // pending rows are history or unreviewed drafts — they must stay
+            // hidden here too, or degraded (text-only) search leaks them while
+            // normal search hides them.
+            v.push_back({"knowledge", "knowledge", "knowledge_id", "text",
+                "datetime(created_at,'unixepoch','localtime')",
+                " AND status IN (" + status::in_list_sql(status::kCacheLoaded) + ")",
+                nullptr});
+            // Turn summaries. NOTE: this table has no created_at — an L2 summary
+            // inherits its source turn's timestamp in turn_datetime (the
+            // (session_id, turn_datetime) pair is the join back to the turn).
+            v.push_back({"turn_summary", "turn_summaries", "turn_summary_id", "text",
+                "datetime(turn_datetime,'unixepoch','localtime')", "", nullptr});
+            // Episodes (db 0.17). Marker rows (text='') are excluded here exactly
+            // as ensure_episode_cache() excludes them from the vector corpus.
+            v.push_back({"episode", "episodes", "episode_id", "text",
+                "datetime(span_end,'unixepoch','localtime')", " AND text != ''", nullptr});
+            // LR S75: raw exchanges — opt-in agent layer only (never in the
+            // flat search's all-corpora sweep). Same non-empty rule as the
+            // vector loader.
+            v.push_back({"turn", "turns", "turn_id",
+                "ifnull(user_text,'') || CASE "
+                "WHEN ifnull(assistant_text,'') = '' THEN '' "
+                "ELSE char(10) || char(10) || assistant_text END",
+                "datetime(created_at,'unixepoch','localtime')",
+                " AND (ifnull(user_text,'') != '' OR ifnull(assistant_text,'') != '')",
+                nullptr, true});
+            return v;
+        }();
+        return kCorpora;
+    }
+    } // anonymous namespace
+
+
     // Text-only search: text-index keyword + phonetic scoring across all four
     // corpora. No embedding caches, no embedder call. Used when embeddings
     // are degraded (drift mismatch at startup).
@@ -206,91 +359,29 @@ namespace fs = std::filesystem;
 
         push_text_weights();
 
-        struct Candidate {
-            float        score;
-            SearchResult result;
-        };
-        std::vector<Candidate> candidates;
-
-        // Score one corpus via the custom TF-IDF text index, then join back
-        // to the source table for text + metadata. S45: `from_clause` lets a
-        // corpus whose row lives behind a JOIN (documents) use this ONE path;
-        // it replaces the bare table name in the FROM when given.
-        auto score_text_corpus = [&](
-                const char* table, const char* id_col, const char* text_col,
-                const char* source_label,
-                const char* ts_expr,
-                const char* extra_where = "",
-                const char* from_clause = nullptr) {
-            std::vector<TextScore> hits = text_index_->score_query(table, query);
-            if (hits.empty()) return;
-
-            for (const auto& hit : hits) {
-                Stmt s(db, std::format(
-                    "SELECT {}, {} FROM {} WHERE {} = ?{}",
-                    text_col, ts_expr, from_clause ? from_clause : table, id_col, extra_where));
-                s.bind(1, hit.id);
-                if (!s.step()) continue;
-                std::string text = s.column_text(0);
-                std::string ts   = s.column_text(1);
-
-                json meta = json::object();
-                meta["source"] = source_label;
-
-                SearchResult sr{hit.id, text, hit.score, meta, ts};
-                sr.vec_score  = -1.0f;  // no vector signal
-                sr.bm25_score = hit.score;
-                sr.phon_score = -1.0f;  // folded into bm25_score by score_query()
-                sr.blended    = hit.score;
-                candidates.push_back({hit.score, std::move(sr)});
-            }
-        };
-
-        // Documents (imported_at lives on document_sources, joined via
-        // document_source_id — pre-existing bug fixed while rewiring this
-        // corpus for v0.16: the old code referenced documents.imported_at,
-        // a column that has never existed on the documents table itself).
-        score_text_corpus("documents", "d.document_id", "d.text", "document",
-                          "CASE WHEN ds.imported_at IS NULL THEN '' "
-                          "ELSE datetime(ds.imported_at,'unixepoch','localtime') END",
-                          "",
-                          "documents d LEFT JOIN document_sources ds "
-                          "ON d.document_source_id = ds.document_source_id");
-        // Knowledge (PHASE7: one corpus replaces decisions + insights). Same
-        // status allow-list as ensure_knowledge_cache(): superseded / retired /
-        // pending rows are history or unreviewed drafts — they must stay
-        // hidden here too, or degraded (text-only) search leaks them while
-        // normal search hides them.
-        score_text_corpus("knowledge", "knowledge_id", "text", "knowledge",
-                          "datetime(created_at,'unixepoch','localtime')",
-                          (" AND status IN (" + status::in_list_sql(status::kCacheLoaded) + ")").c_str());
-        // Turn summaries. NOTE: this table has no created_at — an L2 summary
-        // inherits its source turn's timestamp in turn_datetime (the
-        // (session_id, turn_datetime) pair is the join back to the turn). The
-        // wrong column name here threw "no such column: created_at" out of the
-        // whole function, so text-only search never returned anything: both
-        // the drift-degraded fallback and the startup warmup were dead.
-        score_text_corpus("turn_summaries", "turn_summary_id", "text", "turn_summary",
-                          "datetime(turn_datetime,'unixepoch','localtime')");
-        // Episodes (db 0.17). Marker rows (text='') are excluded here exactly
-        // as ensure_episode_cache() excludes them from the vector corpus.
-        score_text_corpus("episodes", "episode_id", "text", "episode",
-                          "datetime(span_end,'unixepoch','localtime')",
-                          " AND text != ''");
+        std::vector<SearchResult> candidates;
+        for (const auto& c : text_corpora()) {
+            if (c.agent_only) continue;  // LR S75: opt-in layer, not in the sweep
+            auto v = text_score_corpus(query, c.table, c.id_col, c.text_col,
+                                       c.source, c.ts_expr, c.extra_where, c.from_clause);
+            candidates.insert(candidates.end(),
+                              std::make_move_iterator(v.begin()),
+                              std::make_move_iterator(v.end()));
+        }
 
         if (candidates.empty())
             return {{}, {{"corpus_size", 0}, {"text_only", true}}};
 
         // Rank by blended score, top-k
         std::sort(candidates.begin(), candidates.end(),
-                  [](const Candidate& a, const Candidate& b) {
-                      return a.score > b.score;
+                  [](const SearchResult& a, const SearchResult& b) {
+                      return a.blended > b.blended;
                   });
 
         std::vector<SearchResult> results;
         int top_k = std::min(limit, static_cast<int>(candidates.size()));
         for (int i = 0; i < top_k; ++i)
-            results.push_back(std::move(candidates[i].result));
+            results.push_back(std::move(candidates[i]));
 
         auto ms = [](auto a, auto b) {
             return std::chrono::duration<double, std::milli>(b - a).count();
@@ -300,6 +391,29 @@ namespace fs = std::filesystem;
             {"text_only", true},
         };
         return {std::move(results), std::move(timing)};
+    }
+
+
+    // LR S74: per-corpus text-only pools (degraded path). Same contract as
+    // hybrid_pools: each requested corpus capped at its OWN pool (blended
+    // desc — here blended == the text-index score).
+    std::map<std::string, std::vector<SearchResult>>
+    Backend::Impl::text_pools(const std::string& query,
+                              const std::set<std::string>& sources, int pool) {
+        push_text_weights();
+        std::map<std::string, std::vector<SearchResult>> out;
+        for (const auto& c : text_corpora()) {
+            if (!sources.count(c.source)) continue;
+            auto v = text_score_corpus(query, c.table, c.id_col, c.text_col,
+                                       c.source, c.ts_expr, c.extra_where, c.from_clause);
+            std::sort(v.begin(), v.end(),
+                      [](const SearchResult& a, const SearchResult& b) {
+                          return a.blended > b.blended;
+                      });
+            if (static_cast<int>(v.size()) > pool) v.resize(static_cast<size_t>(pool));
+            out.emplace(c.source, std::move(v));
+        }
+        return out;
     }
 
 

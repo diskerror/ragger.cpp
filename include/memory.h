@@ -87,6 +87,9 @@ public:
     /// Layered agent search (agent API Phase 2) — handles + snippets only.
     std::vector<AgentHit> agent_search(const AgentSearchQuery& q);
 
+    /// LR S76: documents are searched through their own verb.
+    std::vector<AgentHit> agent_document_search(const DocumentSearchQuery& q);
+
     /// Agent row reads (agent API Phase 2) — full rows / expansion / history.
     json agent_get(const AgentGetQuery& q);
 

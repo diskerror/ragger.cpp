@@ -358,6 +358,11 @@ std::vector<AgentHit> Backend::agent_search(const AgentSearchQuery& q) {
     return pImpl->agent_search(q);
 }
 
+std::vector<AgentHit> Backend::agent_document_search(const DocumentSearchQuery& q) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->agent_document_search(q);
+}
+
 json Backend::agent_get(const AgentGetQuery& q) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->agent_get(q);

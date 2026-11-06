@@ -588,6 +588,7 @@ static std::string tags_from_metadata(const json& metadata) {
                     throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
                 text_index_->index_record("turns", prev_id, u + "\n" + *merged);
                 tx.commit();
+                invalidate_raw_turn_cache();  // LR S75
                 return prev_id;
             }
         }
@@ -627,6 +628,7 @@ static std::string tags_from_metadata(const json& metadata) {
             touch_session_span(session_id, ts);
             tx.commit();
         }
+        invalidate_raw_turn_cache();  // LR S75
         return new_id;
     }
 
@@ -707,6 +709,7 @@ static std::string tags_from_metadata(const json& metadata) {
         if (!s.exec()) return false;  // tx rolls back on scope exit
         text_index_->index_record("turns", turn_id, u + "\n" + a);
         tx.commit();
+        invalidate_raw_turn_cache();  // LR S75
         return true;
     }
 
@@ -1894,6 +1897,7 @@ static std::string tags_from_metadata(const json& metadata) {
                 recompute_span(new_session_id);
         }
         tx.commit();
+        if (changed) invalidate_raw_turn_cache();  // LR S75: time/session moved
         return changed;
     }
 

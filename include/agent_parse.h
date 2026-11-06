@@ -30,6 +30,9 @@ std::string tags_to_comma_string(const nlohmann::json& a,
 /// POST /memory/search body / memory_search arguments -> AgentSearchQuery.
 AgentSearchQuery parse_agent_search_query(const nlohmann::json& a);
 
+/// LR S76: arguments for the document_search verb (query, source, limit).
+DocumentSearchQuery parse_document_search_query(const nlohmann::json& a);
+
 /// POST /memory/get body / memory_get arguments -> AgentGetQuery.
 AgentGetQuery parse_agent_get_query(const nlohmann::json& a);
 

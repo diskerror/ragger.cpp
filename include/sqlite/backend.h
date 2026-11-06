@@ -79,6 +79,7 @@ public:
 
     /// Agent API Phase 2 reads (see StorageBackend docs).
     std::vector<AgentHit> agent_search(const AgentSearchQuery& q) override;
+    std::vector<AgentHit> agent_document_search(const DocumentSearchQuery& q) override;
     json agent_get(const AgentGetQuery& q) override;
 
     /// Agent API Phase 4: timeline / curation / review (see StorageBackend docs).

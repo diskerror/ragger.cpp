@@ -2224,9 +2224,10 @@ void test_invalidate_all_caches(ragger::Embedder& emb) {
         daemon.store_document(d);
     }
     auto has = [&](const char* q, const char* needle) {
-        ragger::AgentSearchQuery aq;
-        aq.query = q; aq.layers = {"document"}; aq.limit = 10;
-        for (auto& h : daemon.agent_search(aq))
+        // LR S76: documents are probed through their own verb now.
+        ragger::DocumentSearchQuery dq;
+        dq.query = q; dq.limit = 10;
+        for (auto& h : daemon.agent_document_search(dq))
             if (h.snippet.find(needle) != std::string::npos) return true;
         return false;
     };
@@ -3846,10 +3847,9 @@ void p11_search_by_metadata_boundaries(ragger::Embedder& emb) {
 // =======================================================================
 // S51 (b) (B §6 item 11-ish, C §7): agent_search on the DEGRADED path
 // (no usable embedder -> search_text_only) with a document hit and a time
-// window. The existing since/until probe (test_p2_search_since) uses a ready
-// embedder and a knowledge row; nothing covered the degraded branch, the
-// documents layer, or `until`.
-//
+// LR S76 MIGRATION: this window test used the documents corpus (the only
+// degraded-path fixture at the time); documents left agent_search's layers,
+// so the same degraded-window contract is now pinned on turn_summaries.
 // Window semantics AS IMPLEMENTED (src/sqlite/agent_read.cpp): the bounds are
 // resolved by resolve_agent_time_bound() and then compared as STRINGS against
 // the rendered local datetime of each hit — `since` inclusive, `until`
@@ -3860,8 +3860,8 @@ void p11_search_by_metadata_boundaries(ragger::Embedder& emb) {
 // Runs without an ONNX model: the DB-only constructor leaves the embedder
 // null, which is exactly the "unready" condition.
 // =======================================================================
-void p11_agent_search_unready_document_window(ragger::Embedder& emb) {
-    std::println("  p11_agent_search_unready_document_window...");
+void p11_agent_search_unready_window(ragger::Embedder& emb) {
+    std::println("  p11_agent_search_unready_window...");
     cleanup();
 
     // Writes need an embedder (require_embedder() throws without one), so the
@@ -3870,19 +3870,13 @@ void p11_agent_search_unready_document_window(ragger::Embedder& emb) {
     // server without a model reaches it.
     {
         ragger::sqlite::Backend w(emb, TEMP_DB);
-        ragger::DocumentChunk early;
-    early.path = "/docs/window-early.md";
-    early.title = "window early";
-    early.text = "otter slide rule specifications";
-        early.imported_at = "2026-06-01 10:00:00";
-        CHECK(w.store_document(early, /*defer_embedding=*/true) > 0);
-
-        ragger::DocumentChunk late;
-        late.path = "/docs/window-late.md";
-        late.title = "window late";
-        late.text = "otter slide rule calibration";
-        late.imported_at = "2026-06-05 10:00:00";
-        CHECK(w.store_document(late, /*defer_embedding=*/true) > 0);
+        const std::string gs = "p11-window";
+        const int t1 = w.store_turn("early q", "otter slide rule specifications",
+                                    "test-model", true, gs, "2026-06-01 10:00:00");
+        CHECK(w.finalize_turn_summary(t1, "otter slide rule specifications", "summarizer-model"));
+        const int t2 = w.store_turn("late q", "otter slide rule calibration",
+                                    "test-model", true, gs, "2026-06-05 10:00:00");
+        CHECK(w.finalize_turn_summary(t2, "otter slide rule calibration", "summarizer-model"));
     }
 
     ragger::sqlite::Backend db(TEMP_DB);   // DB-only: embedder == nullptr
@@ -3901,13 +3895,13 @@ void p11_agent_search_unready_document_window(ragger::Embedder& emb) {
     q.query = "otter slide rule";
     q.limit = 10;
 
-    // Degraded path finds both documents. NOTE: matched_by is deliberately NOT
+    // Degraded path finds both summaries. NOTE: matched_by is deliberately NOT
     // asserted here -- see p11_agent_search_matched_by_no_vector_signal below
     // (FINDING, parked unregistered).
     auto all = db.agent_search(q);
     CHECK(all.size() == 2);
     for (const auto& h : all) {
-        CHECK(h.layer == "document");
+        CHECK(h.layer == "turn_summary");
         // Rendered local datetime, never a bare epoch.
         CHECK(h.created.size() == 19);
         CHECK(h.created[4] == '-' && h.created[7] == '-' &&
@@ -3916,16 +3910,16 @@ void p11_agent_search_unready_document_window(ragger::Embedder& emb) {
 
     // since (inclusive lower bound, date widened to 00:00:00).
     q.since = "2026-06-03";
-    CHECK(ids(db.agent_search(q)) == "document:2|");
+    CHECK(ids(db.agent_search(q)) == "turn_summary:2|");
     // until (inclusive upper bound, date widened to 23:59:59).
     q.since = "";
     q.until = "2026-06-03";
-    CHECK(ids(db.agent_search(q)) == "document:1|");
+    CHECK(ids(db.agent_search(q)) == "turn_summary:1|");
     // A bare `since` date is widened to 00:00:00, so the row on that day is in
     // (and so is every later row: this bound alone has no upper edge).
     q.until = "";
     q.since = "2026-06-01";
-    CHECK(ids(db.agent_search(q)) == "document:1|document:2|");
+    CHECK(ids(db.agent_search(q)) == "turn_summary:1|turn_summary:2|");
     // Empty window.
     q.since = "2026-06-02";
     q.until = "2026-06-04";
@@ -4604,6 +4598,26 @@ void p10_unknown_session_guid(ragger::Embedder& emb) {
     aq.session = "s43-no-such-guid";
     auto hits = db.agent_search(aq);
     CHECK(hits.empty());
+
+    // Ruling 2026-11-05 (Reid): "matches nothing" is the contract. Same for
+    // the knowledge granularity (LR S79); an unknown exclude_session still
+    // excludes nothing (results unchanged).
+    ragger::TimelineQuery kt;
+    kt.granularity = "knowledge";
+    kt.session = "s43-no-such-guid";
+    CHECK(db.agent_timeline(kt)["items"].empty());
+
+    ragger::KnowledgeInput k;
+    k.kind = "note";
+    k.text = "s43 knowledge note about kites";
+    db.store_knowledge(k);
+    ragger::AgentSearchQuery eq;
+    eq.query = "s43 knowledge note kites";
+    eq.limit = 20;
+    const size_t base = db.agent_search(eq).size();
+    CHECK(base > 0);
+    eq.exclude_session = "s43-no-such-guid";
+    CHECK(db.agent_search(eq).size() == base);
 
     db.close();
     cleanup();
@@ -6576,6 +6590,641 @@ void lr68_test_time_invariants(ragger::Embedder& emb) {
     std::println(" ok");
 }
 
+// LR S73 (R13, Q5, review #3): episodes satisfy the session/exclude_session
+// filters, and episode hits carry extra = {session, span_start, span_end}
+// (spans rendered like memory_timeline renders `created`). Before this step
+// session_of was filled only for turn_summary/knowledge, so
+// layers:["episode"] + session returned [] and extra was null.
+void lr73_test_episode_session_filter_and_extra(ragger::Embedder& emb) {
+    std::println("  lr73_test_episode_session_filter_and_extra...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    const std::string ga = "lr73-a", gb = "lr73-b";
+    auto ma = p5_seed_members(db, ga, {"2026-07-01 09:00:00", "2026-07-01 09:10:00"});
+    auto mb = p5_seed_members(db, gb, {"2026-07-02 09:00:00", "2026-07-02 09:10:00"});
+
+    auto close_ep = [&](const std::string& g, std::vector<int>& m,
+                        const std::string& text, const char* s, const char* e) {
+        ragger::EpisodeClose ec;
+        ec.text = text;
+        ec.model_name = "summarizer-model";
+        ec.session_guid = g;
+        ec.span_start = p5_epoch(s);
+        ec.span_end   = p5_epoch(e);
+        ec.member_turn_summary_ids = m;
+        const int ep = db.store_episode_close(ec);
+        CHECK(ep > 0);
+        return ep;
+    };
+    const int epa = close_ep(ga, ma, "lr73 alpha episode about kites",
+                             "2026-07-01 09:00:00", "2026-07-01 09:10:00");
+    const int epb = close_ep(gb, mb, "lr73 beta episode about kites",
+                             "2026-07-02 09:00:00", "2026-07-02 09:10:00");
+
+    // Session filter over the episode layer: exactly that session's episode.
+    ragger::AgentSearchQuery q;
+    q.query = "lr73 episode kites";
+    q.layers = {"episode"};
+    q.session = ga;
+    auto hits = db.agent_search(q);
+    CHECK(hits.size() == 1);
+    CHECK(!hits.empty() && hits[0].id == "episode:" + std::to_string(epa));
+
+    q.session = "";
+    q.exclude_session = ga;
+    hits = db.agent_search(q);
+    CHECK(hits.size() == 1);
+    CHECK(!hits.empty() && hits[0].id == "episode:" + std::to_string(epb));
+
+    // Episode hits carry extra with the owning session GUID and the span
+    // rendered as local "YYYY-MM-DD HH:MM:SS" (memory_timeline's format).
+    q.exclude_session = "";
+    hits = db.agent_search(q);
+    CHECK(hits.size() == 2);
+    for (const auto& h : hits) {
+        CHECK(h.extra.is_object());
+        const bool is_a = (h.id == "episode:" + std::to_string(epa));
+        CHECK(h.extra.value("session", "") == (is_a ? ga : gb));
+        CHECK(h.extra.value("span_start", std::string()) ==
+              (is_a ? "2026-07-01 09:00:00" : "2026-07-02 09:00:00"));
+        CHECK(h.extra.value("span_end", std::string()) ==
+              (is_a ? "2026-07-01 09:10:00" : "2026-07-02 09:10:00"));
+    }
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+// LR S75: raw turns are an OPT-IN corpus. Default layers never return a
+// turn:* hit; layers:["turn"] finds a phrase that exists only in the raw
+// assistant text (never in its L2 summary); hits carry turn:<N>, created =
+// the turn's time, extra.session; memory_get("turn:<N>") works; degraded
+// (no embedder) mirrors the contract with text-only scoring per corpus.
+void lr75_test_raw_turn_opt_in(ragger::Embedder& emb) {
+    std::println("  lr75_test_raw_turn_opt_in...");
+    cleanup();
+    int t1 = 0, t2 = 0;
+    const std::string s = "lr75-sess";
+    {
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        t1 = db.store_turn("How did the reptile review end?",
+                           "The purple newt hypothesis was rejected in 1998.",
+                           "test-model", false, s, "2026-08-03 11:22:33");
+        CHECK(t1 > 0);
+        CHECK(db.finalize_turn_summary(t1, "The reptile review concluded negatively.",
+                                       "summarizer-model"));
+        // A second turn with NO summary row at all — the raw corpus must find
+        // it too (it is not gated on summarization).
+        t2 = db.store_turn("And the salamander appendix?",
+                           "The orange salamander appendix was withdrawn.",
+                           "test-model", false, s, "2026-08-03 11:25:00");
+        CHECK(t2 > 0);
+
+        // S75 report: raw-turn cache cost for this fixture. Per row the warm
+        // cache holds dim*4 float32 bytes + display text + a small meta json.
+        {
+            const long long text_bytes =
+                std::string_view("How did the reptile review end?").size() +
+                std::string_view("The purple newt hypothesis was rejected in 1998.").size() +
+                std::string_view("And the salamander appendix?").size() +
+                std::string_view("The orange salamander appendix was withdrawn.").size();
+            std::println("    [s75] fixture turns=2 text_bytes={} "
+                         "cache ≈ {} B (float32 emb) + text/meta",
+                         text_bytes, 2 * 384 * 4);
+        }
+
+        ragger::AgentSearchQuery q;
+        q.limit = 10;
+
+        // Default layers: the raw-only phrase must not surface a turn hit.
+        q.query = "purple newt hypothesis rejected";
+        q.layers = {};
+        for (const auto& h : db.agent_search(q))
+            CHECK(!h.id.starts_with("turn:"));
+
+        // Opt-in: finds the turn by raw text its summary never contained.
+        q.layers = {"turn"};
+        bool found = false;
+        for (const auto& h : db.agent_search(q)) {
+            CHECK(h.layer == "turn");
+            if (h.id != "turn:" + std::to_string(t1)) continue;
+            found = true;
+            CHECK(h.created == "2026-08-03 11:22:33");
+            CHECK(h.extra.contains("session"));
+            CHECK(h.extra["session"].get<std::string>() == s);
+        }
+        CHECK(found);
+
+        // The unsummarized turn is findable as well.
+        q.query = "orange salamander appendix";
+        found = false;
+        for (const auto& h : db.agent_search(q))
+            if (h.id == "turn:" + std::to_string(t2)) found = true;
+        CHECK(found);
+
+        // Session filter works on the raw corpus too. NOTE: an UNKNOWN guid
+        // is the parked FINDING (filter silently ignored) — not asserted here;
+        // use a session that exists but does not own t2.
+        const int t3 = db.store_turn("Unrelated question",
+                                     "Nothing about salamanders here.",
+                                     "test-model", false, "lr75-other",
+                                     "2026-08-03 12:00:00");
+        CHECK(t3 > 0);
+        q.query = "orange salamander appendix";
+        q.session = "lr75-other";
+        for (const auto& h : db.agent_search(q))
+            CHECK(h.id != "turn:" + std::to_string(t2));
+        q.session.clear();
+
+        // memory_get by handle.
+        ragger::AgentGetQuery g;
+        g.ids = {"turn:" + std::to_string(t1)};
+        const auto got = db.agent_get(g);
+        CHECK(got["items"][0]["layer"] == "turn");
+        CHECK(got["items"][0]["assistant_text"].get<std::string>()
+                  .contains("purple newt"));
+    }
+    // Degraded (DB-only constructor = unready embedder): same contract via
+    // text-only scoring; default layers still exclude turn.
+    {
+        ragger::sqlite::Backend db(TEMP_DB);
+        ragger::AgentSearchQuery q;
+        q.query = "purple newt hypothesis rejected";
+        q.limit = 10;
+        q.layers = {"turn"};
+        bool found = false;
+        for (const auto& h : db.agent_search(q))
+            if (h.id == "turn:" + std::to_string(t1)) found = true;
+        CHECK(found);
+        q.layers = {};
+        for (const auto& h : db.agent_search(q))
+            CHECK(!h.id.starts_with("turn:"));
+        db.close();
+    }
+    cleanup();
+    std::println(" OK");
+}
+
+// LR S76 (D-7, Q-A): documents get their own verb. document_search finds a
+// chunk with extra {source_path, chunk_index}; `source` filters by path;
+// memory_search's default layers no longer include document, and naming the
+// `document` layer is an invalid_argument pointing to document_search; the
+// flat quick search still covers documents; degraded mirrors the contract.
+void lr76_test_document_search(ragger::Embedder& emb) {
+    std::println("  lr76_test_document_search...");
+    cleanup();
+    int doc_id = 0;
+    {
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        ragger::DocumentChunk d;
+        d.text = "The quarterly otter census was published in March.";
+        d.title = "Otter census";
+        d.path = "/docs/lr76-census.md";
+        d.chunk_index = 2;
+        doc_id = db.store_document(d);
+        CHECK(doc_id > 0);
+
+        ragger::DocumentSearchQuery dq;
+        dq.query = "otter census published";
+        auto hits = db.agent_document_search(dq);
+        bool found = false;
+        for (const auto& h : hits) {
+            CHECK(h.layer == "document");
+            if (h.id != "document:" + std::to_string(doc_id)) continue;
+            found = true;
+            CHECK(h.extra["source_path"] == "/docs/lr76-census.md");
+            CHECK(h.extra["chunk_index"] == 2);
+            CHECK(h.snippet.find("otter") != std::string::npos);
+        }
+        CHECK(found);
+
+        // source filter (substring, case-insensitive).
+        dq.source = "LR76";
+        found = false;
+        for (const auto& h : db.agent_document_search(dq))
+            if (h.id == "document:" + std::to_string(doc_id)) found = true;
+        CHECK(found);
+        dq.source = "no-such-path";
+        for (const auto& h : db.agent_document_search(dq))
+            CHECK(h.id != "document:" + std::to_string(doc_id));
+        dq.source.clear();
+
+        // memory_search default layers: no document hits.
+        ragger::AgentSearchQuery q;
+        q.query = "otter census published";
+        q.limit = 10;
+        for (const auto& h : db.agent_search(q))
+            CHECK(!h.id.starts_with("document:"));
+
+        // Naming the document layer is rejected with the pointer.
+        bool threw = false;
+        try {
+            q.layers = {"document"};
+            db.agent_search(q);
+        } catch (const std::invalid_argument& e) {
+            threw = true;
+            CHECK(std::string(e.what()).find("document_search") != std::string::npos);
+        }
+        CHECK(threw);
+
+        // The flat quick search still covers documents (Hermes keeps one call
+        // for "anything").
+        bool flat = false;
+        for (const auto& r : db.search("otter census published", 10, 0.0f).results)
+            if (r.metadata.value("source", "") == "document") flat = true;
+        CHECK(flat);
+    }
+    // Degraded (unready embedder): document_search still finds via text-only.
+    {
+        ragger::sqlite::Backend db(TEMP_DB);
+        ragger::DocumentSearchQuery dq;
+        dq.query = "otter census published";
+        bool found = false;
+        for (const auto& h : db.agent_document_search(dq))
+            if (h.id == "document:" + std::to_string(doc_id)) found = true;
+        CHECK(found);
+        db.close();
+    }
+    cleanup();
+    std::println(" OK");
+}
+
+// LR S77 (Q-A): mode = hybrid | semantic | keyword. hybrid is the default
+// (byte-identical to today, pinned by every existing search test); keyword
+// is text-index only and works without an embedder; semantic is vector-only
+// (ranks a paraphrase above an unrelated row) and needs an embedder; unknown
+// mode is invalid_argument; matched_by reflects the mode.
+void lr77_test_search_mode(ragger::Embedder& emb) {
+    std::println("  lr77_test_search_mode...");
+    cleanup();
+    int a_id = 0, c_id = 0, doc_id = 0;
+    {
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        const std::string gs = "lr77";
+        const int t1 = db.store_turn("q1", "Freezing garlic bread keeps it fresh for months",
+                                     "test-model", false, gs, "2026-08-04 09:00:00");
+        CHECK(db.finalize_turn_summary(t1, "Freezing garlic bread keeps it fresh for months",
+                                       "summarizer-model"));
+        const int t2 = db.store_turn("q2", "The stock market closed lower on Friday",
+                                     "test-model", false, gs, "2026-08-04 09:01:00");
+        CHECK(db.finalize_turn_summary(t2, "The stock market closed lower on Friday",
+                                       "summarizer-model"));
+        const int t3 = db.store_turn("q3", "The xylophonically tuned bell rang",
+                                     "test-model", false, gs, "2026-08-04 09:02:00");
+        CHECK(db.finalize_turn_summary(t3, "The xylophonically tuned bell rang",
+                                       "summarizer-model"));
+
+        ragger::AgentSearchQuery q;
+        q.limit = 10;
+
+        // keyword: exact rare token, matched_by lexical.
+        q.query = "xylophonically";
+        q.mode = "keyword";
+        bool found = false;
+        for (const auto& h : db.agent_search(q))
+            if (h.id == "turn_summary:" + std::to_string(t3)) {
+                found = true;
+                CHECK(h.matched_by == "lexical");
+            }
+        CHECK(found);
+        c_id = t3;
+
+        // semantic: paraphrase ranks above the unrelated row; matched_by vector.
+        q.query = "how do I keep garlic bread fresh";
+        q.mode = "semantic";
+        int rank_a = -1, rank_b = -1, i = 0;
+        for (const auto& h : db.agent_search(q)) {
+            if (h.id == "turn_summary:" + std::to_string(t1)) { rank_a = i; CHECK(h.matched_by == "vector"); }
+            if (h.id == "turn_summary:" + std::to_string(t2)) rank_b = i;
+            ++i;
+        }
+        CHECK(rank_a >= 0);
+        CHECK(rank_b == -1 || rank_a < rank_b);
+        a_id = t1;
+
+        // unknown mode -> invalid_argument.
+        bool threw = false;
+        try {
+            q.mode = "fuzzy";
+            db.agent_search(q);
+        } catch (const std::invalid_argument&) { threw = true; }
+        CHECK(threw);
+        q.mode = "hybrid";
+
+        // hybrid default finds the keyword row again (unchanged behavior).
+        q.query = "xylophonically";
+        found = false;
+        for (const auto& h : db.agent_search(q))
+            if (h.id == "turn_summary:" + std::to_string(c_id)) found = true;
+        CHECK(found);
+
+        // document_search takes the same mode. (Two docs: with a one-row
+        // corpus the idf term weight is 0 and every text score is 0 — the
+        // parked matched_by FINDING shape, not what this step pins.)
+        ragger::DocumentChunk other;
+        other.text = "Harbor lantern oil deliveries, weekly.";
+        other.title = "Lantern oil";
+        other.path = "/docs/lr77-oil.md";
+        CHECK(db.store_document(other) > 0);
+        ragger::DocumentChunk d;
+        d.text = "Kelpie lighthouse maintenance log, xylophonically indexed.";
+        d.title = "Kelpie log";
+        d.path = "/docs/lr77-kelpie.md";
+        doc_id = db.store_document(d);
+        CHECK(doc_id > 0);
+        ragger::DocumentSearchQuery dq;
+        dq.query = "xylophonically";
+        dq.mode = "keyword";
+        found = false;
+        for (const auto& h : db.agent_document_search(dq))
+            if (h.id == "document:" + std::to_string(doc_id)) {
+                found = true;
+                CHECK(h.matched_by == "lexical");
+            }
+        CHECK(found);
+        threw = false;
+        try {
+            dq.mode = "telepathy";
+            db.agent_document_search(dq);
+        } catch (const std::invalid_argument&) { threw = true; }
+        CHECK(threw);
+    }
+    // Degraded (no embedder): keyword works; semantic is a clean 400-class
+    // invalid_argument, not a runtime_error.
+    {
+        ragger::sqlite::Backend db(TEMP_DB);
+        ragger::AgentSearchQuery q;
+        q.query = "xylophonically";
+        q.limit = 10;
+        q.mode = "keyword";
+        bool found = false;
+        for (const auto& h : db.agent_search(q))
+            if (h.id == "turn_summary:" + std::to_string(c_id)) found = true;
+        CHECK(found);
+        bool threw = false;
+        try {
+            q.mode = "semantic";
+            db.agent_search(q);
+        } catch (const std::invalid_argument& e) {
+            threw = true;
+            CHECK(std::string(e.what()).find("embedder") != std::string::npos);
+        }
+        CHECK(threw);
+        ragger::DocumentSearchQuery dq;
+        dq.query = "xylophonically";
+        dq.mode = "keyword";
+        found = false;
+        for (const auto& h : db.agent_document_search(dq))
+            if (h.id == "document:" + std::to_string(doc_id)) found = true;
+        CHECK(found);
+        db.close();
+    }
+    cleanup();
+    std::println(" OK");
+}
+
+// LR S78 (logic §2): memory_search `tags` filters knowledge hits to rows
+// carrying ALL listed tags (trimmed, case-insensitive); an array or a comma
+// string are both accepted; layers without tags are excluded when tags are
+// given; memory_update accepts the same array/string forms.
+void lr78_test_tags_filter(ragger::Embedder& emb) {
+    std::println("  lr78_test_tags_filter...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    ragger::KnowledgeInput k1;
+    k1.kind = "note"; k1.text = "quay lantern inventory alpha"; k1.tags = "a,b";
+    const auto r1 = db.store_knowledge(k1);
+    ragger::KnowledgeInput k2;
+    k2.kind = "note"; k2.text = "quay lantern inventory beta"; k2.tags = "a";
+    const auto r2 = db.store_knowledge(k2);
+    // A turn_summary matching the same query must be excluded when tags filter.
+    const int t = db.store_turn("quay lantern inventory?", "quay lantern inventory gamma",
+                                "test-model", false, "lr78", "2026-08-05 09:00:00");
+    CHECK(db.finalize_turn_summary(t, "quay lantern inventory gamma", "summarizer-model"));
+
+    auto ids_with = [&](const ragger::json& tags) {
+        ragger::AgentSearchQuery q;
+        q.query = "quay lantern inventory";
+        q.limit = 20;
+        if (tags.is_array()) {
+            for (const auto& x : tags) q.tags.push_back(x.get<std::string>());
+        } else if (tags.is_string()) {
+            const std::string s = tags.get<std::string>();
+            std::string::size_type start = 0;
+            while (start <= s.size()) {
+                auto comma = s.find(',', start);
+                const auto end = comma == std::string::npos ? s.size() : comma;
+                if (end > start) q.tags.push_back(s.substr(start, end - start));
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+            }
+        }
+        std::set<std::string> got;
+        for (const auto& h : db.agent_search(q)) got.insert(h.id);
+        return got;
+    };
+    const std::string id1 = "knowledge:" + std::to_string(r1.id);
+    const std::string id2 = "knowledge:" + std::to_string(r2.id);
+    const std::string tid = "turn_summary:" + std::to_string(t);
+
+    // No tags: both knowledge rows + the summary.
+    auto all = ids_with(ragger::json::array());
+    CHECK(all.count(id1) && all.count(id2) && all.count(tid));
+
+    // AND rule: ["a","b"] -> only the first; ["a"] -> both knowledge rows,
+    // summary excluded (layers without tags drop out).
+    auto ab = ids_with(ragger::json{"a", "b"});
+    CHECK((ab == std::set<std::string>{id1}));
+    auto a = ids_with(ragger::json{"a"});
+    CHECK((a == std::set<std::string>{id1, id2}));
+    // Case-insensitive + comma string form.
+    auto ac = ids_with(ragger::json{"A"});
+    CHECK((ac == std::set<std::string>{id1, id2}));
+    auto cs = ids_with(std::string("a, b"));
+    CHECK((cs == std::set<std::string>{id1}));
+    // A tag nobody has: nothing.
+    CHECK(ids_with(ragger::json{"z"}).empty());
+
+    // memory_update accepts arrays and strings alike.
+    ragger::UpdateRequest u;
+    u.id = id2;
+    u.tags = std::string("x,y");
+    db.agent_update(u);
+    auto after = ids_with(ragger::json{"x", "y"});
+    CHECK(after.count(id2));
+    CHECK((ids_with(ragger::json{"a"}) == std::set<std::string>{id1}));  // id2 lost 'a'
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+// LR S79 (logic §2, P10): history reads carry the hierarchy.
+// (a) session paging returns each turn's turn_summary_id and episode_id
+//     when they exist; (b) expand=context for a turn returns the 2 turns
+//     before/after in SESSION ORDER (created_at, turn_id), not raw id
+//     order; (c) memory_timeline granularity "knowledge" pages newest-first
+//     with <epoch>:<rowid> cursors, no gaps or repeats.
+void lr79_test_history_hierarchy(ragger::Embedder& emb) {
+    std::println("  lr79_test_history_hierarchy...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    const std::string ga = "lr79-a", gb = "lr79-b";
+    // Session A's id order deliberately differs from its time order:
+    //   A1 10:00, B1 10:01 (other session), A2 10:05, A3 10:02,
+    //   A4 10:06, A5 10:03, A6 10:07
+    // A's time order: A1 A3 A5 A2 A4 A6.
+    auto store = [&](const std::string& g, const std::string& n, const char* ts) {
+        return db.store_turn("lr79 q " + n, "lr79 a " + n, "test-model", false, g, ts);
+    };
+    const int a1 = store(ga, "a1", "2026-08-06 10:00:00");
+    const int b1 = store(gb, "b1", "2026-08-06 10:01:00");
+    const int a2 = store(ga, "a2", "2026-08-06 10:05:00");
+    const int a3 = store(ga, "a3", "2026-08-06 10:02:00");
+    const int a4 = store(ga, "a4", "2026-08-06 10:06:00");
+    const int a5 = store(ga, "a5", "2026-08-06 10:03:00");
+    const int a6 = store(ga, "a6", "2026-08-06 10:07:00");
+    CHECK(b1 > 0);
+
+    // (b) context around A2: before = A3, A5; after = A4, A6 (session order).
+    // The old id-window code returned A1, A3, A4 (ids a2-2..a2+2 within the
+    // session): A1 is outside the time window and A5 was missing.
+    ragger::AgentGetQuery gq;
+    gq.ids = {"turn:" + std::to_string(a2)};
+    gq.expand = "context";
+    const auto got = db.agent_get(gq);
+    std::vector<std::string> exp_ids;
+    if (!got["items"].empty() && got["items"][0].contains("expanded"))
+        for (const auto& e : got["items"][0]["expanded"])
+            exp_ids.push_back(e["id"].get<std::string>());
+    const std::vector<std::string> want = {
+        "turn:" + std::to_string(a3), "turn:" + std::to_string(a5),
+        "turn:" + std::to_string(a4), "turn:" + std::to_string(a6)};
+    CHECK((exp_ids == want));
+
+    // (a) summaries + an episode so the hierarchy fields exist.
+    CHECK(db.finalize_turn_summary(a1, "lr79 summary a1", "summarizer-model"));
+    CHECK(db.finalize_turn_summary(a3, "lr79 summary a3", "summarizer-model"));
+    auto tsid = [&](int turn) {
+        sqlite3* raw = p1_open_raw();
+        const long long v = p1_scalar_int(raw, std::format(
+            "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = {}", turn));
+        sqlite3_close(raw);
+        return static_cast<int>(v);
+    };
+    ragger::EpisodeClose ec;
+    ec.text = "lr79 episode one";
+    ec.model_name = "summarizer-model";
+    ec.session_guid = ga;
+    ec.span_start = p5_epoch("2026-08-06 10:00:00");
+    ec.span_end   = p5_epoch("2026-08-06 10:02:00");
+    ec.member_turn_summary_ids = {tsid(a1), tsid(a3)};
+    const int ep = db.store_episode_close(ec);
+    CHECK(ep > 0);
+
+    ragger::AgentGetQuery hq;
+    hq.session = ga;
+    hq.limit = 100;
+    const auto hist = db.agent_get(hq);
+    CHECK(hist["turns"].size() == 6);
+    int seen_a1 = 0, seen_a2 = 0;
+    for (const auto& t : hist["turns"]) {
+        const int id = std::stoi(t["id"].get<std::string>().substr(5));
+        if (id == a1) {
+            CHECK(t["turn_summary_id"] == tsid(a1));
+            CHECK(t["episode_id"] == ep);
+            ++seen_a1;
+        } else if (id == a2) {
+            CHECK(t["turn_summary_id"].is_null());
+            CHECK(t["episode_id"].is_null());
+            ++seen_a2;
+        }
+    }
+    CHECK(seen_a1 == 1 && seen_a2 == 1);
+
+    // (c) knowledge timeline: 5 rows, limit 2 -> pages 2+2+1, no repeats.
+    for (int i = 0; i < 5; ++i) {
+        ragger::KnowledgeInput k;
+        k.kind = "note";
+        k.text = "lr79 knowledge note number " + std::to_string(i);
+        db.store_knowledge(k);
+    }
+    ragger::TimelineQuery tq;
+    tq.granularity = "knowledge";
+    tq.limit = 2;
+    std::set<std::string> seen_ids;
+    int pages = 0;
+    while (true) {
+        const auto tl = db.agent_timeline(tq);
+        for (const auto& it : tl["items"]) {
+            CHECK(it["id"].get<std::string>().starts_with("knowledge:"));
+            CHECK(it["kind"] == "note");
+            CHECK(seen_ids.insert(it["id"].get<std::string>()).second);
+        }
+        ++pages;
+        if (tl["next_cursor"].is_null()) break;
+        tq.cursor = tl["next_cursor"].get<std::string>();
+        CHECK(pages < 10);   // guard: paging must terminate
+    }
+    CHECK(pages == 3);
+    CHECK(seen_ids.size() == 5);
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
+// LR S74 (review #2, Q-A): per-corpus candidate pools. One merged pool of
+// max(limit*5,50) lets a big corpus starve a narrow filter (live probe:
+// layers:[turn_summary] + session -> 0 hits at limit 3). Fixture: 3 target
+// L2 rows in one session, outranked on the query by 80 denser L2 rows in
+// another session and 60 knowledge rows. Per-corpus pools must return all
+// 3 targets at limit 3.
+void lr74_test_per_corpus_pools(ragger::Embedder& emb) {
+    std::println("  lr74_test_per_corpus_pools...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    const std::string gt = "lr74-target", gf = "lr74-filler";
+    for (int i = 0; i < 3; ++i) {
+        const int t = db.store_turn("lr74 q " + std::to_string(i),
+                                    "wombat target " + std::to_string(i),
+                                    "test-model", false, gt,
+                                    "2026-08-01 09:0" + std::to_string(i) + ":00");
+        CHECK(db.finalize_turn_summary(t, "wombat target note " + std::to_string(i),
+                                       "summarizer-model"));
+    }
+    for (int i = 0; i < 80; ++i) {
+        const int t = db.store_turn("lr74 filler q " + std::to_string(i),
+                                    "wombat wombat wombat wombat filler " + std::to_string(i),
+                                    "test-model", false, gf,
+                                    "2026-08-02 09:00:00");
+        CHECK(db.finalize_turn_summary(t, "wombat wombat wombat wombat filler " + std::to_string(i),
+                                       "summarizer-model"));
+    }
+    for (int i = 0; i < 60; ++i)
+        CHECK(!db.store("wombat wombat wombat knowledge " + std::to_string(i)).empty());
+
+    ragger::AgentSearchQuery q;
+    q.query = "wombat";
+    q.layers = {"turn_summary"};
+    q.session = gt;
+    q.limit = 3;
+    auto hits = db.agent_search(q);
+    std::println("    [pin] layers:[turn_summary] session:target limit:3 -> {} hits", hits.size());
+    CHECK(hits.size() == 3);
+    for (const auto& h : hits)
+        CHECK(h.id.starts_with("turn_summary:"));
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
 int main() {
     TestEnv env("sqlite_backend");  // must be first: isolates from ~/.ragger
     // Need config for model dir
@@ -6673,7 +7322,7 @@ int main() {
     p1_test_turn_summary_index_keying(emb);
     p1t_test_import_probes(emb);
     p11_search_by_metadata_boundaries(emb);
-    p11_agent_search_unready_document_window(emb);
+    p11_agent_search_unready_window(emb);
     p11_timeline_turn_interleaved_sessions(emb);
     p11_time_bound_formats(emb);
     p1_test_embedder_swap(emb, model_dir);
@@ -6687,10 +7336,9 @@ int main() {
     p10_knowledge_get_absent_keys(emb);
     p10_text_only_one_path(emb);
     p10_turn_meta_columns(emb);
-    // p10_unknown_session_guid(emb);  // FINDING 2026-11-03: fails on old code
-    // (agent_timeline/agent_search return UNFILTERED results for an unknown
-    // session GUID; comments in agent_read.cpp say 'matches nothing'). Left
-    // defined below, unregistered, per the findings rule; awaiting Reid.
+    // p10_unknown_session_guid: FINDING 2026-11-03 parked; RULED 2026-11-05
+    // ("matches nothing" is the contract) — registered with the fix.
+    p10_unknown_session_guid(emb);
     p10_embeddable_counts(emb);
     p2_test_backfill_invalidates_dec_cache(emb);
     p2_test_db_version_gate(emb);
@@ -6715,6 +7363,13 @@ int main() {
     lr67_test_backfill_stranded(emb);
     lr67_test_backfill_session_names(emb);
     lr68_test_time_invariants(emb);
+    lr73_test_episode_session_filter_and_extra(emb);
+    lr74_test_per_corpus_pools(emb);
+    lr75_test_raw_turn_opt_in(emb);
+    lr76_test_document_search(emb);
+    lr77_test_search_mode(emb);
+    lr78_test_tags_filter(emb);
+    lr79_test_history_hierarchy(emb);
 
     std::println("test_sqlite_backend: all passed");
     return 0;

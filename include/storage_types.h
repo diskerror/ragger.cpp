@@ -120,6 +120,20 @@ struct AgentSearchQuery {
     std::string exclude_session;       ///< drop this session GUID
     int limit = 10;
     int max_tokens = 0;                ///< 0 = no budget; else stop adding results past ~max_tokens (chars/4)
+    std::string mode = "hybrid";       ///< LR S77: hybrid | semantic | keyword
+    std::vector<std::string> tags;     ///< LR S78 (logic §2): knowledge hits must carry ALL
+                                       ///  listed tags (trimmed, case-insensitive elements of
+                                       ///  the stored comma list); layers without tags are
+                                       ///  excluded when non-empty; empty = no filter
+};
+
+/// LR S76 (D-7): documents are their own verb. `source` is a case-insensitive
+/// substring filter on document_sources.path; "" = all sources.
+struct DocumentSearchQuery {
+    std::string query;
+    std::string source;
+    int limit = 10;
+    std::string mode = "hybrid";   // LR S77: hybrid | semantic | keyword
 };
 
 struct AgentHit {
