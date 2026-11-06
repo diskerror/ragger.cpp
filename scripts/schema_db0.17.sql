@@ -25,7 +25,7 @@
 --      superseded | retired | pending (no CHECK; vocabulary may grow).
 --      decision requires trigger; insight requires evidence; note neither.
 --      supersedes is self-referential and may cross kinds (promotion).
---      knowledge_turn_evidence / knowledge_document_evidence replace the old
+--      knowledge_episode_evidence / knowledge_document_evidence replace the old
 --      evidence tables; the document side keeps a breadcrumb path so evidence
 --      survives document deletion.
 --   4. summaries, projects, decisions, insights and every junction/view of
@@ -74,7 +74,9 @@ CREATE TABLE sessions (
                 name_source TEXT,
                 started_on  INTEGER,
                 ended_on    INTEGER,
-                created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+                created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                unigram_count INTEGER NOT NULL DEFAULT 0,
+                bigram_count  INTEGER NOT NULL DEFAULT 0
             );
 
 CREATE TABLE turns (
@@ -178,6 +180,14 @@ CREATE TABLE episodes_terms (
 
 CREATE INDEX idx_episodes_terms_row ON episodes_terms(episode_id);
 
+CREATE TABLE sessions_terms (
+                term_id INTEGER NOT NULL REFERENCES terms(term_id) ON DELETE CASCADE,
+                session_id INTEGER NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                count   INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (term_id, session_id)
+            ) WITHOUT ROWID;
+CREATE INDEX idx_sessions_terms_row ON sessions_terms(session_id);
+
 CREATE INDEX idx_turns_created_at      ON turns(created_at);
 
 CREATE INDEX idx_turns_session         ON turns(session_id);
@@ -217,13 +227,13 @@ CREATE INDEX idx_knowledge_created_at ON knowledge(created_at);
 
 CREATE INDEX idx_knowledge_embedding_version ON knowledge(embedding_version);
 
-CREATE TABLE knowledge_turn_evidence (
-                knowledge_id    INTEGER NOT NULL REFERENCES knowledge(knowledge_id) ON DELETE CASCADE,
-                turn_summary_id INTEGER NOT NULL REFERENCES turn_summaries(turn_summary_id) ON DELETE RESTRICT,
-                PRIMARY KEY (knowledge_id, turn_summary_id)
+CREATE TABLE knowledge_episode_evidence (
+                knowledge_id INTEGER NOT NULL REFERENCES knowledge(knowledge_id) ON DELETE CASCADE,
+                episode_id   INTEGER NOT NULL REFERENCES episodes(episode_id) ON DELETE RESTRICT,
+                PRIMARY KEY (knowledge_id, episode_id)
             );
 
-CREATE INDEX idx_knowledge_turn_evidence_ts ON knowledge_turn_evidence(turn_summary_id);
+CREATE INDEX idx_knowledge_episode_evidence_ep ON knowledge_episode_evidence(episode_id);
 
 CREATE TABLE knowledge_document_evidence (
                 evidence_id          INTEGER PRIMARY KEY,
@@ -279,7 +289,7 @@ CREATE UNIQUE INDEX idx_turn_summaries_turn_id_uniq
 CREATE TRIGGER protect_orphan_turn_summaries
         BEFORE DELETE ON turn_summaries
         WHEN OLD.turn_id IS NULL AND OLD.text <> ''
-        BEGIN SELECT RAISE(ABORT, 'orphaned turn summary is sole evidence'); END;
+        BEGIN SELECT RAISE(ABORT, 'orphaned turn summary has no source turn'); END;
 
 CREATE INDEX idx_document_sources_imported_at ON document_sources(imported_at);
 

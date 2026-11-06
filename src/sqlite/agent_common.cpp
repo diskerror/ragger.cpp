@@ -143,8 +143,8 @@ json fetch_knowledge_row(sqlite3* db, int rowid) {
         {"model",        s.column_text(11)},
     };
     json ev = json::array();
-    Stmt e(db, "SELECT turn_summary_id FROM knowledge_turn_evidence "
-               "WHERE knowledge_id = ? ORDER BY turn_summary_id");
+    Stmt e(db, "SELECT episode_id FROM knowledge_episode_evidence "
+               "WHERE knowledge_id = ? ORDER BY episode_id");
     e.bind(1, rowid);
     while (e.step()) ev.push_back(e.column_int(0));
     item["evidence"] = std::move(ev);

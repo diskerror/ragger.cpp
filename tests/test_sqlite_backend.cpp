@@ -1349,6 +1349,31 @@ static long long p5_epoch(const std::string& ts) {
     return static_cast<long long>(mktime(&tm));   // localtime, like resolve_epoch
 }
 
+// LR S80 (D2): one closed episode over one fresh turn summary — the unit
+// evidence points at now. Own session per tag.
+static int p1_make_episode(ragger::sqlite::Backend& db, const std::string& tag) {
+    const std::string guid = "ep-" + tag;
+    const std::string stamp = "2026-07-01 10:00:00";
+    const int t = db.store_turn("Question about " + tag, "Answer about " + tag,
+                                "test-model", false, guid, stamp);
+    CHECK(t > 0);
+    CHECK(db.finalize_turn_summary(t, "Summary about " + tag, "summarizer-model"));
+    sqlite3* raw = p1_open_raw();
+    const int ts = static_cast<int>(p1_scalar_int(raw, std::format(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = {}", t)));
+    sqlite3_close(raw);
+    ragger::EpisodeClose ec;
+    ec.text = "Episode about " + tag;
+    ec.model_name = "summarizer-model";
+    ec.session_guid = guid;
+    ec.span_start = p5_epoch(stamp);
+    ec.span_end   = p5_epoch(stamp);
+    ec.member_turn_summary_ids = {ts};
+    const int ep = db.store_episode_close(ec);
+    CHECK(ep > 0);
+    return ep;
+}
+
 static bool p1_throws_invalid(ragger::sqlite::Backend& db, const ragger::KnowledgeInput& in) {
     try { db.store_knowledge(in); }
     catch (const std::invalid_argument&) { return true; }
@@ -1506,29 +1531,29 @@ void test_structured_decision_supersedes(ragger::Embedder& emb) {
 void test_structured_decision_evidence(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
-    int ts1 = p1_make_turn_summary(db, "evidence one");
-    int ts2 = p1_make_turn_summary(db, "evidence two");
+    int ep1 = p1_make_episode(db, "evidence one");
+    int ep2 = p1_make_episode(db, "evidence two");
 
     ragger::KnowledgeInput in;
     in.kind = "decision";
-    in.text = "Link decisions to turn summaries.";
+    in.text = "Link decisions to episodes.";
     in.trigger = "Use when recording why a decision was made";
-    in.evidence = {ts1, ts2, ts1};   // duplicate is ignored
+    in.evidence = {ep1, ep2, ep1};   // duplicate is ignored
     int id = db.store_knowledge(in).id;
 
     sqlite3* raw = p1_open_raw();
     CHECK(p1_scalar_int(raw, std::format(
-        "SELECT COUNT(*) FROM knowledge_turn_evidence WHERE knowledge_id = {}", id)) == 2);
-    // RESTRICT: a turn summary that is evidence cannot be deleted.
+        "SELECT COUNT(*) FROM knowledge_episode_evidence WHERE knowledge_id = {}", id)) == 2);
+    // RESTRICT: an episode that is evidence cannot be deleted.
     int rc = sqlite3_exec(raw, std::format(
-        "DELETE FROM turn_summaries WHERE turn_summary_id = {}", ts1).c_str(),
+        "DELETE FROM episodes WHERE episode_id = {}", ep1).c_str(),
         nullptr, nullptr, nullptr);
     CHECK(rc != SQLITE_OK);
     // CASCADE: deleting the decision removes its links.
     CHECK(sqlite3_exec(raw, std::format(
         "DELETE FROM knowledge WHERE knowledge_id = {}", id).c_str(),
         nullptr, nullptr, nullptr) == SQLITE_OK);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge_turn_evidence") == 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge_episode_evidence") == 0);
     sqlite3_close(raw);
     db.close();
     cleanup();
@@ -1551,7 +1576,7 @@ void test_orphan_turn_summary_protected(ragger::Embedder& emb) {
         "DELETE FROM turn_summaries WHERE turn_summary_id = {}", ts).c_str(),
         nullptr, nullptr, &err);
     CHECK(rc != SQLITE_OK);
-    CHECK(err && std::string(err).find("sole evidence") != std::string::npos);
+    CHECK(err && std::string(err).find("has no source turn") != std::string::npos);
     sqlite3_free(err);
 
     // An EMPTY orphan marker row stays deletable.
@@ -1716,7 +1741,7 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('decisions','decisions_terms','decision_evidence','insights','insight_evidence','insights_terms')") == 0);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name IN ('decisions_view','insights_view')") == 0);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name='knowledge_view'") == 1);
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('knowledge_turn_evidence','knowledge_document_evidence')") == 2);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('knowledge_episode_evidence','knowledge_document_evidence')") == 2);
     // knowledge_document_evidence FKs: document_id SET NULL, knowledge_id CASCADE.
     CHECK(p1_scalar_text(raw, "SELECT on_delete FROM pragma_foreign_key_list('knowledge_document_evidence') WHERE \"table\" = 'documents'") == "SET NULL");
     CHECK(p1_scalar_text(raw, "SELECT on_delete FROM pragma_foreign_key_list('knowledge_document_evidence') WHERE \"table\" = 'knowledge'") == "CASCADE");
@@ -2038,7 +2063,7 @@ void test_p9_schema_assembly(ragger::Embedder& emb) {
     // junctions, settings) has none.
     std::set<std::string> allowed_no_view = {
         "sqlite_sequence", "semqlite_config", "settings", "terms",
-        "knowledge_turn_evidence", "knowledge_document_evidence"};
+        "knowledge_episode_evidence", "knowledge_document_evidence"};
     for (const auto& tt : ragger::sqlite::kTextTables)
         allowed_no_view.insert(tt.junction);
     std::vector<std::string> tables;
@@ -2259,15 +2284,15 @@ static bool p5_throws_invalid_insight(ragger::sqlite::Backend& db,
 void test_p5_insight_basic(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
-    int ts1 = p1_make_turn_summary(db, "insight evidence one");
-    int ts2 = p1_make_turn_summary(db, "insight evidence two");
+    int ep1 = p1_make_episode(db, "insight evidence one");
+    int ep2 = p1_make_episode(db, "insight evidence two");
 
     ragger::KnowledgeInput in;
     in.kind = "insight";
     in.text      = "The embed-table lists must stay in sync by hand.";
     in.rationale = "Nothing enforces kAllTables vs count_embeddable_rows.";
     in.tags      = "maintenance";
-    in.evidence  = {ts1, ts2, ts1};   // duplicate is ignored
+    in.evidence  = {ep1, ep2, ep1};   // duplicate is ignored
     int id = db.store_knowledge(in).id;
     CHECK(id > 0);
 
@@ -2280,7 +2305,7 @@ void test_p5_insight_basic(ragger::Embedder& emb) {
     CHECK(p1_scalar_int(raw, "SELECT embedding IS NOT NULL" + w) == 1);
     CHECK(p1_scalar_int(raw, "SELECT unigram_count > 0" + w) == 1);
     CHECK(p1_scalar_int(raw, std::format(
-        "SELECT COUNT(*) FROM knowledge_turn_evidence WHERE knowledge_id = {}", id)) == 2);
+        "SELECT COUNT(*) FROM knowledge_episode_evidence WHERE knowledge_id = {}", id)) == 2);
     sqlite3_close(raw);
 
     // Search finds it tagged as an insight.
@@ -2290,12 +2315,11 @@ void test_p5_insight_basic(ragger::Embedder& emb) {
         if (h.metadata.value("source", "") == "knowledge" && h.id == id) found = true;
     CHECK(found);
 
-    // RESTRICT (same semantics as decision_evidence): evidence summaries
-    // can't vanish from under the insight.
+    // RESTRICT: evidence episodes can't vanish from under the insight.
     raw = p1_open_raw();
     sqlite3_stmt* st = nullptr;
-    sqlite3_prepare_v2(raw, "DELETE FROM turn_summaries WHERE turn_summary_id = ?", -1, &st, nullptr);
-    sqlite3_bind_int(st, 1, ts1);
+    sqlite3_prepare_v2(raw, "DELETE FROM episodes WHERE episode_id = ?", -1, &st, nullptr);
+    sqlite3_bind_int(st, 1, ep1);
     CHECK(sqlite3_step(st) == SQLITE_CONSTRAINT);
     sqlite3_finalize(st);
     sqlite3_close(raw);
@@ -2309,7 +2333,7 @@ void test_p5_insight_basic(ragger::Embedder& emb) {
 void test_p5_insight_validation(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
-    int ts = p1_make_turn_summary(db, "validation evidence");
+    int ts = p1_make_episode(db, "validation evidence");
 
     ragger::KnowledgeInput ok;
     ok.kind = "insight";
@@ -2372,7 +2396,7 @@ void test_p5_insight_validation(ragger::Embedder& emb) {
 void test_p5_insight_rebuild_is_stable(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
-    int ts = p1_make_turn_summary(db, "rebuild evidence");
+    int ts = p1_make_episode(db, "rebuild evidence");
 
     ragger::KnowledgeInput a;
     a.kind = "insight";
@@ -2421,7 +2445,7 @@ void test_p5_insight_layer(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
 
-    int ts = p1_make_turn_summary(db, "layer evidence");
+    int ts = p1_make_episode(db, "layer evidence");
 
     ragger::KnowledgeInput a;
     a.kind = "insight";
@@ -2445,13 +2469,13 @@ void test_p5_insight_layer(ragger::Embedder& emb) {
     }
     CHECK(found);
 
-    // ---- agent_get expand=sources -> the evidence turn_summary
+    // ---- agent_get expand=sources -> the evidence episode (LR S80)
     ragger::AgentGetQuery g;
     g.ids = {"knowledge:" + std::to_string(a_id)};
     g.expand = "sources";
     auto got = db.agent_get(g);
     CHECK(!got["items"][0]["expanded"].empty());
-    CHECK(got["items"][0]["expanded"][0]["layer"] == "turn_summary");
+    CHECK(got["items"][0]["expanded"][0]["layer"] == "episode");
 
     // ---- agent_get expand=chain -> supersede lineage oldest -> newest
     ragger::KnowledgeInput b = a;
@@ -2551,7 +2575,7 @@ void test_p7_knowledge_kinds(ragger::Embedder& emb) {
     CHECK(d_id > 0);
 
     // insight without evidence -> rejected; with evidence -> stored.
-    int ts = p1_make_turn_summary(db, "P7 insight evidence");
+    int ts = p1_make_episode(db, "P7 insight evidence");
     ragger::KnowledgeInput i;
     i.kind = "insight";
     i.text = "P7 insight: slow practice transfers to tempo.";
@@ -2584,7 +2608,7 @@ void test_p7_knowledge_kinds(ragger::Embedder& emb) {
 void test_p7_cross_kind_supersedes(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
-    int ts = p1_make_turn_summary(db, "P7 promotion evidence");
+    int ts = p1_make_episode(db, "P7 promotion evidence");
 
     ragger::KnowledgeInput i;
     i.kind = "insight";
@@ -2626,8 +2650,6 @@ void test_p7_cross_kind_supersedes(ragger::Embedder& emb) {
 void test_p7_kinds_filter(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
-    int ts = p1_make_turn_summary(db, "P7 filter evidence");
-
     ragger::KnowledgeInput d;
     d.kind = "decision";
     d.text = "P7 filter decision: oboe reeds bend northward.";
@@ -2943,8 +2965,8 @@ void test_p2_get_decision(ragger::Embedder& emb) {
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
 
-    int ts1 = p1_make_turn_summary(db, "alpha");
-    int ts2 = p1_make_turn_summary(db, "beta");
+    int ts1 = p1_make_episode(db, "alpha");
+    int ts2 = p1_make_episode(db, "beta");
 
     ragger::KnowledgeInput d;
     d.kind = "decision";
@@ -4745,7 +4767,7 @@ void p2_test_db_version_gate(ragger::Embedder& emb) {
 void p3_test_known_layers() {
     std::println("  p3_test_known_layers...");
     const std::set<std::string> expected = {
-        "turn", "turn_summary", "document", "knowledge", "episode"};
+        "turn", "turn_summary", "document", "knowledge", "episode", "session"};
     std::set<std::string> got;
     for (const auto& t : ragger::sqlite::kTextTables)
         if (t.layer && *t.layer) got.insert(t.layer);
@@ -4942,9 +4964,22 @@ void p3_cache_pin(ragger::Embedder& emb) {
     ragger::KnowledgeInput in;
     in.kind = "insight";
     in.text     = "cachepin insight ruling";
-    { sqlite3* raw = p1_open_raw();
-      in.evidence = {static_cast<int>(p1_scalar_int(raw, "SELECT MAX(turn_summary_id) FROM turn_summaries"))};
-      sqlite3_close(raw); }
+    {   // LR S80: episode evidence over the cachepin turn (no extra rows).
+        sqlite3* raw = p1_open_raw();
+        const int ts = static_cast<int>(p1_scalar_int(raw, std::format(
+            "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = {}", t)));
+        const long long when = p1_scalar_int(raw, std::format(
+            "SELECT created_at FROM turns WHERE turn_id = {}", t));
+        sqlite3_close(raw);
+        ragger::EpisodeClose ec;
+        ec.text = "cachepin episode";
+        ec.model_name = "sum-model";
+        ec.session_guid = "cachepin-session-guid";
+        ec.span_start = when;
+        ec.span_end   = when;
+        ec.member_turn_summary_ids = {ts};
+        in.evidence = {db.store_episode_close(ec)};
+    }
     db.store_knowledge(in);                                         // insights
 
     auto resp = db.search("cachepin", 50, 0.0f);
@@ -5651,7 +5686,7 @@ void p9b_test_reindex_atomic(ragger::Embedder& emb) {
     // Happy path: same totals as the per-table loop, search still works.
     p9b_trigger("DROP TRIGGER p9b_boom_docs");
     auto done = db.reindex_all({});
-    CHECK(done.size() == 5);
+    CHECK(done.size() == 6);   // LR S81: sessions joins the registry (lexical-only)
     int total = 0;
     for (auto& [table, n] : done) total += n;
     CHECK(total == 3 + 2);   // 3 notes + 2 document chunks (turns empty here)
@@ -7225,6 +7260,172 @@ void lr74_test_per_corpus_pools(ragger::Embedder& emb) {
     std::println(" OK");
 }
 
+
+// LR S80 (D2): evidence points at EPISODES, not turn summaries. Table
+// knowledge_episode_evidence (CASCADE/RESTRICT); validation wording
+// "evidence: episode N does not exist or is empty"; missing-evidence message
+// names episode ids; fetch + expand=sources return episode handles.
+void lr80_test_episode_evidence(ragger::Embedder& emb) {
+    std::println("  lr80_test_episode_evidence...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    const std::string guid = "lr80-evidence";
+    auto members = p5_seed_members(db, guid, {"2026-06-01 10:00:00", "2026-06-01 10:05:00"});
+    ragger::EpisodeClose ec;
+    ec.text = "lr80 episode text";
+    ec.model_name = "summarizer-model";
+    ec.session_guid = guid;
+    ec.span_start = p5_epoch("2026-06-01 10:00:00");
+    ec.span_end   = p5_epoch("2026-06-01 10:05:00");
+    ec.member_turn_summary_ids = members;
+    const int ep = db.store_episode_close(ec);
+    CHECK(ep > 0);
+
+    // Insight backed by an episode; a duplicated id is OR IGNORE (one row).
+    ragger::KnowledgeInput in;
+    in.kind = "insight";
+    in.text = "lr80 insight backed by an episode";
+    in.evidence = {ep, ep};
+    const auto res = db.store_knowledge(in);
+    sqlite3* raw = p1_open_raw();
+    CHECK(p1_scalar_int(raw, std::format(
+        "SELECT COUNT(*) FROM knowledge_episode_evidence WHERE knowledge_id = {}",
+        res.id)) == 1);
+    CHECK(p1_scalar_int(raw,
+        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'knowledge_turn_evidence'") == 0);
+    // RESTRICT: an episode with evidence cannot be deleted.
+    CHECK(sqlite3_exec(raw, std::format(
+        "DELETE FROM episodes WHERE episode_id = {}", ep).c_str(),
+        nullptr, nullptr, nullptr) != SQLITE_OK);
+    // CASCADE: deleting the knowledge row removes the link.
+    CHECK(sqlite3_exec(raw, std::format(
+        "DELETE FROM knowledge WHERE knowledge_id = {}", res.id).c_str(),
+        nullptr, nullptr, nullptr) == SQLITE_OK);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge_episode_evidence") == 0);
+    sqlite3_close(raw);
+
+    // Unknown episode id -> the exact contract wording.
+    ragger::KnowledgeInput bad;
+    bad.kind = "insight";
+    bad.text = "lr80 bad insight";
+    bad.evidence = {9999};
+    bool threw = false;
+    try { db.store_knowledge(bad); }
+    catch (const std::invalid_argument& e) {
+        threw = std::string(e.what()).find(
+            "evidence: episode 9999 does not exist or is empty") != std::string::npos;
+    }
+    CHECK(threw);
+
+    // An ''-text episode is not evidence either.
+    int empty_ep = 0;
+    {
+        sqlite3* r2 = p1_open_raw();
+        CHECK(sqlite3_exec(r2, "INSERT INTO episodes (text, span_start, span_end)"
+                               " VALUES ('', 1, 2)", nullptr, nullptr, nullptr) == SQLITE_OK);
+        empty_ep = static_cast<int>(p1_scalar_int(r2, "SELECT last_insert_rowid()"));
+        sqlite3_close(r2);
+    }
+    bad.evidence = {empty_ep};
+    threw = false;
+    try { db.store_knowledge(bad); }
+    catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+
+    // Missing evidence names episode ids (not turn_summary ids).
+    bad.evidence.clear();
+    threw = false;
+    try { db.store_knowledge(bad); }
+    catch (const std::invalid_argument& e) {
+        threw = std::string(e.what()).find("episode_id") != std::string::npos;
+    }
+    CHECK(threw);
+
+    // fetch: evidence[] carries the episode id; expand=sources returns the
+    // episode's full row.
+    ragger::KnowledgeInput ok2;
+    ok2.kind = "insight";
+    ok2.text = "lr80 insight for fetch";
+    ok2.evidence = {ep};
+    const auto k2 = db.store_knowledge(ok2);
+    ragger::AgentGetQuery g;
+    g.ids = {std::format("knowledge:{}", k2.id)};
+    auto got = db.agent_get(g);
+    const auto& item = got["items"][0];
+    CHECK(item["evidence"].size() == 1 && item["evidence"][0] == ep);
+    g.expand = "sources";
+    auto src = db.agent_get(g);
+    const auto& ex = src["items"][0]["expanded"];
+    CHECK(ex.size() == 1 && ex[0]["id"] == std::format("episode:{}", ep));
+    CHECK(ex[0]["layer"] == "episode");
+}
+
+
+// LR S81 (D5): sessions as a lexical-only title corpus. Search layer
+// `session` (hit id session:<guid>, matched_by lexical, extra
+// {started_on, ended_on}); semantic mode excludes it; the default corpus
+// set never includes it; reindex rebuilds sessions_terms from name alone;
+// embedding loops skip the table.
+void lr81_test_session_corpus(ragger::Embedder& emb) {
+    std::println("  lr81_test_session_corpus...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    const std::string g1 = "lr81-named";
+    CHECK(db.store_turn("lr81 q", "lr81 a", "test-model", false, g1, "",
+                        "Zephyr gardening plans", "test") > 0);
+    const std::string g2 = "lr81-unnamed";
+    CHECK(db.store_turn("lr81 q2", "lr81 a2", "test-model", false, g2) > 0);
+
+    // A word in the title finds the session; unnamed stays absent.
+    ragger::AgentSearchQuery q;
+    q.query = "zephyr gardening";
+    q.layers = {"session"};
+    auto hits = db.agent_search(q);
+    CHECK(hits.size() == 1);
+    CHECK(hits[0].id == "session:" + g1);
+    CHECK(hits[0].layer == "session");
+    CHECK(hits[0].matched_by == "lexical");
+    CHECK(hits[0].extra.contains("started_on"));
+    CHECK(hits[0].extra.contains("ended_on"));
+
+    // semantic mode excludes the lexical-only corpus; keyword finds it.
+    q.mode = "semantic";
+    CHECK(db.agent_search(q).empty());
+    q.mode = "keyword";
+    CHECK(db.agent_search(q).size() == 1);
+    q.mode = "hybrid";
+
+    // The default corpus set never includes sessions.
+    ragger::AgentSearchQuery d;
+    d.query = "zephyr gardening plans";
+    for (const auto& h : db.agent_search(d))
+        CHECK(h.layer != "session");
+
+    // reindex rebuilds sessions_terms from name alone: a raw UPDATE bypasses
+    // the write-path index, so the row is invisible until reindex_table.
+    const std::string g3 = "lr81-rawname";
+    CHECK(db.store_turn("lr81 q3", "lr81 a3", "test-model", false, g3) > 0);
+    {
+        sqlite3* raw = p1_open_raw();
+        CHECK(sqlite3_exec(raw, "UPDATE sessions SET name = 'Wombat tax review'"
+                                " WHERE guid = 'lr81-rawname'",
+                           nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(raw);
+    }
+    q.query = "wombat tax";
+    CHECK(db.agent_search(q).empty());            // not indexed yet
+    db.reindex_table("sessions");
+    auto rh = db.agent_search(q);
+    CHECK(rh.size() == 1 && rh[0].id == "session:" + g3);
+
+    // Embedding loops skip the lexical-only table.
+    CHECK(db.count_embeddable_rows("sessions") == 0);
+    CHECK(db.rebuild_embeddings(emb, {}, "sessions") == 0);
+    db.close();
+}
+
 int main() {
     TestEnv env("sqlite_backend");  // must be first: isolates from ~/.ragger
     // Need config for model dir
@@ -7370,6 +7571,8 @@ int main() {
     lr77_test_search_mode(emb);
     lr78_test_tags_filter(emb);
     lr79_test_history_hierarchy(emb);
+    lr80_test_episode_evidence(emb);
+    lr81_test_session_corpus(emb);
 
     std::println("test_sqlite_backend: all passed");
     return 0;

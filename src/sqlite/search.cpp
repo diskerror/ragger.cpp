@@ -343,6 +343,13 @@ namespace fs = std::filesystem;
                 "datetime(created_at,'unixepoch','localtime')",
                 " AND (ifnull(user_text,'') != '' OR ifnull(assistant_text,'') != '')",
                 nullptr, true});
+            // LR S81 (D5): session titles — lexical-only (the table has no
+            // embedding column, so hybrid_pools never vector-scores it and
+            // semantic mode excludes it). Agent layer only, like raw turns.
+            v.push_back({"session", "sessions", "session_id", "name",
+                "datetime(created_at,'unixepoch','localtime')",
+                " AND name IS NOT NULL AND name != ''",
+                nullptr, true});
             return v;
         }();
         return kCorpora;

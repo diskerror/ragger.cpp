@@ -18,13 +18,18 @@ namespace {
 // PHASE3 Step 1: registry self-consistency.
 void p3_registry_checks() {
     using namespace ragger::sqlite;
-    CHECK(kTextTableCount == 5);  // PHASE8: summaries gone (turns, turn_summaries, episodes, knowledge, documents)
+    CHECK(kTextTableCount == 6);  // LR S81: + sessions (lexical-only); PHASE8: summaries gone
     for (const auto& t : kTextTables) {
         CHECK(std::string(t.junction) == std::string(t.table) + "_terms");
         CHECK(find_text_table(t.table) == &t);
     }
     CHECK(find_text_table("nope") == nullptr);
     CHECK(find_text_table("") == nullptr);
+    // LR S81 (D5): exactly one lexical-only row, and it answers by layer too.
+    CHECK(find_text_table("sessions")->lexical_only);
+    CHECK(is_lexical_layer("session"));
+    CHECK(!is_lexical_layer("episode"));
+    CHECK(!is_lexical_layer("nope"));
     std::cout << "  registry OK\n";
 }
 
@@ -88,6 +93,9 @@ void p3_insert_row(sqlite3* db, const std::string& table, int id,
         sql = "INSERT INTO documents(document_id, text, document_source_id) VALUES ("
               + i + ", '" + text + "', " + i + ")";
     }
+    else if (table == "sessions")   // LR S81 (D5): lexical-only title corpus
+        sql = "INSERT INTO sessions(session_id, guid, name) VALUES ("
+              + i + ", 'g" + i + "', '" + text + "')";
     else
         CHECK(!"p3_insert_row: unknown table");
     CHECK(sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
@@ -114,6 +122,8 @@ void p3_pin_all_tables() {
         "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
         "CREATE TABLE documents (document_id INTEGER PRIMARY KEY, text TEXT,"
         "  document_source_id INTEGER,"
+        "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
+        "CREATE TABLE sessions (session_id INTEGER PRIMARY KEY, guid TEXT, name TEXT,"
         "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);";
     CHECK(sqlite3_exec(db, ddl, nullptr, nullptr, nullptr) == SQLITE_OK);
 
@@ -226,8 +236,8 @@ sqlite3* p10_open(const char* ddl) {
 }
 
 // Every text table create_schema()'s junctions reference. A DELETE on `terms`
-// with foreign_keys=ON walks the CASCADE clause of ALL five junction tables, so
-// a fixture that deletes a term must have all five parents present (the error
+// with foreign_keys=ON walks the CASCADE clause of ALL six junction tables, so
+// a fixture that deletes a term must have all six parents present (the error
 // is 'no such table: main.episodes', far from the statement's own subject).
 const char* kP10FullDDL =
     "CREATE TABLE document_sources (document_source_id INTEGER PRIMARY KEY, title TEXT);"
@@ -240,6 +250,8 @@ const char* kP10FullDDL =
     "CREATE TABLE knowledge (knowledge_id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, text TEXT, trigger TEXT,"
     "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
     "CREATE TABLE documents (document_id INTEGER PRIMARY KEY, text TEXT, document_source_id INTEGER,"
+    "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);"
+    "CREATE TABLE sessions (session_id INTEGER PRIMARY KEY, guid TEXT, name TEXT,"
     "  unigram_count INTEGER NOT NULL DEFAULT 0, bigram_count INTEGER NOT NULL DEFAULT 0);";
 
 // Ids returned by score_query(), sorted by score descending (the function

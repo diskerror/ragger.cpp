@@ -504,7 +504,7 @@ struct Backend::Impl {
     // ANY kind (insight -> decision promotion). Validates, embeds
     // trigger+text, then in ONE transaction inserts the row, flips the
     // superseded row (if any) to 'superseded', and links the evidence
-    // turn_summaries. Throws std::invalid_argument on bad input.
+    // episodes (LR S80). Throws std::invalid_argument on bad input.
     KnowledgeResult store_knowledge(const KnowledgeInput& in);
 
     // Shared INSERT used by store_knowledge and the legacy store_decision

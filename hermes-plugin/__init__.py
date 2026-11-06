@@ -318,8 +318,9 @@ DECISION_SCHEMA = {
             "status": {"type": "string", "enum": ["current", "provisional", "pending"],
                        "description": "Default current. provisional = agreed, not yet proven."},
             "supersedes": {"type": "integer", "description": "knowledge id this replaces (any kind)."},
-            "evidence": {"type": "array", "items": {"type": "integer"},
-                         "description": "turn_summary ids (from search results) this rests on."},
+            "evidence": {"type": "array",
+                         "items": {"type": ["integer", "string"]},
+                         "description": "episode ids (or \"episode:<id>\" handles; from search results) this rests on."},
         },
         "required": ["text", "trigger"],
     },
@@ -334,7 +335,7 @@ MEMORY_NOTE_SCHEMA = {
         "`possible_supersedes`: current "
         "decisions this note may contradict (hint only -- nothing was changed; "
         "review them and use memory_decision for a real ruling). Pass evidence "
-        "(turn_summary ids from search) when you are recording a synthesized "
+        "(episode ids from search) when you are recording a synthesized "
         "insight; it is stored as an insight linked to those sources. "
         "`trigger` is only valid on an insight (with evidence); `session` is "
         "recorded on the stored row."
@@ -345,8 +346,9 @@ MEMORY_NOTE_SCHEMA = {
             "text": {"type": "string", "description": "The note text."},
             "tags": {"type": "array", "items": {"type": "string"},
                      "description": "Optional tags (use `project:<name>` to scope)."},
-            "evidence": {"type": "array", "items": {"type": "integer"},
-                         "description": "turn_summary ids this note synthesizes. When present the note is stored as an insight (response carries \"kind\":\"insight\") instead of a plain note."},
+            "evidence": {"type": "array",
+                         "items": {"type": ["integer", "string"]},
+                         "description": "episode ids (or \"episode:<id>\" handles) this note synthesizes. When present the note is stored as an insight (response carries \"kind\":\"insight\") instead of a plain note."},
             "trigger": {"type": "string",
                         "description": "When this insight applies, in the vocabulary of a future query. Only valid together with evidence; on a plain note the server rejects it."},
             "session": {"type": "string",
@@ -451,7 +453,7 @@ MEMORY_SEARCH_SCHEMA = {
         "properties": {
             "query": {"type": "string", "description": "What to search for."},
             "layers": {"type": "array", "items": {"type": "string"},
-                       "description": "Subset of: turn_summary, episode, knowledge. 'turn' is raw exchange text, searched only when named explicitly (prefer turn_summary/episode). Documents use document_search. Legacy 'decision'/'insight' are accepted and mean knowledge of that kind."},
+                       "description": "Subset of: turn_summary, episode, knowledge. 'turn' is raw exchange text, searched only when named explicitly (prefer turn_summary/episode). 'session' matches session titles (lexical only, opt-in; hits are 'session:<guid>'). Documents use document_search. Legacy 'decision'/'insight' are accepted and mean knowledge of that kind."},
             "kinds": {"type": "array", "items": {"type": "string"},
                       "description": "Narrow knowledge hits: decision, insight, note."},
             "since": {"type": "string", "description": "Only results at/after this time."},
@@ -1003,10 +1005,14 @@ class RaggerMemoryProvider(MemoryProvider):
                     return json.dumps({"error": err})
                 payload["supersedes"] = v
             if args.get("evidence"):
-                try:
-                    payload["evidence"] = [int(x) for x in args["evidence"]]
-                except (TypeError, ValueError):
-                    return json.dumps({"error": "evidence must be a list of integers"})
+                # LR S80: episode ids or "episode:<id>" handles; the server
+                # parses both, so pass values through and only reject junk.
+                ev = args["evidence"]
+                if not isinstance(ev, list) or not all(
+                        isinstance(x, int) or isinstance(x, str) for x in ev):
+                    return json.dumps({"error": 'evidence must be a list of '
+                                                'episode ids or "episode:<id>" handles'})
+                payload["evidence"] = ev
             got = self._post_status("/decision", payload)
             if got is None:
                 self._record_fail()
@@ -1086,10 +1092,13 @@ class RaggerMemoryProvider(MemoryProvider):
                 payload["session"] = self._session_id if s == "current" else s
             if args.get("evidence"):
                 # Phase 5: evidence routes the write to store_insight server-side.
-                try:
-                    payload["evidence"] = [int(e) for e in args["evidence"]]
-                except (TypeError, ValueError):
-                    return json.dumps({"error": "evidence must be a list of integers"})
+                # LR S80: episode ids or "episode:<id>" handles pass through.
+                ev = args["evidence"]
+                if not isinstance(ev, list) or not all(
+                        isinstance(x, int) or isinstance(x, str) for x in ev):
+                    return json.dumps({"error": 'evidence must be a list of '
+                                                'episode ids or "episode:<id>" handles'})
+                payload["evidence"] = ev
             got = self._post_status("/memory/note", payload)
             return self._agent_tool_result(got)
 

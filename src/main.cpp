@@ -1355,13 +1355,18 @@ int main(int argc, char **argv) {
             auto args = opts.getParams("args");
             std::string target = args.empty() ? "all" : args[0];
             if (target != "all") {
-                bool found = false;
+                const ragger::sqlite::TextTable* row = nullptr;
                 for (const auto& t : ragger::sqlite::kTextTables)
-                    if (target == t.table) { found = true; break; }
-                if (!found) {
+                    if (target == t.table) { row = &t; break; }
+                if (!row) {
                     Diskerror::Logger::error(std::format(
                         "Unknown table '{}'. Expected one of: {}, or \"all\"",
                         target, ragger::sqlite::text_table_names()));
+                    return 1;
+                }
+                if (row->lexical_only) {   // LR S81: nothing to embed
+                    Diskerror::Logger::error(std::format(
+                        "Table '{}' is lexical-only (no embeddings).", target));
                     return 1;
                 }
             }

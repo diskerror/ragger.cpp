@@ -455,8 +455,8 @@ bool pragma_bool(Impl& self, const char* name);
         // part in a rebuild dance.
         exec(ddl::if_not_exists(ddl::knowledge()));
         exec(ddl::if_not_exists(ddl::knowledge_indexes()));
-        exec(ddl::if_not_exists(ddl::knowledge_turn_evidence()));
-        exec(ddl::if_not_exists(ddl::knowledge_turn_evidence_indexes()));
+        exec(ddl::if_not_exists(ddl::knowledge_episode_evidence()));
+        exec(ddl::if_not_exists(ddl::knowledge_episode_evidence_indexes()));
         exec(ddl::if_not_exists(ddl::knowledge_document_evidence()));
         exec(ddl::if_not_exists(ddl::knowledge_document_evidence_indexes()));
 
@@ -936,8 +936,8 @@ bool pragma_bool(Impl& self, const char* name);
             // 0.16 DB has no evidence rows; §4b notes arrive in Phase 8).
             exec(ddl::knowledge());
             exec(ddl::knowledge_indexes());
-            exec(ddl::knowledge_turn_evidence());
-            exec(ddl::knowledge_turn_evidence_indexes());
+            exec(ddl::knowledge_episode_evidence());
+            exec(ddl::knowledge_episode_evidence_indexes());
             exec(ddl::knowledge_document_evidence());
             exec(ddl::knowledge_document_evidence_indexes());
 

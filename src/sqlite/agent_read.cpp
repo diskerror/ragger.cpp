@@ -200,12 +200,26 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
         corpora = {"turn_summary", "episode", "knowledge"};  // LR S76: document left
     std::vector<SearchResult> cands;
     {
-        auto pools = (q.mode == "keyword" || !embedder || !embedder->ready())
-            ? text_pools(q.query, corpora, pool)
-            : hybrid_pools(q.query, corpora, pool, q.mode == "hybrid");
-        for (auto& [src, v] : pools)
-            cands.insert(cands.end(), std::make_move_iterator(v.begin()),
-                         std::make_move_iterator(v.end()));
+        // LR S81 (D5): lexical-only corpora (session titles) never enter the
+        // vector blend; semantic mode excludes them entirely. A request for
+        // lexical corpora only needs no embedder at all.
+        std::set<std::string> vec_corpora, lex_corpora;
+        for (const auto& c : corpora)
+            (is_lexical_layer(c) ? lex_corpora : vec_corpora).insert(c);
+        if (q.mode == "semantic") lex_corpora.clear();
+        auto merge = [&](std::map<std::string, std::vector<SearchResult>> pools) {
+            for (auto& [src, v] : pools)
+                cands.insert(cands.end(), std::make_move_iterator(v.begin()),
+                             std::make_move_iterator(v.end()));
+        };
+        if (!vec_corpora.empty()) {
+            if (q.mode == "keyword" || !embedder || !embedder->ready())
+                merge(text_pools(q.query, vec_corpora, pool));
+            else
+                merge(hybrid_pools(q.query, vec_corpora, pool, q.mode == "hybrid"));
+        }
+        if (!lex_corpora.empty())
+            merge(text_pools(q.query, lex_corpora, pool));
     }
 
     // Knowledge status comes from the rows, never from cache
@@ -327,17 +341,36 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
     std::unordered_map<int, std::string> guid_of_session;
     {
         std::vector<int> sids;
-        for (const auto& r : cands)
-            if ((r.metadata.value("source", "") == "turn_summary" ||
-                 r.metadata.value("source", "") == "episode" ||
-                 r.metadata.value("source", "") == "turn") &&   // LR S75
+        for (const auto& r : cands) {
+            const std::string src = r.metadata.value("source", "");
+            if ((src == "turn_summary" || src == "episode" ||
+                 src == "turn") &&                     // LR S75
                 r.metadata.contains("session_id"))
                 sids.push_back(r.metadata["session_id"].get<int>());
+            else if (src == "session")                 // LR S81: the hit IS the session
+                sids.push_back(r.id);
+        }
         if (!sids.empty()) {
             Stmt s(db, std::format(
                 "SELECT session_id, guid FROM sessions WHERE session_id IN ({})",
                 in_clause(sids)));
             while (s.step()) guid_of_session[s.column_int(0)] = s.column_text(1);
+        }
+    }
+    // LR S81: spans for session-hit extras — one batched read for the pool.
+    std::unordered_map<int, std::pair<std::string, std::string>> sess_span;
+    {
+        auto it = ids_by_layer.find("session");
+        if (it != ids_by_layer.end() && !it->second.empty()) {
+            Stmt s(db, std::format(
+                "SELECT session_id, "
+                "CASE WHEN started_on IS NULL THEN '' "
+                "     ELSE datetime(started_on,'unixepoch','localtime') END, "
+                "CASE WHEN ended_on IS NULL THEN '' "
+                "     ELSE datetime(ended_on,'unixepoch','localtime') END "
+                "FROM sessions WHERE session_id IN ({})", in_clause(it->second)));
+            while (s.step())
+                sess_span[s.column_int(0)] = {s.column_text(1), s.column_text(2)};
         }
     }
 
@@ -396,17 +429,28 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
 
         if (sess_id || excl_id) {
             std::optional<int> sid;
-            auto lit = session_of.find(layer);
-            if (lit != session_of.end()) {
-                auto it = lit->second.find(r.id);
-                if (it != lit->second.end()) sid = it->second;
+            if (layer == "session") {
+                sid = r.id;   // LR S81: the hit IS the session
+            } else {
+                auto lit = session_of.find(layer);
+                if (lit != session_of.end()) {
+                    auto it = lit->second.find(r.id);
+                    if (it != lit->second.end()) sid = it->second;
+                }
             }
             if (sess_id && (!sid || *sid != *sess_id)) continue;
             if (excl_id && sid && *sid == *excl_id) continue;
         }
 
         AgentHit h;
-        h.id    = layer + ":" + std::to_string(r.id);
+        if (layer == "session") {
+            // LR S81 (D5): session hits are addressed by GUID, like timeline rows.
+            auto git = guid_of_session.find(r.id);
+            h.id = "session:" + (git != guid_of_session.end() ? git->second
+                                                              : std::to_string(r.id));
+        } else {
+            h.id = layer + ":" + std::to_string(r.id);
+        }
         h.layer = layer;
         h.score = r.blended;   // the value that actually ranked this hit
         if (r.vec_score > 0.0f && r.bm25_score > 0.0f)      h.matched_by = "both";
@@ -450,6 +494,13 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
                 h.extra["session"] = it != guid_of_session.end()
                     ? it->second : std::string();
             }
+        } else if (layer == "session") {
+            // LR S81 (D5): session hits carry their span (the title is the
+            // snippet; there is no body text to excerpt).
+            h.extra = json::object();
+            auto sp = sess_span.find(r.id);
+            h.extra["started_on"] = sp != sess_span.end() ? sp->second.first : "";
+            h.extra["ended_on"]   = sp != sess_span.end() ? sp->second.second : "";
         }
         hits.push_back(std::move(h));
     }
@@ -896,17 +947,17 @@ json Backend::Impl::agent_get(const AgentGetQuery& q) {
             } else if (q.expand == "sources") {
                 json expanded = json::array();
                 if (layer == "knowledge") {
-                    // Its evidence turn_summaries, full rows. The join filter
-                    // keeps done-marker rows (text='') out of expansion even
-                    // if a source turn was later abandoned (RULES 6).
+                    // LR S80 (D2): its evidence EPISODES, full rows. The join
+                    // filter keeps ''-text episodes out of expansion even if
+                    // a link survived (RULES 6).
                     Stmt e(db,
-                        "SELECT de.turn_summary_id FROM knowledge_turn_evidence de "
-                        "JOIN turn_summaries ts ON ts.turn_summary_id = de.turn_summary_id "
-                        "WHERE de.knowledge_id = ? AND ts.text != '' "
-                        "ORDER BY de.turn_summary_id");
+                        "SELECT de.episode_id FROM knowledge_episode_evidence de "
+                        "JOIN episodes ep ON ep.episode_id = de.episode_id "
+                        "WHERE de.knowledge_id = ? AND ep.text != '' "
+                        "ORDER BY de.episode_id");
                     e.bind(1, rowid);
                     while (e.step())
-                        expanded.push_back(fetch_agent_row(db, "turn_summary", e.column_int(0)));
+                        expanded.push_back(fetch_agent_row(db, "episode", e.column_int(0)));
                 } else if (layer == "episode") {
                     // Recorded membership (PHASE5 C.2): replaces the old
                     // turn_datetime BETWEEN span heuristic, which
@@ -983,8 +1034,8 @@ json Backend::Impl::agent_get(const AgentGetQuery& q) {
         "       datetime(t.created_at,'unixepoch','localtime'), "
         "       (SELECT text FROM turn_summaries ts "
         "         WHERE ts.turn_id = t.turn_id AND ts.text != '' LIMIT 1), "
-        // LR S79 (P10): the hierarchy above each turn, so a reader can fill
-        // evidence[] with turn_summary:<id> / episode:<id> handles.
+        // LR S79 (P10) + S80 (D2): the hierarchy above each turn, so a reader
+        // can fill evidence[] with episode:<id> handles.
         "       (SELECT ts.turn_summary_id FROM turn_summaries ts "
         "         WHERE ts.turn_id = t.turn_id AND ts.text != '' LIMIT 1), "
         "       (SELECT ts.episode_id FROM turn_summaries ts "

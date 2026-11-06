@@ -121,8 +121,9 @@ static nlohmann::json tools_list(bool capture_turns, bool build_context) {
                                     {"description", "knowledge_id this replaces (any kind)."}}},
                     {"session",    {{"type", "string"},
                                     {"description", "Current session GUID, for provenance."}}},
-                    {"evidence",   {{"type", "array"}, {"items", {{"type", "integer"}}},
-                                    {"description", "turn_summary ids this decision rests on (optional for decisions)."}}},
+                    {"evidence",   {{"type", "array"},
+                                    {"items", {{"type", nlohmann::json::array({"integer", "string"})}}},
+                                    {"description", "episode ids (or \"episode:<id>\" handles) this decision rests on (optional for decisions)."}}},
                 }},
                 {"required", nlohmann::json::array({"text", "trigger"})}
             }}
@@ -168,6 +169,8 @@ static nlohmann::json tools_list(bool capture_turns, bool build_context) {
                                            "(turn_summary, episode, knowledge). "
                                            "'turn' is raw exchange text, searched only "
                                            "when named explicitly; prefer the summaries. "
+                                           "'session' matches session titles "
+                                           "(lexical only, opt-in). "
                                            "Documents use document_search."}}},
                     {"since",           {{"type", "string"},
                                           {"description", "Only results at/after this time."}}},
@@ -249,7 +252,7 @@ static nlohmann::json tools_list(bool capture_turns, bool build_context) {
              "the working directory when `cwd` is given. The result may carry "
              "`possible_supersedes`: current decisions this note may contradict "
              "(hint only — nothing was changed; review them, and record a real "
-             "ruling with memory_decision instead). Pass evidence (turn_summary "
+             "ruling with memory_decision instead). Pass evidence (episode "
              "ids from search) when you are recording a synthesized insight; it "
              "is stored as an insight linked to those sources. `trigger` is only "
              "valid on an insight (with evidence); `session` records which "
@@ -261,8 +264,9 @@ static nlohmann::json tools_list(bool capture_turns, bool build_context) {
                                  {"description", "The note text."}}},
                     {"tags",    {{"type", "array"}, {"items", {{"type", "string"}}},
                                  {"description", "Optional tags."}}},
-                    {"evidence",{{"type", "array"}, {"items", {{"type", "integer"}}},
-                                 {"description", "turn_summary ids this note synthesizes. When present the note is stored as an insight (response carries \"kind\":\"insight\") instead of a plain note."}}},
+                    {"evidence",{{"type", "array"},
+                                 {"items", {{"type", nlohmann::json::array({"integer", "string"})}}},
+                                 {"description", "episode ids (or \"episode:<id>\" handles) this note synthesizes. When present the note is stored as an insight (response carries \"kind\":\"insight\") instead of a plain note."}}},
                     {"trigger", {{"type", "string"},
                                  {"description", "When this insight applies, in the vocabulary of a future query. Only valid together with evidence; on a plain note it is a 400."}}},
                     {"session", {{"type", "string"},

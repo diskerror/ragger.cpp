@@ -341,22 +341,21 @@ void t_write_verbs_parity_s72(HttpFixture& fx) {
     CHECK(nm.contains("possible_supersedes") == nh.contains("possible_supersedes"));
     CHECK(!nm.contains("kind") && !nh.contains("kind")); // plain path shape unchanged
 
-    // ---- memory_note (insight) — seed an L2 row to point at -------------
+    // ---- memory_note (insight) — seed an episode to point at (LR S80) ----
     const std::string db_path = fx.env.base() + "/http_test.db";
     const int turn = fx.mem->store_turn("lr72 q", "lr72 a", "", false, "lr72-sess");
     CHECK(turn > 0);
-    long long tsid = -1;
+    long long epid = -1;
     {
         RawDb db(db_path);
-        db.exec("INSERT INTO turn_summaries (text, turn_id, session_id, turn_datetime) "
-                "SELECT 'lr72 evidence summary', " + std::to_string(turn) +
-                ", session_id, created_at FROM turns WHERE turn_id = " + std::to_string(turn));
-        tsid = db.scalar("SELECT turn_summary_id FROM turn_summaries WHERE turn_id = "
-                         + std::to_string(turn));
+        db.exec("INSERT INTO episodes (text, session_id, span_start, span_end) "
+                "SELECT 'lr72 evidence episode', session_id, created_at, created_at "
+                "FROM turns WHERE turn_id = " + std::to_string(turn));
+        epid = db.scalar("SELECT episode_id FROM episodes WHERE text = 'lr72 evidence episode'");
     }
-    CHECK(tsid > 0);
+    CHECK(epid > 0);
     const json ins_args{{"text", "lr72 parity insight"},
-                        {"evidence", json::array({tsid})},
+                        {"evidence", json::array({epid})},
                         {"trigger", "when probing s72 parity"}};
     const auto ih = post_json(fx, "/memory/note", ins_args);
     CHECK(ih["_status"] == 200);
@@ -470,25 +469,24 @@ void t_memory_note_trigger_session(HttpFixture& fx) {
     std::println("  t_memory_note_trigger_session...");
     const std::string db_path = fx.env.base() + "/http_test.db";
 
-    // Seed a session + turn through the shared backend, then its L2 row raw
-    // (the fixture runs no summarizer).
+    // Seed a session + turn through the shared backend, then an episode raw
+    // (the fixture runs no summarizer). LR S80: evidence points at episodes.
     const int turn = fx.mem->store_turn("lr59 q", "lr59 a", "", false, "lr59-sess");
     CHECK(turn > 0);
-    long long tsid = -1;
+    long long epid = -1;
     {
         RawDb db(db_path);
-        db.exec("INSERT INTO turn_summaries (text, turn_id, session_id, turn_datetime) "
-                "SELECT 'lr59 evidence summary', " + std::to_string(turn) +
-                ", session_id, created_at FROM turns WHERE turn_id = " + std::to_string(turn));
-        tsid = db.scalar("SELECT turn_summary_id FROM turn_summaries WHERE turn_id = "
-                         + std::to_string(turn));
+        db.exec("INSERT INTO episodes (text, session_id, span_start, span_end) "
+                "SELECT 'lr59 evidence episode', session_id, created_at, created_at "
+                "FROM turns WHERE turn_id = " + std::to_string(turn));
+        epid = db.scalar("SELECT episode_id FROM episodes WHERE text = 'lr59 evidence episode'");
     }
-    CHECK(tsid > 0);
+    CHECK(epid > 0);
 
     // Insight with trigger -> stored with trigger; memory_search echoes it.
     auto ins = post_json(fx, "/memory/note",
                          {{"text", "lr59 synthesized insight"},
-                          {"evidence", json::array({tsid})},
+                          {"evidence", json::array({epid})},
                           {"trigger", "when probing note triggers"}});
     CHECK(ins["_status"] == 200);
     CHECK(ins["kind"] == "insight");

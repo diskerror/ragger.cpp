@@ -454,6 +454,9 @@ static std::string tags_from_metadata(const json& metadata) {
                 if (!id)
                     throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, "session insert produced no rowid"));
             }
+            // LR S81 (D5): session titles join the text index at write time.
+            if (!session_name.empty())
+                text_index_->index_record("sessions", id, session_name);
         } else if (!session_name.empty()) {
             // Update name if changed (retitled session, or first time a name
             // is available for a previously-unnamed session).
@@ -464,6 +467,8 @@ static std::string tags_from_metadata(const json& metadata) {
             u.bind(3, id);
             u.bind(4, session_name);
             u.exec();
+            if (sqlite3_changes(db) > 0)   // LR S81: re-index only on a real rename
+                text_index_->index_record("sessions", id, session_name);
         }
         return id;
     }
@@ -832,7 +837,7 @@ static std::string tags_from_metadata(const json& metadata) {
             throw std::invalid_argument(std::format("{} trigger is required", noun));
         if (rule->evidence_required && in.evidence.empty())
             throw std::invalid_argument(std::format(
-                "{} requires at least one evidence turn_summary_id", noun));
+                "{} requires at least one evidence episode_id", noun));
         // Statuses a NEW row may start in. 'superseded' and 'retired' are
         // reached only by curation, never on create.
         validate_creatable_status(status);
@@ -849,13 +854,14 @@ static std::string tags_from_metadata(const json& metadata) {
                     "supersedes: knowledge {} is already {}", *in.supersedes, old_status));
         }
 
-        for (int ts_id : in.evidence) {
-            Stmt st(db, "SELECT 1 FROM turn_summaries "
-                        "WHERE turn_summary_id = ? AND text != ''");
-            st.bind(1, ts_id);
+        // LR S80 (D2): evidence references EPISODES (knowledge_episode_evidence).
+        for (int ep_id : in.evidence) {
+            Stmt st(db, "SELECT 1 FROM episodes "
+                        "WHERE episode_id = ? AND text != ''");
+            st.bind(1, ep_id);
             if (!st.step())
                 throw std::invalid_argument(std::format(
-                    "evidence: turn_summary {} does not exist or is empty", ts_id));
+                    "evidence: episode {} does not exist or is empty", ep_id));
         }
 
         std::optional<int> session_id;
@@ -894,12 +900,12 @@ static std::string tags_from_metadata(const json& metadata) {
                 out.superseded = *in.supersedes;
             }
 
-            for (int ts_id : in.evidence) {
+            for (int ep_id : in.evidence) {
                 // OR IGNORE: a caller listing the same id twice is harmless.
-                Stmt ev(db, "INSERT OR IGNORE INTO knowledge_turn_evidence "
-                            "(knowledge_id, turn_summary_id) VALUES (?,?)");
+                Stmt ev(db, "INSERT OR IGNORE INTO knowledge_episode_evidence "
+                            "(knowledge_id, episode_id) VALUES (?,?)");
                 ev.bind(1, out.id);
-                ev.bind(2, ts_id);
+                ev.bind(2, ep_id);
                 if (!ev.exec())
                     throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
             }
@@ -1301,7 +1307,10 @@ static std::string tags_from_metadata(const json& metadata) {
         u.bind(1, name).bind(2, name_source).bind(3, session_id);
         if (!u.exec())
             throw std::runtime_error(std::format("apply_session_name: {}", sqlite3_errmsg(db)));
-        return sqlite3_changes(db) > 0;
+        const bool changed = sqlite3_changes(db) > 0;   // read BEFORE index_record runs its own stmts
+        if (changed)   // LR S81: a filled name joins the text index
+            text_index_->index_record("sessions", session_id, name);
+        return changed;
     }
 
 

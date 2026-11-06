@@ -494,7 +494,7 @@ struct Server::Impl {
 
     // POST /decision -- structured decision (agent API Phase 1, db 0.17).
     // Body: {text, trigger, rationale?, scope?, tags?, status?, supersedes?,
-    //        session?, evidence?: [turn_summary_id,...]}
+    //        session?, evidence?: [episode_id,...] (LR S80)}
     // tags may be a string ("a,b") or an array of strings.
     // LR S72 (R4): verb body moved to agent_memory_decision (agent_api.h);
     // validation failures map to 400 "ERROR: <msg>" via guarded() (D-4).
@@ -509,7 +509,7 @@ struct Server::Impl {
     // where ragger_store notes land (knowledge kind='note'). The response carries
     // possible_supersedes exactly like /decision — compared against current
     // decisions, hint only, nothing is changed.
-    // Phase 5 step 6: `evidence: [turn_summary_id]` routes the write to
+    // Phase 5 step 6 + LR S80: `evidence: [episode_id]` routes the write to
     // store_knowledge(kind="insight") instead — a synthesized insight linked
     // to its sources, and the response carries "kind":"insight". Without evidence nothing
     // changes.

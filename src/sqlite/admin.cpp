@@ -408,6 +408,7 @@ namespace fs = std::filesystem;
         // inspector can write. They are dropped by NAME, never "every view not
         // listed above", so a view a user made in their own copy survives.
         for (const char* name : {"knowledge_turn_evidence_view",
+                                 "knowledge_episode_evidence_view",
                                  "knowledge_document_evidence_view"})
             exec(std::format("DROP VIEW IF EXISTS {}", name));
         for (const auto& t : kTextTables)

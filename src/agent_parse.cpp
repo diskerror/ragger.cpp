@@ -27,6 +27,42 @@ std::string tags_to_comma_string(const json& a, const char* key) {
     return "";
 }
 
+namespace {
+// LR S80 (D2): evidence references EPISODES. Bare ints and "episode:N"
+// handles are accepted; "turn_summary:N" / "turn:N" handles (the old
+// evidence level) and anything else are client errors pointing at episode
+// ids. Shared by the decision and note-insight branches.
+std::vector<int> parse_evidence_ids(const json& v) {
+    if (!v.is_array())
+        throw std::invalid_argument("evidence must be an array of episode ids");
+    std::vector<int> out;
+    for (const auto& e : v) {
+        if (e.is_number_integer()) {
+            out.push_back(e.get<int>());
+            continue;
+        }
+        if (e.is_string()) {
+            const std::string s = e.get<std::string>();
+            constexpr std::string_view pfx = "episode:";
+            if (s.rfind(pfx, 0) == 0 && s.size() > pfx.size()) {
+                int id = 0;
+                bool ok = true;
+                for (char c : s.substr(pfx.size())) {
+                    if (c < '0' || c > '9') { ok = false; break; }
+                    id = id * 10 + (c - '0');
+                }
+                if (ok && id > 0) { out.push_back(id); continue; }
+            }
+            throw std::invalid_argument(std::string(
+                "evidence must reference episodes: pass episode ids or "
+                "\"episode:<id>\" handles (turn_summary/turn handles no longer carry evidence)"));
+        }
+        throw std::invalid_argument("evidence entries must be episode ids");
+    }
+    return out;
+}
+} // namespace
+
 AgentSearchQuery parse_agent_search_query(const json& a) {
     AgentSearchQuery q;
     q.query           = a.value("query", "");
@@ -125,7 +161,7 @@ KnowledgeInput parse_decision_input(const json& a) {
     if (a.contains("supersedes") && !a["supersedes"].is_null())
         in.supersedes = a["supersedes"].get<int>();
     if (a.contains("evidence"))
-        in.evidence = a["evidence"].get<std::vector<int>>();
+        in.evidence = parse_evidence_ids(a["evidence"]);
     return in;
 }
 
@@ -133,7 +169,7 @@ KnowledgeInput parse_note_insight(const json& a, const std::string& text) {
     KnowledgeInput in;
     in.kind         = "insight";
     in.text         = text;
-    in.evidence     = a["evidence"].get<std::vector<int>>();
+    in.evidence     = parse_evidence_ids(a["evidence"]);
     in.tags         = tags_to_comma_string(a);
     in.trigger      = a.value("trigger", "");        // LR S59 (Q6)
     in.session_guid = a.value("session", "");

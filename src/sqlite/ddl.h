@@ -32,6 +32,8 @@ inline std::string if_not_exists(std::string ddl) {
 // sessions — grouping key only (guid + title + derived span).
 // started_on/ended_on are INTEGER epochs: MIN/MAX of the session's turns,
 // maintained on write (Impl::touch_session_span). Dropped: project_id.
+// LR S81 (D5): unigram_count/bigram_count are the text-index TF denominators
+// for the lexical-only title corpus (sessions.name); no embedding column.
 inline std::string sessions(const std::string& name) {
     return std::format(R"(CREATE TABLE {} (
                 session_id  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,7 +42,9 @@ inline std::string sessions(const std::string& name) {
                 name_source TEXT,
                 started_on  INTEGER,
                 ended_on    INTEGER,
-                created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+                created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                unigram_count INTEGER NOT NULL DEFAULT 0,
+                bigram_count  INTEGER NOT NULL DEFAULT 0
             ))", name);
 }
 
@@ -81,13 +85,14 @@ inline std::string knowledge_indexes(const std::string& name = "knowledge") {
     )", name, name, name, name, name, name, name, name, name, name, name, name);
 }
 
-// Evidence at turn-summary level: CASCADE on the knowledge side, RESTRICT on
-// the turn_summary side (evidence cannot vanish from under a claim).
-inline std::string knowledge_turn_evidence() {
-    return R"(CREATE TABLE knowledge_turn_evidence (
-                knowledge_id    INTEGER NOT NULL REFERENCES knowledge(knowledge_id) ON DELETE CASCADE,
-                turn_summary_id INTEGER NOT NULL REFERENCES turn_summaries(turn_summary_id) ON DELETE RESTRICT,
-                PRIMARY KEY (knowledge_id, turn_summary_id)
+// Evidence points at EPISODES (D2, LR S80): CASCADE on the knowledge side,
+// RESTRICT on the episode side (an episode with evidence cannot vanish from
+// under a claim). Replaces knowledge_turn_evidence.
+inline std::string knowledge_episode_evidence() {
+    return R"(CREATE TABLE knowledge_episode_evidence (
+                knowledge_id INTEGER NOT NULL REFERENCES knowledge(knowledge_id) ON DELETE CASCADE,
+                episode_id   INTEGER NOT NULL REFERENCES episodes(episode_id) ON DELETE RESTRICT,
+                PRIMARY KEY (knowledge_id, episode_id)
             ))";
 }
 
@@ -105,12 +110,12 @@ inline std::string knowledge_document_evidence() {
             ))";
 }
 
-inline std::string knowledge_turn_evidence_indexes() {
-    // Reverse lookup (which knowledge cites a turn summary) and the
-    // ON DELETE RESTRICT FK probe both key on turn_summary_id; the PK
-    // (knowledge_id, turn_summary_id) cannot serve them. Part of the
+inline std::string knowledge_episode_evidence_indexes() {
+    // Reverse lookup (which knowledge cites an episode) and the
+    // ON DELETE RESTRICT FK probe both key on episode_id; the PK
+    // (knowledge_id, episode_id) cannot serve them. Part of the
     // schema-0.17.ddl.sql contract.
-    return R"(CREATE INDEX idx_knowledge_turn_evidence_ts ON knowledge_turn_evidence(turn_summary_id))";
+    return R"(CREATE INDEX idx_knowledge_episode_evidence_ep ON knowledge_episode_evidence(episode_id))";
 }
 
 inline std::string knowledge_document_evidence_indexes() {
@@ -188,7 +193,7 @@ inline std::string turn_summaries_indexes_and_trigger() {
         CREATE TRIGGER protect_orphan_turn_summaries
         BEFORE DELETE ON turn_summaries
         WHEN OLD.turn_id IS NULL AND OLD.text <> ''
-        BEGIN SELECT RAISE(ABORT, 'orphaned turn summary is sole evidence'); END;
+        BEGIN SELECT RAISE(ABORT, 'orphaned turn summary has no source turn'); END;
     )";
 }
 

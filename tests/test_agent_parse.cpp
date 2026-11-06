@@ -177,6 +177,20 @@ void test_decision_input_parsing() {
     CHECK(ev.evidence.size() == 2 && ev.evidence[1] == 5);
     CHECK(ev.session_guid == "guid-9");
 
+    // LR S80 (D2): evidence accepts bare ints and "episode:N" handles;
+    // turn_summary:N / turn:N handles are rejected pointing at episode ids.
+    auto eh = ragger::parse_decision_input(json{
+        {"text", "t"}, {"evidence", {std::string("episode:7"), 9}}});
+    CHECK(eh.evidence.size() == 2 && eh.evidence[0] == 7 && eh.evidence[1] == 9);
+    for (const char* h : {"turn_summary:7", "turn:7", "nonsense"}) {
+        bool et = false;
+        try { ragger::parse_decision_input(json{{"text", "t"}, {"evidence", {std::string(h)}}}); }
+        catch (const std::invalid_argument& e) {
+            et = std::string(e.what()).find("episode") != std::string::npos;
+        }
+        CHECK(et);
+    }
+
     // note-insight branch.
     auto ni = ragger::parse_note_insight(
         json{{"evidence", {1}}, {"tags", {"n1", "n2"}}}, "note text");

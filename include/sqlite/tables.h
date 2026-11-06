@@ -63,6 +63,11 @@ struct TextTable {
     const char* junction;  // "turn_summaries_terms"   (always <table>_terms)
     const char* layer;     // agent layer name ("turn_summary"); "" = not an agent layer
     const char* embed_sql; // SQL expression for the embedded/indexed text; nullptr = plain `text`
+    // LR S81 (D5 ruling, option a): lexical-only rows have NO embedding
+    // column — the text index and reindex loops treat them normally, the
+    // embedding loops (embed_tables, has_embeddings, count_embeddable_rows)
+    // and the re-embed CLI skip them.
+    bool lexical_only = false;
 };
 
 inline constexpr TextTable kTextTables[] = {
@@ -71,6 +76,8 @@ inline constexpr TextTable kTextTables[] = {
     {"documents",      "document_id",     "documents_terms",      "document",     kDocEmbedTextSQL},
     {"turn_summaries", "turn_summary_id", "turn_summaries_terms", "turn_summary", nullptr},
     {"episodes",       "episode_id",      "episodes_terms",       "episode",      nullptr},
+    // LR S81 (D5): session titles — searchable by name, never embedded.
+    {"sessions",       "session_id",      "sessions_terms",       "session",      "name", true},
 };
 
 inline constexpr std::size_t kTextTableCount = std::size(kTextTables);
@@ -80,6 +87,13 @@ inline constexpr const TextTable* find_text_table(std::string_view name) {
     for (const auto& t : kTextTables)
         if (name == t.table) return &t;
     return nullptr;
+}
+
+// LR S81: same question by AGENT LAYER name (agent_search's corpus keys).
+inline constexpr bool is_lexical_layer(std::string_view layer) {
+    for (const auto& t : kTextTables)
+        if (layer == t.layer) return t.lexical_only;
+    return false;
 }
 
 // WHERE fragment selecting rows whose built embed text is non-empty —

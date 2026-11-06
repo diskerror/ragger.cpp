@@ -49,6 +49,7 @@ namespace fs = std::filesystem;
     int Backend::Impl::count_embeddable_rows(const std::string& table) const {
         int total = 0;
         for (const auto& t : kTextTables) {
+            if (t.lexical_only) continue;   // LR S81: no embedding column
             if (table != "all" && table != t.table) continue;
             Stmt s(db, std::format("SELECT COUNT(*) FROM {} WHERE {}",
                                    t.table, embeddable_where_sql(t)));
@@ -65,6 +66,7 @@ namespace fs = std::filesystem;
         std::string sql = "SELECT EXISTS(";
         bool first = true;
         for (const auto& t : kTextTables) {
+            if (t.lexical_only) continue;   // LR S81: no embedding column
             sql += first ? "SELECT 1 FROM " : " UNION ALL SELECT 1 FROM ";
             sql += t.table;
             sql += " WHERE embedding IS NOT NULL";
@@ -115,18 +117,22 @@ namespace fs = std::filesystem;
         };
         static constexpr std::size_t kSpecCount = kTextTableCount;
         std::array<TableSpec, kSpecCount> kAllTables{};
+        std::size_t spec_n = 0;
         for (std::size_t i = 0; i < kSpecCount; ++i) {
             const auto& t = kTextTables[i];
+            if (t.lexical_only) continue;   // LR S81: no embedding column
             if (std::string_view(t.table) == "turns")
-                kAllTables[i] = { t.table, t.pk, "user_text", "assistant_text" };
+                kAllTables[spec_n] = { t.table, t.pk, "user_text", "assistant_text" };
             else
-                kAllTables[i] = { t.table, t.pk,
-                                  t.embed_sql ? t.embed_sql : "text", nullptr };
+                kAllTables[spec_n] = { t.table, t.pk,
+                                       t.embed_sql ? t.embed_sql : "text", nullptr };
+            ++spec_n;
         }
 
         // Filter to one table, or run the full fixed set when "all"/empty.
         std::vector<TableSpec> selected;
-        for (auto& t : kAllTables) {
+        for (std::size_t i = 0; i < spec_n; ++i) {
+            auto& t = kAllTables[i];
             if (table_filter == "all" || table_filter.empty() || table_filter == t.table)
                 selected.push_back(t);
         }

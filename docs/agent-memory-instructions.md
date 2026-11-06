@@ -37,8 +37,9 @@ With the layered tools:
   neighbouring turns (`context`, in session time order), a row's evidence
   (`sources`), or a decision's
   full supersede lineage (`chain`). The default layers are turn summaries,
-  episodes and knowledge; raw `turn` text is searched **only** when you name
-  `turn` explicitly — prefer the summaries, which are denser.
+  episodes and knowledge; raw `turn` text and session titles (`session`,
+  lexical-only, hits `session:<guid>`) are searched **only** when you name
+  them explicitly — prefer the summaries, which are denser.
 - `memory_get(session=...)` history pages carry each turn's
   `turn_summary_id` and `episode_id` (`null` when absent), so a reader can
   fill `evidence[]` handles without extra lookups.
@@ -73,14 +74,14 @@ Pick the tool by the shape of the thing:
   `memory_decision` whenever you can supply one.
 - **A fact, preference or lesson** -> `memory_note` (or `store`). Tag project
   facts `project:<name>`. If you are synthesizing something from earlier
-  results, pass their turn_summary ids as `evidence` and it is stored as an
+  results, pass their episode ids as `evidence` and it is stored as an
   insight linked to its sources. `trigger` is only valid on such an insight
   (a plain note with a trigger is rejected); `session` (a GUID) is recorded
   on the stored row as provenance.
 - **An insight**: a conclusion you drew by combining several earlier
   memories (a pattern across sessions, a recurring cause, how two facts fit
   together). Find the sources with `memory_search` or `memory_timeline`, then
-  `memory_note` with their **turn_summary ids** in `evidence`; it is stored
+  `memory_note` with their **episode ids** in `evidence`; it is stored
   as `kind: "insight"` linked to those sources. Only write one when the
   evidence supports it: state the conclusion, not a recap, and do not pass
   evidence you did not actually read. Plain notes (no `evidence`) are for

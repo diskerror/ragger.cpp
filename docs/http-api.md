@@ -158,7 +158,9 @@ Store a structured decision (knowledge `kind='decision'`).
 …" phrasing), `rationale`, `scope`, `tags` (string `"a,b"` or array),
 `status` (default `current`; must be creatable:
 `current | provisional | pending`), `supersedes` (knowledge id this
-replaces), `session` (GUID), `evidence` (array of turn_summary ids).
+replaces), `session` (GUID), `evidence` (array of episode ids or `"episode:<id>"`
+handles; LR S80: evidence points at episodes, `turn_summary:`/`turn:` handles
+are rejected with a pointer).
 
 **Response:**
 
@@ -225,10 +227,11 @@ Documents are **not** searched here (since v0.17, S76) — use
 `POST /memory/documents`.
 
 **Request fields:** `query` (required), `layers` (subset of
-`turn | turn_summary | episode | knowledge`; `turn` is raw exchange text,
-searched only when named explicitly; naming `document` is a `400` pointing to
-`/memory/documents`; the input aliases `decision` / `insight` restrict
-knowledge to that kind; empty = all),
+`turn | turn_summary | episode | knowledge | session`; `turn` is raw exchange
+text and `session` matches session titles (lexical only, never vector
+scored) — both searched only when named explicitly; naming `document` is a
+`400` pointing to `/memory/documents`; the input aliases `decision` /
+`insight` restrict knowledge to that kind; empty = all),
 `kinds` (`decision | insight | note` filter), `since` / `until`
 (`YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS`, or relative `30d` / `12h`),
 `status` (knowledge only: `active` (default = current+provisional) |
@@ -243,7 +246,8 @@ without tags are excluded).
 `{"id": "<layer>:<rowid>", "layer", "score", "matched_by":
 "vector|lexical|both", "created", "snippet", "extra"}` (`extra` is
 layer-specific: knowledge → `{status, trigger}`, turn_summary →
-`{turn_id, session}`, …).
+`{turn_id, session}`, session → `{started_on, ended_on}` with
+`id = session:<guid>`, …).
 
 **Status codes:** `400` on unknown layer/kind or bad time format.
 
@@ -290,8 +294,8 @@ Store a note (knowledge `kind='note'`), or an insight when `evidence` is
 supplied.
 
 **Request fields:** `text` (required), `tags` (optional), `evidence`
-(optional array of turn_summary ids — when present the row is stored as
-`kind='insight'` linked to its sources).
+(optional array of episode ids or `"episode:<id>"` handles — when present
+the row is stored as `kind='insight'` linked to its sources).
 
 **Response (note):** `{"id": "123", "status": "stored",
 "possible_supersedes": [...]}`

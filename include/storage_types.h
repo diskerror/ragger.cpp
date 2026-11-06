@@ -33,7 +33,7 @@ struct KnowledgeInput {
     std::string session_guid;         ///< source session GUID ("" = none)
     std::string model_name;           ///< producing model ("" = NULL model_id)
     std::string source_timestamp;     ///< historical created_at ("" = now)
-    std::vector<int> evidence;        ///< turn_summary_ids backing the row
+    std::vector<int> evidence;        ///< episode_ids backing the row (LR S80, D2)
 };
 
 /// Input to store_episode_close (db 0.17, PHASE5 B.1): one closed episode —
