@@ -385,6 +385,50 @@ void t_write_verbs_parity_s72(HttpFixture& fx) {
     err_parity("memory_decision", {{"text", "lr72 decision no trigger"}},
                post_json(fx, "/decision", {{"text", "lr72 decision no trigger"}}));
 
+    // ---- LR S85: evidence by episode in every transport ------------------
+    // Mixed forms in ONE array (bare int + "episode:<id>" handle) store the
+    // same rows on both surfaces; a turn_summary handle is a 400 naming
+    // `episode` on both.
+    long long epid2 = -1;
+    {
+        RawDb db(db_path);
+        db.exec("INSERT INTO episodes (text, session_id, span_start, span_end) "
+                "SELECT 'lr72 evidence episode 2', session_id, created_at + 3600, created_at + 3600 "
+                "FROM turns WHERE turn_id = " + std::to_string(turn));
+        epid2 = db.scalar("SELECT episode_id FROM episodes WHERE text = 'lr72 evidence episode 2'");
+    }
+    CHECK(epid2 > 0);
+    const json mix_args{{"text", "lr85 mixed evidence"},
+                        {"trigger", "when probing s85"},
+                        {"evidence", json::array({epid, std::string("episode:") + std::to_string(epid2)})}};
+    const auto mh_resp = post_json(fx, "/decision", mix_args);
+    CHECK(mh_resp["_status"] == 200);
+    {
+        RawDb db(db_path);
+        CHECK(db.scalar("SELECT COUNT(*) FROM knowledge_episode_evidence WHERE knowledge_id = "
+                        + id_of(mh_resp)) == 2);
+    }
+    const auto [s85_err, s85_text] = mcp_call("memory_decision", mix_args);
+    CHECK(!s85_err);
+    {
+        RawDb db(db_path);
+        const std::string mid = id_of(json::parse(s85_text));
+        CHECK(db.scalar("SELECT COUNT(*) FROM knowledge_episode_evidence WHERE knowledge_id = "
+                        + mid) == 2);
+    }
+    err_parity("memory_decision",
+               {{"text", "lr85 bad evidence"}, {"trigger", "x"},
+                {"evidence", json::array({std::string("turn_summary:5")})}},
+               post_json(fx, "/decision", {{"text", "lr85 bad evidence"}, {"trigger", "x"},
+                                           {"evidence", json::array({std::string("turn_summary:5")})}}));
+    {
+        const auto [berr, btext] = mcp_call("memory_decision",
+            {{"text", "lr85 bad evidence 2"}, {"trigger", "x"},
+             {"evidence", json::array({std::string("turn_summary:5")})}});
+        CHECK(berr);
+        CHECK(btext.find("episode") != std::string::npos);
+    }
+
     // ---- memory_update (tags on each surface's own note; text rejected) --
     const auto uh = post_json(fx, "/memory/update",
                               {{"id", "knowledge:" + id_of(nh)}, {"tags", "lr72,updated"}});
@@ -400,17 +444,15 @@ void t_write_verbs_parity_s72(HttpFixture& fx) {
     err_parity("memory_update", {{"id", "knowledge:1"}, {"text", "no in-place edit"}},
                post_json(fx, "/memory/update", {{"id", "knowledge:1"}, {"text", "no in-place edit"}}));
 
-    // ---- memory_review ----------------------------------------------------
+    // ---- memory_review (LR S88: HTTP only; MCP no longer lists it) -------
     const auto rh = post_json(fx, "/memory/review", {{"action", "list"}});
     CHECK(rh["_status"] == 200);
-    const auto [rerr, rtext] = mcp_call("memory_review", {{"action", "list"}});
-    CHECK(!rerr);
-    auto rh_clean = rh;
-    rh_clean.erase("_status");
-    rh_clean.erase("_raw");
-    CHECK(json::parse(rtext) == rh_clean);   // empty queue: byte-equal payloads
-    err_parity("memory_review", {{"action", "explode"}},
-               post_json(fx, "/memory/review", {{"action", "explode"}}));
+    {
+        const auto [rerr, rtext] = mcp_call("memory_review", {{"action", "list"}});
+        CHECK(rerr);   // removed from tools/list AND dispatch (D7, D-2)
+        CHECK(rtext.find("unknown tool") != std::string::npos
+              || rtext.find("Unknown tool") != std::string::npos);
+    }
 
     // ---- turn (capture_turn) ----------------------------------------------
     const json targs{{"user", "lr72 turn user"}, {"assistant", "lr72 turn assistant"},

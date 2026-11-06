@@ -968,6 +968,13 @@ json Backend::Impl::agent_get(const AgentGetQuery& q) {
                     c.bind(1, rowid);
                     while (c.step())
                         expanded.push_back(fetch_agent_row(db, "turn_summary", c.column_int(0)));
+                } else if (layer == "turn_summary") {
+                    // LR S86: one level down the hierarchy — its turn (turn:N).
+                    Stmt c(db, "SELECT turn_id FROM turn_summaries "
+                               "WHERE turn_summary_id = ? AND turn_id IS NOT NULL");
+                    c.bind(1, rowid);
+                    while (c.step())
+                        expanded.push_back(fetch_agent_row(db, "turn", c.column_int(0)));
                 }
                 // PHASE8: the old `summary` expand branch is gone with the
                 // layer; notes carry their evidence links like any knowledge row.

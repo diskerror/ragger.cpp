@@ -311,6 +311,9 @@ void p12_mcp_tools_list_contract() {
             // Gating: the two hook tools appear exactly when their flag is on.
             CHECK(find_tool(tools, "capture_turn").is_object() == cap);
             CHECK(find_tool(tools, "build_context").is_object() == ctx);
+            // LR S88 (D7, D-2): memory_review left the agent tool lists —
+            // curation is user-driven (HTTP route + CLI remain).
+            CHECK(find_tool(tools, "memory_review").is_null());
         }
     }
 

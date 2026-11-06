@@ -4,7 +4,8 @@
  * JSON-RPC 2.0 over stdin/stdout.  Tools exposed (see tools_list()):
  *   store, search, status, capture_turn, build_context, get_config,
  *   memory_decision, memory_note, memory_search, memory_get,
- *   memory_timeline, memory_update, memory_review.
+ *   memory_timeline, memory_update. (memory_review left the agent tool
+ *   lists at LR S88 (D7, D-2); the HTTP route and CLI remain.)
  *
  * Housekeeping: if no ragger HTTP server PID file is found, a
  * background thread runs periodic cleanup so the database doesn't
@@ -123,7 +124,7 @@ static nlohmann::json tools_list(bool capture_turns, bool build_context) {
                                     {"description", "Current session GUID, for provenance."}}},
                     {"evidence",   {{"type", "array"},
                                     {"items", {{"type", nlohmann::json::array({"integer", "string"})}}},
-                                    {"description", "episode ids (or \"episode:<id>\" handles) this decision rests on (optional for decisions)."}}},
+                                    {"description", "episode ids (or \"episode:<id>\" handles) this decision rests on (optional for decisions). Cite an episode you relied on; get ids from memory_search (layer 'episode') hits."}}},
                 }},
                 {"required", nlohmann::json::array({"text", "trigger"})}
             }}
@@ -224,7 +225,8 @@ static nlohmann::json tools_list(bool capture_turns, bool build_context) {
              "Read full rows by typed handles ('<layer>:<rowid>' from memory_search), or page "
              "through one session's conversation history. Exactly one mode per call: ids, or "
              "session (+optional after_turn/before_turn/limit). expand: none | context "
-             "(neighbouring turns/chunks) | sources (evidence / constituent summaries) | chain "
+             "(neighbouring turns/chunks) | sources (one level down: knowledge -> its "
+             "episodes, episode -> its summaries, summary -> its turn) | chain "
              "(knowledge supersede lineage, oldest to newest; may cross kinds)."},
             {"inputSchema", {
                 {"type", "object"},
@@ -266,7 +268,7 @@ static nlohmann::json tools_list(bool capture_turns, bool build_context) {
                                  {"description", "Optional tags."}}},
                     {"evidence",{{"type", "array"},
                                  {"items", {{"type", nlohmann::json::array({"integer", "string"})}}},
-                                 {"description", "episode ids (or \"episode:<id>\" handles) this note synthesizes. When present the note is stored as an insight (response carries \"kind\":\"insight\") instead of a plain note."}}},
+                                 {"description", "episode ids (or \"episode:<id>\" handles) this note synthesizes; get ids from memory_search (layer 'episode') hits. When present the note is stored as an insight (response carries \"kind\":\"insight\") instead of a plain note."}}},
                     {"trigger", {{"type", "string"},
                                  {"description", "When this insight applies, in the vocabulary of a future query. Only valid together with evidence; on a plain note it is a 400."}}},
                     {"session", {{"type", "string"},
@@ -328,26 +330,6 @@ static nlohmann::json tools_list(bool capture_turns, bool build_context) {
                                 {"description", "Replacement tags (array) or comma-separated string; replaces the whole set."}}},
                 }},
                 {"required", nlohmann::json::array({"id"})}
-            }}
-        },
-        {
-            {"name", "memory_review"},
-            {"description",
-             "The pending queue. action 'list' returns pending knowledge rows "
-             "of any kind oldest first (handle + trigger + snippet); 'approve' "
-             "moves each id pending→current; 'reject' moves each id "
-             "pending→retired. ids accept 'knowledge:<id>' handles or bare "
-             "integers; a non-pending id fails only that entry."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"action", {{"type", "string"},
-                                {"enum", nlohmann::json::array({"list", "approve", "reject"})},
-                                {"description", "list | approve | reject."}}},
-                    {"ids",    {{"type", "array"}, {"items", {{"type", "string"}}},
-                                {"description", "Knowledge handles (`knowledge:N`) for approve/reject."}}}
-                }},
-                {"required", nlohmann::json::array({"action"})}
             }}
         },
         {
@@ -526,15 +508,6 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         // LR S72 (R4): shared body with HTTP POST /memory/update.
         try {
             return text_result(ragger::agent_memory_update(memory, arguments).dump());
-        } catch (const std::invalid_argument& e) {
-            return error_result(e.what());
-        }
-
-    } else if (tool_name == "memory_review") {
-        // LR S72 (R4): shared body with HTTP POST /memory/review; the
-        // action/ids extraction moved to parse_review_request (D18).
-        try {
-            return text_result(ragger::agent_memory_review(memory, arguments).dump());
         } catch (const std::invalid_argument& e) {
             return error_result(e.what());
         }

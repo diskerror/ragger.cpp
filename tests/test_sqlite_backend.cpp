@@ -7359,6 +7359,60 @@ void lr80_test_episode_evidence(ragger::Embedder& emb) {
     const auto& ex = src["items"][0]["expanded"];
     CHECK(ex.size() == 1 && ex[0]["id"] == std::format("episode:{}", ep));
     CHECK(ex[0]["layer"] == "episode");
+
+    // ---- LR S86: expand=sources follows the new hierarchy end to end:
+    // knowledge -> its episodes (in order); episode -> member summaries in
+    // time order with ''-marker members excluded; turn_summary -> its turn.
+    auto members2 = p5_seed_members(db, guid, {"2026-06-01 11:00:00"});
+    ragger::EpisodeClose ec2;
+    ec2.text = "lr80 episode text two";
+    ec2.model_name = "summarizer-model";
+    ec2.session_guid = guid;
+    ec2.span_start = p5_epoch("2026-06-01 11:00:00");
+    ec2.span_end   = p5_epoch("2026-06-01 11:05:00");
+    ec2.member_turn_summary_ids = members2;
+    const int ep2 = db.store_episode_close(ec2);
+    CHECK(ep2 > 0);
+
+    ragger::KnowledgeInput d86;
+    d86.kind = "decision";
+    d86.text = "lr80 decision citing two episodes";
+    d86.trigger = "when probing s86";
+    d86.evidence = {ep, ep2};
+    const auto dres = db.store_knowledge(d86);
+    g.ids = {std::format("knowledge:{}", dres.id)};
+    g.expand = "sources";
+    const auto got86 = db.agent_get(g);
+    const auto& ex86 = got86["items"][0]["expanded"];
+    CHECK(ex86.size() == 2 && ex86[0]["id"] == std::format("episode:{}", ep)
+                              && ex86[1]["id"] == std::format("episode:{}", ep2));
+
+    // A ''-text marker member joins ep; expansion must exclude it.
+    // (turn_summaries is UNIQUE(turn_id), so the marker rides its own turn.)
+    auto marker_member = p5_seed_members(db, guid, {"2026-06-01 12:00:00"})[0];
+    {
+        sqlite3* r3 = p1_open_raw();
+        char* errmsg = nullptr;
+        const int rc3 = sqlite3_exec(r3, std::format(
+            "UPDATE turn_summaries SET text = '', episode_id = {}"
+            " WHERE turn_summary_id = {}", ep, marker_member).c_str(),
+            nullptr, nullptr, &errmsg);
+        if (rc3 != SQLITE_OK) std::println("  marker update: {}", errmsg ? errmsg : "?");
+        CHECK(rc3 == SQLITE_OK);
+        sqlite3_close(r3);
+    }
+    g.ids = {std::format("episode:{}", ep)};
+    const auto ep_src = db.agent_get(g);
+    const auto& ex_ep = ep_src["items"][0]["expanded"];
+    CHECK(ex_ep.size() == members.size());   // the marker member is excluded
+    for (size_t i = 0; i < members.size(); ++i)
+        CHECK(ex_ep[i]["id"] == std::format("turn_summary:{}", members[i]));
+
+    // turn_summary -> its turn (turn:N).
+    g.ids = {std::format("turn_summary:{}", members[0])};
+    const auto ts_src = db.agent_get(g);
+    const auto& ex_ts = ts_src["items"][0]["expanded"];
+    CHECK(ex_ts.size() == 1 && ex_ts[0]["layer"] == "turn");
 }
 
 

@@ -320,7 +320,7 @@ DECISION_SCHEMA = {
             "supersedes": {"type": "integer", "description": "knowledge id this replaces (any kind)."},
             "evidence": {"type": "array",
                          "items": {"type": ["integer", "string"]},
-                         "description": "episode ids (or \"episode:<id>\" handles; from search results) this rests on."},
+                         "description": "episode ids (or \"episode:<id>\" handles) this rests on. Cite an episode you relied on; get ids from memory_search (layer 'episode') hits."},
         },
         "required": ["text", "trigger"],
     },
@@ -348,7 +348,7 @@ MEMORY_NOTE_SCHEMA = {
                      "description": "Optional tags (use `project:<name>` to scope)."},
             "evidence": {"type": "array",
                          "items": {"type": ["integer", "string"]},
-                         "description": "episode ids (or \"episode:<id>\" handles) this note synthesizes. When present the note is stored as an insight (response carries \"kind\":\"insight\") instead of a plain note."},
+                         "description": "episode ids (or \"episode:<id>\" handles) this note synthesizes; get ids from memory_search (layer 'episode') hits. When present the note is stored as an insight (response carries \"kind\":\"insight\") instead of a plain note."},
             "trigger": {"type": "string",
                         "description": "When this insight applies, in the vocabulary of a future query. Only valid together with evidence; on a plain note the server rejects it."},
             "session": {"type": "string",
@@ -412,26 +412,6 @@ MEMORY_UPDATE_SCHEMA = {
 }
 
 
-MEMORY_REVIEW_SCHEMA = {
-    "name": "memory_review",
-    "description": (
-        "The pending queue. action 'list' returns pending knowledge rows of "
-        "any kind oldest first (handle + trigger + snippet); 'approve' moves each id "
-        "pending->current; 'reject' moves each id pending->retired. ids accept "
-        "'knowledge:<id>' handles or bare integers; "
-        "a non-pending id fails only that entry."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "action": {"type": "string", "enum": ["list", "approve", "reject"],
-                       "description": "list | approve | reject."},
-            "ids": {"type": "array", "items": {"type": "string"},
-                    "description": "Knowledge handles (`knowledge:N`) for approve/reject."},
-        },
-        "required": ["action"],
-    },
-}
 
 
 MEMORY_SEARCH_SCHEMA = {
@@ -506,8 +486,9 @@ MEMORY_GET_SCHEMA = {
         "Read full memory rows by typed handles (from memory_search), or page "
         "through one session's conversation history. Exactly one mode per call: "
         "ids, or session (+optional after_turn/before_turn/limit). expand: none | "
-        "context (neighbouring turns/chunks) | sources (a knowledge row's "
-        "evidence, a summary's constituent turn summaries) | chain "
+        "context (neighbouring turns/chunks) | sources (one level down: a "
+        "knowledge row's episodes, an episode's summaries, a summary's "
+        "turn) | chain "
         "(a knowledge row's full supersede lineage, oldest to newest; may "
         "cross kinds). Pass session='current' for this conversation."
     ),
@@ -931,8 +912,7 @@ class RaggerMemoryProvider(MemoryProvider):
         return [SEARCH_SCHEMA, STORE_SCHEMA, DECISION_SCHEMA,
                 MEMORY_SEARCH_SCHEMA, DOCUMENT_SEARCH_SCHEMA, MEMORY_GET_SCHEMA,
                 MEMORY_NOTE_SCHEMA,
-                MEMORY_TIMELINE_SCHEMA, MEMORY_UPDATE_SCHEMA,
-                MEMORY_REVIEW_SCHEMA]
+                MEMORY_TIMELINE_SCHEMA, MEMORY_UPDATE_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         """Tool entry point. Must never raise for bad arguments: anything the
@@ -1131,16 +1111,6 @@ class RaggerMemoryProvider(MemoryProvider):
                     # list would send Python repr, so pass lists through.
                     payload[key] = [str(x) for x in v] if isinstance(v, list) else str(v)
             got = self._post_status("/memory/update", payload)
-            return self._agent_tool_result(got)
-
-        elif tool_name == "memory_review":
-            action = str(args.get("action", "")).strip()
-            if action not in ("list", "approve", "reject"):
-                return json.dumps({"error": "memory_review action must be list|approve|reject"})
-            payload = {"action": action}
-            if args.get("ids"):
-                payload["ids"] = [str(x) for x in args["ids"]]
-            got = self._post_status("/memory/review", payload)
             return self._agent_tool_result(got)
 
         elif tool_name == "memory_get":

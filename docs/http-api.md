@@ -715,7 +715,6 @@ standard MCP handshake and tool discovery:
 | `memory_get`      | Full rows by typed handle, or session history paging                       | — (exactly one mode per call)   |
 | `memory_timeline` | Deterministic newest-first range scan                                      | —                               |
 | `memory_update`   | Metadata-only curation of a knowledge row                                  | `id` (handle)                   |
-| `memory_review`   | Pending-review queue: list / approve / reject                              | `action`                        |
 
 **Optional `search` params:** `limit` (integer; default: the
 `default_search_limit` setting), `min_score` (number). The `collections`

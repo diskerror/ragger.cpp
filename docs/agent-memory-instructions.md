@@ -15,7 +15,7 @@ Names vary by host. Use the ones you have:
 | Quick save | `store` | `ragger_store` | `memory_store` |
 | Layered search, read, recent history | `memory_search`, `memory_get`, `memory_timeline` | same | n/a — OpenClaw exposes only the quick pair; its `memory_get` returns the stored-memories count, not full rows by handle |
 | Structured saves (decisions, notes, insights) | `memory_decision`, `memory_note` | same | n/a |
-| Curation | `memory_update`, `memory_review` | same | n/a |
+| Curation | `memory_update` | same | n/a |
 
 If you only have the quick pair, use it for everything below.
 
@@ -34,8 +34,9 @@ it. Do not invent memories.
 With the layered tools:
 - `memory_search` returns **handles and snippets only**. Pick the relevant
   ones and call `memory_get` with the handles for full text. `expand` can add
-  neighbouring turns (`context`, in session time order), a row's evidence
-  (`sources`), or a decision's
+  neighbouring turns (`context`, in session time order), one level down the
+  hierarchy (`sources`: knowledge → its cited episodes, episode → its member
+  summaries, summary → its turn), or a decision's
   full supersede lineage (`chain`). The default layers are turn summaries,
   episodes and knowledge; raw `turn` text and session titles (`session`,
   lexical-only, hits `session:<guid>`) are searched **only** when you name
@@ -101,8 +102,6 @@ Text is never edited in place. To change what something says, store a new
 decision or note. `memory_update` changes only status and tags.
 
 ## Curation
-- `memory_review` lists decisions waiting in the **pending** queue. Approve or
-  reject only when the user asks you to. Do not approve your own entries.
 - `memory_update` can retire a note that is wrong or move a decision between
   `current` and `provisional`.
 
