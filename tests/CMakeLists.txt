@@ -86,6 +86,16 @@ target_link_libraries(test_http PRIVATE ragger_core)
 target_include_directories(test_http PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME test_http COMMAND test_http)
 
+# LR S91: the daemon jobs runner (single-flight, cancel, SSE `job` frames,
+# shutdown join) against a live daemon whose inference endpoint is a local
+# stub (harness/http_fixture.h after_env hook). The slow-latch tests make it
+# a slower binary; the shutdown test can wait out one model call.
+add_executable(test_jobs test_jobs.cpp)
+target_link_libraries(test_jobs PRIVATE ragger_core)
+target_include_directories(test_jobs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME test_jobs COMMAND test_jobs)
+set_tests_properties(test_jobs PROPERTIES TIMEOUT 120)
+
 # Stats logger tests — only built/registered when RAGGER_STATS is ON.
 # (ragger_core carries the RAGGER_STATS compile definition transitively, so
 # the test body's #ifdef sees it; we still gate the target so a default build

@@ -38,6 +38,7 @@
 #include <atomic>
 #include <chrono>
 #include <arpa/inet.h>
+#include <functional>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <thread>
@@ -66,13 +67,20 @@ inline int free_port() {
 }
 
 struct HttpFixture {
-    explicit HttpFixture(const char* tag) : env(tag) {
+    /// `after_env` runs after the scratch base exists but before the token
+    /// and the Server are created — the window for persisting config the
+    /// daemon must see at startup (e.g. an inference endpoint pointing at a
+    /// test stub, LR S91).
+    explicit HttpFixture(const char* tag, const std::function<void()>& after_env = {})
+        : env(tag) {
         // The daemon's own switch, persisted into the scratch base. The
-        // settable key is `socket_enable` (the map in config_access.cpp is the
-        // authority; the Config field is socket_enabled).
+        // settable key is `socket_enable` (the map in config_access.cpp is
+        // the authority; the Config field is socket_enabled).
         auto r = ragger::set_config_persisted("socket_enable", "false");
         CHECK(r.has_value());
         CHECK(!ragger::config().socket_enabled);
+
+        if (after_env) after_env();
 
         token = ragger::ensure_token();
         CHECK(!token.empty());

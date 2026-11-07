@@ -204,7 +204,7 @@ int main(int argc, char **argv) {
             // admin flags removed — sudo is the admin gate
             ("yes,y", CLI_YES)
             ("json,j", "config get: format output as JSON")
-            ("dry-run", "backfill: print candidate counts, write nothing")
+            ("dry-run", "reindex/re-embed/housekeeping/backfill: report what the run would do, write nothing")
             ("model", "backfill l2-regenerate: only rows whose turn or summary model has this name")
             ("ids", "backfill l2-regenerate: comma-separated turn_summary_ids to regenerate")
             ("browser,b", "dashboard: open the URL in the default browser")
@@ -1378,6 +1378,21 @@ int main(int argc, char **argv) {
             ragger::RaggerMemory memory_temp(db_path,
                                              /*skip_embedding_guard=*/true);
             int total_count = memory_temp.backend()->count_embeddable_rows(target);
+
+            // LR S90: --dry-run reports the selection and stops. SELECT-only
+            // path (count_embeddable_rows is the exact predicate the real
+            // pass uses), so the DB is untouched — pinned by test.
+            if (opts.count("dry-run")) {
+                if (target == "all")
+                    for (const auto& tbl : ragger::sqlite::kTextTables) {
+                        if (tbl.lexical_only) continue;   // LR S81
+                        std::println("{}: {} embeddable row(s)", tbl.table,
+                                     memory_temp.backend()->count_embeddable_rows(tbl.table));
+                    }
+                std::println("re-embed {}: {} embeddable row(s) (dry run, nothing written).",
+                             target, total_count);
+                return 0;
+            }
             memory_temp.close();
 
             // Warning + confirmation prompt
@@ -1478,6 +1493,21 @@ int main(int argc, char **argv) {
                     return 1;
                 }
             }
+            // LR S90: --dry-run reports the selection (every row of each
+            // selected table is walked by the real pass) and stops.
+            if (opts.count("dry-run")) {
+                ragger::RaggerMemory memory_temp(db_path,
+                                                 /*skip_embedding_guard=*/true);
+                int planned = 0;
+                for (const auto& [tbl, rows] : memory_temp.backend()->reindex_plan(target)) {
+                    std::println("{}: {} row(s)", tbl, rows);
+                    planned += rows;
+                }
+                std::println("reindex {}: {} row(s) (dry run, nothing written).",
+                             target, planned);
+                return 0;
+            }
+
             cli_audit("reindex", target);
 
             backup_db_or_warn(db_path);
@@ -1656,6 +1686,23 @@ int main(int argc, char **argv) {
             return res.failed > 0 ? 1 : 0;
         }
         else if (command == "housekeeping") {
+            // LR S90: --dry-run reports what one pass WOULD do (shared
+            // predicates with the real pass) and writes nothing. Works
+            // without a running daemon.
+            if (opts.count("dry-run")) {
+                ragger::RaggerMemory memory(db_path, /*skip_embedding_guard=*/true);
+                const auto plan = memory.backend()->housekeeping_plan(
+                    cfg.cleanup_max_age_hours);
+                std::println("housekeeping (dry run, nothing written):");
+                std::println("  purge turns older than {} h that have a summary: {}",
+                             cfg.cleanup_max_age_hours, plan.purge_turns);
+                std::println("  unsummarized turns (catch-up would enqueue): {}",
+                             plan.unsummarized);
+                std::println("  embeddable rows without an embedding: {}", plan.embed_missing);
+                std::println("  embeddable rows at an old embedding version: {}",
+                             plan.embed_stale);
+                return 0;
+            }
             // Send SIGUSR1 to the running daemon via the shared PID-file
             // scanner (S22). A stale pid file whose process is gone reads as
             // "no daemon" here — the old separate not-running message went

@@ -10,6 +10,14 @@ size_t write_to_string(char* ptr, size_t size, size_t nmemb, void* userdata) {
     out->append(ptr, size * nmemb);
     return size * nmemb;
 }
+
+// LR S91: streaming write-callback -> std::function. Returning 0 aborts the
+// transfer with CURLE_WRITE_ERROR (curl's documented "stop" signal).
+size_t write_to_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    auto* cb = static_cast<std::function<bool(std::string_view)>*>(userdata);
+    const size_t n = size * nmemb;
+    return (*cb)(std::string_view(ptr, n)) ? n : 0;
+}
 } // namespace
 
 // See header: single source of the Bearer scheme literal. One line so the
@@ -70,6 +78,38 @@ HttpClient::Response HttpClient::request(const std::string& method,
     } else {
         resp.error = curl_easy_strerror(resp.result);
     }
+
+    if (header_list) curl_slist_free_all(header_list);
+
+    return resp;
+}
+
+HttpClient::Response HttpClient::stream(const std::string& url,
+                                        const std::vector<std::string>& headers,
+                                        const std::function<bool(std::string_view)>& on_data,
+                                        long timeout_sec) {
+    curl_easy_reset(curl_);
+
+    Response resp;
+
+    struct curl_slist* header_list = nullptr;
+    for (const auto& h : headers)
+        header_list = curl_slist_append(header_list, h.c_str());
+
+    curl_easy_setopt(curl_, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl_, CURLOPT_NOSIGNAL, 1L);
+    if (timeout_sec > 0) curl_easy_setopt(curl_, CURLOPT_TIMEOUT, timeout_sec);
+    if (header_list) curl_easy_setopt(curl_, CURLOPT_HTTPHEADER, header_list);
+
+    curl_easy_setopt(curl_, CURLOPT_WRITEFUNCTION, write_to_callback);
+    curl_easy_setopt(curl_, CURLOPT_WRITEDATA, &on_data);
+
+    resp.result = curl_easy_perform(curl_);
+    if (resp.result == CURLE_OK || resp.result == CURLE_WRITE_ERROR) {
+        curl_easy_getinfo(curl_, CURLINFO_RESPONSE_CODE, &resp.status);
+    }
+    if (resp.result != CURLE_OK && resp.result != CURLE_WRITE_ERROR)
+        resp.error = curl_easy_strerror(resp.result);
 
     if (header_list) curl_slist_free_all(header_list);
 

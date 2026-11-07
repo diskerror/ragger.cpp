@@ -129,6 +129,7 @@ struct Backend::Impl {
     using TriggerCandidate    = StorageBackend::TriggerCandidate;
     using StrandedCandidate   = StorageBackend::StrandedCandidate;
     using SessionNameCandidate = StorageBackend::SessionNameCandidate;
+    using HousekeepingPlan  = StorageBackend::HousekeepingPlan;
 
     // ---- helpers -------------------------------------------------------
     void exec(const char* sql);
@@ -428,7 +429,8 @@ struct Backend::Impl {
     /// PHASE9B step 5: rebuild the whole text index atomically. One outer
     /// transaction around reset_terms_table() + every registry table, so the
     /// old index survives any failure. Returns {table, rows} per table.
-    std::vector<std::pair<std::string, int>> reindex_all(const ProgressFn& progress);
+    std::vector<std::pair<std::string, int>> reindex_all(const ProgressFn& progress,
+                                                             const CancelFlag* cancel = nullptr);
 
     /// S38: retention purge of raw L1 turns. Deletes turns older than the
     /// cutoff ONLY where a turn_summaries row exists (marker rows count:
@@ -811,16 +813,19 @@ struct Backend::Impl {
     // source shared with TextIndex::text_select_of() and the store paths.
     int embed_tables(Embedder& emb_ref, bool only_missing,
                       const ProgressFn& progress,
-                      const std::string& table_filter = "all");
+                      const std::string& table_filter = "all",
+                      const CancelFlag* cancel = nullptr);
 
     // Full re-encode of every embedded row (progress callback optional),
     // or one table when `table` != "all".
     int rebuild_embeddings(Embedder& emb_ref, const ProgressFn& progress,
-                           const std::string& table);
+                           const std::string& table,
+                           const CancelFlag* cancel = nullptr);
 
     // Cheap backfill: embed rows left NULL or with stale version byte,
     // scoped to one table when `table` != "all".
-    int backfill_embeddings(Embedder& emb_ref, const std::string& table);
+    int backfill_embeddings(Embedder& emb_ref, const std::string& table,
+                             const CancelFlag* cancel = nullptr);
 
     // A disabled embedder returns {} from encode(), which bind_embedding()
     // turns into NULL. That is right for a single store, but catastrophic for
@@ -840,7 +845,10 @@ struct Backend::Impl {
 
     // (Re)build the custom index for a single text table. Delegates to the
     // TextIndex engine (schema + tokenize + TF-IDF live there now).
-    int reindex_table(const std::string& table_name, const ProgressFn& progress = {});
+    int reindex_table(const std::string& table_name, const ProgressFn& progress = {},
+                        const CancelFlag* cancel = nullptr);
+    HousekeepingPlan housekeeping_plan(float max_age_hours) const;
+    std::vector<std::pair<std::string, int>> reindex_plan(const std::string& table) const;
 
     // Truncate the shared `terms` table + reset its AUTOINCREMENT counter.
     // Delegates to TextIndex; see its header comment for the "only

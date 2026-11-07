@@ -51,7 +51,8 @@ BackfillResult backfill_l2(StorageBackend& backend, InferenceClient& inference,
                            const std::string& kind, bool dry_run,
                            const std::string& model_name = {},
                            const std::vector<int>& ids = {},
-                           const ProgressFn& progress = {});
+                           const ProgressFn& progress = {},
+                           const CancelFlag* cancel = nullptr);
 
 /// Kind triggers: decision|insight rows with no trigger get one drafted by
 /// the summarizer and written into the NULL/empty column only. The row is
@@ -59,19 +60,22 @@ BackfillResult backfill_l2(StorageBackend& backend, InferenceClient& inference,
 /// trigger + '\n' + text — the vector and terms MUST follow the fill).
 BackfillResult backfill_triggers(StorageBackend& backend,
                                  InferenceClient& inference, bool dry_run,
-                                 const ProgressFn& progress = {});
+                                 const ProgressFn& progress = {},
+                                 const CancelFlag* cancel = nullptr);
 
 /// Kind stranded (S67): membership-only attach of L2 rows that lie inside
 /// an already-closed episode span of their session. Rows after the last
 /// span of their session are the open tail: counted, never touched.
 BackfillResult backfill_stranded(StorageBackend& backend, bool dry_run,
-                                 const ProgressFn& progress = {});
+                                 const ProgressFn& progress = {},
+                                 const CancelFlag* cancel = nullptr);
 
 /// Kind session-names (S67, D5): sessions with no name whose L2 texts form
 /// the title corpus; the summarizer drafts one line, written with
 /// name_source = 'summarizer'. A named session is never touched.
 BackfillResult backfill_session_names(StorageBackend& backend,
                                       InferenceClient& inference, bool dry_run,
-                                      const ProgressFn& progress = {});
+                                      const ProgressFn& progress = {},
+                                      const CancelFlag* cancel = nullptr);
 
 } // namespace ragger

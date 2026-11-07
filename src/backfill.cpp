@@ -21,6 +21,19 @@ void tick(const ProgressFn& progress, const std::string& kind, int done, int tot
     if (progress) progress(kind.c_str(), done, total);
 }
 
+// LR S90: cancel between rows. Rows already applied stay applied (each
+// write is its own transaction); the caches must not keep serving values
+// the pass already replaced, so invalidate before throwing. A rerun
+// re-selects only what is left — the pass is resumable by construction.
+void check_cancel(const CancelFlag* cancel, const std::string& kind,
+                  const BackfillResult& res, StorageBackend& backend) {
+    if (!cancel || !cancel->load()) return;
+    if (res.applied > 0) backend.invalidate_all_caches();
+    throw cancelled_error(std::format(
+        "backfill {}: cancelled after {} applied, {} failed",
+        kind, res.applied, res.failed));
+}
+
 /// The exact text the summarizer sees for a turn (mirrors handle_l2: the
 /// system-injected user side is blanked; an assistant-only turn summarizes
 /// the assistant alone). Doubles as the copy text for the S62 rules.
@@ -80,7 +93,8 @@ BackfillResult backfill_l2(StorageBackend& backend, InferenceClient& inference,
                            const std::string& kind, bool dry_run,
                            const std::string& model_name,
                            const std::vector<int>& ids,
-                           const ProgressFn& progress) {
+                           const ProgressFn& progress,
+                           const CancelFlag* cancel) {
     if (kind != "null" && kind != "empty" && kind != "regenerate")
         throw std::invalid_argument("unknown l2 backfill kind '" + kind + "'");
     // Addendum 5: regeneration is eligible, never run by default.
@@ -100,6 +114,7 @@ BackfillResult backfill_l2(StorageBackend& backend, InferenceClient& inference,
         static_cast<size_t>(std::max(0, config().summarizer_min_words));
     int done = 0;
     for (const auto& c : cands) {
+        check_cancel(cancel, label, res, backend);
         ++done;
         tick(progress, label, done, res.candidates);
         const std::string source = l2_source(c.user_text, c.assistant_text);
@@ -136,7 +151,8 @@ BackfillResult backfill_l2(StorageBackend& backend, InferenceClient& inference,
 
 BackfillResult backfill_triggers(StorageBackend& backend,
                                  InferenceClient& inference, bool dry_run,
-                                 const ProgressFn& progress) {
+                                 const ProgressFn& progress,
+                                 const CancelFlag* cancel) {
     if (!dry_run) require_inference_configured(inference);
 
     BackfillResult res;
@@ -146,6 +162,7 @@ BackfillResult backfill_triggers(StorageBackend& backend,
 
     int done = 0;
     for (const auto& c : cands) {
+        check_cancel(cancel, "triggers", res, backend);
         ++done;
         tick(progress, "triggers", done, res.candidates);
         try {
@@ -170,7 +187,8 @@ BackfillResult backfill_triggers(StorageBackend& backend,
 }
 
 BackfillResult backfill_stranded(StorageBackend& backend, bool dry_run,
-                                 const ProgressFn& progress) {
+                                 const ProgressFn& progress,
+                                 const CancelFlag* cancel) {
     BackfillResult res;
     int ties = 0;
     const auto cands = backend.stranded_l2_candidates(ties);
@@ -184,6 +202,7 @@ BackfillResult backfill_stranded(StorageBackend& backend, bool dry_run,
 
     int done = 0;
     for (const auto& c : cands) {
+        check_cancel(cancel, "stranded", res, backend);
         ++done;
         tick(progress, "stranded", done, res.candidates);
         try {
@@ -202,7 +221,8 @@ BackfillResult backfill_stranded(StorageBackend& backend, bool dry_run,
 
 BackfillResult backfill_session_names(StorageBackend& backend,
                                       InferenceClient& inference, bool dry_run,
-                                      const ProgressFn& progress) {
+                                      const ProgressFn& progress,
+                                      const CancelFlag* cancel) {
     if (!dry_run) require_inference_configured(inference);
 
     BackfillResult res;
@@ -212,6 +232,7 @@ BackfillResult backfill_session_names(StorageBackend& backend,
 
     int done = 0;
     for (const auto& c : cands) {
+        check_cancel(cancel, "session-names", res, backend);
         ++done;
         tick(progress, "session-names", done, res.candidates);
         if (c.l2_texts.empty()) { ++res.skipped; continue; }

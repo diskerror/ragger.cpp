@@ -54,7 +54,8 @@ public:
     // then per-record index_record(). Idempotent (delete-then-insert). Returns
     // the number of records reindexed. `progress` receives (table, done, total)
     // per record and (table, -1, total) at the end (see ragger::ProgressFn).
-    int reindex_table(const std::string& table, const ProgressFn& progress = {});
+    int reindex_table(const std::string& table, const ProgressFn& progress = {},
+                  const CancelFlag* cancel = nullptr);
 
     // Truncate the shared `terms` table and reset its AUTOINCREMENT counter,
     // starting term_ids fresh from 1. Only safe when reindexing ALL six

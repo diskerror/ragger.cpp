@@ -9,7 +9,9 @@
  */
 #pragma once
 
+#include <atomic>
 #include <functional>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -22,6 +24,17 @@ namespace ragger {
 // library code never writes to stdout itself (B m6) — the CLI supplies the
 // printer, the daemon passes nothing.
 using ProgressFn = std::function<void(const char* table, int done, int total)>;
+
+// LR S90: cooperative cancellation for the long maintenance paths. The
+// caller owns the flag and sets it from another thread; the library checks
+// it between batches (and between rows where the unit cost is trivial).
+// Committed work stays committed; the in-flight transaction rolls back with
+// the exception, so the DB is always consistent and a rerun finishes the
+// rest. S91's JobRunner catches cancelled_error to mark a job 'cancelled'.
+using CancelFlag = std::atomic<bool>;
+struct cancelled_error : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
 
 // One scored hit from the text index: record id + accumulated TF-IDF score.
 struct TextScore { int id; float score; };

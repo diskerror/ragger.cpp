@@ -169,7 +169,8 @@ public:
     /// at each table's end — the CLI passes a stdout printer; daemon callers
     /// pass nothing and get periodic Logger lines instead.
     int rebuild_embeddings(const ProgressFn& progress = {},
-                           const std::string& table = "all");
+                           const std::string& table = "all",
+                           const CancelFlag* cancel = nullptr);
 
     // ---- Embedding identity: current vs desired + re-embed control -------
     struct EmbeddingStatus {
@@ -225,7 +226,7 @@ public:
     int resume_interrupted_reembed();
 
     /// Embed only rows whose embedding column is NULL. Returns count.
-    int backfill_embeddings();
+    int backfill_embeddings(const CancelFlag* cancel = nullptr);
 
     /// Get distinct collection names.
     std::vector<std::string> collections() const;

@@ -11,6 +11,30 @@ namespace ragger::sqlite {
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
+namespace {
+
+// LR S90: the purge predicate is defined once — cleanup_old_conversations
+// (the real DELETE) and housekeeping_plan (the dry-run count) share it, so
+// the two can never drift apart.
+constexpr const char* kPurgeTurnsWhere =
+    "created_at < ? "
+    "AND EXISTS (SELECT 1 FROM turn_summaries ts WHERE ts.turn_id = turns.turn_id)";
+
+void bind_purge_cutoff(Stmt& s, float max_age_hours) {
+    auto cutoff = std::chrono::system_clock::now() -
+        std::chrono::duration_cast<std::chrono::system_clock::duration>(
+            std::chrono::duration<double, std::ratio<3600>>(max_age_hours));
+    s.bind(1, db_epoch(std::chrono::system_clock::to_time_t(cutoff)));
+}
+
+// LR S90: the embedding staleness filters are defined once — embed_tables
+// and housekeeping_plan share them (the '?' binds the current version).
+constexpr const char* kMissingEmbeddingWhere = "embedding IS NULL";
+constexpr const char* kStaleEmbeddingWhere =
+    "embedding IS NOT NULL AND (embedding_version IS NULL OR embedding_version != ?)";
+
+} // namespace
+
 
     // PHASE8 semantic shift: the old count() counted summaries only; notes
     // now live in `knowledge`, so count() is every knowledge row (decisions,
@@ -108,7 +132,8 @@ namespace fs = std::filesystem;
 
     int Backend::Impl::embed_tables(Embedder& emb_ref, bool only_missing,
                                     const ProgressFn& progress,
-                                    const std::string& table_filter) {
+                                    const std::string& table_filter,
+                                    const CancelFlag* cancel) {
         struct TableSpec {
             const char* table;
             const char* id_col;
@@ -176,9 +201,8 @@ namespace fs = std::filesystem;
             // bind_embedding/bind_embedding_version always write both
             // together, but a row that reaches this state some other way
             // should still be treated as stale rather than skipped forever).
-            const char* filter = stale_only
-                ? "embedding IS NOT NULL AND (embedding_version IS NULL OR embedding_version != ?)"
-                : only_missing ? "embedding IS NULL"
+            const char* filter = stale_only ? kStaleEmbeddingWhere
+                : only_missing ? kMissingEmbeddingWhere
                               : "1";
             std::string cols = t.extra_col
                 ? std::format("{}, {}, {}", t.id_col, t.text_col, t.extra_col)
@@ -237,6 +261,15 @@ namespace fs = std::filesystem;
                 }
 
                 for (auto& r : batch) {
+                    // LR S90: cancel between rows. Rows already written stay
+                    // (autocommit); a rerun or the daemon's backfill finishes
+                    // the rest, so the pass is resumable by construction.
+                    if (cancel && cancel->load()) {
+                        // Written rows must not survive in the warm caches.
+                        if (done > 0) invalidate_all_caches();
+                        throw cancelled_error(std::format(
+                            "embed {}: cancelled after {} row(s)", t.table, done));
+                    }
                     auto emb = emb_ref.encode(r.text);
                     Stmt update(db, upd);
                     bind_embedding_version(update.raw(), 1, emb);
@@ -295,9 +328,10 @@ namespace fs = std::filesystem;
     // or one table when `table` != "all".
     int Backend::Impl::rebuild_embeddings(Embedder& emb_ref,
                                           const ProgressFn& progress,
-                                          const std::string& table) {
+                                          const std::string& table,
+                                          const CancelFlag* cancel) {
         if (!embedder_usable(emb_ref)) return 0;
-        int n = embed_tables(emb_ref, /*only_missing=*/false, progress, table);
+        int n = embed_tables(emb_ref, /*only_missing=*/false, progress, table, cancel);
         // Belt and braces: a full rebuild touches every corpus and a dtype
         // change makes every cached decoded vector stale — drop all.
         invalidate_all_caches();
@@ -307,9 +341,10 @@ namespace fs = std::filesystem;
 
     // Cheap backfill: embed rows left NULL or with stale version byte,
     // scoped to one table when `table` != "all".
-    int Backend::Impl::backfill_embeddings(Embedder& emb_ref, const std::string& table) {
+    int Backend::Impl::backfill_embeddings(Embedder& emb_ref, const std::string& table,
+                                           const CancelFlag* cancel) {
         if (!embedder_usable(emb_ref)) return 0;
-        return embed_tables(emb_ref, /*only_missing=*/true, /*progress=*/{}, table);
+        return embed_tables(emb_ref, /*only_missing=*/true, /*progress=*/{}, table, cancel);
     }
 
 
@@ -354,11 +389,67 @@ namespace fs = std::filesystem;
     }
 
 
+    // LR S90: one housekeeping pass's worth of counts, SELECT-only — the
+    // dry-run behind `ragger housekeeping --dry-run` (and S91's dry_run
+    // jobs). Predicates are shared with the real pass (server.cpp
+    // run_housekeeping): the purge WHERE, the catch-up selection
+    // (unsummarized_turns in write.cpp + the service's empty-assistant
+    // skip), and the embed_tables missing/stale filters.
+    Backend::Impl::HousekeepingPlan Backend::Impl::housekeeping_plan(
+            float max_age_hours) const {
+        HousekeepingPlan p;
+        {
+            Stmt s(db, std::string("SELECT COUNT(*) FROM turns WHERE ") + kPurgeTurnsWhere);
+            bind_purge_cutoff(s, max_age_hours);
+            if (s.step()) p.purge_turns = s.column_int(0);
+        }
+        {
+            Stmt s(db,
+                "SELECT COUNT(*) FROM turns t "
+                "LEFT JOIN turn_summaries ts ON ts.turn_id = t.turn_id "
+                "WHERE ts.turn_id IS NULL AND t.assistant_text IS NOT NULL "
+                "  AND t.assistant_text != ''");
+            if (s.step()) p.unsummarized = s.column_int(0);
+        }
+        for (const auto& t : kTextTables) {
+            if (t.lexical_only) continue;   // LR S81: no embedding column
+            const std::string embeddable = embeddable_where_sql(t);
+            {
+                Stmt s(db, std::format("SELECT COUNT(*) FROM {} WHERE ({}) AND ({})",
+                                       t.table, embeddable, kMissingEmbeddingWhere));
+                if (s.step()) p.embed_missing += s.column_int(0);
+            }
+            {
+                Stmt s(db, std::format("SELECT COUNT(*) FROM {} WHERE ({}) AND ({})",
+                                       t.table, embeddable, kStaleEmbeddingWhere));
+                s.bind(1, static_cast<int>(embedding_version_));
+                if (s.step()) p.embed_stale += s.column_int(0);
+            }
+        }
+        return p;
+    }
+
+
+    // LR S90: dry-run for `reindex` — every row of each selected text table
+    // is walked by the real pass, so the plan is just the row counts.
+    std::vector<std::pair<std::string, int>> Backend::Impl::reindex_plan(
+            const std::string& table) const {
+        std::vector<std::pair<std::string, int>> out;
+        for (const auto& t : kTextTables) {
+            if (table != "all" && table != t.table) continue;
+            Stmt s(db, std::format("SELECT COUNT(*) FROM {}", t.table));
+            out.emplace_back(std::string(t.table), s.step() ? s.column_int(0) : 0);
+        }
+        return out;
+    }
+
+
     // (Re)build the custom index for a single text table. Delegates to the
     // TextIndex engine (schema + tokenize + TF-IDF live there now).
     int Backend::Impl::reindex_table(const std::string& table_name,
-                                     const ProgressFn& progress) {
-        return text_index_->reindex_table(table_name, progress);
+                                     const ProgressFn& progress,
+                                     const CancelFlag* cancel) {
+        return text_index_->reindex_table(table_name, progress, cancel);
     }
 
 
@@ -378,12 +469,12 @@ namespace fs = std::filesystem;
     // write lock is held for the whole run, so a running daemon's writers
     // wait (busy timeout) or fail — main.cpp prints a note about that.
     std::vector<std::pair<std::string, int>> Backend::Impl::reindex_all(
-            const ProgressFn& progress) {
+            const ProgressFn& progress, const CancelFlag* cancel) {
         std::vector<std::pair<std::string, int>> out;
         Transaction tx(db);
         reset_terms_table();
         for (const auto& t : kTextTables)
-            out.emplace_back(std::string(t.table), reindex_table(t.table, progress));
+            out.emplace_back(std::string(t.table), reindex_table(t.table, progress, cancel));
         tx.commit();
         return out;
     }
@@ -398,15 +489,8 @@ namespace fs = std::filesystem;
     // summarizer cannot silently destroy unsummarized history. The FK
     // (turn_summaries.turn_id ON DELETE SET NULL) leaves the summary behind.
     int Backend::Impl::cleanup_old_conversations(float max_age_hours) {
-        auto cutoff = std::chrono::system_clock::now() -
-            std::chrono::duration_cast<std::chrono::system_clock::duration>(
-                std::chrono::duration<double, std::ratio<3600>>(max_age_hours));
-        int64_t cutoff_epoch = db_epoch(std::chrono::system_clock::to_time_t(cutoff));
-
-        Stmt stmt(db,
-            "DELETE FROM turns WHERE created_at < ? "
-            "AND EXISTS (SELECT 1 FROM turn_summaries ts WHERE ts.turn_id = turns.turn_id)");
-        stmt.bind(1, cutoff_epoch);
+        Stmt stmt(db, std::string("DELETE FROM turns WHERE ") + kPurgeTurnsWhere);
+        bind_purge_cutoff(stmt, max_age_hours);
         if (!stmt.exec())
             throw std::runtime_error(std::format(
                 "cleanup_old_conversations: DELETE failed: {}", sqlite3_errmsg(db)));

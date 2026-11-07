@@ -21,6 +21,7 @@
 #include <curl/curl.h>
 #include "summarizer.h"
 #include "summarizer_service.h"
+#include "jobs.h"
 #include "nlohmann_json.hpp"
 
 #include "httplib.h"
@@ -117,6 +118,10 @@ struct Server::Impl {
     std::shared_ptr<InferenceClient>    inference_;
     mutable std::mutex                  inference_mu_;  // guards inference_ (C §1.3)
     std::unique_ptr<SummarizerService>  summarizer_;
+    // LR S91 (D4, D-6): single-flight maintenance jobs (reindex,
+    // housekeeping, backfill:<kind>). Built before setup_routes() so the
+    // routes can capture it; shut down with the background threads.
+    std::unique_ptr<JobRunner>          jobs_;
 
     /// Snapshot accessor: callers hold the returned shared_ptr for as long
     /// as they need the client, independent of any concurrent reload.
@@ -143,6 +148,8 @@ struct Server::Impl {
     {
         bootstrap_auth();
         init_inference();
+        jobs_ = std::make_unique<JobRunner>(
+            memory, [this] { return inference(); }, [this] { run_housekeeping(); });
         tcp_svr = make_tcp_server();
         if (!config().server_name.empty()) {
             httplib::Headers server_header{{"Server", config().server_name}};
@@ -388,6 +395,10 @@ struct Server::Impl {
     }
 
     void stop_background_threads() {
+        // LR S91: a running job is cancelled and joined BEFORE the timer
+        // stops, so shutdown never leaves a half-run worker (the S90 cancel
+        // contract keeps the DB consistent).
+        if (jobs_) jobs_->shutdown();
         timer_running_ = false;
         poller_running_ = false;
         if (timer_thread_.joinable()) {
@@ -1362,6 +1373,51 @@ struct Server::Impl {
             g_restart_requested.store(true, std::memory_order_relaxed);
         }));
 
+        // LR S91 (D4, D-6): maintenance jobs — admin token only (same as
+        // /config and /restart), NEVER added to the MCP tools or the plugin
+        // schemas. Jobs are the S90 verbs: reindex, housekeeping,
+        // backfill:<kind>. There is no re-embed job (Reid runs it, rule 17).
+        // Register /jobs/cancel BEFORE the name pattern so it wins.
+        svr.Post("/jobs/cancel", guarded([this](const UserInfo&, const httplib::Request&,
+                                                httplib::Response& res) {
+            jobs_->cancel();
+            respond_json(res, json{{"status", "cancel-requested"}});
+        }));
+        svr.Post(R"(/jobs/([A-Za-z0-9_:.-]+))",
+                 guarded([this](const UserInfo&, const httplib::Request& req,
+                                httplib::Response& res) {
+            const std::string name = req.matches[1];
+            bool dry_run = false;
+            if (!req.body.empty()) {
+                auto body = json::parse(req.body, nullptr, /*allow_exceptions=*/false);
+                if (!body.is_discarded() && body.contains("dry_run") &&
+                    body["dry_run"].is_boolean())
+                    dry_run = body["dry_run"].get<bool>();
+            }
+            std::string error;
+            switch (jobs_->start(name, dry_run, error)) {
+                case JobRunner::StartResult::Started:
+                    Diskerror::Logger::info(std::format(
+                        "POST /jobs/{} -> started{}", name, dry_run ? " (dry run)" : ""));
+                    respond_json(res, json{{"status", "started"},
+                                           {"job", name},
+                                           {"dry_run", dry_run}}, 202);
+                    break;
+                case JobRunner::StartResult::Busy:
+                    res.status = 409;
+                    res.set_content("ERROR: " + error, "text/plain");
+                    break;
+                case JobRunner::StartResult::Unknown:
+                    res.status = 400;
+                    res.set_content("ERROR: " + error, "text/plain");
+                    break;
+            }
+        }));
+        svr.Get("/jobs", guarded([this](const UserInfo&, const httplib::Request&,
+                                        httplib::Response& res) {
+            respond_json(res, jobs_->status_json());
+        }));
+
         // GET /events -> Server-Sent Events stream. Pushes a "stats" event
         // (server status + table sizes) and any new activity-log lines every
         // few seconds. One-directional; the dashboard subscribes with
@@ -1372,7 +1428,8 @@ struct Server::Impl {
             res.set_header("Connection", "keep-alive");
             res.set_chunked_content_provider(
                 "text/event-stream",
-                [this, offset = std::uintmax_t{}](size_t /*offset_arg*/, httplib::DataSink& sink) mutable {
+                [this, offset = std::uintmax_t{},
+                       last_job_seq = std::uint64_t{}](size_t /*offset_arg*/, httplib::DataSink& sink) mutable {
                     // Emit a stats frame.
                     std::string frame = "event: stats\ndata: " +
                                         build_stats_json().dump() + "\n\n";
@@ -1383,6 +1440,18 @@ struct Server::Impl {
                         std::string a = "event: activity\ndata: " +
                                         json{{"line", line}}.dump() + "\n\n";
                         if (!sink.write(a.data(), a.size())) return false;
+                    }
+
+                    // LR S91: a "job" frame whenever the job state or
+                    // progress changed since THIS subscriber's last frame
+                    // (the S17 per-subscriber offset pattern — log tailing
+                    // is never disturbed by job events).
+                    const std::uint64_t jseq = jobs_ ? jobs_->event_seq() : 0;
+                    if (jseq != last_job_seq) {
+                        last_job_seq = jseq;
+                        std::string jf = "event: job\ndata: " +
+                                         jobs_->status_json().dump() + "\n\n";
+                        if (!sink.write(jf.data(), jf.size())) return false;
                     }
 
                     std::this_thread::sleep_for(std::chrono::seconds(2));

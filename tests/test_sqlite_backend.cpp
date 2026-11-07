@@ -7480,6 +7480,198 @@ void lr81_test_session_corpus(ragger::Embedder& emb) {
     db.close();
 }
 
+// ---------------------------------------------------------------------------
+// LR S90 — maintenance-verb contract: dry-run (SELECT-only, writes nothing),
+// cooperative cancel (committed work stays, the in-flight transaction rolls
+// back, a rerun finishes the rest), and failure injection (the failing row
+// unchanged, earlier rows kept, the message names the row). Reid runs the
+// real verbs (rule 17); this pins the code.
+// ---------------------------------------------------------------------------
+void lr90_test_maintenance_verbs(ragger::Embedder& emb) {
+    std::println("  lr90_test_maintenance_verbs...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    sqlite3* raw = p1_open_raw();
+
+    // ---- reindex: plan counts, cancel after the first batch, rerun finishes
+    // Chunks hang off one source: kDocEmbedTextSQL is NULL for a source-less
+    // chunk (three-valued logic), and such chunks are neither embeddable nor
+    // indexable by design — store_document always attaches a source.
+    CHECK(sqlite3_exec(raw,
+        "INSERT INTO document_sources (title, imported_at) VALUES ('s90 doc', 100)",
+        nullptr, nullptr, nullptr) == SQLITE_OK);
+    for (int i = 1; i <= 205; ++i) {
+        const std::string sql = std::format(
+            "INSERT INTO documents (text, chunk_index, document_source_id, modified_on)"
+            " VALUES ('alpha bravo charlie doc {}', {}, 1, 100)", i, i);
+        CHECK(sqlite3_exec(raw, sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+    }
+    {
+        auto plan = db.reindex_plan("documents");
+        CHECK(plan.size() == 1 && plan[0].first == "documents" && plan[0].second == 205);
+        CHECK(db.reindex_plan("all").size() == ragger::sqlite::kTextTableCount);
+    }
+    {
+        ragger::CancelFlag cancel{false};
+        const ragger::ProgressFn prog = [&](const char*, int done, int) {
+            if (done >= 200) cancel.store(true);
+        };
+        bool threw = false;
+        try { db.reindex_table("documents", prog, &cancel); }
+        catch (const ragger::cancelled_error&) { threw = true; }
+        CHECK(threw);
+        // Batch one committed; the rest untouched (consistent partial state).
+        CHECK(p1_scalar_int(raw,
+              "SELECT COUNT(DISTINCT document_id) FROM documents_terms") == 200);
+        // Rerun without cancel finishes the rest.
+        CHECK(db.reindex_table("documents") == 205);
+        CHECK(p1_scalar_int(raw,
+              "SELECT COUNT(DISTINCT document_id) FROM documents_terms") == 205);
+    }
+    {
+        // reindex_all is ONE transaction: a cancel rolls back the terms reset
+        // and every partial batch — the DB reads exactly as before the run.
+        const int terms_before = p1_scalar_int(raw, "SELECT COUNT(*) FROM terms");
+        const int jt_before = p1_scalar_int(raw, "SELECT COUNT(*) FROM documents_terms");
+        ragger::CancelFlag cancel{false};
+        const ragger::ProgressFn prog = [&](const char*, int done, int) {
+            if (done >= 1) cancel.store(true);
+        };
+        bool threw = false;
+        try { db.reindex_all(prog, &cancel); }
+        catch (const ragger::cancelled_error&) { threw = true; }
+        CHECK(threw);
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM documents_terms") == jt_before);
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM terms") == terms_before);
+    }
+
+    // ---- re-embed: cancel after the first row; backfill finishes the rest
+    std::vector<int> ts_ids;
+    for (int i = 1; i <= 3; ++i) {
+        const int tt = db.store_turn(
+            std::format("question number {} alpha bravo", i),
+            std::format("answer number {} charlie delta", i),
+            "turn-model", false, "s90-a");
+        ragger::Stmt s(raw, "INSERT INTO turn_summaries (turn_id, text, turn_datetime, summarized_on)"
+                            " VALUES (?, ?, (SELECT created_at FROM turns WHERE turn_id = ?), 1700000000)");
+        s.bind(1, tt).bind(2, std::format("summary text number {} echo foxtrot", i)).bind(3, tt);
+        CHECK(s.exec());
+        ts_ids.push_back(bf_ts_id(raw, tt));
+    }
+    {
+        ragger::CancelFlag cancel{false};
+        const ragger::ProgressFn prog = [&](const char*, int done, int) {
+            if (done >= 1) cancel.store(true);
+        };
+        bool threw = false;
+        try { db.rebuild_embeddings(emb, prog, "turn_summaries", &cancel); }
+        catch (const ragger::cancelled_error&) { threw = true; }
+        CHECK(threw);
+        CHECK(p1_scalar_int(raw,
+              "SELECT COUNT(*) FROM turn_summaries WHERE embedding IS NOT NULL") == 1);
+        // Rerun (cheap stale/missing mode) completes the rest.
+        CHECK(db.backfill_embeddings(emb, "turn_summaries") == 2);
+        CHECK(p1_scalar_int(raw,
+              "SELECT COUNT(*) FROM turn_summaries WHERE embedding IS NOT NULL") == 3);
+    }
+
+    // ---- backfill: cancel after the first row; rerun applies the rest
+    {
+        const std::string long_u = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima ";
+        const std::string long_a = "mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu ";
+        for (int i = 0; i < 3; ++i) {
+            const int tt = db.store_turn(long_u + std::to_string(i), long_a + std::to_string(i),
+                                         "turn-model", false, "s90-b");
+            ragger::Stmt s(raw, "INSERT INTO turn_summaries (turn_id, text, turn_datetime, summarized_on)"
+                                " VALUES (?, NULL, (SELECT created_at FROM turns WHERE turn_id = ?), 1700000000)");
+            s.bind(1, tt).bind(2, tt);
+            CHECK(s.exec());
+        }
+        bf_stub stub("Brief recap.");
+        auto client = stub.client();
+        ragger::CancelFlag cancel{false};
+        const ragger::ProgressFn prog = [&](const char*, int done, int) {
+            if (done >= 1) cancel.store(true);
+        };
+        bool threw = false;
+        try { ragger::backfill_l2(db, client, "null", false, "", {}, prog, &cancel); }
+        catch (const ragger::cancelled_error&) { threw = true; }
+        CHECK(threw);
+        CHECK(p1_scalar_int(raw,
+              "SELECT COUNT(*) FROM turn_summaries WHERE text = 'Brief recap.'") == 1);
+        auto res = ragger::backfill_l2(db, client, "null", false);
+        CHECK(res.candidates == 2 && res.applied == 2);
+    }
+
+    // ---- failure injection: failing row unchanged, earlier rows kept,
+    //      the message names the row.
+    {
+        // re-embed: a BEFORE UPDATE trigger aborts the write for one row.
+        CHECK(sqlite3_exec(raw, "UPDATE turn_summaries SET embedding_version = 999",
+                           nullptr, nullptr, nullptr) == SQLITE_OK);
+        const int victim = ts_ids[1];
+        const std::string trg = std::format(
+            "CREATE TRIGGER s90_inj BEFORE UPDATE ON turn_summaries WHEN old.turn_summary_id = {}"
+            " BEGIN SELECT RAISE(ABORT, 'injected'); END", victim);
+        CHECK(sqlite3_exec(raw, trg.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+        std::string msg;
+        bool threw = false;
+        try { db.rebuild_embeddings(emb, {}, "turn_summaries"); }
+        catch (const std::exception& e) { threw = true; msg = e.what(); }
+        sqlite3_exec(raw, "DROP TRIGGER s90_inj", nullptr, nullptr, nullptr);
+        CHECK(threw);
+        CHECK(msg.find("turn_summaries") != std::string::npos);
+        CHECK(msg.find(std::to_string(victim)) != std::string::npos);
+        // The victim kept the sentinel version (its UPDATE never landed);
+        // the earlier row was re-encoded.
+        CHECK(p1_scalar_int(raw, "SELECT embedding_version FROM turn_summaries WHERE turn_summary_id = "
+                                  + std::to_string(victim)) == 999);
+        CHECK(p1_scalar_int(raw, "SELECT embedding_version != 999 FROM turn_summaries WHERE turn_summary_id = "
+                                  + std::to_string(ts_ids[0])) == 1);
+    }
+    {
+        // reindex: a BEFORE INSERT trigger aborts one record's junction write;
+        // its whole batch rolls back (per-batch transaction).
+        const int doc2 = static_cast<int>(p1_scalar_int(raw, "SELECT MIN(document_id) FROM documents"));
+        const std::string trg = std::format(
+            "CREATE TRIGGER s90_inj2 BEFORE INSERT ON documents_terms WHEN new.document_id = {}"
+            " BEGIN SELECT RAISE(ABORT, 'injected'); END", doc2);
+        CHECK(sqlite3_exec(raw, trg.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+        const int jt_before = p1_scalar_int(raw, "SELECT COUNT(*) FROM documents_terms");
+        std::string msg;
+        bool threw = false;
+        try { db.reindex_table("documents"); }
+        catch (const std::exception& e) { threw = true; msg = e.what(); }
+        sqlite3_exec(raw, "DROP TRIGGER s90_inj2", nullptr, nullptr, nullptr);
+        CHECK(threw);
+        CHECK(msg.find("documents") != std::string::npos);
+        CHECK(msg.find(std::to_string(doc2)) != std::string::npos);
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM documents_terms") == jt_before);
+    }
+
+    // ---- dry-run paths: counts only, DB byte-identical.
+    {
+        db.store_turn("unsummarized question", "unsummarized answer",
+                      "turn-model", false, "s90-c");
+        // Normalize versions so the stale count is deterministic.
+        CHECK(sqlite3_exec(raw, ("UPDATE turn_summaries SET embedding_version = "
+                                 + std::to_string(db.embedding_version())
+                                 + " WHERE embedding IS NOT NULL").c_str(),
+                           nullptr, nullptr, nullptr) == SQLITE_OK);
+        const std::string before = bf_dump(raw);
+        CHECK(db.count_embeddable_rows("all") > 0);
+        (void)db.reindex_plan("all");
+        const auto plan = db.housekeeping_plan(100000.0f);   // cutoff far in the past
+        CHECK(plan.purge_turns == 0);
+        CHECK(plan.unsummarized == 1);
+        CHECK(plan.embed_missing == 205);   // the raw-inserted document chunks
+        CHECK(plan.embed_stale == 0);
+        CHECK(bf_dump(raw) == before);
+    }
+    sqlite3_close(raw);
+    db.close();
+}
+
 int main() {
     TestEnv env("sqlite_backend");  // must be first: isolates from ~/.ragger
     // Need config for model dir
@@ -7627,6 +7819,7 @@ int main() {
     lr79_test_history_hierarchy(emb);
     lr80_test_episode_evidence(emb);
     lr81_test_session_corpus(emb);
+    lr90_test_maintenance_verbs(emb);
 
     std::println("test_sqlite_backend: all passed");
     return 0;

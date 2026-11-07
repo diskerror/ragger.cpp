@@ -326,7 +326,8 @@ std::vector<TextIndex::Posting> TextIndex::postings(
     return out;
 }
 
-int TextIndex::reindex_table(const std::string& table, const ProgressFn& progress) {
+int TextIndex::reindex_table(const std::string& table, const ProgressFn& progress,
+                             const CancelFlag* cancel) {
     validate_table(table);
     const std::string id_col = id_col_of(table);
     const std::string select_sql = text_select_of(table);
@@ -370,12 +371,25 @@ int TextIndex::reindex_table(const std::string& table, const ProgressFn& progres
             }
         }
         if (batch.empty()) break;
+        // LR S90: cancel between batches — before this batch's transaction
+        // opens, so nothing half-written exists. Earlier batches stay
+        // committed (each has its own); a rerun finishes the rest.
+        if (cancel && cancel->load())
+            throw cancelled_error(std::format(
+                "reindex {}: cancelled after {} row(s)", table, done));
         // PHASE9B step 5: one commit per batch instead of one fsync per
         // statement. Transaction joins an outer one when a caller (reindex_all)
         // owns the transaction, so this is also correct inside it. A failing
         // batch rolls back only itself; earlier batches stay indexed.
         Transaction tx(db_);
         for (const auto& row : batch) {
+            // LR S90: also between records — inside the batch transaction a
+            // cancel rolls this batch back (nothing half-indexed) and keeps
+            // earlier batches. reindex_all's outer transaction turns the
+            // whole run into all-or-nothing, as PHASE9B intended.
+            if (cancel && cancel->load())
+                throw cancelled_error(std::format(
+                    "reindex {}: cancelled after {} row(s)", table, done));
             index_record(table, row.id, row.text);
             last_id = row.id;
             ++done;

@@ -641,6 +641,27 @@ void t_document_search_parity_s76(HttpFixture& fx) {
     std::println(" OK");
 }
 
+/// LR S92 (D4): the dashboard carries the Maintenance card — every element id
+/// the job runner drives, one button per S91 job, the Dry-run checkbox, and
+/// the route paths the buttons post to. No browser in CTest: the shipped HTML
+/// is compiled into the binary, so fetching it asserts the wiring exists.
+static void t_dashboard_maintenance_s92(HttpFixture& fx) {
+    const auto r = fx.client.get(fx.url("/dashboard"), fx.auth());
+    CHECK(r.status == 200);
+    const std::string html = r.body;
+    CHECK(!html.empty());
+    for (const char* needle : {"maintenance-card", "maint-btn-reindex",
+                               "maint-btn-l2null", "maint-btn-triggers",
+                               "maint-btn-stranded", "maint-btn-sessions",
+                               "maint-dryrun", "maint-progress",
+                               "maint-cancel", "maint-result",
+                               "/jobs/", "/jobs/cancel"}) {
+        CHECK(html.find(needle) != std::string::npos);
+    }
+    // No embedding job button (rule 17: Reid runs re-embed himself).
+    CHECK(html.find("maint-btn-embed") == std::string::npos);
+}
+
 int main() {
     HttpFixture fx("http");
     CHECK(fx.ready);
@@ -660,6 +681,7 @@ int main() {
     t_delete_routes_gone(fx);
     t_memory_note_trigger_session(fx);
     t_document_search_parity_s76(fx);
+    t_dashboard_maintenance_s92(fx);
 
     std::println("test_http: all passed");
     return 0;

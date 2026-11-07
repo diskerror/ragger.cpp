@@ -179,14 +179,17 @@ public:
 
     /// Rebuild embeddings for all stored documents. Returns doc count.
     int rebuild_embeddings(Embedder& embedder, const ProgressFn& progress = {},
-                           const std::string& table = "all") override;
+                           const std::string& table = "all",
+                           const CancelFlag* cancel = nullptr) override;
     void set_embedder(Embedder& embedder) override;
     void set_vector_type(vector_codec::VectorType t) override;
     int backfill_embeddings(Embedder& embedder,
-                            const std::string& table = "all") override;
+                            const std::string& table = "all",
+                            const CancelFlag* cancel = nullptr) override;
     uint8_t embedding_version() const override;
     uint8_t increment_embedding_version() override;
-    int reindex_table(const std::string& table, const ProgressFn& progress = {}) override;
+    int reindex_table(const std::string& table, const ProgressFn& progress = {},
+                        const CancelFlag* cancel = nullptr) override;
     void reset_terms_table() override;
 
     /// Get distinct collection names.
@@ -194,7 +197,11 @@ public:
 
     /// PHASE9B step 5: atomic full text-index rebuild (see backend_impl.h).
     std::vector<std::pair<std::string, int>> reindex_all(
-        const ProgressFn& progress = {}) override;
+        const ProgressFn& progress = {},
+        const CancelFlag* cancel = nullptr) override;
+    HousekeepingPlan housekeeping_plan(float max_age_hours) const override;
+    std::vector<std::pair<std::string, int>> reindex_plan(
+        const std::string& table = "all") const override;
 
     /// Search by metadata field matching with optional temporal filtering. Returns vector of results.
     std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit = 0,

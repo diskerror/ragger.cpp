@@ -244,6 +244,7 @@ add_library(ragger_core STATIC
     src/summarizer.cpp
     src/summarizer_service.cpp
     src/backfill.cpp
+    src/jobs.cpp
     src/episode_boundaries.cpp
     src/recipe.cpp
     src/recipe_cli.cpp

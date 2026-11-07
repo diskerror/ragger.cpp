@@ -244,6 +244,35 @@ function renderSection(section) {
     main.appendChild(banner);
     document.getElementById("restart-btn").onclick = doRestart;
     refreshRestart();
+
+    // LR S92 (D4): the Maintenance card — one button per daemon job (the
+    // S91 routes), a Dry-run checkbox (dry_run:true on the same route), a
+    // progress bar driven by the `job` SSE event, Cancel, and the last
+    // result line. No Re-embed button: Reid runs re-embed (rule 17).
+    const maint = document.createElement("div");
+    maint.className = "embed-banner";
+    maint.id = "maintenance-card";
+    maint.innerHTML =
+      '<div class="cur">Maintenance jobs (one at a time; progress below).</div>' +
+      '<div class="embed-row">' +
+        '<button class="btn" id="maint-btn-reindex" data-job="reindex">Reindex</button>' +
+        '<button class="btn" id="maint-btn-l2null" data-job="backfill:l2-null">Back-fill L2</button>' +
+        '<button class="btn" id="maint-btn-triggers" data-job="backfill:triggers">Back-fill triggers</button>' +
+        '<button class="btn" id="maint-btn-stranded" data-job="backfill:stranded">Re-attach stranded</button>' +
+        '<button class="btn" id="maint-btn-sessions" data-job="backfill:session-names">Name sessions</button>' +
+        '<label style="margin-left:8px"><input type="checkbox" id="maint-dryrun"> Dry run</label>' +
+      '</div>' +
+      '<div class="embed-row">' +
+        '<progress id="maint-progress" max="1" value="0" style="flex:1"></progress>' +
+        '<button class="btn" id="maint-cancel" disabled>Cancel</button>' +
+      '</div>' +
+      '<div class="embed-status" id="maint-result"></div>';
+    main.appendChild(maint);
+    maint.querySelectorAll("button[data-job]").forEach(b => {
+      b.onclick = () => startMaintJob(b.dataset.job);
+    });
+    document.getElementById("maint-cancel").onclick = cancelMaintJob;
+    refreshJobs();
   }
 
   // The Embedding tab gets a special banner (current identity + Update now).
@@ -752,6 +781,56 @@ async function probeExternalDimensions(host, port, model) {
   } catch (e) { /* probe failed silently */ }
 }
 
+// ---- maintenance jobs (LR S92) ----------------------------------------------
+// The card lives on the Server tab; state arrives on the `job` SSE event (the
+// S91 JobRunner) and from GET /jobs on first render. One job runs at a time;
+// a second start gets 409 and the banner says so.
+
+async function startMaintJob(name) {
+  const dry = document.getElementById("maint-dryrun").checked;
+  try {
+    const r = await fetch(api("/jobs/" + name), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dry_run: dry })
+    });
+    if (r.status === 409) { showBanner("A maintenance job is already running."); return; }
+    if (!r.ok) { showBanner("Could not start " + name + ": HTTP " + r.status); return; }
+  } catch (e) { showBanner("Could not start " + name + ": " + e.message); return; }
+  refreshJobs();
+}
+
+async function cancelMaintJob() {
+  try { await fetch(api("/jobs/cancel"), { method: "POST" }); } catch (e) {}
+  refreshJobs();
+}
+
+async function refreshJobs() {
+  try {
+    const r = await fetch(api("/jobs"));
+    if (r.ok) renderJobState(await r.json());
+  } catch (e) {}
+}
+
+function renderJobState(s) {
+  const bar = document.getElementById("maint-progress");
+  const res = document.getElementById("maint-result");
+  const cancel = document.getElementById("maint-cancel");
+  if (!bar || !res) return;              // card not on screen right now
+  const running = !!s.current;
+  const job = s.current || s.last;
+  const total = job && job.total > 0 ? job.total : 0;
+  bar.max = total || 1;
+  bar.value = job ? Math.max(0, job.done) : 0;
+  if (cancel) cancel.disabled = !running;
+  if (!job) { res.textContent = ""; res.className = "embed-status"; return; }
+  const pct = total > 0 ? " (" + job.done + "/" + job.total + ")" : "";
+  res.className = "embed-status" +
+    (job.state === "failed" ? " pending" : job.state === "done" ? " ok" : "");
+  res.textContent = job.name + ": " + job.state + pct +
+    (job.message ? " — " + job.message : "");
+}
+
 // ---- server restart panel --------------------------------------------------
 let RESTART_STATUS = null;
 
@@ -1054,6 +1133,10 @@ function connectEvents() {
   });
   es.addEventListener("activity", (ev) => {
     try { addActivity(JSON.parse(ev.data).line); } catch (e) {}
+  });
+  // LR S92: maintenance job progress (the S91 `job` event).
+  es.addEventListener("job", (ev) => {
+    try { renderJobState(JSON.parse(ev.data)); } catch (e) {}
   });
   es.onerror = () => {
     setServerBadge(false);

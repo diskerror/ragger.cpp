@@ -27,6 +27,7 @@
 
 #include <curl/curl.h>
 
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -75,6 +76,16 @@ public:
                  long timeout_sec = 30) {
         return request("GET", url, "", headers, timeout_sec);
     }
+
+    /// LR S91: streaming GET — calls `on_data` for every received chunk
+    /// (SSE-style). The transfer ends when `on_data` returns false (result
+    /// is CURLE_WRITE_ERROR — the caller treats that as "stopped on
+    /// request"), when the timeout expires, or when the server closes.
+    /// `body` stays empty: chunks go to the callback, not accumulated.
+    Response stream(const std::string& url,
+                    const std::vector<std::string>& headers,
+                    const std::function<bool(std::string_view)>& on_data,
+                    long timeout_sec = 30);
 
     Response post(const std::string& url,
                   const std::string& body,

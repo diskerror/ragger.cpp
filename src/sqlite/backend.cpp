@@ -212,8 +212,9 @@ std::vector<EpisodeCandidateTurn> Backend::episode_candidate_turns(
     return pImpl->episode_candidate_turns(session_guid, since_ts);
 }
 
-std::vector<std::pair<std::string, int>> Backend::reindex_all(const ProgressFn& progress) {
-    return pImpl->reindex_all(progress);
+std::vector<std::pair<std::string, int>> Backend::reindex_all(
+        const ProgressFn& progress, const CancelFlag* cancel) {
+    return pImpl->reindex_all(progress, cancel);
 }
 
 
@@ -275,9 +276,10 @@ std::vector<SearchResult> Backend::load_all(const std::string& collection) {
     return pImpl->load_all(collection);
 }
 
-int Backend::rebuild_embeddings(Embedder& embedder, const ProgressFn& progress, const std::string& table) {
+int Backend::rebuild_embeddings(Embedder& embedder, const ProgressFn& progress,
+                                const std::string& table, const CancelFlag* cancel) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->rebuild_embeddings(embedder, progress, table);
+    return pImpl->rebuild_embeddings(embedder, progress, table, cancel);
 }
 
 // RaggerMemory swaps its Embedder object on recovery/update; the backend must
@@ -292,9 +294,10 @@ void Backend::set_vector_type(vector_codec::VectorType t) {
     pImpl->vtype_ = t;
 }
 
-int Backend::backfill_embeddings(Embedder& embedder, const std::string& table) {
+int Backend::backfill_embeddings(Embedder& embedder, const std::string& table,
+                                 const CancelFlag* cancel) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->backfill_embeddings(embedder, table);
+    return pImpl->backfill_embeddings(embedder, table, cancel);
 }
 
 uint8_t Backend::embedding_version() const {
@@ -307,9 +310,20 @@ uint8_t Backend::increment_embedding_version() {
     return pImpl->increment_embedding_version();
 }
 
-int Backend::reindex_table(const std::string& table, const ProgressFn& progress) {
+int Backend::reindex_table(const std::string& table, const ProgressFn& progress,
+                           const CancelFlag* cancel) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->reindex_table(table, progress);
+    return pImpl->reindex_table(table, progress, cancel);
+}
+
+Backend::HousekeepingPlan Backend::housekeeping_plan(float max_age_hours) const {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->housekeeping_plan(max_age_hours);
+}
+
+std::vector<std::pair<std::string, int>> Backend::reindex_plan(const std::string& table) const {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->reindex_plan(table);
 }
 
 void Backend::reset_terms_table() {

@@ -365,9 +365,10 @@ std::vector<SearchResult> RaggerMemory::load_all(const std::string& collection) 
     return backend_->load_all(collection);
 }
 
-int RaggerMemory::rebuild_embeddings(const ProgressFn& progress, const std::string& table) {
+int RaggerMemory::rebuild_embeddings(const ProgressFn& progress, const std::string& table,
+                                     const CancelFlag* cancel) {
     auto emb = embedder_snapshot();
-    return backend_->rebuild_embeddings(*emb, progress, table);
+    return backend_->rebuild_embeddings(*emb, progress, table, cancel);
 }
 
 RaggerMemory::EmbeddingStatus RaggerMemory::embedding_status() {
@@ -708,9 +709,9 @@ int RaggerMemory::resume_interrupted_reembed() {
     return total;
 }
 
-int RaggerMemory::backfill_embeddings() {
+int RaggerMemory::backfill_embeddings(const CancelFlag* cancel) {
     auto emb = embedder_snapshot();
-    return backend_->backfill_embeddings(*emb);
+    return backend_->backfill_embeddings(*emb, "all", cancel);
 }
 
 std::vector<std::string> RaggerMemory::collections() const {

@@ -480,9 +480,12 @@ public:
     /// `table` != "all" (turns, turn_summaries, summaries, decisions,
     /// documents). Returns row count (re-)encoded. `progress` receives
     /// (table, done, total) per row and (table, -1, total) at each table's end.
+    /// `cancel` (LR S90) is checked before each encode: when set, rows
+    /// already written stay (autocommit), and cancelled_error is thrown.
     virtual int rebuild_embeddings(Embedder& embedder,
                                     const ProgressFn& progress = {},
-                                    const std::string& table = "all") = 0;
+                                    const std::string& table = "all",
+                                    const CancelFlag* cancel = nullptr) = 0;
 
     /// Rebind the backend's embedder. RaggerMemory replaces its Embedder
     /// object (recovery, model update); the backend keeps a raw pointer, so
@@ -499,7 +502,8 @@ public:
     /// scoped to one table when `table` != "all". Cheap; intended to run on
     /// startup and after deferred-embedding writes. Returns rows updated.
     virtual int backfill_embeddings(Embedder& embedder,
-                                     const std::string& table = "all") = 0;
+                                     const std::string& table = "all",
+                                     const CancelFlag* cancel = nullptr) = 0;
 
     /// Get the current embedding version from the settings table.
     virtual uint8_t embedding_version() const = 0;
@@ -515,9 +519,12 @@ public:
     /// table: one of the registry's text tables (see sqlite/tables.h)
     /// progress: called (table, done, total) per record and (table, -1, total)
     ///           at the end (see ragger::ProgressFn)
+    /// cancel:   LR S90 — checked between batches and between records; when
+    ///           set, committed batches stay and cancelled_error is thrown.
     /// Returns: number of records reindexed.
     virtual int reindex_table(const std::string& table,
-                              const ProgressFn& progress = {}) = 0;
+                              const ProgressFn& progress = {},
+                              const CancelFlag* cancel = nullptr) = 0;
 
     /// Truncate the shared cross-table `terms` list and reset its
     /// AUTOINCREMENT counter (starts term_ids fresh from 1). ON DELETE
@@ -533,8 +540,27 @@ public:
     // --- Memory operations ---
 
     /// PHASE9B step 5: atomic full text-index rebuild. Returns {table, rows}.
+    /// cancel (LR S90): checked between batches and records; a cancel rolls
+    /// the whole run back (one transaction) and throws cancelled_error.
     virtual std::vector<std::pair<std::string, int>> reindex_all(
-        const ProgressFn& progress = {}) = 0;
+        const ProgressFn& progress = {},
+        const CancelFlag* cancel = nullptr) = 0;
+
+    /// LR S90: what one housekeeping pass WOULD do, computed with SELECTs
+    /// only — the dry-run behind `ragger housekeeping --dry-run`. The
+    /// predicates are shared with the real pass (no drift).
+    struct HousekeepingPlan {
+        int purge_turns = 0;     // old turns with a summary row (cleanup)
+        int unsummarized = 0;    // turns awaiting L2 catch-up
+        int embed_missing = 0;   // embeddable rows with no embedding
+        int embed_stale = 0;     // embeddable rows at an old embedding_version
+    };
+    virtual HousekeepingPlan housekeeping_plan(float max_age_hours) const = 0;
+
+    /// LR S90: what `reindex <table|all>` WOULD walk — row count per text
+    /// table (reindex indexes every row; SELECT only).
+    virtual std::vector<std::pair<std::string, int>> reindex_plan(
+        const std::string& table = "all") const = 0;
 
     /// Search by metadata field matching with optional temporal filtering.
     virtual std::vector<SearchResult> search_by_metadata(const json& metadata_filter,
