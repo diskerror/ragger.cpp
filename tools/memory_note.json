@@ -1,0 +1,41 @@
+{
+  "description": "Store a note (fact, preference, lesson) into memory. To scope a note to a project, tag it (e.g. `project:ragger`). The result may carry the working directory when `cwd` is given. The result may carry `possible_supersedes`: current decisions this note may contradict (hint only \u2014 nothing was changed; review them, and record a real ruling with memory_decision instead). Pass evidence (episode ids from search) when you are recording a synthesized insight; it is stored as an insight linked to those sources. `trigger` is only valid on an insight (with evidence); `session` records which session the note came from.",
+  "inputSchema": {
+    "properties": {
+      "evidence": {
+        "description": "episode ids (or \"episode:<id>\" handles) this note synthesizes; get ids from memory_search (layer 'episode') hits. When present the note is stored as an insight (response carries \"kind\":\"insight\") instead of a plain note.",
+        "items": {
+          "type": [
+            "integer",
+            "string"
+          ]
+        },
+        "type": "array"
+      },
+      "session": {
+        "description": "Session GUID to record as provenance (stored on the row; unknown GUID stores without a link, not an error).",
+        "type": "string"
+      },
+      "tags": {
+        "description": "Optional tags.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "text": {
+        "description": "The note text.",
+        "type": "string"
+      },
+      "trigger": {
+        "description": "When this insight applies, in the vocabulary of a future query. Only valid together with evidence; on a plain note it is a 400.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "text"
+    ],
+    "type": "object"
+  },
+  "name": "memory_note"
+}

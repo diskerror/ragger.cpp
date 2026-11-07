@@ -1,0 +1,13 @@
+{
+  "description": "Read Ragger's live configuration. Returns every setting with its current value and schema metadata (type, default, edit policy, enum options). Pass a `key` to fetch just one setting. Read-only \u2014 use this to bootstrap host/port/token or other settings on agent-framework restart instead of reading a config file.",
+  "inputSchema": {
+    "properties": {
+      "key": {
+        "description": "Optional single setting key. Omit for all settings.",
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "name": "get_config"
+}

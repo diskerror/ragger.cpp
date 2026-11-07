@@ -83,7 +83,7 @@ unknown statuses, illegal transitions) are always `400`, never `500`.
 
 ## Endpoints
 
-34 routes are registered; each `###` heading below is one route.
+39 routes are registered; each `###` heading below is one route.
 
 ### GET /health
 
@@ -659,6 +659,49 @@ supervisor re-execs.
 
 ---
 
+### POST /jobs/&lt;name&gt;
+
+Start a maintenance job in the daemon (LR S91). One job runs at a time.
+Names: `reindex`, `housekeeping`, `backfill:<kind>` (`l2-null`,
+`l2-empty`, `l2-regenerate`, `triggers`, `stranded`, `session-names`).
+There is deliberately **no** re-embed job — re-embedding is a CLI
+operation the user runs (`ragger re-embed`).
+
+Optional JSON body `{"dry_run": true}` selects only (counts, writes
+nothing). **Responses:** `202 {"status":"started","job":"<name>","dry_run":<bool>}`;
+`409` when a job is already running; `400` for an unknown name
+(`text/plain` `ERROR: …`). Progress arrives on `GET /events` as
+`event: job`; the current/last snapshot is `GET /jobs`.
+
+---
+
+### POST /jobs/cancel
+
+Ask the running job to stop at its next batch boundary. Always succeeds;
+a job that already finished ignores it. **Response:**
+`{"status": "cancel-requested"}`. A cancelled job ends in state
+`cancelled` with everything committed up to that point intact.
+
+---
+
+### GET /jobs
+
+Snapshot of the job runner: `{"current": <job>|null, "last": <job>|null}`
+where `<job>` is `{"name", "state", "done", "total", "message"}` and
+`state` is one of `queued | running | done | failed | cancelled`.
+
+---
+
+### GET /tools
+
+The MCP `tools/list` array over HTTP (LR S95):
+`{"tools": [{"name", "description", "inputSchema"}, …]}` — the same
+embedded `tools/*.json` definitions, gated by the same
+`capture_turns` / `build_context` settings. For inspection and
+cross-surface parity; agents discover tools through MCP itself.
+
+---
+
 ### GET /events
 
 Server-Sent Events stream (one-directional; the dashboard subscribes with
@@ -668,6 +711,9 @@ Server-Sent Events stream (one-directional; the dashboard subscribes with
 - `event: activity` — `{"line": "..."}` for each new activity-log line
   since the last drain (first read starts at EOF, so only new lines
   stream).
+- `event: job` — the `GET /jobs` payload, sent when the running or last
+  job's state/progress changed since this subscriber's previous frame
+  (LR S91).
 
 Config writes go through `PUT /config`, not this stream.
 
@@ -701,6 +747,11 @@ standard MCP handshake and tool discovery:
 
 ### Tools
 
+The definitions live in `tools/*.json` (one file per tool) and are
+compiled into the binary — `tools/list` and `GET /tools` serve exactly
+those, so there is one source of truth (LR S95). `memory_review` is not
+in this list by design: curation is user-driven (HTTP route + CLI).
+
 | Tool              | Description                                                                | Required params                 |
 |-------------------|----------------------------------------------------------------------------|---------------------------------|
 | `store`           | Store a memory (decision when `metadata.category="decision"`, else note)   | `text` (string)                 |
@@ -712,6 +763,7 @@ standard MCP handshake and tool discovery:
 | `memory_decision` | Store a structured decision                                                | `text`, `trigger`              |
 | `memory_note`     | Store a note, or an insight with `evidence`                                | `text`                          |
 | `memory_search`   | Layered search across all memory layers                                    | `query` (string)                |
+| `document_search` | Search imported documents (their own verb; `search` also covers them)      | `query` (string)                |
 | `memory_get`      | Full rows by typed handle, or session history paging                       | — (exactly one mode per call)   |
 | `memory_timeline` | Deterministic newest-first range scan                                      | —                               |
 | `memory_update`   | Metadata-only curation of a knowledge row                                  | `id` (handle)                   |

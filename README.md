@@ -223,6 +223,7 @@ macOS (arm64 and x86_64) and Linux (x86_64 and aarch64) are supported. Windows n
 | [Getting started](docs/getting-started.md)                     | Setup and first run                                            |
 | [Configuration](docs/configuration.md)                         | Config keys reference (DB-backed)                              |
 | [Search & RAG](docs/search-and-rag.md)                         | How hybrid search works                                        |
+| [What capture records](docs/capture.md)                        | What the plugin sends and merges; what never enters           |
 | [HTTP API](docs/http-api.md)                                   | REST endpoints, MCP, auth, `/turn` and `/session/<id>?recipe=` |
 | [Importing conversations](docs/importing-conversations.md)     | Claude Code / claude.ai history                                |
 | [Deployment](docs/deployment.md)                               | Daemon lifecycle, sub-users, reverse proxy                     |
@@ -235,7 +236,7 @@ macOS (arm64 and x86_64) and Linux (x86_64 and aarch64) are supported. Windows n
 ## Tests
 
 ```bash
-cd build && ctest --output-on-failure   # 14 suites
+cd build && ctest --output-on-failure   # 21 suites (22 with stats)
 ```
 
 ## License

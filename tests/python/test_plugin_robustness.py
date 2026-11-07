@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """PHASE9B step 9: Hermes plugin robustness.
 
-Standalone, stdlib only. NOT registered in CTest: the plugin imports
-`agent.memory_provider`, and the interpreter that has Hermes on its path is
-machine-specific. Run directly:
+Standalone, stdlib only. Registered in CTest as test_plugin_robustness (S52);
+it stubs `agent.memory_provider` so no Hermes install is needed. Run
+directly:
 
     python3 tests/python/test_plugin_robustness.py
 
@@ -172,6 +172,27 @@ check(sent.get("evidence") == [3], "evidence forwarded: %r" % sent)
 p5.handle_tool_call("memory_note", {"text": "n3", "session": "explicit-guid"})
 sent = json.loads(_state["last_body"])
 check(sent.get("session") == "explicit-guid", "an explicit GUID passes through: %r" % sent)
+
+# --- 6. plugin schemas match the embedded tool definitions (LR S95) ------
+# tools/*.json is the single source of truth for the MCP/HTTP surfaces; the
+# plugin keeps its own Hermes-facing schemas (different descriptions, and
+# ragger_search/ragger_store are the plugin's names for search/store). The
+# contract checked here: every plugin tool exists among the tool definitions
+# and demands the same required arguments.
+TOOLS_DIR = PLUGIN_PATH.parent.parent / "tools"
+tool_defs = {f.stem: json.loads(f.read_text())
+             for f in sorted(TOOLS_DIR.glob("*.json"))}
+PLUGIN_NAME_MAP = {"ragger_search": "search", "ragger_store": "store"}
+p6 = make_provider()
+for schema in p6.get_tool_schemas():
+    mapped = PLUGIN_NAME_MAP.get(schema["name"], schema["name"])
+    check(mapped in tool_defs,
+          "plugin tool %r has no tools/%s.json" % (schema["name"], mapped))
+    plugin_required = sorted(schema["parameters"].get("required", []))
+    def_required = sorted(tool_defs[mapped]["inputSchema"].get("required", []))
+    check(plugin_required == def_required,
+          "plugin %r required %r != tools/%s.json required %r"
+          % (schema["name"], plugin_required, mapped, def_required))
 
 _server.shutdown()
 print("OK")

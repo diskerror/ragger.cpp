@@ -1,0 +1,65 @@
+{
+  "description": "Layered search across the conversation and knowledge corpora. Returns handles + snippets only \u2014 call memory_get with chosen handles for full text. `layers` narrows by layer (turn_summary, episode, knowledge); empty = all. Documents are NOT searched here \u2014 use document_search. `kinds` narrows knowledge hits (decision, insight, note). Legacy layer names 'decision'/'insight' are accepted and mean knowledge restricted to that kind. status: 'active' (default) hides superseded/retired knowledge, 'any' includes them. since/until: 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or relative ('30d', '12h'). For conversation history use memory_get(session=..., after_turn=...).",
+  "inputSchema": {
+    "properties": {
+      "exclude_session": {
+        "description": "Drop results from this session GUID.",
+        "type": "string"
+      },
+      "layers": {
+        "description": "Restrict to these layers (turn_summary, episode, knowledge). 'turn' is raw exchange text, searched only when named explicitly; prefer the summaries. 'session' matches session titles (lexical only, opt-in). Documents use document_search.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "limit": {
+        "description": "Max results (default 10, max 50).",
+        "type": "integer"
+      },
+      "max_tokens": {
+        "description": "Token budget (~chars/4) over snippets; 0 = none.",
+        "type": "integer"
+      },
+      "mode": {
+        "description": "hybrid (default) | semantic (vector only; needs an embedder) | keyword (text index only).",
+        "type": "string"
+      },
+      "query": {
+        "description": "The search query.",
+        "type": "string"
+      },
+      "session": {
+        "description": "Only results from this session GUID.",
+        "type": "string"
+      },
+      "since": {
+        "description": "Only results at/after this time.",
+        "type": "string"
+      },
+      "status": {
+        "description": "Decisions only: active (default) | any | one exact status.",
+        "type": "string"
+      },
+      "tags": {
+        "description": "Knowledge rows must carry ALL listed tags (AND rule; trimmed, case-insensitive; `project:<name>` is just a tag). A comma string is accepted. Layers without tags are excluded.",
+        "items": {
+          "type": "string"
+        },
+        "type": [
+          "array",
+          "string"
+        ]
+      },
+      "until": {
+        "description": "Only results at/before this time.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "type": "object"
+  },
+  "name": "memory_search"
+}

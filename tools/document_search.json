@@ -1,0 +1,28 @@
+{
+  "description": "Search imported documents (their own verb; memory_search does not cover them). Returns document:<N> handles + snippets \u2014 call memory_get with chosen handles for full text. `source` narrows to paths containing this substring (case-insensitive).",
+  "inputSchema": {
+    "properties": {
+      "limit": {
+        "description": "Max results (default 10, max 50).",
+        "type": "integer"
+      },
+      "mode": {
+        "description": "hybrid (default) | semantic (vector only; needs an embedder) | keyword (text index only).",
+        "type": "string"
+      },
+      "query": {
+        "description": "The search query.",
+        "type": "string"
+      },
+      "source": {
+        "description": "Only documents whose stored source path contains this.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "type": "object"
+  },
+  "name": "document_search"
+}

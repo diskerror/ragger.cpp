@@ -3,9 +3,10 @@
  *
  * JSON-RPC 2.0 over stdin/stdout.  Tools exposed (see tools_list()):
  *   store, search, status, capture_turn, build_context, get_config,
- *   memory_decision, memory_note, memory_search, memory_get,
- *   memory_timeline, memory_update. (memory_review left the agent tool
- *   lists at LR S88 (D7, D-2); the HTTP route and CLI remain.)
+ *   memory_decision, memory_note, memory_search, document_search,
+ *   memory_get, memory_timeline, memory_update. (memory_review left the
+ *   agent tool lists at LR S88 (D7, D-2); the HTTP route and CLI remain.)
+ *   The definitions themselves are tools/*.json, compiled in (LR S95).
  *
  * Housekeeping: if no ragger HTTP server PID file is found, a
  * background thread runs periodic cleanup so the database doesn't
@@ -25,6 +26,7 @@
 #include "sqlite/status.h"
 #include "util/fs.h"
 #include "nlohmann_json.hpp"
+#include "tools_json.inc"
 
 #include <atomic>
 #include <chrono>
@@ -34,6 +36,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
+#include <stdexcept>
 #include <mutex>
 #include <print>
 #include <thread>
@@ -76,340 +80,35 @@ static std::string mcp_instructions() {
 /// S54: the two flags are parameters (run_mcp passes config()); the old form
 /// read config() internally, which made the gating untestable without
 /// mutating persisted settings.
+// LR S95: the tool definitions are no longer C++ literals. They live in
+// tools/<name>.json — the single source of truth for name, description and
+// inputSchema — and are compiled in by cmake/embed_tools.cmake (one raw
+// string per file, keyed by file stem). This function only assembles the
+// list ORDER and applies the two config gates (S54): capture_turn and
+// build_context appear only when enabled. A test pins that the embedded
+// memory_decision `status` enum still equals sqlite::status::kCreatable.
+static const nlohmann::json& tool_json(const std::string& name) {
+    static const std::map<std::string, nlohmann::json> parsed = [] {
+        std::map<std::string, nlohmann::json> m;
+        for (const auto& t : TOOLS_JSON)
+            m.emplace(t.name, nlohmann::json::parse(t.json));
+        return m;
+    }();
+    const auto it = parsed.find(name);
+    if (it == parsed.end())
+        throw std::runtime_error("missing embedded tool definition: " + name);
+    return it->second;
+}
+
 static nlohmann::json tools_list(bool capture_turns, bool build_context) {
-    nlohmann::json tools = nlohmann::json::array({
-        {
-            {"name", "store"},
-            {"description", "Store a memory for later semantic retrieval."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"text",     {{"type", "string"},
-                                  {"description", "The text content to store."}}},
-                    {"metadata", {{"type", "object"},
-                                  {"description", "Optional metadata (category, tags, source, collection, etc.)."}}}
-                }},
-                {"required", nlohmann::json::array({"text"})}
-            }}
-        },
-        {
-            {"name", "memory_decision"},
-            {"description",
-             "Record a standing decision: a ruling plus the situation it applies to. "
-             "`trigger` is required and is phrased the way a FUTURE question would be "
-             "asked (\"Use when choosing a full-text index strategy\"), because that is "
-             "what search matches against. To replace an earlier decision, pass its id "
-             "in `supersedes`; the old row is kept and marked superseded."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"text",       {{"type", "string"},
-                                    {"description", "The ruling itself, imperative."}}},
-                    {"trigger",    {{"type", "string"},
-                                    {"description", "When this applies, in the vocabulary of a future query."}}},
-                    {"rationale",  {{"type", "string"},
-                                    {"description", "Why; alternatives considered and rejected."}}},
-                    {"scope",      {{"type", "string"},
-                                    {"description", "What this does NOT apply to."}}},
-                    {"tags",       {{"type", "array"}, {"items", {{"type", "string"}}},
-                                 {"description", "Optional tags (use `project:<name>` to scope)."}}},
-                    {"status",     {{"type", "string"},
-                                    {"enum", [&]{ nlohmann::json a = nlohmann::json::array();
-                                    for (auto s : ragger::sqlite::status::kCreatable) a.push_back(s);
-                                    return a; }()},
-                                    {"description", "Default current. provisional = agreed, not yet proven."}}},
-                    {"supersedes", {{"type", "integer"},
-                                    {"description", "knowledge_id this replaces (any kind)."}}},
-                    {"session",    {{"type", "string"},
-                                    {"description", "Current session GUID, for provenance."}}},
-                    {"evidence",   {{"type", "array"},
-                                    {"items", {{"type", nlohmann::json::array({"integer", "string"})}}},
-                                    {"description", "episode ids (or \"episode:<id>\" handles) this decision rests on (optional for decisions). Cite an episode you relied on; get ids from memory_search (layer 'episode') hits."}}},
-                }},
-                {"required", nlohmann::json::array({"text", "trigger"})}
-            }}
-        },
-        {
-            {"name", "search"},
-            {"description", "Search stored memories by semantic similarity."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"query",       {{"type", "string"},
-                                    {"description", "The search query."}}},
-                    {"limit",       {{"type", "integer"},
-                                    {"description", "Maximum number of results (default: the `default_search_limit` setting)."}}},
-                    {"min_score",   {{"type", "number"},
-                                    {"description", "Minimum similarity score 0–1 (default: 0.0)."}}},
-                    {"collections", {{"type", "array"},
-                                    {"items", {{"type", "string"}}},
-                                    {"description", "Filter by collection names (accepted, currently ignored)."}}}
-                }},
-                {"required", nlohmann::json::array({"query"})}
-            }}
-        },
-        {
-            {"name", "memory_search"},
-            {"description",
-             "Layered search across the conversation and knowledge corpora. Returns handles + "
-             "snippets only — call memory_get with chosen handles for full text. `layers` narrows by layer "
-             "(turn_summary, episode, knowledge); empty = all. Documents are NOT searched here — "
-             "use document_search. "
-             "`kinds` narrows knowledge hits (decision, insight, note). Legacy layer names "
-             "'decision'/'insight' are accepted and mean knowledge restricted to that kind. "
-             "status: 'active' (default) hides superseded/retired knowledge, 'any' includes them. "
-             "since/until: 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or relative ('30d', '12h'). "
-             "For conversation history use memory_get(session=..., after_turn=...)."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"query",           {{"type", "string"},
-                                          {"description", "The search query."}}},
-                    {"layers",          {{"type", "array"}, {"items", {{"type", "string"}}},
-                                          {"description", "Restrict to these layers "
-                                           "(turn_summary, episode, knowledge). "
-                                           "'turn' is raw exchange text, searched only "
-                                           "when named explicitly; prefer the summaries. "
-                                           "'session' matches session titles "
-                                           "(lexical only, opt-in). "
-                                           "Documents use document_search."}}},
-                    {"since",           {{"type", "string"},
-                                          {"description", "Only results at/after this time."}}},
-                    {"until",           {{"type", "string"},
-                                          {"description", "Only results at/before this time."}}},
-                    {"status",          {{"type", "string"},
-                                          {"description", "Decisions only: active (default) | any | one exact status."}}},
-                    {"session",         {{"type", "string"},
-                                          {"description", "Only results from this session GUID."}}},
-                    {"exclude_session", {{"type", "string"},
-                                          {"description", "Drop results from this session GUID."}}},
-                    {"limit",           {{"type", "integer"},
-                                          {"description", "Max results (default 10, max 50)."}}},
-                    {"max_tokens",      {{"type", "integer"},
-                                          {"description", "Token budget (~chars/4) over snippets; 0 = none."}}},
-                    {"mode",            {{"type", "string"},
-                                          {"description", "hybrid (default) | semantic (vector only; needs an embedder) | keyword (text index only)."}}},
-                    {"tags",            {{"type", nlohmann::json::array({"array", "string"})},
-                                          {"items", {{"type", "string"}}},
-                                          {"description", "Knowledge rows must carry ALL listed tags "
-                                           "(AND rule; trimmed, case-insensitive; `project:<name>` is just a tag). "
-                                           "A comma string is accepted. Layers without tags are excluded."}}},
-                }},
-                {"required", nlohmann::json::array({"query"})}
-            }}
-        },
-        {
-            {"name", "document_search"},
-            {"description",
-             "Search imported documents (their own verb; memory_search does not cover them). "
-             "Returns document:<N> handles + snippets — call memory_get with chosen handles for "
-             "full text. `source` narrows to paths containing this substring (case-insensitive)."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"query",  {{"type", "string"},
-                                 {"description", "The search query."}}},
-                    {"source", {{"type", "string"},
-                                 {"description", "Only documents whose stored source path contains this."}}},
-                    {"limit",  {{"type", "integer"},
-                                 {"description", "Max results (default 10, max 50)."}}},
-                    {"mode",   {{"type", "string"},
-                                 {"description", "hybrid (default) | semantic (vector only; needs an embedder) | keyword (text index only)."}}},
-                }},
-                {"required", nlohmann::json::array({"query"})}
-            }}
-        },
-        {
-            {"name", "memory_get"},
-            {"description",
-             "Read full rows by typed handles ('<layer>:<rowid>' from memory_search), or page "
-             "through one session's conversation history. Exactly one mode per call: ids, or "
-             "session (+optional after_turn/before_turn/limit). expand: none | context "
-             "(neighbouring turns/chunks) | sources (one level down: knowledge -> its "
-             "episodes, episode -> its summaries, summary -> its turn) | chain "
-             "(knowledge supersede lineage, oldest to newest; may cross kinds)."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"ids",         {{"type", "array"}, {"items", {{"type", "string"}}},
-                                      {"description", "Typed handles (mode 1)."}}},
-                    {"expand",      {{"type", "string"},
-                                      {"description", "none | context | sources | chain."}}},
-                    {"session",     {{"type", "string"},
-                                      {"description", "Session GUID for history paging (mode 2)."}}},
-                    {"after_turn",  {{"type", "integer"},
-                                      {"description", "History: turns with turn_id > this (0 = from start)."}}},
-                    {"before_turn", {{"type", "integer"},
-                                      {"description", "History: turns with turn_id < this (0 = to end)."}}},
-                    {"limit",       {{"type", "integer"},
-                                      {"description", "History page size (default 20, max 100)."}}}
-                }}
-            }}
-        },
-        {
-            {"name", "memory_note"},
-            {"description",
-             "Store a note (fact, preference, lesson) into memory. To scope a "
-             "note to a project, tag it (e.g. `project:ragger`). The result may carry "
-             "the working directory when `cwd` is given. The result may carry "
-             "`possible_supersedes`: current decisions this note may contradict "
-             "(hint only — nothing was changed; review them, and record a real "
-             "ruling with memory_decision instead). Pass evidence (episode "
-             "ids from search) when you are recording a synthesized insight; it "
-             "is stored as an insight linked to those sources. `trigger` is only "
-             "valid on an insight (with evidence); `session` records which "
-             "session the note came from."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"text",    {{"type", "string"},
-                                 {"description", "The note text."}}},
-                    {"tags",    {{"type", "array"}, {"items", {{"type", "string"}}},
-                                 {"description", "Optional tags."}}},
-                    {"evidence",{{"type", "array"},
-                                 {"items", {{"type", nlohmann::json::array({"integer", "string"})}}},
-                                 {"description", "episode ids (or \"episode:<id>\" handles) this note synthesizes; get ids from memory_search (layer 'episode') hits. When present the note is stored as an insight (response carries \"kind\":\"insight\") instead of a plain note."}}},
-                    {"trigger", {{"type", "string"},
-                                 {"description", "When this insight applies, in the vocabulary of a future query. Only valid together with evidence; on a plain note it is a 400."}}},
-                    {"session", {{"type", "string"},
-                                 {"description", "Session GUID to record as provenance (stored on the row; unknown GUID stores without a link, not an error)."}}}
-                }},
-                {"required", nlohmann::json::array({"text"})}
-            }}
-        },
-        {
-            {"name", "memory_timeline"},
-            {"description",
-             "What happened recently, as a deterministic newest-first list (no "
-             "search ranking). granularity 'turn' = per-exchange summaries "
-             "(falling back to raw user text), 'episode' = episode summaries "
-             "(default), 'session' = one row per session (guid, name, turn "
-             "span, episode count, newest episode text), 'knowledge' = stored "
-             "knowledge rows newest first (id, kind, status). Filters: session GUID, since/until ('YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', "
-             "or relative '30d'/'12h'). Page through with the returned "
-             "next_cursor; null means the end."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"session",     {{"type", "string"},
-                                     {"description", "Only this session GUID."}}},
-                    {"since",       {{"type", "string"},
-                                     {"description", "Lower time bound."}}},
-                    {"until",       {{"type", "string"},
-                                     {"description", "Upper time bound (bare date = end of day)."}}},
-                    {"granularity", {{"type", "string"},
-                                     {"enum", nlohmann::json::array({"turn", "episode", "session", "knowledge"})},
-                                     {"description", "turn | episode | session | knowledge (default episode)."}}},
-                    {"limit",       {{"type", "integer"},
-                                     {"description", "Page size (default 20, max 100)."}}},
-                    {"cursor",      {{"type", "string"},
-                                     {"description", "Opaque next_cursor from the previous page."}}}
-                }}
-            }}
-        },
-        {
-            {"name", "memory_update"},
-            {"description",
-             "Curate one row's METADATA by typed handle: knowledge status "
-             "(legal transitions only; 'superseded' is set only by storing a "
-             "superseding row), tags (replaces the whole set). Agent notes "
-             "(summaries without a model) accept tags; summarizer rollups and turn / "
-             "turn_summary / document rows are not editable. Text is NEVER "
-             "edited in place — to change what something says, store a new "
-             "decision (memory_decision with supersedes) or note; passing "
-             "`text` here is always rejected. Returns the updated row."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"id",     {{"type", "string"},
-                                {"description", "Typed handle '<layer>:<rowid>'."}}},
-                    {"status", {{"type", "string"},
-                                {"description", "Knowledge status: current | provisional | pending | retired."}}},
-                    {"tags",   {{"type", nlohmann::json::array({"array", "string"})},
-                                {"items", {{"type", "string"}}},
-                                {"description", "Replacement tags (array) or comma-separated string; replaces the whole set."}}},
-                }},
-                {"required", nlohmann::json::array({"id"})}
-            }}
-        },
-        {
-            {"name", "get_config"},
-            {"description", "Read Ragger's live configuration. Returns every "
-                           "setting with its current value and schema metadata "
-                           "(type, default, edit policy, enum options). Pass a "
-                           "`key` to fetch just one setting. Read-only — use this "
-                           "to bootstrap host/port/token or other settings on "
-                           "agent-framework restart instead of reading a config file."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"key", {{"type", "string"},
-                             {"description", "Optional single setting key. Omit for all settings."}}}
-                }}
-            }}
-        },
-        {
-            {"name", "status"},
-            {"description", "Report Ragger's runtime status: version, total "
-                           "memories, per-table row counts, and whether "
-                           "embeddings are degraded/unavailable. Read-only."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", nlohmann::json::object()}
-            }}
-        }
-    });
-    if (capture_turns) {
-        tools.push_back({
-            {"name", "capture_turn"},
-            {"description", "Push a completed conversation turn (user + assistant) "
-                           "into memory for background summarization. Called from an "
-                           "agent's turn hook."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"user",       {{"type", "string"},
-                                    {"description", "The user message of the turn."}}},
-                    {"assistant",  {{"type", "string"},
-                                    {"description", "The assistant reply of the turn."}}},
-                    {"model",      {{"type", "string"},
-                                    {"description", "Model that produced the reply."}}},
-                    {"session_id", {{"type", "string"},
-                                    {"description", "Conversation/session GUID grouping the turn."}}},
-                    {"session_name", {{"type", "string"},
-                                    {"description", "Human-readable session/conversation title. "
-                                                    "Framework-specific: Hermes passes its session title, "
-                                                    "others may derive from context."}}},
-                    {"name_source", {{"type", "string"},
-                                    {"description", "Origin of session_name: 'hermes_title', 'openclaw', "
-                                                    "'derived', etc. Omit if no session_name."}}},
-                    {"metadata",   {{"type", "object"},
-                                    {"description", "Optional metadata (source, hook, etc.). Reserved."}}}
-                }},
-                {"required", nlohmann::json::array({"user"})}
-            }}
-        });
-    }
-    if (build_context) {
-        tools.push_back({
-            {"name", "build_context"},
-            {"description", "Assemble a session's context as recipe-shaped chunks "
-                           "(oldest first). The default recipe walks back from the "
-                           "latest prompt: a few raw turns, then turn summaries, then "
-                           "recent episodes, then pertinent "
-                           "knowledge."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"session_id", {{"type", "string"},
-                                    {"description", "Conversation/session GUID to build context from."}}},
-                    {"recipe",     {{"type", "string"},
-                                    {"description", "Optional recipe name (e.g. natural_fading, raw_only). Defaults to the server's default_recipe."}}}
-                }},
-                {"required", nlohmann::json::array({"session_id"})}
-            }}
-        });
-    }
+    nlohmann::json tools = nlohmann::json::array();
+    for (const char* name : {"store", "memory_decision", "search",
+                             "memory_search", "document_search", "memory_get",
+                             "memory_note", "memory_timeline",
+                             "memory_update", "get_config", "status"})
+        tools.push_back(tool_json(name));
+    if (capture_turns) tools.push_back(tool_json("capture_turn"));
+    if (build_context) tools.push_back(tool_json("build_context"));
     return {{"tools", tools}};
 }
 

@@ -13,6 +13,7 @@
 #include "check.h"
 #include "config.h"
 #include "mcp.h"
+#include "sqlite/status.h"
 #include "test_env.h"
 #include "memory.h"
 #include "util/parse.h"
@@ -350,6 +351,25 @@ void p12_mcp_tools_list_contract() {
     std::println(" OK");
 }
 
+// LR S95: the tool definitions moved to tools/*.json (compiled in). That
+// makes one value a transcription: memory_decision's `status` enum, which
+// used to be generated from sqlite::status::kCreatable. This pin is the
+// drift guard — edit kCreatable without the JSON and this fails.
+void p12_tools_json_status_enum_drift() {
+    std::println("  p12_tools_json_status_enum_drift...");
+    const auto tools = ragger::mcp_tools_list(false, false)["tools"];
+    for (const auto& t : tools) {
+        if (t.value("name", "") != "memory_decision") continue;
+        const auto& e = t["inputSchema"]["properties"]["status"]["enum"];
+        json want = json::array();
+        for (auto s : ragger::sqlite::status::kCreatable) want.push_back(s);
+        CHECK(e == want);
+        std::println(" OK");
+        return;
+    }
+    CHECK(false);  // memory_decision missing from tools/list
+}
+
 int main() {
     TestEnv env("agent_parse");  // must be first: isolates from ~/.ragger
     std::println("Running agent-parse tests:");
@@ -368,6 +388,7 @@ int main() {
         test_mcp_tool_call_bad_arg_type(mem);
         p10_test_mcp_unknown_config_key(mem);
         p12_mcp_tools_list_contract();
+        p12_tools_json_status_enum_drift();
         mem.close();
     }
 

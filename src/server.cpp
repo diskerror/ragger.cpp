@@ -5,6 +5,7 @@
 #include "build_info.h"
 #include "server.h"
 #include "memory.h"
+#include "mcp.h"
 #include "agent_api.h"
 #include "user_store.h"
 #include "sqlite/backend.h"
@@ -1416,6 +1417,17 @@ struct Server::Impl {
         svr.Get("/jobs", guarded([this](const UserInfo&, const httplib::Request&,
                                         httplib::Response& res) {
             respond_json(res, jobs_->status_json());
+        }));
+
+        // LR S95 (P12): the tool definitions over HTTP — the exact array MCP
+        // tools/list returns (same tools/*.json source of truth, same
+        // capture_turns/build_context gates). Token-guarded like everything
+        // else; agents still discover tools through MCP, this is for
+        // inspection and cross-surface parity tests.
+        svr.Get("/tools", guarded([this](const UserInfo&, const httplib::Request&,
+                                         httplib::Response& res) {
+            respond_json(res, mcp_tools_list(config().capture_turns,
+                                             config().build_context));
         }));
 
         // GET /events -> Server-Sent Events stream. Pushes a "stats" event

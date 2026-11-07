@@ -1,0 +1,20 @@
+{
+  "description": "Assemble a session's context as recipe-shaped chunks (oldest first). The default recipe walks back from the latest prompt: a few raw turns, then turn summaries, then recent episodes, then pertinent knowledge.",
+  "inputSchema": {
+    "properties": {
+      "recipe": {
+        "description": "Optional recipe name (e.g. natural_fading, raw_only). Defaults to the server's default_recipe.",
+        "type": "string"
+      },
+      "session_id": {
+        "description": "Conversation/session GUID to build context from.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "type": "object"
+  },
+  "name": "build_context"
+}

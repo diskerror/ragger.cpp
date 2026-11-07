@@ -1,0 +1,20 @@
+{
+  "description": "Store a memory for later semantic retrieval.",
+  "inputSchema": {
+    "properties": {
+      "metadata": {
+        "description": "Optional metadata (category, tags, source, collection, etc.).",
+        "type": "object"
+      },
+      "text": {
+        "description": "The text content to store.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "text"
+    ],
+    "type": "object"
+  },
+  "name": "store"
+}

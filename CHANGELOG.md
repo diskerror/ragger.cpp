@@ -18,7 +18,7 @@
 
 **Summarizer / episodes**
 - Every new turn captured via `/turn` is enqueued to the summarizer immediately instead of waiting for the next catch-up tick
-- Trivial turns are marked with a `(skipped)` model even when inference is down, and failing turns back off (5 min, doubling to 6 h) instead of retrying every tick
+- Failing turns back off (5 min, doubling to 6 h) instead of retrying every tick
 - Episodes close when a session has been idle past `episode_idle_minutes`, split on embedding-similarity boundaries (the existing rule), with membership recorded
 
 **API**
@@ -35,10 +35,37 @@
 - CLI verbs (`import-docs`, `delete-doc`, `reindex`, `config set`, `recipe`) write audit lines to `activity.log`; `config set` signals the daemon to reload
 - `import-docs` embeds in-process instead of spawning one model-loading subprocess per chunk
 
+**Logic review 0.17 (capture quality, search, surfaces)**
+- Episodes are stamped with their last member's time (`created_at` = span end); turn summaries keep their turn's time
+- An interrupted turn merges into the stored turn instead of overwriting it
+- Short exchanges are stored as real turn summaries (the source text copied, no model call at or under `summarizer_min_words`, default 20) — the empty `(skipped)` marker rows are gone; a poison-abandoned turn is the only empty row (model `bad`)
+- A summary longer than its source is replaced by the source (a tie keeps the source); a copied summary records the original's model
+- Episode summaries get their own prompt: the model is told the input is N consecutive summaries of one conversation span and must write standalone text without headers or wrapping quotes
+- New back-fill verbs: `ragger backfill <kind>` (`l2-null`, `l2-empty`, `l2-regenerate`, `triggers`, `stranded`, `session-names`) with `--dry-run`; they repair pre-rule rows, draft missing decision triggers, re-attach stranded summaries, and name untitled sessions
+- `DELETE /memory/<id>` and `POST /delete_batch` left the HTTP surface (now 404); rows are retired by status (`memory_update`), not deleted
+- `memory_note` accepts `trigger` (insights only — a plain note with a trigger is rejected) and `session` provenance
+- `ragger decision set-status` goes through the same update path and validation as `memory_update`
+- `memory_search` defaults to turn summaries, episodes and knowledge; documents have their own verb `document_search` (the `document` layer is rejected); raw `turn` text and session titles are searched only when named
+- Sessions are searchable by title (lexical-only corpus)
+- `memory_search` scores each requested corpus against its own candidate pool, so a weak corpus can no longer crowd another one's hits out of the results
+- Both search verbs take `mode` (`hybrid` | `semantic` | `keyword`) and a `tags` filter (AND rule; arrays accepted everywhere, not just comma strings)
+- Episode hits carry their session and span, and episodes satisfy the session filters
+- History paging carries each turn's `turn_summary_id` and `episode_id`; `expand=context` returns neighbouring turns in session order; `expand=sources` walks knowledge → episodes → summaries → turn; `memory_timeline` gained `granularity=knowledge`
+- Evidence points at episodes (`episode:<id>` or bare ids) on every transport; turn-summary handles are rejected with a pointer to the right form
+- `memory_review` left the agent tool lists (MCP and plugin): curation stays user-driven (HTTP route + CLI)
+- Tool definitions live in `tools/*.json` — one source of truth compiled into the binary; new `GET /tools` serves the same gated array as MCP `tools/list`
+- Every maintenance verb is dry-runnable (`--dry-run`), reports progress, is cancellable between batches, and resumable; `ragger reindex all` stays atomic
+- The daemon gained a single-flight maintenance job runner (`POST /jobs/<name>`, `POST /jobs/cancel`, `GET /jobs`, progress as SSE `job` events) and the dashboard a Maintenance card; re-embedding stays a CLI operation the user runs
+
 **Upgrade notes**
-- Back up the database before upgrading (the migration leg makes its own pre-migration backup too)
-- Run `ragger re-embed all` after upgrading — embeddings stored before the padding fix are degraded
-- After the tokenizer changes land in this cycle, run `ragger reindex all` on existing databases; stored term rows are stale
+- Back up the database before upgrading (the migration leg makes its own pre-migration backup too — take one anyway)
+- Run `ragger reindex all` — the tokenizer changes land in this cycle; stored term rows are stale
+- Run `ragger re-embed all` — embeddings stored before the padding fix are degraded, and some rows' embed text changed
+- Import your conversation history (e.g. Telegram) so the back-fill below runs against realistic data
+- Repair episode times once through `semqlite`: `UPDATE episodes SET created_at = span_end WHERE created_at <> span_end;`, then `ragger reload-cache`
+- Run `ragger backfill <kind> --dry-run` for each kind, then for real
+- `ragger housekeeping` (or the daemon's normal pass) closes new episodes with the corrected time
+- Run `scripts/rebuild-check.sql` and read the counts
 - If your stored `summarizer_prompt` is wrapped in double quotes (older installs), fix it with `ragger config set`
 
 ## v0.16.2.5

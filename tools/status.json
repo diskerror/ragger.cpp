@@ -1,0 +1,8 @@
+{
+  "description": "Report Ragger's runtime status: version, total memories, per-table row counts, and whether embeddings are degraded/unavailable. Read-only.",
+  "inputSchema": {
+    "properties": {},
+    "type": "object"
+  },
+  "name": "status"
+}

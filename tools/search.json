@@ -1,0 +1,31 @@
+{
+  "description": "Search stored memories by semantic similarity.",
+  "inputSchema": {
+    "properties": {
+      "collections": {
+        "description": "Filter by collection names (accepted, currently ignored).",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "limit": {
+        "description": "Maximum number of results (default: the `default_search_limit` setting).",
+        "type": "integer"
+      },
+      "min_score": {
+        "description": "Minimum similarity score 0\u20131 (default: 0.0).",
+        "type": "number"
+      },
+      "query": {
+        "description": "The search query.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "type": "object"
+  },
+  "name": "search"
+}

@@ -1,0 +1,30 @@
+{
+  "description": "Curate one row's METADATA by typed handle: knowledge status (legal transitions only; 'superseded' is set only by storing a superseding row), tags (replaces the whole set). Agent notes (summaries without a model) accept tags; summarizer rollups and turn / turn_summary / document rows are not editable. Text is NEVER edited in place \u2014 to change what something says, store a new decision (memory_decision with supersedes) or note; passing `text` here is always rejected. Returns the updated row.",
+  "inputSchema": {
+    "properties": {
+      "id": {
+        "description": "Typed handle '<layer>:<rowid>'.",
+        "type": "string"
+      },
+      "status": {
+        "description": "Knowledge status: current | provisional | pending | retired.",
+        "type": "string"
+      },
+      "tags": {
+        "description": "Replacement tags (array) or comma-separated string; replaces the whole set.",
+        "items": {
+          "type": "string"
+        },
+        "type": [
+          "array",
+          "string"
+        ]
+      }
+    },
+    "required": [
+      "id"
+    ],
+    "type": "object"
+  },
+  "name": "memory_update"
+}

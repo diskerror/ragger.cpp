@@ -1,0 +1,36 @@
+{
+  "description": "Read full rows by typed handles ('<layer>:<rowid>' from memory_search), or page through one session's conversation history. Exactly one mode per call: ids, or session (+optional after_turn/before_turn/limit). expand: none | context (neighbouring turns/chunks) | sources (one level down: knowledge -> its episodes, episode -> its summaries, summary -> its turn) | chain (knowledge supersede lineage, oldest to newest; may cross kinds).",
+  "inputSchema": {
+    "properties": {
+      "after_turn": {
+        "description": "History: turns with turn_id > this (0 = from start).",
+        "type": "integer"
+      },
+      "before_turn": {
+        "description": "History: turns with turn_id < this (0 = to end).",
+        "type": "integer"
+      },
+      "expand": {
+        "description": "none | context | sources | chain.",
+        "type": "string"
+      },
+      "ids": {
+        "description": "Typed handles (mode 1).",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "limit": {
+        "description": "History page size (default 20, max 100).",
+        "type": "integer"
+      },
+      "session": {
+        "description": "Session GUID for history paging (mode 2).",
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "name": "memory_get"
+}

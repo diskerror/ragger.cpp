@@ -1,0 +1,63 @@
+{
+  "description": "Record a standing decision: a ruling plus the situation it applies to. `trigger` is required and is phrased the way a FUTURE question would be asked (\"Use when choosing a full-text index strategy\"), because that is what search matches against. To replace an earlier decision, pass its id in `supersedes`; the old row is kept and marked superseded.",
+  "inputSchema": {
+    "properties": {
+      "evidence": {
+        "description": "episode ids (or \"episode:<id>\" handles) this decision rests on (optional for decisions). Cite an episode you relied on; get ids from memory_search (layer 'episode') hits.",
+        "items": {
+          "type": [
+            "integer",
+            "string"
+          ]
+        },
+        "type": "array"
+      },
+      "rationale": {
+        "description": "Why; alternatives considered and rejected.",
+        "type": "string"
+      },
+      "scope": {
+        "description": "What this does NOT apply to.",
+        "type": "string"
+      },
+      "session": {
+        "description": "Current session GUID, for provenance.",
+        "type": "string"
+      },
+      "status": {
+        "description": "Default current. provisional = agreed, not yet proven.",
+        "enum": [
+          "current",
+          "provisional",
+          "pending"
+        ],
+        "type": "string"
+      },
+      "supersedes": {
+        "description": "knowledge_id this replaces (any kind).",
+        "type": "integer"
+      },
+      "tags": {
+        "description": "Optional tags (use `project:<name>` to scope).",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "text": {
+        "description": "The ruling itself, imperative.",
+        "type": "string"
+      },
+      "trigger": {
+        "description": "When this applies, in the vocabulary of a future query.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "text",
+      "trigger"
+    ],
+    "type": "object"
+  },
+  "name": "memory_decision"
+}

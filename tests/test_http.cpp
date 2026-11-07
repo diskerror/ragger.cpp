@@ -11,6 +11,7 @@
 #include "harness/http_fixture.h"
 
 #include "mcp.h"
+#include "config_access.h"
 #include "nlohmann_json.hpp"
 
 #include <print>
@@ -662,6 +663,30 @@ static void t_dashboard_maintenance_s92(HttpFixture& fx) {
     CHECK(html.find("maint-btn-embed") == std::string::npos);
 }
 
+/// LR S95 (P12): GET /tools is the MCP tools/list array over HTTP — same
+/// embedded tools/*.json, same gates. Equality is exact (same json values),
+/// and flipping build_context adds exactly that tool on both surfaces.
+static void t_tools_parity_s95(HttpFixture& fx) {
+    const auto r = fx.client.get(fx.url("/tools"), fx.auth());
+    CHECK(r.status == 200);
+    const auto body = nlohmann::json::parse(r.body);
+    CHECK(body == ragger::mcp_tools_list(ragger::config().capture_turns,
+                                         ragger::config().build_context));
+    const auto has = [](const nlohmann::json& j, const char* name) {
+        for (const auto& t : j.at("tools"))
+            if (t.at("name").get<std::string>() == name) return true;
+        return false;
+    };
+    CHECK(has(body, "store"));
+    CHECK(!has(body, "build_context"));  // default off (default-settings.txt)
+    CHECK(ragger::set_config_persisted("build_context", "true").has_value());
+    const auto body2 =
+        nlohmann::json::parse(fx.client.get(fx.url("/tools"), fx.auth()).body);
+    CHECK(has(body2, "build_context"));
+    CHECK(body2 == ragger::mcp_tools_list(ragger::config().capture_turns, true));
+    (void)ragger::set_config_persisted("build_context", "");  // restore default
+}
+
 int main() {
     HttpFixture fx("http");
     CHECK(fx.ready);
@@ -682,6 +707,7 @@ int main() {
     t_memory_note_trigger_session(fx);
     t_document_search_parity_s76(fx);
     t_dashboard_maintenance_s92(fx);
+    t_tools_parity_s95(fx);
 
     std::println("test_http: all passed");
     return 0;
