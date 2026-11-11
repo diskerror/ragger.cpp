@@ -236,7 +236,7 @@ macOS (arm64 and x86_64) and Linux (x86_64 and aarch64) are supported. Windows n
 ## Tests
 
 ```bash
-cd build && ctest --output-on-failure   # 21 suites (22 with stats)
+cd build && ctest --output-on-failure   # 22 suites (23 with stats)
 ```
 
 ## License

@@ -37,6 +37,10 @@ add_executable(test_agent_parse test_agent_parse.cpp)
 target_link_libraries(test_agent_parse PRIVATE ragger_core)
 add_test(NAME test_agent_parse COMMAND test_agent_parse)
 
+add_executable(test_rebuild_check test_rebuild_check.cpp)
+target_link_libraries(test_rebuild_check PRIVATE ragger_core)
+add_test(NAME test_rebuild_check COMMAND test_rebuild_check)
+
 
 add_executable(test_path_normalization test_path_normalization.cpp)
 target_link_libraries(test_path_normalization PRIVATE ragger_core)
