@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.16.2.6
+- Follow c_lib's new library layout: `diskerror_double_metaphone` and `diskerror_stemmer_snowball` were merged into one `diskerror_search` target, so `ragger_core` links that instead. Pinned fallback c_lib bumped to `76eada1` (sources in `src/`, SQLite 3.54.1, merged search library)
+- No behavior change; the DB schema stays 0.16
+
 ## v0.16.2.5
 - Hermes plugin: hooks now actually register. `register()` used `@ctx.hook(...)`, which is not a Hermes API; it raised `AttributeError` on every load (logged as "Memory provider 'ragger' raised after registering (hook)") and left both hooks dead since they were written. They now use `ctx.register_hook(name, callback)`: `post_tool_call` forwards the built-in `memory` tool's add/replace calls to `/store`, and `post_turn_finalized` captures interrupted turns
 - `install-hermes.sh` patches Hermes core to fire `post_turn_finalized` from `finalize_turn()` (upstream has no hook that carries message text on an interrupted turn: hermes-agent#108808). Idempotent; re-run after every `hermes update`

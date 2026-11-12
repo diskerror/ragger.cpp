@@ -17,7 +17,7 @@ if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CXX_COMPILER AND NOT DE
     endforeach()
 endif()
 
-project(ragger VERSION 0.16.2.5 LANGUAGES C CXX)
+project(ragger VERSION 0.16.2.6 LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -300,8 +300,7 @@ endif()
 target_link_libraries(ragger_core PUBLIC
     c_lib_utils
     diskerror_embedding_codec
-    diskerror_double_metaphone
-    diskerror_stemmer_snowball
+    diskerror_search
     ${RAGGER_SQLITE_TARGET}
     onnxruntime
     tokenizers_cpp

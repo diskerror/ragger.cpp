@@ -6,7 +6,7 @@ set(TOKENIZERS_CPP_REPO https://github.com/mlc-ai/tokenizers-cpp.git)
 set(TOKENIZERS_CPP_SHA  c586c52f93f7b060753bd2388eb96a105cb7374d)
 
 set(C_LIB_REPO https://github.com/diskerror/c_lib.git)
-set(C_LIB_SHA  9814f0600d6985d27dc30a54925dfd2fc7afabdb)
+set(C_LIB_SHA  76eada178ff024f66f92fe820f10bfdf95b23ce1)
 
 # ONNX Runtime ships as release binaries, not a git repo: pin the version in the
 # top-level CMakeLists (ORT_VERSION) and its archive checksums here. Bump by
