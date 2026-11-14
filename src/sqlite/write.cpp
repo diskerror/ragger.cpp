@@ -427,6 +427,9 @@ static std::string tags_from_metadata(const json& metadata) {
     /// sighting. Empty guid → 0 (NULL session_id), mirroring get_or_create_model.
     /// If session_name is non-empty, sets sessions.name (and name_source) on
     /// first sighting or updates it if the title has changed since last capture.
+    /// X4 (M6): every write here (INSERT, rename UPDATE, the sessions index
+    /// rows) is part of the caller's transaction — store_turn opens it before
+    /// calling, so a failure anywhere in here rolls the turn back with it.
     int Backend::Impl::get_or_create_session(const std::string& guid,
                               const std::string& session_name,
                               const std::string& name_source) {
@@ -466,7 +469,13 @@ static std::string tags_from_metadata(const json& metadata) {
             u.bind(2, name_source);
             u.bind(3, id);
             u.bind(4, session_name);
-            u.exec();
+            // X4 (M6): a failed rename used to be ignored, so the caller went on
+            // to index the NEW name while sessions.name still held the old one.
+            // Same style as the neighbouring ERR_STORE_FAILED throws; the caller
+            // (store_turn) holds the transaction, so this rolls the whole write
+            // back.
+            if (!u.exec())
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
             if (sqlite3_changes(db) > 0)   // LR S81: re-index only on a real rename
                 text_index_->index_record("sessions", id, session_name);
         }
@@ -530,6 +539,11 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
+    // ORDER (X4/M6, same contract as store_episode_close): validate -> embed
+    // (outside the txn) -> BEGIN -> resolve model/session -> INSERT -> index ->
+    // commit. Everything from BEGIN on is one unit: a session created or
+    // renamed here, its index rows, the model row and the turn row all roll
+    // back together if any of them fails.
     int Backend::Impl::store_turn(const std::string& user_text, const std::string& assistant_text,
                    const std::string& model_name, bool defer_embedding,
                    const std::string& session_guid,
@@ -538,8 +552,6 @@ static std::string tags_from_metadata(const json& metadata) {
                    const std::string& name_source) {
         std::string u = normalize_path(user_text);
         std::string a = normalize_path(assistant_text);
-        int model_id   = get_or_create_model(model_name);
-        int session_id = get_or_create_session(session_guid, session_name, name_source);
 
         // Same-exchange handling (PHASE9B step 10). Only the FINAL assistant
         // text of a turn is kept; a rejected draft is never stored as its own
@@ -559,50 +571,79 @@ static std::string tags_from_metadata(const json& metadata) {
         //     blank line to the same row.
         // The embedding is recomputed from the combined text (NULL when
         // defer_embedding, so backfill fills it; a stale vector is never kept).
-        if (!a.empty() && source_timestamp.empty() && session_id) {
-            Stmt p(db,
-                "SELECT turn_id, user_text, assistant_text, created_at FROM turns "
-                "WHERE session_id = ? ORDER BY turn_id DESC LIMIT 1");
-            p.bind(1, session_id);
-            if (p.step() && p.column_text(1) == u &&
-                (db_epoch() - p.column_int64(3)) <= 300) {
-                const int prev_id        = p.column_int(0);
-                const std::string prev_a = p.column_text(2);   // "" when NULL
-                // LR S57: the rule itself is merge_assistant_text (shared with
-                // finalize_turn); nullopt = already held, nothing to write.
-                const std::optional<std::string> merged = merge_assistant_text(prev_a, a);
-                if (!merged) return prev_id;
-                std::vector<float> emb2;
-                if (!defer_embedding)
-                    emb2 = require_embedder().encode(turn_embed_text(u, *merged));
-                Transaction tx(db);
-                Stmt up(db,
-                    "UPDATE turns SET assistant_text = ?, embedding_version = ?, embedding = ?, "
-                    "model_id = COALESCE(model_id, ?) WHERE turn_id = ?");
-                up.bind(1, *merged);
-                if (defer_embedding) {
-                    up.bind_null(2);
-                    up.bind_null(3);
-                } else {
-                    bind_embedding_version(up.raw(), 2, emb2);
-                    bind_embedding(up.raw(), 3, emb2);
+        // X4 (M6): the probe reads through find_session() instead of the
+        // resolved session id, and runs BEFORE the transaction opens. A session
+        // that does not exist yet cannot hold a previous turn, so the probe
+        // result is identical to probing after resolution — and the embedding
+        // below stays outside the write window (ORDER contract: validate ->
+        // embed (outside the txn) -> INSERT -> index -> commit).
+        int probe_id = -1;
+        std::optional<std::string> merged;   // set only when the probe matched
+        if (!a.empty() && source_timestamp.empty() && !session_guid.empty()) {
+            if (const auto sid = find_session(session_guid)) {
+                Stmt p(db,
+                    "SELECT turn_id, user_text, assistant_text, created_at FROM turns "
+                    "WHERE session_id = ? ORDER BY turn_id DESC LIMIT 1");
+                p.bind(1, *sid);
+                if (p.step() && p.column_text(1) == u &&
+                    (db_epoch() - p.column_int64(3)) <= 300) {
+                    probe_id = p.column_int(0);
+                    // LR S57: the rule itself is merge_assistant_text (shared
+                    // with finalize_turn); nullopt = already held, nothing to
+                    // write (model/session resolution still runs, as before).
+                    merged = merge_assistant_text(p.column_text(2), a);
                 }
-                if (model_id) up.bind(4, model_id); else up.bind_null(4);
-                up.bind(5, prev_id);
-                if (!up.exec())
-                    throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-                text_index_->index_record("turns", prev_id, u + "\n" + *merged);
-                tx.commit();
-                invalidate_raw_turn_cache();  // LR S75
-                return prev_id;
             }
         }
 
+        // Embedding computed OUTSIDE the transaction: encoding is slow and
+        // holding the write lock across a model call would block every other
+        // writer (same rule as store_episode_close). Exactly the encode calls
+        // HEAD made: the merged text on a merge, the exchange on a new turn,
+        // nothing when the probe found the text already held (that path writes
+        // no row).
+        const bool write_merge = merged.has_value();             // UPDATE the probed row
+        const bool write_new   = (probe_id < 0) && !a.empty();   // INSERT a new row
         std::vector<float> emb;
         bool have_emb = false;
-        if (!defer_embedding && !a.empty()) {
-            emb = require_embedder().encode(turn_embed_text(u, a));
+        if (!defer_embedding && (write_merge || write_new)) {
+            emb = require_embedder().encode(write_merge ? turn_embed_text(u, *merged)
+                                                        : turn_embed_text(u, a));
             have_emb = true;
+        }
+
+        // X4 (M6): the transaction opens BEFORE session/model resolution, so a
+        // session create/rename, its index rows, the model upsert and the turn
+        // write commit or roll back together (they used to commit one by one in
+        // autocommit, so a later failure left a half-applied session). Callers
+        // that already hold a transaction join this one — Transaction no-ops
+        // when joined, the outer owner decides.
+        Transaction tx(db);
+        int model_id   = get_or_create_model(model_name);
+        int session_id = get_or_create_session(session_guid, session_name, name_source);
+
+        if (probe_id >= 0) {
+            // Already held: nothing to write, but keep the resolution above.
+            if (!merged) { tx.commit(); return probe_id; }
+            Stmt up(db,
+                "UPDATE turns SET assistant_text = ?, embedding_version = ?, embedding = ?, "
+                "model_id = COALESCE(model_id, ?) WHERE turn_id = ?");
+            up.bind(1, *merged);
+            if (defer_embedding) {
+                up.bind_null(2);
+                up.bind_null(3);
+            } else {
+                bind_embedding_version(up.raw(), 2, emb);
+                bind_embedding(up.raw(), 3, emb);
+            }
+            if (model_id) up.bind(4, model_id); else up.bind_null(4);
+            up.bind(5, probe_id);
+            if (!up.exec())
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            text_index_->index_record("turns", probe_id, u + "\n" + *merged);
+            tx.commit();
+            invalidate_raw_turn_cache();  // LR S75
+            return probe_id;
         }
 
         Stmt s(db,
@@ -623,16 +664,14 @@ static std::string tags_from_metadata(const json& metadata) {
         const int64_t ts = resolve_epoch(source_timestamp);
         s.bind(7, ts);
 
-        int new_id = -1;
-        {
-            Transaction tx(db);  // row + postings atomic (B §1.3)
-            if (!s.exec())
-                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-            new_id = static_cast<int>(sqlite3_last_insert_rowid(db));
-            text_index_->index_record("turns", new_id, a.empty() ? u : (u + "\n" + a));
-            touch_session_span(session_id, ts);
-            tx.commit();
-        }
+        // row + postings + session span atomic (B §1.3; X4/M6 folds the
+        // session/model resolution opened above into the same commit).
+        if (!s.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+        const int new_id = static_cast<int>(sqlite3_last_insert_rowid(db));
+        text_index_->index_record("turns", new_id, a.empty() ? u : (u + "\n" + a));
+        touch_session_span(session_id, ts);
+        tx.commit();
         invalidate_raw_turn_cache();  // LR S75
         return new_id;
     }

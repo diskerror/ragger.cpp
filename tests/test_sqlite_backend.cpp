@@ -5737,6 +5737,148 @@ void p9b_test_checked_writes(ragger::Embedder& emb) {
     std::println(" OK");
 }
 
+// X4 (M6): store_turn's session create/rename, its index rows, the model
+// upsert and the turn insert commit or roll back TOGETHER. Before the fix the
+// session part ran outside store_turn's Transaction (and the rename UPDATE
+// ignored exec()'s return), so a failure there left the sessions row committed
+// while the turn was lost.
+void x4_test_store_turn_atomicity(ragger::Embedder& emb) {
+    std::println("  x4_test_store_turn_atomicity...");
+
+    // (a) index_record("sessions", ...) fails: sessions_terms is renamed away
+    // on a SECOND raw connection (not a mock). store_turn must throw and leave
+    // NEITHER a new turn row NOR a new session row.
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        const int t0 = db.store_turn("x4a warm question", "x4a warm answer", "x4-model",
+                                     /*defer_embedding=*/false, "x4a-guid", "",
+                                     "x4a warm name", "test");
+        CHECK(t0 > 0);
+        {
+            sqlite3* raw2 = p1_open_raw();
+            CHECK(sqlite3_exec(raw2, "ALTER TABLE sessions_terms RENAME TO x4a_terms_gone",
+                               nullptr, nullptr, nullptr) == SQLITE_OK);
+            sqlite3_close(raw2);
+        }
+        bool threw = false;
+        std::string what;
+        try {
+            db.store_turn("x4a question", "x4a answer", "x4-model",
+                          /*defer_embedding=*/false, "x4a-guid-new", "",
+                          "x4a new name", "test");
+        } catch (const std::exception& e) { threw = true; what = e.what(); }
+        CHECK(threw);
+        std::println("    store_turn with sessions_terms gone threw: {}", what);
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw,
+            "SELECT COUNT(*) FROM turns WHERE user_text = 'x4a question'") == 0);
+        CHECK(p1_scalar_int(raw,
+            "SELECT COUNT(*) FROM sessions WHERE guid = 'x4a-guid-new'") == 0);
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turns") == 1);   // only the warm turn
+        sqlite3_close(raw);
+        // Restore the junction table: the write path works again.
+        {
+            sqlite3* raw2 = p1_open_raw();
+            CHECK(sqlite3_exec(raw2, "ALTER TABLE x4a_terms_gone RENAME TO sessions_terms",
+                               nullptr, nullptr, nullptr) == SQLITE_OK);
+            sqlite3_close(raw2);
+        }
+        const int t2 = db.store_turn("x4a retry question", "x4a retry answer", "x4-model",
+                                     /*defer_embedding=*/false, "x4a-guid-retry", "",
+                                     "x4a retry name", "test");
+        CHECK(t2 > 0);
+        sqlite3* raw3 = p1_open_raw();
+        CHECK(p1_scalar_int(raw3,
+            "SELECT unigram_count FROM sessions WHERE guid = 'x4a-guid-retry'") >= 1);
+        sqlite3_close(raw3);
+        db.close();
+        cleanup();
+    }
+
+    // (b) the rename UPDATE fails: a BEFORE UPDATE OF name trigger that
+    // RAISE(ABORT, ...) fires ONLY on the rename (touch_session_span updates
+    // started_on/ended_on, never name), so this pins the rename's own exec()
+    // check rather than a later write. store_turn must throw, the session keeps
+    // its old name, and the turn is not written.
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        const int t0 = db.store_turn("x4b question", "x4b answer", "x4-model",
+                                     /*defer_embedding=*/false, "x4b-guid", "",
+                                     "x4b original name", "test");
+        CHECK(t0 > 0);
+        p9b_trigger("CREATE TRIGGER x4_boom_sessions_upd BEFORE UPDATE OF name ON sessions "
+                    "WHEN NEW.name = 'x4b renamed name' "
+                    "BEGIN SELECT RAISE(ABORT, 'x4 injected'); END");
+        bool threw = false;
+        std::string what;
+        try {
+            db.store_turn("x4b question two", "x4b answer two", "x4-model",
+                          /*defer_embedding=*/false, "x4b-guid", "",
+                          "x4b renamed name", "test");
+        } catch (const std::exception& e) { threw = true; what = e.what(); }
+        CHECK(threw);
+        std::println("    store_turn under rename trigger threw: {}", what);
+        CHECK(what.find("x4 injected") != std::string::npos);
+        p9b_trigger("DROP TRIGGER x4_boom_sessions_upd");
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_text(raw,
+            "SELECT name FROM sessions WHERE guid = 'x4b-guid'") == "x4b original name");
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turns") == 1);   // turn rolled back
+        sqlite3_close(raw);
+        // Once the trigger is gone the rename works.
+        const int t2 = db.store_turn("x4b question three", "x4b answer three", "x4-model",
+                                     /*defer_embedding=*/false, "x4b-guid", "",
+                                     "x4b renamed name", "test");
+        CHECK(t2 > 0);
+        sqlite3* raw2 = p1_open_raw();
+        CHECK(p1_scalar_text(raw2,
+            "SELECT name FROM sessions WHERE guid = 'x4b-guid'") == "x4b renamed name");
+        sqlite3_close(raw2);
+        db.close();
+        cleanup();
+    }
+
+    // (c) happy path unchanged: create + rename + the same-exchange merge all
+    // still produce the same rows and index postings.
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        const int t = db.store_turn("x4c question", "x4c answer", "x4c-model",
+                                    /*defer_embedding=*/false, "x4c-guid", "",
+                                    "x4c alpha", "test");
+        CHECK(t > 0);
+        const int t2 = db.store_turn("x4c question", "more detail.", "x4c-model",
+                                     /*defer_embedding=*/false, "x4c-guid", "",
+                                     "x4c alpha", "test");
+        CHECK(t2 == t);                                   // merged into the same row
+        const int t3 = db.store_turn("x4c question four", "x4c answer four", "x4c-model",
+                                     /*defer_embedding=*/false, "x4c-guid", "",
+                                     "x4c beta", "test");
+        CHECK(t3 > 0 && t3 != t);
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turns") == 2);
+        CHECK(p1_scalar_text(raw,
+            "SELECT assistant_text FROM turns WHERE turn_id = " + std::to_string(t))
+              == "x4c answer\n\nmore detail.");
+        CHECK(p1_scalar_text(raw,
+            "SELECT name FROM sessions WHERE guid = 'x4c-guid'") == "x4c beta");
+        CHECK(p1_scalar_int(raw,
+            "SELECT unigram_count FROM sessions WHERE guid = 'x4c-guid'") >= 1);
+        CHECK(p1_scalar_int(raw,
+            "SELECT COUNT(*) FROM sessions_terms st JOIN sessions s "
+            "ON s.session_id = st.session_id WHERE s.guid = 'x4c-guid'") >= 1);
+        CHECK(p1_scalar_int(raw,
+            "SELECT COUNT(*) FROM turns_terms WHERE turn_id = " + std::to_string(t)) >= 1);
+        sqlite3_close(raw);
+        db.close();
+        cleanup();
+    }
+
+    std::println(" OK");
+}
+
 // PHASE9B step 5: reindex_all is atomic; reindex_table commits per batch.
 void p9b_test_reindex_atomic(ragger::Embedder& emb) {
     std::println("  p9b_test_reindex_atomic...");
@@ -7895,6 +8037,7 @@ int main() {
     lr57_test_finalize_turn_merges(emb);
     p9b_test_timestamp_formats(emb);
     p9b_test_checked_writes(emb);
+    x4_test_store_turn_atomicity(emb);
     p9b_test_reindex_atomic(emb);
     p9b_test_store_one_function(emb);
     lr60_test_decision_status_via_agent_update(emb);
