@@ -1362,9 +1362,10 @@ struct Server::Impl {
             g_restart_requested.store(true, std::memory_order_relaxed);
         }));
 
-        // LR S91 (D4, D-6): maintenance jobs — admin token only (same as
-        // /config and /restart), NEVER added to the MCP tools or the plugin
-        // schemas. Jobs are the S90 verbs: reindex, housekeeping,
+        // LR S91 (D4, D-6): maintenance jobs — same `guarded` auth as every
+        // other route (no separate admin token exists; the only separation
+        // is that these are NEVER added to the MCP tools or the plugin
+        // schemas). Jobs are the S90 verbs: reindex, housekeeping,
         // backfill:<kind>. There is no re-embed job (Reid runs it, rule 17).
         // Register /jobs/cancel BEFORE the name pattern so it wins.
         svr.Post("/jobs/cancel", guarded([this](const UserInfo&, const httplib::Request&,

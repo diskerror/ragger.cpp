@@ -67,7 +67,9 @@ nlohmann::json agent_memory_decision(RaggerMemory& mem, const nlohmann::json& ar
 /// Metadata-only curation (HTTP POST /memory/update, MCP tool memory_update).
 nlohmann::json agent_memory_update(RaggerMemory& mem, const nlohmann::json& args);
 
-/// Pending queue (HTTP POST /memory/review, MCP tool memory_review).
+/// Pending queue (HTTP POST /memory/review only — memory_review left the
+/// MCP tool list at LR S88, and there is no CLI memory_review verb; the
+/// CLI path is `decision list --status pending` + `decision set-status`).
 nlohmann::json agent_memory_review(RaggerMemory& mem, const nlohmann::json& args);
 
 /// Turn capture (HTTP POST /turn, MCP tool capture_turn). Thin wrapper over

@@ -1,6 +1,6 @@
 /**
  * Conversation summarization — used by the HTTP server's daemon-resident
- * summarizer (L2 turn / L3 session, idle-triggered housekeeping).
+ * summarizer (L2 turn / episode close, idle-triggered housekeeping).
  */
 #pragma once
 
@@ -21,9 +21,9 @@ std::string summarize_transcript(
     InferenceClient& inference,
     const std::vector<std::pair<std::string, std::string>>& turns);
 
-/// Summarize a flat list of text blobs (e.g. L2 summaries → L3, or L3
-/// summaries → L4). Each entry is treated as an equal-weight fragment;
-/// the same percentage-based size contract as summarize_transcript applies,
+/// Summarize a flat list of text blobs (e.g. L2 summaries → episode text at
+/// close). Each entry is treated as an equal-weight fragment; the same
+/// percentage-based size contract as summarize_transcript applies,
 /// measured against the total character count of all input texts.
 /// Returns "" for empty input or on error.
 std::string summarize_texts(

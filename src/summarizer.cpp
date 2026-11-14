@@ -16,12 +16,6 @@ namespace ragger {
 
 namespace {
 
-// Stable bracketed markers Hermes prepends to system-injected user turns.
-// Matched case-sensitively against the trimmed start of the user text. Kept
-// deliberately narrow: each is a phrase Hermes core controls, so a real human
-// message is extraordinarily unlikely to begin with one. Note the OUT-OF-BAND
-// USER MESSAGE marker is intentionally absent — that wraps a genuine human
-// message and should be summarized normally.
 // Resolve the system prompt: INI/config `summarizer_prompt` overrides the
 // built-in default. Empty (or missing) uses the default; any non-empty value
 // is passed to the model as-is, including a single space to suppress it.
@@ -113,6 +107,12 @@ std::string build_episode_prompt(std::size_t n, const SummaryBudget& b) {
     }
 }
 
+// Stable bracketed markers Hermes prepends to system-injected user turns.
+// Matched case-sensitively against the trimmed start of the user text. Kept
+// deliberately narrow: each is a phrase Hermes core controls, so a real human
+// message is extraordinarily unlikely to begin with one. Note the OUT-OF-BAND
+// USER MESSAGE marker is intentionally absent — that wraps a genuine human
+// message and should be summarized normally.
 constexpr std::string_view kSystemMarkers[] = {
     "[System note:",
     "[Note: model was just switched",
@@ -295,7 +295,8 @@ std::string summarize_transcript(
     const std::vector<std::pair<std::string, std::string>>& turns) {
     if (turns.empty()) return "";
 
-    // Summary contract: never longer than the source, target ~1/4 of it.
+    // Summary contract: never longer than the source, target ~30% of it
+    // (make_budget's kDefaultTargetPct).
     // Short exchanges (slash commands like /exit, single-line greetings)
     // can't be compressed — return them verbatim and skip inference.
     std::string conversation;

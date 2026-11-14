@@ -455,7 +455,9 @@ constexpr const char* kStaleEmbeddingWhere =
 
     // Truncate the shared `terms` table + reset its AUTOINCREMENT counter.
     // Delegates to TextIndex; see its header comment for the "only
-    // safe immediately before reindexing ALL five tables" caveat.
+    // safe immediately before reindexing ALL six text tables" caveat
+    // (kTextTables: turns, knowledge, documents, turn_summaries, episodes,
+    // sessions — sessions is lexical-only, no embedding).
     void Backend::Impl::reset_terms_table() {
         text_index_->reset_terms_table();
     }

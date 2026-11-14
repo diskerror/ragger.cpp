@@ -1471,7 +1471,7 @@ int main(int argc, char **argv) {
         }
         else if (command == "reindex") {
             // Manually (re)build the custom terms/TF-IDF text index for one
-            // table, or all five. Idempotent (delete-then-insert per record),
+            // table, or all six. Idempotent (delete-then-insert per record),
             // so safe to re-run any time — e.g. after a tokenizer/stopword
             // change, or to recover from a suspected inconsistency. Backs up
             // the DB first — cheap rollback, no drift guard needed. Table

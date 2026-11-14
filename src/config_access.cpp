@@ -213,10 +213,13 @@ nlohmann::json config_entry_json(const lang::ConfigMeta& m,
         {"value",   value},
     };
     if (m.secret) {
-        // Never echo a credential through the read surfaces; a non-empty
+        // Secret-masking mechanism (kept for any future credential entry):
+        // never echo a credential through the read surfaces; a non-empty
         // secret shows as the "<set>" marker (writing "<set>" back is a
         // no-op, so a dashboard that round-trips the mask cannot clobber
-        // the real key). Empty stays "" (C §1.7).
+        // the real key). Empty stays "". No kConfigSchema entry currently
+        // sets secret=true — API keys are env-var NAMES, not values — so
+        // today this branch never fires.
         j["secret"] = true;
         if (!value.empty()) j["value"] = "<set>";
     }

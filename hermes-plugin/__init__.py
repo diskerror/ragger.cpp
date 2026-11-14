@@ -803,7 +803,7 @@ class RaggerMemoryProvider(MemoryProvider):
 
         The daemon stores the raw turn — and later summarizes it — only when
         [server] capture_turns is enabled; otherwise this is a server-side
-        no-op. session_id groups turns for session summaries. Agent-driven
+        no-op. session_id groups turns into episodes. Agent-driven
         ragger_store remains the path for explicitly-curated memories.
         """
         if self._breaker_open() or not user_content:

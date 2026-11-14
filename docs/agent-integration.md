@@ -79,8 +79,8 @@ wrote this summary?".
    - Don't summarize in the agent. Let Ragger do it.
 
 4. **On session pause / window compaction.**
-   - Don't worry about it. The daemon's pause timer closes the L3
-     summary when the session goes quiet. The next `build_context`
+   - Don't worry about it. The daemon's pause timer closes the episode
+     when the session goes quiet. The next `build_context`
      call will pull it.
 
 ## Choosing a recipe
@@ -107,7 +107,7 @@ overrides win.
 ## Storing decisions vs. session memory
 
 Treat decisions as first-class. Don't bury "we chose cpp-httplib for
-SSE support" inside a session summary — call `store` for it
+SSE support" inside an episode summary — call `store` for it
 explicitly, with enough context that the entry is useful in
 isolation. Decisions live in the unified `knowledge` table
 (`kind='decision'`) and have their own recipe layer; they outlive any

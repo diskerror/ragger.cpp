@@ -1,7 +1,8 @@
 // Agent API request parsing — shared by server.cpp (HTTP) and mcp.cpp
 // (MCP tool_call). See agent_parse.h for the contract. Field defaults here
 // are the documented API defaults; keep them in sync with the tool schemas
-// in mcp.cpp and the endpoint docs in server.cpp handler comments.
+// in tools/*.json (compiled in, LR S95) and the endpoint docs in server.cpp
+// handler comments.
 #include "agent_parse.h"
 
 #include <string>

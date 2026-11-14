@@ -196,15 +196,21 @@ struct Backend::Impl {
 
 
     /// 0.16 -> 0.17 migration: the whole agent-API schema in one step.
-    /// Rebuilds `sessions` (drops project_id, adds started_on/ended_on span
-    /// columns computed from the session's turns), moves the episode rows out
-    /// of `summaries` into the new `episodes` table and rebuilds
+    /// Rebuilds `sessions` from ddl::sessions (drops project_id, adds
+    /// started_on/ended_on span columns computed from the session's turns,
+    /// plus the unigram_count/bigram_count TF denominators for the
+    /// lexical-only title corpus — no embedding column), moves the episode
+    /// rows out of `summaries` into the new `episodes` table and rebuilds
     /// `turn_summaries` with `episode_id`, creates `knowledge` + the two
     /// evidence tables and moves decisions in (kind='decision', ids
     /// PRESERVED) plus the remaining summaries rows (kind='note'), drops the
-    /// old decisions/insights/summaries/projects objects, and moves stray
-    /// category words that leaked into decisions.status ('fact', 'lesson')
-    /// into tags, setting status 'current'. The turn_summaries indexes and the
+    /// old decisions/insights/summaries objects (their junction and evidence
+    /// tables included), and moves stray category words that leaked into
+    /// decisions.status ('fact', 'lesson') into tags, setting status
+    /// 'current'. Ends with reset_terms_table() + a reindex of every
+    /// kTextTables entry (sessions included), then deletes the dead settings
+    /// keys (the two boundary watermarks, phon_weight, ini_migrated) and
+    /// stamps db_version. The turn_summaries indexes and the
     /// orphan-protection trigger are recreated by create_schema() afterward.
     void migrate_0_16_to_0_17();
 
@@ -852,7 +858,9 @@ struct Backend::Impl {
 
     // Truncate the shared `terms` table + reset its AUTOINCREMENT counter.
     // Delegates to TextIndex; see its header comment for the "only
-    // safe immediately before reindexing ALL five tables" caveat.
+    // safe immediately before reindexing ALL six text tables" caveat
+    // (kTextTables: turns, knowledge, documents, turn_summaries, episodes,
+    // sessions — sessions is lexical-only, no embedding).
     void reset_terms_table();
 
     // Set a document's embedding (used by the import path to write vectors

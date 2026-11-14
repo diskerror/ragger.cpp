@@ -7,7 +7,7 @@
         "type": "string"
       },
       "metadata": {
-        "description": "Optional metadata (source, hook, etc.). Reserved.",
+        "description": "Optional metadata (source, hook, etc.). Accepted and ignored \u2014 nothing reads it.",
         "type": "object"
       },
       "model": {

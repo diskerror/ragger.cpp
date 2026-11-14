@@ -38,7 +38,7 @@
         "type": "string"
       },
       "status": {
-        "description": "Decisions only: active (default) | any | one exact status.",
+        "description": "Knowledge rows only (any kind): active (default) | any | one exact status.",
         "type": "string"
       },
       "tags": {

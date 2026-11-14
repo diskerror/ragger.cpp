@@ -54,7 +54,11 @@ struct ConfigMeta {
     std::string_view help;          // explanation (CLI help + dashboard tooltip)
     bool secret = false;            // value is a credential: never expose it
                                     // through GET /config / MCP get_config —
-                                    // emit "<set>" instead (C §1.7)
+                                    // emit "<set>" instead. No entry in
+                                    // kConfigSchema currently sets it (API
+                                    // keys are env-var names, not values);
+                                    // the mechanism is kept for a future
+                                    // credential entry.
 };
 
 // Defined in include/ragger/lang/en.h (kConfigSchema[]).

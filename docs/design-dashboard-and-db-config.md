@@ -226,7 +226,7 @@ a staged wish until an explicit update.
   and returns ONE record: text = "Search not available. Re-embedding in
   progress."
 
-**Update-now** (dashboard button / `ragger rebuild-embeddings`): set
+**Update-now** (dashboard button / `ragger re-embed`): set
 `reembedding=true`, construct a desired-model Embedder, re-encode all rows on
 the existing backend (`rebuild_embeddings(Embedder&)` — no second backend),
 promote current := desired in settings, swap the daemon's live embedder, clear

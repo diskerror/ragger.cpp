@@ -289,7 +289,7 @@ constexpr const char* MSG_EMBEDDINGS_REBUILT  = "✓ Embeddings rebuilt: {} rows
 constexpr const char* WARN_EMBED_SUBPROCESS   = "Warning: embed subprocess failed (attempt {}/{}); embedding skipped";
 constexpr const char* WARN_IMPORT_EMBED_SKIPPED = "Warning: {}/{} chunks left unembedded (embed subprocess failed or timed out); re-import to retry";
 
-// --- Summarizer service (daemon-resident L2/L3 worker) -------------
+// --- Summarizer service (daemon-resident L2/episode worker) -------------
 constexpr const char* MSG_SUMMARIZER_START    = "[summarizer] catch-up queued {} turn(s), {} episode close(s)";
 constexpr const char* MSG_SUMMARIZER_STOP     = "Summarizer stopped";
 constexpr const char* MSG_SUMMARIZER_L2       = "L2 turn summary written for session {} at {}";
@@ -410,6 +410,7 @@ Commands:
   passwd <name>      Set (or clear) a user's web-UI login password
   add-self           Bootstrap ~/.ragger/token for the current user
   housekeeping       Trigger housekeeping on running daemon
+                     (supports --dry-run)
   reload-cache       Make the running daemon re-read its search caches from the DB
                      (done automatically after commands that may change the DB)
   reload             Reload config and search caches on running daemon (SIGHUP)
@@ -418,8 +419,9 @@ Commands:
                      turn_summaries, episodes, or "all")
   reindex <table|all> Rebuild the custom text index (terms + TF-IDF)
                      tables: turns, knowledge, documents, turn_summaries,
-                     episodes, or "all" ("all" also resets the shared
-                     terms table + its id counter, clearing orphaned terms)
+                     episodes, sessions, or "all" ("all" also resets the
+                     shared terms table + its id counter, clearing orphaned
+                     terms)
   backfill <kind>    Repair/back-fill stored data (each kind supports --dry-run):
                      l2-null        summarize turn_summaries rows with NULL text
                      l2-empty       fill legacy '' rows whose turn has content
@@ -695,7 +697,7 @@ inline constexpr auto kConfigSchema = std::to_array<ConfigMeta>({
     // ---- summarizer ----
     {"summarizer_model", "summarizer", "Model", CfgType::String, CfgEdit::Live,
      "qwen3-4b-instruct-2507", "",
-     "Model used for L2/L3 summarization."},
+     "Model used for L2 and episode summarization."},
     {"summarizer_api_url", "summarizer", "API URL", CfgType::String, CfgEdit::Live,
      "http://localhost:1234/v1", "",
      "Inference endpoint. Default follows the LM Studio convention."},

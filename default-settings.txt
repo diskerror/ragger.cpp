@@ -96,10 +96,10 @@ fts_literal_enabled = true  # exact stemmed-literal term matching. Disable for
                             # DMP-only (phonetic-only) scoring, no reindex needed.
 
 # =====================================================================
-# Summarizer (inference endpoint used for L2/L3 summarization)
+# Summarizer (inference endpoint used for L2/episode summarization)
 # =====================================================================
 [summarizer]
-model      = qwen3-4b-instruct-2507   # model used for L2/L3 summarization
+model      = qwen3-4b-instruct-2507   # model used for L2/episode summarization
 api_url    = http://localhost:1234/v1 # default: LM Studio convention
 max_tokens = 1024
 target_pct = 40    # target summary length as % of raw turn; 0 = 30%

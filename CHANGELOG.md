@@ -52,7 +52,7 @@
 - Episode hits carry their session and span, and episodes satisfy the session filters
 - History paging carries each turn's `turn_summary_id` and `episode_id`; `expand=context` returns neighbouring turns in session order; `expand=sources` walks knowledge → episodes → summaries → turn; `memory_timeline` gained `granularity=knowledge`
 - Evidence points at episodes (`episode:<id>` or bare ids) on every transport; turn-summary handles are rejected with a pointer to the right form
-- `memory_review` left the agent tool lists (MCP and plugin): curation stays user-driven (HTTP route + CLI)
+- `memory_review` left the agent tool lists (MCP and plugin): there is no CLI `memory_review` verb; curation stays user-driven — the HTTP route `POST /memory/review` remains, and from the CLI the pending queue is reached with `ragger decision list --status pending` + `ragger decision set-status`
 - Tool definitions live in `tools/*.json` — one source of truth compiled into the binary; new `GET /tools` serves the same gated array as MCP `tools/list`
 - Every maintenance verb is dry-runnable (`--dry-run`), reports progress, is cancellable between batches, and resumable; `ragger reindex all` stays atomic
 - The daemon gained a single-flight maintenance job runner (`POST /jobs/<name>`, `POST /jobs/cancel`, `GET /jobs`, progress as SSE `job` events) and the dashboard a Maintenance card; re-embedding stays a CLI operation the user runs

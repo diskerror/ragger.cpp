@@ -5,7 +5,10 @@
  *   store, search, status, capture_turn, build_context, get_config,
  *   memory_decision, memory_note, memory_search, document_search,
  *   memory_get, memory_timeline, memory_update. (memory_review left the
- *   agent tool lists at LR S88 (D7, D-2); the HTTP route and CLI remain.)
+ *   agent tool lists at LR S88 (D7, D-2); there is no CLI memory_review
+ *   verb — curation stays user-driven through the HTTP route
+ *   POST /memory/review, or from the CLI via `decision list --status
+ *   pending` + `decision set-status`.)
  *   The definitions themselves are tools/*.json, compiled in (LR S95).
  *
  * Housekeeping: if no ragger HTTP server PID file is found, a

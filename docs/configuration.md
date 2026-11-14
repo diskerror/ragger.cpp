@@ -40,7 +40,7 @@ symlink `~/.ragger` there instead.
 | `[server]`       | Socket/bind/port, TLS cert/key, turn-capture/build-context toggles, recipes |
 | `[embedding]`    | Model, vector dimensions, on-disk precision                    |
 | `[search]`       | Default limit, score floor, BM25/vector/phonetic blend |
-| `[summarizer]`   | Inference endpoint used by the L2/L3 background worker         |
+| `[summarizer]`   | Inference endpoint used by the L2/episode background worker     |
 | `[embed]`        | Embedding subprocess pool — timeouts, retries, concurrency     |
 | `[logging]`      | Log level (one unified log file — see below)                  |
 | `[housekeeping]` | Retention, pass cadence, episode-idle minutes                  |
@@ -113,7 +113,7 @@ text-index-vs-vector weight for backward compatibility.
 
 ## `[summarizer]` — the only inference endpoint
 
-Ragger only calls inference for L2/L3 summarization. There is no chat
+Ragger only calls inference for L2 and episode summarization. There is no chat
 surface. (Older versions had a separate `[inference]` block for a
 general-purpose endpoint plus `[inference.<name>]` multi-endpoint
 routing — both are gone from the documented config; `[summarizer]` is

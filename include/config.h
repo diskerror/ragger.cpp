@@ -144,7 +144,7 @@ struct Config {
     int inference_max_tokens = 4096;
     std::vector<InferenceEndpointConfig> inference_endpoints;
 
-    // --- [summarizer] section — model, endpoint, and prompt for L2/L3 ---
+    // --- [summarizer] section — model, endpoint, and prompt for L2/episode ---
     std::string summarizer_model   = "";
     std::string summarizer_api_url = "";
     std::string summarizer_api_key_env = "RAGGER_SUMMARIZER_API_KEY";  // env var NAME

@@ -740,7 +740,10 @@ standard MCP handshake and tool discovery:
 The definitions live in `tools/*.json` (one file per tool) and are
 compiled into the binary — `tools/list` and `GET /tools` serve exactly
 those, so there is one source of truth (LR S95). `memory_review` is not
-in this list by design: curation is user-driven (HTTP route + CLI).
+in this list by design: curation is user-driven — the HTTP route
+`POST /memory/review` remains, and there is no CLI `memory_review` verb
+(the CLI path is `ragger decision list --status pending` +
+`ragger decision set-status`).
 
 | Tool              | Description                                                                | Required params                 |
 |-------------------|----------------------------------------------------------------------------|---------------------------------|
@@ -762,8 +765,9 @@ in this list by design: curation is user-driven (HTTP route + CLI).
 `default_search_limit` setting), `min_score` (number). The `collections`
 parameter is accepted but is a no-op in the current schema.
 
-**Optional `capture_turn` params:** `assistant`, `model`, `session_id`,
-`metadata`. Requires `[server] capture_turns = true`; otherwise the
+**Optional `capture_turn` params:** `assistant`, `model`, `session_id`
+(`metadata` is accepted and ignored — nothing reads it). Requires
+`[server] capture_turns = true`; otherwise the
 call returns `{"status":"disabled"}`.
 
 **Optional `build_context` params:** `recipe` (string — name from
