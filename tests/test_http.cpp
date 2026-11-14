@@ -42,6 +42,41 @@ json post_json(HttpFixture& fx, const std::string& path, const json& body,
     return out;
 }
 
+/// Send a hand-built request over a fresh TCP connection and return the HTTP
+/// status code. curl always synthesizes a Host header, so the "no Host header"
+/// failure path (X7/C4) can only be exercised with a raw socket.
+int raw_http_status(int port, const std::string& request) {
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(fd >= 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        ::close(fd);
+        return -1;
+    }
+    size_t off = 0;
+    while (off < request.size()) {
+        ssize_t n = ::send(fd, request.data() + off, request.size() - off, 0);
+        if (n <= 0) { ::close(fd); return -1; }
+        off += static_cast<size_t>(n);
+    }
+    std::string resp;
+    char buf[2048];
+    while (resp.find('\n') == std::string::npos) {
+        ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+        if (n <= 0) break;
+        resp.append(buf, static_cast<size_t>(n));
+    }
+    ::close(fd);
+    if (resp.rfind("HTTP/1.1 ", 0) != 0 && resp.rfind("HTTP/1.0 ", 0) != 0)
+        return -1;
+    auto sp = resp.find(' ', 5);
+    if (sp == std::string::npos) return -1;
+    return std::atoi(resp.c_str() + sp + 1);
+}
+
 } // namespace
 
 // Minimal read/write access to the fixture DB for row-level assertions
@@ -116,6 +151,43 @@ void t_loopback_auth_contract(HttpFixture& fx) {
                                    "Origin: http://127.0.0.1:" + std::to_string(fx.port)});
     CHECK(sorigin.ok());
     CHECK(sorigin.status == 200);
+    std::println(" OK");
+}
+
+// X7 (C4): DNS-rebinding guard. A page on evil.example whose DNS resolves to
+// 127.0.0.1 reaches the daemon over loopback. Before this fix every loopback
+// peer was pre-authenticated regardless of its Host header, so such a page
+// could call guarded routes with no token. Now a loopback request is
+// pre-authenticated only when its Host header also names loopback; a foreign
+// Host must present a token (401, not 403 — a token holder still works).
+void t_dns_rebinding_host_guard(HttpFixture& fx) {
+    std::println("  t_dns_rebinding_host_guard...");
+    const std::string loopback_host = "127.0.0.1:" + std::to_string(fx.port);
+
+    // Loopback Host, no token → pre-authenticated 200 (local curl/CLI/plugin
+    // keep working unchanged).
+    auto ok = fx.client.get(fx.url("/count"), {"Host: " + loopback_host});
+    CHECK(ok.ok());
+    CHECK(ok.status == 200);
+
+    // Foreign Host over loopback, no token → NOT pre-authenticated → 401.
+    auto rebinding = fx.client.get(fx.url("/count"), {"Host: evil.example"});
+    CHECK(rebinding.ok());
+    CHECK(rebinding.status == 401);
+
+    // Foreign Host over loopback WITH a valid bearer token → 200.
+    auto tokened = fx.client.get(
+        fx.url("/count"),
+        {"Host: evil.example", ragger::util::bearer_header(fx.token)});
+    CHECK(tokened.ok());
+    CHECK(tokened.status == 200);
+
+    // Failure path: no Host header at all → treated as non-loopback → 401.
+    // curl always sends a Host, so this needs a raw socket.
+    const std::string no_host =
+        "GET /count HTTP/1.1\r\nConnection: close\r\n\r\n";
+    CHECK(raw_http_status(fx.port, no_host) == 401);
+
     std::println(" OK");
 }
 
@@ -694,6 +766,7 @@ int main() {
 
     t_health_no_token(fx);
     t_loopback_auth_contract(fx);
+    t_dns_rebinding_host_guard(fx);
     t_store_then_search(fx);
     t_store_empty_text(fx);
     t_store_metadata_type_error(fx);

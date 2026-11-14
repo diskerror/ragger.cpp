@@ -80,4 +80,13 @@ bool request_origin_allowed(std::string_view method,
                             std::string_view origin,
                             std::string_view host);
 
+/// True if a Host-header authority names the loopback interface: exactly
+/// "localhost", "127.0.0.1" or "::1" (case-insensitive), with an optional
+/// ":port" and bracketed IPv6 ("[::1]:7777") accepted. Nothing else counts —
+/// not 127.0.0.2, not 0.0.0.0, not any prefix/suffix match, not an empty or
+/// malformed value. Guards the loopback auth bypass against DNS rebinding:
+/// a page on an attacker domain that resolves to 127.0.0.1 sends its own
+/// Host, so it is no longer pre-authenticated.
+bool host_is_loopback(std::string_view host_header);
+
 } // namespace ragger

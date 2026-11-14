@@ -444,11 +444,15 @@ struct Server::Impl {
     }
 
     /// True if this request must present a valid token. False for requests
-    /// arriving on the unix socket (empty remote_addr) or from localhost.
+    /// arriving on the unix socket (empty remote_addr) or from loopback — but
+    /// a loopback peer is only trusted when its Host header also names
+    /// loopback (X7/C4). A DNS-rebinding page reaches us over loopback while
+    /// sending its own Host, so it is no longer pre-authenticated; it must
+    /// present a token (this is not a 403 — a token holder still works).
     bool request_requires_auth(const httplib::Request& req) const {
-        if (req.remote_addr.empty()) return false;  // unix socket
+        if (req.remote_addr.empty()) return false;  // unix socket (no Host check)
         if (req.remote_addr == "127.0.0.1" || req.remote_addr == "::1") {
-            return false;
+            return !host_is_loopback(req.get_header_value("Host"));
         }
         return true;
     }
