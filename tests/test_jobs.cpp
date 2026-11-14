@@ -285,6 +285,81 @@ void t_jobs_unknown(HttpFixture& fx) {
     CHECK(j["last"].is_null());
 }
 
+// X6 (M7): POST /jobs/<name> body validation — one test per row of the
+// step's table. Empty body and `{}` start a real job (dry_run=false);
+// {"dry_run":true} starts a dry run; unknown extra keys are ignored
+// (unchanged). A body that is not a JSON object, and an object whose
+// `dry_run` is present but not boolean, is a 400 BEFORE anything starts:
+// GET /jobs must show nothing queued/running afterwards.
+void t_jobs_body_validation(HttpFixture& fx) {
+    auto x6_post = [&](const std::string& body) {
+        return fx.client.post(fx.url("/jobs/reindex"), body, fx.auth());
+    };
+    // `current` is only set while queued/running (jobs.h), so a null
+    // `current` proves no job started.
+    auto x6_idle = [&fx] { return get_jobs(fx)["current"].is_null(); };
+    // Wait for the started reindex to finish. wait_last() alone cannot tell
+    // two consecutive same-name jobs apart (`last` still holds the previous
+    // job's `done` while the new one runs), so also require `current` to be
+    // cleared — start() sets it synchronously before returning 202.
+    auto x6_wait_done = [&fx] {
+        CHECK(poll_until([&] {
+            auto j = get_jobs(fx);
+            return j["current"].is_null() && !j["last"].is_null() &&
+                   j["last"]["name"] == "reindex" &&
+                   j["last"]["state"] == "done";
+        }, 10000));
+    };
+
+    // "" -> 202, a real job starts (dry_run defaults to false).
+    {
+        auto r = x6_post("");
+        CHECK(r.status == 202);
+        CHECK(json::parse(r.body)["dry_run"].get<bool>() == false);
+    }
+    x6_wait_done();
+
+    // "{}" -> 202, a real job starts.
+    {
+        auto r = x6_post("{}");
+        CHECK(r.status == 202);
+        CHECK(json::parse(r.body)["dry_run"].get<bool>() == false);
+    }
+    x6_wait_done();
+
+    // {"dry_run":true} -> 202, dry run.
+    {
+        auto r = x6_post(R"({"dry_run":true})");
+        CHECK(r.status == 202);
+        CHECK(json::parse(r.body)["dry_run"].get<bool>() == true);
+    }
+    x6_wait_done();
+
+    // Unknown extra keys are ignored (unchanged contract).
+    {
+        auto r = x6_post(R"({"unknown_key":42})");
+        CHECK(r.status == 202);
+    }
+    x6_wait_done();
+
+    // The 400 rows: status, exact message, and nothing started.
+    struct x6_bad { const char* body; const char* msg; };
+    for (const x6_bad& bad : {
+             x6_bad{R"({"dry_run":"yes"})", "ERROR: dry_run must be a boolean"},
+             x6_bad{R"({"dry_run":1})", "ERROR: dry_run must be a boolean"},
+             x6_bad{"[1]", "ERROR: body must be a JSON object"},
+             x6_bad{"not json", "ERROR: body must be a JSON object"},
+             x6_bad{"null", "ERROR: body must be a JSON object"}}) {
+        auto r = x6_post(bad.body);
+        if (r.status != 400 || r.body != bad.msg) {
+            std::println(stderr, "DIAG x6 body '{}' -> status {} body '{}'",
+                         bad.body, r.status, r.body);
+            CHECK(false);
+        }
+        CHECK(x6_idle());
+    }
+}
+
 void t_jobs_dry_runs(HttpFixture& fx) {
     CHECK(post_job(fx, "reindex", true) == 202);
     CHECK(wait_last(fx, "reindex", "done"));
@@ -404,6 +479,7 @@ int main() {
     sse.start(fx->url("/events"), {ragger::util::bearer_header(fx->token)});
 
     t_jobs_unknown(*fx);
+    t_jobs_body_validation(*fx);
     t_jobs_dry_runs(*fx);
     t_jobs_cancel_and_rerun(*fx, stub, db, sse);
     t_jobs_failed(*fx, stub);

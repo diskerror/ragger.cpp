@@ -1388,12 +1388,20 @@ struct Server::Impl {
                  guarded([this](const UserInfo&, const httplib::Request& req,
                                 httplib::Response& res) {
             const std::string name = req.matches[1];
+            // X6 (M7): a non-empty body must be a JSON object, and a
+            // present `dry_run` must be a boolean — rejected BEFORE
+            // jobs_->start() so a malformed body never starts a real job.
+            // guarded() maps invalid_argument to 400 "ERROR: <msg>".
             bool dry_run = false;
             if (!req.body.empty()) {
                 auto body = json::parse(req.body, nullptr, /*allow_exceptions=*/false);
-                if (!body.is_discarded() && body.contains("dry_run") &&
-                    body["dry_run"].is_boolean())
+                if (body.is_discarded() || !body.is_object())
+                    throw std::invalid_argument("body must be a JSON object");
+                if (body.contains("dry_run")) {
+                    if (!body["dry_run"].is_boolean())
+                        throw std::invalid_argument("dry_run must be a boolean");
                     dry_run = body["dry_run"].get<bool>();
+                }
             }
             std::string error;
             switch (jobs_->start(name, dry_run, error)) {
