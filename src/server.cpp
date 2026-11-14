@@ -741,22 +741,6 @@ struct Server::Impl {
         svr.Get(R"(/session/([^/]+))",  guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_session(u, req, res); }));
         svr.Post("/search_by_metadata", guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_search_by_metadata(u, req, res); }));
 
-        svr.Get("/user/token", guarded([this](const UserInfo& user, const httplib::Request&,
-                                              httplib::Response& res) {
-            struct passwd* pw = getpwnam(user.username.c_str());
-            if (!pw) { res.status = 404; res.set_content(std::format(R"({{"error":"{}"}})", lang::HTTP_SYSTEM_USER_NOT_FOUND), "application/json"); return; }
-            std::string token_file = std::string(pw->pw_dir) + "/.ragger/token";
-            std::ifstream f(token_file);
-            if (!f) { res.status = 404; res.set_content(std::format(R"({{"error":"{}"}})", lang::HTTP_NO_TOKEN_FILE), "application/json"); return; }
-            std::string token;
-            std::getline(f, token);
-            size_t s = token.find_first_not_of(" \t\r\n");
-            size_t e = token.find_last_not_of(" \t\r\n");
-            if (s != std::string::npos) token = token.substr(s, e - s + 1);
-            Diskerror::Logger::debug("GET /user/token 200");
-            respond_json(res, json{{"token", token}, {"username", user.username}});
-        }));
-
         // ---- Dashboard (embedded HTML/JS) --------------------------------
         // GET /dashboard[?token=...] -> the single-page control panel. The
         // page then talks to /config and /events with the same token.

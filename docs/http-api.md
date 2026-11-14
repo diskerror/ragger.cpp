@@ -438,16 +438,6 @@ timestamp bounds.
 
 ---
 
-### GET /user/token
-
-Return the caller's own bootstrap token, read from `~/.ragger/token` in
-the authenticated system user's home directory.
-
-**Response:** `{"token": "<token>", "username": "<name>"}`; `404`
-(JSON) when the system user or the token file is missing.
-
----
-
 ### GET /dashboard
 
 The single-page control panel (embedded HTML/JS, `text/html`). From

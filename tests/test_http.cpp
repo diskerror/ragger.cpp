@@ -579,6 +579,17 @@ void t_delete_routes_gone(HttpFixture& fx) {
     std::println(" OK");
 }
 
+// X8 (M4): GET /user/token is removed — it handed the bearer token to any
+// pre-authenticated caller and read ~/.ragger/token (ignoring --ragger-base).
+// It is an unknown route now (404 like any other), not 200/404-with-token.
+void t_user_token_route_gone(HttpFixture& fx) {
+    std::println("  t_user_token_route_gone...");
+    auto r = fx.client.get(fx.url("/user/token"), fx.auth());
+    CHECK(r.ok());
+    CHECK(r.status == 404);
+    std::println(" OK");
+}
+
 // LR S59: memory_note accepts trigger (insights only) and session.
 void t_memory_note_trigger_session(HttpFixture& fx) {
     std::println("  t_memory_note_trigger_session...");
@@ -777,6 +788,7 @@ int main() {
     t_write_verbs_parity_s72(fx);
     t_unknown_route(fx);
     t_delete_routes_gone(fx);
+    t_user_token_route_gone(fx);
     t_memory_note_trigger_session(fx);
     t_document_search_parity_s76(fx);
     t_dashboard_maintenance_s92(fx);

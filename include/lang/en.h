@@ -478,8 +478,6 @@ constexpr const char* HTTP_MISSING_TEXT         = "Missing 'text' field";
 constexpr const char* HTTP_MISSING_QUERY        = "Missing 'query' field";
 constexpr const char* HTTP_MISSING_METADATA     = "Missing or invalid 'metadata' field";
 constexpr const char* HTTP_JSON_ERROR           = "JSON error: {}";
-constexpr const char* HTTP_SYSTEM_USER_NOT_FOUND = "system user not found";
-constexpr const char* HTTP_NO_TOKEN_FILE        = "no token file";
 
 // --- Server: startup/runtime ---
 constexpr const char* MSG_HEALTH_CHECK_TCP      = "  Health check: curl http://{}/health";
