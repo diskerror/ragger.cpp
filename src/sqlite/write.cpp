@@ -1932,14 +1932,47 @@ static std::string tags_from_metadata(const json& metadata) {
         Transaction tx(db);
         Stmt s(db, sql);
         int idx = 1;
-        if (!timestamp.empty()) s.bind(idx++, resolve_epoch(timestamp));  // INTEGER epoch
+        int64_t new_created_at = 0;   // epoch; only meaningful when !timestamp.empty()
+        if (!timestamp.empty()) {
+            new_created_at = resolve_epoch(timestamp);
+            s.bind(idx++, new_created_at);  // INTEGER epoch
+        }
         if (!session_guid.empty()) {
             new_session_id = get_or_create_session(session_guid);
             s.bind(idx++, new_session_id);
         }
         s.bind(idx, turn_id);
-        const bool changed = s.exec() && sqlite3_changes(db) > 0;
+        // X12 (M5): a failed turns UPDATE used to be swallowed (changed=false,
+        // silent return false). Check it and throw, same style as recompute_span
+        // below; the RAII Transaction rolls the whole thing back.
+        if (!s.exec())
+            throw std::runtime_error(std::format(
+                "update_turn_meta (turn {}): {}", turn_id, sqlite3_errmsg(db)));
+        const bool changed = sqlite3_changes(db) > 0;
         if (changed) {
+            // Keep the L2 invariant (rule 18): turn_summaries.turn_datetime
+            // always equals its turn's created_at, and its session_id follows
+            // the turn. Propagate ONLY the columns that moved, in the SAME
+            // transaction, so a failed L2 write rolls the turns UPDATE (and
+            // any new session) back too. A turn with no L2 row matches 0 rows
+            // here — not an error, unchanged behavior.
+            std::string l2 = "UPDATE turn_summaries SET ";
+            bool l2_first = true;
+            if (!timestamp.empty()) { l2 += "turn_datetime = ?"; l2_first = false; }
+            if (!session_guid.empty()) {
+                if (!l2_first) l2 += ", ";
+                l2 += "session_id = ?";
+            }
+            l2 += " WHERE turn_id = ?";
+            Stmt ls(db, l2);
+            int lidx = 1;
+            if (!timestamp.empty()) ls.bind(lidx++, new_created_at);
+            if (!session_guid.empty()) ls.bind(lidx++, new_session_id);
+            ls.bind(lidx, turn_id);
+            if (!ls.exec())
+                throw std::runtime_error(std::format(
+                    "update_turn_meta L2 (turn {}): {}", turn_id, sqlite3_errmsg(db)));
+
             recompute_span(old_session_id);
             if (new_session_id && new_session_id != old_session_id)
                 recompute_span(new_session_id);

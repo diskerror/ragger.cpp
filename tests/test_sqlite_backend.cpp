@@ -7037,6 +7037,116 @@ void lr68_test_time_invariants(ragger::Embedder& emb) {
     std::println(" ok");
 }
 
+// X12 (M5): update_turn_meta keeps the L2 invariant (Reid's rule 18:
+// turn_summaries.turn_datetime always equals its turn's created_at, and its
+// session_id follows the turn). Moving a turn's time/session must carry the
+// L2 row along, in the SAME transaction, so a failed L2 write rolls the whole
+// thing back. Pinned RED at HEAD: the old code moved turns.created_at /
+// session_id and left turn_summaries behind, and never touched the L2 row.
+void x12_test_update_turn_meta_l2_invariant(ragger::Embedder& emb) {
+    std::println("  x12_test_update_turn_meta_l2_invariant...");
+
+    // (a) move TIME: the L2 turn_datetime must follow turns.created_at.
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        const int t = db.store_turn("x12a question", "x12a answer", "x12-model",
+                                    false, "x12a-guid", "2026-08-01 10:00:00");
+        CHECK(t > 0);
+        CHECK(db.finalize_turn_summary(t, "x12a summary", "summarizer-model"));
+        CHECK(db.update_turn_meta(t, "2026-08-05 14:30:00", ""));
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT turn_datetime FROM turn_summaries WHERE turn_id = "
+                          + std::to_string(t)) == p5_epoch("2026-08-05 14:30:00"));
+        CHECK(p1_scalar_int(raw,
+            "SELECT COUNT(*) FROM turn_summaries ts JOIN turns t ON t.turn_id = ts.turn_id "
+            "WHERE ts.turn_datetime != t.created_at") == 0);
+        sqlite3_close(raw);
+        db.close();
+        cleanup();
+    }
+
+    // (b) move SESSION: the L2 session_id must equal the turn's (new) session.
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        const int t = db.store_turn("x12b question", "x12b answer", "x12-model",
+                                    false, "x12b-guid-a", "2026-08-01 10:00:00");
+        CHECK(t > 0);
+        CHECK(db.finalize_turn_summary(t, "x12b summary", "summarizer-model"));
+        CHECK(db.update_turn_meta(t, "", "x12b-guid-b"));   // move to a new session
+        sqlite3* raw = p1_open_raw();
+        const long long l2_session = p1_scalar_int(raw,
+            "SELECT session_id FROM turn_summaries WHERE turn_id = " + std::to_string(t));
+        CHECK(l2_session == p1_scalar_int(raw,
+            "SELECT session_id FROM turns WHERE turn_id = " + std::to_string(t)));
+        CHECK(l2_session == p1_scalar_int(raw,
+            "SELECT session_id FROM sessions WHERE guid = 'x12b-guid-b'"));
+        sqlite3_close(raw);
+        db.close();
+        cleanup();
+    }
+
+    // (c) a turn WITHOUT an L2 row: unchanged behavior — no crash, and no L2
+    // row is created by the move.
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        const int t = db.store_turn("x12c question", "x12c answer", "x12-model",
+                                    false, "x12c-guid", "2026-08-01 10:00:00");
+        CHECK(t > 0);
+        CHECK(db.update_turn_meta(t, "2026-08-09 08:00:00", "x12c-guid-new"));
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turn_summaries WHERE turn_id = "
+                          + std::to_string(t)) == 0);   // still no L2 row
+        CHECK(p1_scalar_int(raw, "SELECT created_at FROM turns WHERE turn_id = "
+                          + std::to_string(t)) == p5_epoch("2026-08-09 08:00:00"));
+        sqlite3_close(raw);
+        db.close();
+        cleanup();
+    }
+
+    // (d) failure injection: a BEFORE UPDATE trigger on turn_summaries that
+    // RAISE(ABORT) makes the L2 UPDATE fail. update_turn_meta must throw and
+    // the turns row must NOT change either (atomic — the whole transaction
+    // rolls back, including the new session get_or_create_session created).
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        const int t = db.store_turn("x12d question", "x12d answer", "x12-model",
+                                    false, "x12d-guid", "2026-08-01 10:00:00");
+        CHECK(t > 0);
+        CHECK(db.finalize_turn_summary(t, "x12d summary", "summarizer-model"));
+        p9b_trigger("CREATE TRIGGER x12_boom_ts_upd BEFORE UPDATE ON turn_summaries "
+                    "BEGIN SELECT RAISE(ABORT, 'x12 injected'); END");
+        bool threw = false;
+        std::string what;
+        try {
+            db.update_turn_meta(t, "2026-08-11 11:11:11", "x12d-guid-new");
+        } catch (const std::exception& e) { threw = true; what = e.what(); }
+        CHECK(threw);
+        std::println("    update_turn_meta under turn_summaries trigger threw: {}", what);
+        p9b_trigger("DROP TRIGGER x12_boom_ts_upd");
+        sqlite3* raw = p1_open_raw();
+        // The turns row is unchanged (rolled back): original time and session.
+        CHECK(p1_scalar_int(raw, "SELECT created_at FROM turns WHERE turn_id = " + std::to_string(t))
+              == p5_epoch("2026-08-01 10:00:00"));
+        CHECK(p1_scalar_text(raw, "SELECT ss.guid FROM turns t JOIN sessions ss "
+                          "ON ss.session_id = t.session_id WHERE t.turn_id = " + std::to_string(t))
+              == "x12d-guid");
+        // The new session was rolled back too.
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sessions WHERE guid = 'x12d-guid-new'") == 0);
+        // The L2 row is unchanged.
+        CHECK(p1_scalar_int(raw, "SELECT turn_datetime FROM turn_summaries WHERE turn_id = "
+                          + std::to_string(t)) == p5_epoch("2026-08-01 10:00:00"));
+        sqlite3_close(raw);
+        db.close();
+        cleanup();
+    }
+
+    std::println(" OK");
+}
+
 // LR S73 (R13, Q5, review #3): episodes satisfy the session/exclude_session
 // filters, and episode hits carry extra = {session, span_start, span_end}
 // (spans rendered like memory_timeline renders `created`). Before this step
@@ -8225,6 +8335,7 @@ int main() {
     lr67_test_backfill_stranded(emb);
     lr67_test_backfill_session_names(emb);
     lr68_test_time_invariants(emb);
+    x12_test_update_turn_meta_l2_invariant(emb);
     lr73_test_episode_session_filter_and_extra(emb);
     lr74_test_per_corpus_pools(emb);
     lr75_test_raw_turn_opt_in(emb);
