@@ -1640,8 +1640,11 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
                 session_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guid TEXT NOT NULL UNIQUE, name TEXT, name_source TEXT,
                 created_at INTEGER NOT NULL DEFAULT (unixepoch()));
+            -- X3 (C1 pin): the old name 'A' is a unigram stopword and yields
+            -- no index terms, so the sessions-reindex assertions below would
+            -- have nothing to check. Give guid-a a searchable name.
             INSERT INTO sessions (guid, name, name_source) VALUES
-                ('guid-a', 'A', 'test'), ('guid-b', NULL, NULL);
+                ('guid-a', 'alpha', 'test'), ('guid-b', NULL, NULL);
             INSERT INTO turns (user_text, session_id, created_at) VALUES
                 ('t1', 1, 1700000500), ('t2', 1, 1700000100), ('t3', 1, 1700000300);
             CREATE TABLE models (
@@ -1832,6 +1835,31 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
                              "(SELECT knowledge_id FROM knowledge_terms)") == 0);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'protect_orphan_turn_summaries'") == 1);
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_foreign_key_check") == 0);
+
+    // X3 (C1 pin): the migrated `sessions` must actually be WRITABLE and
+    // INDEXABLE — the failure class the review found (`store_turn` with a
+    // session name threw `no such column: unigram_count`). The leg rebuilds
+    // sessions from ddl::sessions (which carries the two count columns) and
+    // reindexes every kTextTables entry, so pin the end state here.
+    // ddl::sessions column order: ... created_at(6), unigram_count(7),
+    // bigram_count(8) — both NOT NULL DEFAULT 0.
+    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('sessions') WHERE cid = 6") == "created_at");
+    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('sessions') WHERE cid = 7") == "unigram_count");
+    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('sessions') WHERE cid = 8") == "bigram_count");
+    CHECK(p1_scalar_int(raw, "SELECT \"notnull\" FROM pragma_table_info('sessions') WHERE name = 'unigram_count'") == 1);
+    CHECK(p1_scalar_int(raw, "SELECT \"notnull\" FROM pragma_table_info('sessions') WHERE name = 'bigram_count'") == 1);
+    CHECK(p1_scalar_text(raw, "SELECT dflt_value FROM pragma_table_info('sessions') WHERE name = 'unigram_count'") == "0");
+    CHECK(p1_scalar_text(raw, "SELECT dflt_value FROM pragma_table_info('sessions') WHERE name = 'bigram_count'") == "0");
+    // The sessions_terms junction exists and the leg's all-table reindex
+    // populated it for the NAMED session; a NULL-name session contributes 0.
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sessions_terms'") == 1);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sessions_terms WHERE session_id = "
+                             "(SELECT session_id FROM sessions WHERE guid = 'guid-a')") > 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sessions_terms WHERE session_id = "
+                             "(SELECT session_id FROM sessions WHERE guid = 'guid-b')") == 0);
+    // The named session's TF denominator is set by the reindex.
+    CHECK(p1_scalar_int(raw, "SELECT unigram_count FROM sessions WHERE guid = 'guid-a'") >= 1);
+
     sqlite3_close(raw);
 
     // PHASE9: PERMANENT equivalence check — the migrated DB and a fresh DB
@@ -1937,6 +1965,74 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
         fs::remove(fresh_db);
         fs::remove(fresh_db + "-wal");
         fs::remove(fresh_db + "-shm");
+    }
+
+    // X3 (C1 pin, clause 5): reopening the already-migrated DB changes nothing
+    // — the leg does not re-run and the schema is stable.
+    {
+        auto schema_snapshot = [](const std::string& path) {
+            sqlite3* d = nullptr;
+            CHECK(sqlite3_open(path.c_str(), &d) == SQLITE_OK);
+            std::string out;
+            sqlite3_stmt* st = nullptr;
+            CHECK(sqlite3_prepare_v2(d,
+                "SELECT type, name, COALESCE(sql,'<none>') FROM sqlite_master "
+                "ORDER BY type, name", -1, &st, nullptr) == SQLITE_OK);
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                for (int i = 0; i < 3; ++i) {
+                    const unsigned char* t = sqlite3_column_text(st, i);
+                    out += (t ? reinterpret_cast<const char*>(t) : "<null>");
+                    out += '|';
+                }
+                out += '\n';
+            }
+            sqlite3_finalize(st);
+            sqlite3_close(d);
+            return out;
+        };
+        const std::string before = schema_snapshot(TEMP_DB);
+        { ragger::sqlite::Backend reopen(emb, TEMP_DB); reopen.close(); }
+        CHECK(schema_snapshot(TEMP_DB) == before);
+        sqlite3* r = p1_open_raw();
+        CHECK(p1_scalar_text(r, "SELECT value FROM settings WHERE key = 'db_version'") == "0.17");
+        sqlite3_close(r);
+    }
+
+    // X3 (C1 pin, clause 4): store_turn with a NEW session name creates and
+    // indexes it; store_turn into the existing named session with a DIFFERENT
+    // name renames it and its sessions_terms row follows (old term gone, new
+    // term present). 'alpha' (fixture) -> 'bravo'.
+    {
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        int t_new = db.store_turn("charlie question", "charlie answer", "test-model",
+                                  /*defer_embedding=*/true, "guid-c", "", "charlie", "test");
+        CHECK(t_new > 0);
+        sqlite3* r = p1_open_raw();
+        CHECK(p1_scalar_int(r, "SELECT unigram_count FROM sessions WHERE guid = 'guid-c'") >= 1);
+        const long long sid_a = p1_scalar_int(r, "SELECT session_id FROM sessions WHERE guid = 'guid-a'");
+        CHECK(p1_scalar_int(r, std::format(
+            "SELECT COUNT(*) FROM sessions_terms st JOIN terms t ON t.term_id = st.term_id "
+            "WHERE st.session_id = {} AND t.term LIKE 'alpha%'", sid_a)) >= 1);
+        CHECK(p1_scalar_int(r, std::format(
+            "SELECT COUNT(*) FROM sessions_terms st JOIN terms t ON t.term_id = st.term_id "
+            "WHERE st.session_id = {} AND t.term LIKE 'bravo%'", sid_a)) == 0);
+        sqlite3_close(r);
+
+        // Rename branch: same GUID, different name.
+        int t_ren = db.store_turn("bravo question", "bravo answer", "test-model",
+                                  /*defer_embedding=*/true, "guid-a", "", "bravo", "test");
+        CHECK(t_ren > 0);
+        db.close();
+
+        sqlite3* r2 = p1_open_raw();
+        CHECK(p1_scalar_text(r2, "SELECT name FROM sessions WHERE guid = 'guid-a'") == "bravo");
+        CHECK(p1_scalar_int(r2, std::format(
+            "SELECT COUNT(*) FROM sessions_terms st JOIN terms t ON t.term_id = st.term_id "
+            "WHERE st.session_id = {} AND t.term LIKE 'alpha%'", sid_a)) == 0);
+        CHECK(p1_scalar_int(r2, std::format(
+            "SELECT COUNT(*) FROM sessions_terms st JOIN terms t ON t.term_id = st.term_id "
+            "WHERE st.session_id = {} AND t.term LIKE 'bravo%'", sid_a)) >= 1);
+        sqlite3_close(r2);
     }
 
     // The pre-migration backup archive lands next to the DB; remove it.
