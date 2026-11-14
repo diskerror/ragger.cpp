@@ -1542,13 +1542,10 @@ int main(int argc, char **argv) {
                     // any orphaned/legacy terms accumulated before a tokenizer
                     // fix and stops term_id from climbing forever.
                     for (const auto& [table, count] : memory.backend()->reindex_all(print_reindex_progress)) {
-                        std::println("Reindexed {}: {} row(s).", table, count);
                         total += count;
                     }
-                    std::println("Reindexed all tables: {} row(s) total.", total);
                 } else {
                     total = memory.backend()->reindex_table(target, print_reindex_progress);
-                    std::println("Reindexed {}: {} row(s).", target, total);
                 }
                 cli_audit_done("reindex", std::format("{} row(s) reindexed", total));
             } catch (const std::exception& e) {
