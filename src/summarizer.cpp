@@ -29,6 +29,11 @@ namespace {
 // that must not escape (an escaping exception skips the caller's failure
 // bookkeeping, so the same turn would re-queue every tick forever). On a bad
 // prompt behave exactly like an inference failure: warn, return "".
+// X10 (M13): '' is the failure sentinel — a caller that receives it must
+// return its own failure value WITHOUT issuing the request (never drop the
+// system message and send the call anyway). A prompt that formats to
+// something non-empty is passed through as-is, including the single space
+// that suppresses the system prompt.
 std::string build_system_prompt(const std::string& raw_prompt,
                                 std::size_t target_chars, std::size_t hard_cap) {
     try {
@@ -320,10 +325,16 @@ std::string summarize_transcript(
     const std::size_t hard_cap = budget.hard_cap;
 
     const std::string system_text = system_prompt(budget);
+    // X10 (M13): build_system_prompt's promise is "on a bad prompt behave
+    // exactly like an inference failure" — so the caller must NOT send the
+    // request. Dropping the empty system message instead let the call go out
+    // with no system prompt, and its result was accepted (and stored) as a
+    // good summary while the caller's failure bookkeeping never ran. Return
+    // the same failure value an inference failure returns, before any I/O.
+    if (system_text.empty()) return "";
 
     std::vector<Message> messages;
-    if (!system_text.empty())
-        messages.push_back({"system", system_text});
+    messages.push_back({"system", system_text});
     messages.push_back({"user", conversation});
 
     std::string result;
@@ -378,10 +389,14 @@ std::string summarize_texts(
     const std::size_t hard_cap = budget.hard_cap;
 
     const std::string system_text = build_episode_prompt(texts.size(), budget);
+    // X10 (M13): same rule as summarize_transcript — an episode prompt that
+    // cannot be built is an inference failure, not a prompt-less request. The
+    // built-in template is always well-formed, so this guard is unreachable
+    // from config; it is here so the promise holds for both entry points.
+    if (system_text.empty()) return "";
 
     std::vector<Message> messages;
-    if (!system_text.empty())
-        messages.push_back({"system", system_text});
+    messages.push_back({"system", system_text});
     messages.push_back({"user", combined});
 
     std::string result;

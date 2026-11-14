@@ -242,8 +242,11 @@ void SummarizerService::pause_timer_loop() {
 
 // --------------------------------------------------------------------
 // L2: summarize one turn into a row that inherits the turn's timestamp.
-// On inference failure, write a heuristic `draft` row instead — the
-// chronology is preserved and the next successful pass can overwrite.
+// On inference failure NO row is written: the turn stays in the
+// unsummarized queue and the next catch-up pass retries it. Only the
+// poison-abandon path below (after max_turn_failures) writes a row, and
+// that one is the '' marker with model 'bad' — the old heuristic `draft`
+// row path is gone.
 // --------------------------------------------------------------------
 void SummarizerService::handle_l2(const Job& j) {
     if (j.assistant_text.empty()) return;  // partial turn

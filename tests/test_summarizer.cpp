@@ -878,6 +878,67 @@ void p9b_test_bad_prompt_no_escape(const std::string& base) {
     std::println(" OK");
 }
 
+// X10 (M13): a malformed `summarizer_prompt` must behave EXACTLY like an
+// inference failure, which is what build_system_prompt's comment promises.
+// That means BOTH halves: the failure value AND no request at all — at HEAD
+// the empty prompt was dropped from the message list and the request went out
+// with no system message, so a result was accepted (and stored) instead of the
+// caller's failure bookkeeping running.
+void x10_test_bad_prompt_sends_no_request() {
+    std::println("  x10_test_bad_prompt_sends_no_request...");
+    StubChat stub("SUMMARY");
+    auto inf = stub.client();
+
+    // Long enough to clear summarize_transcript's 120-char trivial shortcut
+    // (that path returns before any prompt is built, by design).
+    const std::string u = "question about the schema migration and its terms table";
+    const std::string a = std::string(120, 'x') + " answer about baroque music";
+    const std::vector<std::pair<std::string, std::string>> turns = {{u, a}};
+
+    auto set_prompt = [](const std::string& p) {
+        CHECK(ragger::update_config([&](ragger::Config& c) {
+            c.summarizer_prompt = p; return true; }));
+    };
+
+    // Unbalanced brace, and an out-of-range argument index: both make
+    // std::vformat throw, so the prompt cannot be built.
+    for (const std::string& bad : {std::string("{"), std::string("{9}")}) {
+        set_prompt(bad);
+        const int before = stub.calls.load();
+        bool threw = false;
+        std::string out;
+        try { out = summarize_transcript(*inf, turns); }
+        catch (...) { threw = true; }
+        CHECK(!threw);                            // must not escape (PHASE9B 3a)
+        CHECK(out.empty());                       // the inference-failure value
+        CHECK(stub.calls.load() == before);       // ...and NO request issued
+    }
+
+    // Control with a valid prompt: exactly one request, system message present.
+    set_prompt("summarize in {} chars, max {}");
+    const int t_before = stub.calls.load();
+    const auto ok = summarize_transcript(*inf, turns);
+    CHECK(ok == "SUMMARY");
+    CHECK(stub.calls.load() == t_before + 1);
+    CHECK(!stub.system_of(static_cast<size_t>(t_before)).empty());
+
+    // summarize_texts carries its OWN built-in episode prompt (LR S64), which
+    // config cannot malform: pin that the valid prompt still sends exactly one
+    // request with a system message (the empty-prompt guard is the same two
+    // lines in that function; proven by the negative control in the step
+    // report, since no config value can reach it).
+    const int e_before = stub.calls.load();
+    const auto ok2 = ragger::summarize_texts(*inf, {
+        "First summary about the Beelink deployment and its Vulkan builds.",
+        "Second summary about llama.cpp server flags and ctx sizes."});
+    CHECK(ok2 == "SUMMARY");
+    CHECK(stub.calls.load() == e_before + 1);
+    CHECK(!stub.system_of(static_cast<size_t>(e_before)).empty());
+
+    set_prompt("");   // built-in default for whatever runs after this
+    std::println(" ok");
+}
+
 // ---------------------------------------------------------------------------
 // LR S62: shorter-text rule.
 // ---------------------------------------------------------------------------
@@ -1194,6 +1255,7 @@ int main() {
     p6_test_single_scan(env.base());
     p9b_test_utf8_safe_prefix();
     p9b_test_bad_prompt_no_escape(env.base());
+    x10_test_bad_prompt_sends_no_request();
     p9a_test_chat_times_out();
     std::println("All summarizer tests passed.");
     return 0;
