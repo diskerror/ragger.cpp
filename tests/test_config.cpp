@@ -3,9 +3,11 @@
 #include "daemon_control.h"
 #include "user_store.h"
 #include "config_schema.h"
+#include "lang.h"          // kConfigSchema / config_schema() (inline in lang/en.h)
 #include "test_env.h"
 #include "check.h"
 #include "util/fs.h"
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <cmath>
@@ -527,6 +529,36 @@ void p9b_test_reload_config_episode_keys() {
     std::println(" OK");
 }
 
+// X2 (C2): kConfigSchema must have no value-initialized slots. GET /config,
+// MCP get_config and `config get -a` all iterate the schema, so an entry with
+// an empty key or an empty section is served to the dashboard as a blank row.
+void x2_schema_no_blank_entries() {
+    std::print("  x2_schema_no_blank_entries...\n");
+
+    const auto& schema = ragger::lang::config_schema();
+    CHECK(!schema.empty());
+
+    // (a) no empty key, (c) every section non-empty.
+    for (const auto& m : schema) {
+        CHECK(!m.key.empty());
+        CHECK(!m.section.empty());
+    }
+
+    // (b) keys unique.
+    std::vector<std::string_view> keys;
+    keys.reserve(schema.size());
+    for (const auto& m : schema) keys.push_back(m.key);
+    std::sort(keys.begin(), keys.end());
+    CHECK(std::adjacent_find(keys.begin(), keys.end()) == keys.end());
+
+    // The same entries reach the CLI accessor (`config get -a`).
+    const auto cli_keys = ragger::all_config_keys();
+    CHECK(cli_keys.size() == schema.size());
+    for (auto k : cli_keys) CHECK(!k.empty());
+
+    std::print(" ok\n");
+}
+
 int main() {
     TestEnv env("config");  // must be first: set_config_persisted publishes through update_config
     std::print("Running config tests:\n");
@@ -534,6 +566,7 @@ int main() {
     p9a_test_shipped_defaults_applied();
     p9b_test_summarizer_prompt_validation();
     p10_pct_validation();
+    x2_schema_no_blank_entries();
     p9b_test_reload_config_episode_keys();
     p9a_test_config_snapshots();
     test_catch_up_batch_size_default();

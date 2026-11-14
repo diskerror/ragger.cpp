@@ -565,8 +565,11 @@ constexpr const char* ERR_PERMISSION_DENIED_SIGNAL= "Permission denied: cannot s
 // meanings. Keys match the DB `settings` rows and the Config struct.
 // Sections drive the dashboard's left-hand tabs (server, embedding,
 // search, summarizer, logging, housekeeping, import).
+// The size comes from the initializer list (std::to_array), so a stale
+// element count can never leave value-initialized blank entries that
+// GET /config / MCP get_config / `config get -a` would serve (C2).
 // =====================================================================
-inline constexpr std::array<ConfigMeta, 62> kConfigSchema = {{
+inline constexpr auto kConfigSchema = std::to_array<ConfigMeta>({
     // ---- server ----
     {"socket_enable", "server", "Socket Enable", CfgType::Boolean, CfgEdit::RestartRequired,
      "true", "",
@@ -764,7 +767,7 @@ inline constexpr std::array<ConfigMeta, 62> kConfigSchema = {{
     {"normalize_home", "import", "Normalize Home", CfgType::Boolean, CfgEdit::Live,
      "true", "",
      "Replace /Users/<you> or /home/<user> with ~ in stored paths."},
-}};
+});
 
 inline std::span<const ConfigMeta> config_schema() {
     return {kConfigSchema.data(), kConfigSchema.size()};
