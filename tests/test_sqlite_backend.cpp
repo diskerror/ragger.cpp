@@ -49,7 +49,11 @@ std::optional<std::string> merge_assistant_text(const std::string& prev,
 
 namespace fs = std::filesystem;
 
-static const std::string TEMP_DB = "/tmp/ragger_test_backend.db";
+// X14: no fixed /tmp name. The DB lives under the TestEnv scratch base,
+// assigned in main() before any test runs; TestEnv's teardown removes the
+// base directory with the DB and its -wal/-shm siblings (cleanup() below
+// removes them explicitly at each test's end as well).
+static std::string TEMP_DB;
 
 // Clean up temp DB and WAL/SHM files
 static void cleanup() {
@@ -4829,8 +4833,11 @@ void p2_test_backfill_invalidates_dec_cache(ragger::Embedder& emb) {
 // PHASE2 Step 6: the db-version gate must throw, not std::exit (B §1.11).
 void p2_test_db_version_gate(ragger::Embedder& emb) {
     std::println("  p2_test_db_version_gate...");
-    const std::string path = "/tmp/ragger_test_dbversion_gate.db";
+    // X14: under the TestEnv scratch base, not a fixed /tmp name.
+    const std::string path = fs::path(TEMP_DB).parent_path() / "ragger_test_dbversion_gate.db";
     std::filesystem::remove(path);
+    std::filesystem::remove(path + "-wal");
+    std::filesystem::remove(path + "-shm");
     {
         sqlite3* raw = nullptr;
         CHECK(sqlite3_open(path.c_str(), &raw) == SQLITE_OK);
@@ -4856,6 +4863,8 @@ void p2_test_db_version_gate(ragger::Embedder& emb) {
     }
     CHECK(threw);  // construction must reject, not exit the process
     std::filesystem::remove(path);
+    std::filesystem::remove(path + "-wal");
+    std::filesystem::remove(path + "-shm");
     std::println(" ok");
 }
 
@@ -8196,6 +8205,7 @@ void lr90_test_maintenance_verbs(ragger::Embedder& emb) {
 
 int main() {
     TestEnv env("sqlite_backend");  // must be first: isolates from ~/.ragger
+    TEMP_DB = env.base() + "/ragger_test_backend.db";  // X14: under the scratch base
     // Need config for model dir
     auto model_dir = env.model_dir();
 
@@ -8346,6 +8356,8 @@ int main() {
     lr80_test_episode_evidence(emb);
     lr81_test_session_corpus(emb);
     lr90_test_maintenance_verbs(emb);
+
+    cleanup();  // X14: remove the DB and its -wal/-shm siblings on the way out
 
     std::println("test_sqlite_backend: all passed");
     return 0;
