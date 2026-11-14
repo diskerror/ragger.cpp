@@ -194,5 +194,32 @@ for schema in p6.get_tool_schemas():
           "plugin %r required %r != tools/%s.json required %r"
           % (schema["name"], plugin_required, mapped, def_required))
 
+# --- 7. ragger_search must not hard-code limit (X11 / M11) --------------
+# The schema text and tools/search.json say the default is the
+# `default_search_limit` setting, so an omitted limit must send NO limit key
+# (server default applies); a passed limit is forwarded after int coercion;
+# a non-integer limit is an error JSON and sends no request at all.
+_state["status"] = 200
+_state["body"] = '{"results": []}'
+p7 = make_provider()
+
+_state["last_body"] = ""
+p7.handle_tool_call("ragger_search", {"query": "q"})
+check(_state["last_body"] != "", "omitted limit must still send a request")
+sent = json.loads(_state["last_body"])
+check("limit" not in sent,
+      "no limit passed -> the body must have no limit key, got %r" % sent)
+
+_state["last_body"] = ""
+p7.handle_tool_call("ragger_search", {"query": "q", "limit": 3})
+check(_state["last_body"] != "", "limit=3 must send a request")
+sent = json.loads(_state["last_body"])
+check(sent.get("limit") == 3, "limit=3 must be forwarded as 3, got %r" % sent)
+
+_state["last_body"] = ""
+out = json.loads(p7.handle_tool_call("ragger_search", {"query": "q", "limit": "x"}))
+check("error" in out, "limit='x' must return an error JSON, got %r" % out)
+check(_state["last_body"] == "", "limit='x' must send no request")
+
 _server.shutdown()
 print("OK")

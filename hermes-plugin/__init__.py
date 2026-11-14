@@ -935,12 +935,17 @@ class RaggerMemoryProvider(MemoryProvider):
             query = str(args.get("query", "")).strip()
             if not query:
                 return json.dumps({"error": "Missing required parameter: query"})
-            try:
-                limit = max(1, int(args.get("limit", 5)))
-            except (TypeError, ValueError):
-                return json.dumps({"error": "limit must be an integer"})
-            ok, result = self._classify(
-                self._post_status("/search", {"query": query, "limit": limit}))
+            # X11 (M11): an omitted limit sends NO limit key so the server's
+            # `default_search_limit` applies (the schema always said so; the
+            # code used to hard-code 5). A passed limit keeps the old
+            # coercion: int(), floored at 1, error JSON otherwise.
+            payload: dict = {"query": query}
+            if args.get("limit") is not None:
+                try:
+                    payload["limit"] = max(1, int(args["limit"]))
+                except (TypeError, ValueError):
+                    return json.dumps({"error": "limit must be an integer"})
+            ok, result = self._classify(self._post_status("/search", payload))
             if not ok:
                 return json.dumps({"error": result})
             hits = result.get("results", [])
