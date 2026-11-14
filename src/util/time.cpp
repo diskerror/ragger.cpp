@@ -4,6 +4,7 @@
 #include "util/time.h"
 
 #include <chrono>
+#include <format>
 #include <iomanip>
 #include <sstream>
 
@@ -51,6 +52,33 @@ std::string file_stamp() {
     out << std::put_time(&local, "%Y%m%d_%H%M%S")
         << '_' << std::setfill('0') << std::setw(3) << ms;
     return out.str();
+}
+
+// X16 clause 9. std::chrono::zoned_time / std::format's "%{Ez}" are NOT
+// available in this libc++ (probed 2026-11-14: no std::chrono::zoned_time,
+// no current_zone), so this is the fallback the step names: strftime for the
+// date-time part and the UTC offset rendered ±HH:MM by hand. Shifting the
+// instant by the offset and formatting it as UTC yields the wall-clock
+// reading at that offset, which makes the two-argument form independent of
+// the machine's zone (that is what lets a test pin it).
+std::string local_time_string(std::time_t when, int offset_seconds) {
+    const std::time_t shifted = when + offset_seconds;
+    std::tm utc{};
+    gmtime_r(&shifted, &utc);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%F %T", &utc);
+    const char sign = offset_seconds < 0 ? '-' : '+';
+    const int total = offset_seconds < 0 ? -offset_seconds : offset_seconds;
+    return std::format("{}{}{:02d}:{:02d}", buf, sign,
+                       total / 3600, (total % 3600) / 60);
+}
+
+std::string local_time_string() {
+    const std::time_t now =
+        std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm local{};
+    localtime_r(&now, &local);   // tm_gmtoff = this zone's offset, DST included
+    return local_time_string(now, static_cast<int>(local.tm_gmtoff));
 }
 
 } // namespace ragger

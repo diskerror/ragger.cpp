@@ -347,7 +347,16 @@ int TextIndex::reindex_table(const std::string& table, const ProgressFn& progres
     // outer iterations) but reindex_table() itself is a rare admin/CLI
     // operation, not a per-row hot path -- so it's hoisted above the loop for
     // clarity, not promoted to a cached instance member.
-    constexpr int kBatch = 200;
+    //
+    // X16 (Reid, 2026-11-13): 200 -> 256, a power of two by Reid's rule. The
+    // size is the WAL/fsync balance, not a guess: a turn carries ~360 term
+    // rows, so one commit writes ~90k rows (a few MB of WAL) and fsyncs once
+    // per 256 records instead of once per statement, while still letting
+    // SQLite checkpoint BETWEEN commits -- impossible inside one outer
+    // transaction, which is what grew Reid's live `reindex all` -wal to 85 GB
+    // for a 322 MB DB. Deliberately a named constant, not a setting: it is a
+    // property of this write pattern, nothing to tune per deployment.
+    constexpr int kBatch = 256;
     struct Row { int id; std::string text; };
     int done = 0;
     int last_id = 0;
@@ -377,16 +386,21 @@ int TextIndex::reindex_table(const std::string& table, const ProgressFn& progres
         if (cancel && cancel->load())
             throw cancelled_error(std::format(
                 "reindex {}: cancelled after {} row(s)", table, done));
-        // PHASE9B step 5: one commit per batch instead of one fsync per
-        // statement. Transaction joins an outer one when a caller (reindex_all)
-        // owns the transaction, so this is also correct inside it. A failing
-        // batch rolls back only itself; earlier batches stay indexed.
+        // PHASE9B step 5 / X16: one commit per batch instead of one fsync per
+        // statement. Transaction joins an outer one when a caller owns a
+        // transaction (the 0.16 -> 0.17 leg's schema moves), so this is also
+        // correct inside one; reindex_all no longer opens an outer one, so
+        // each batch now commits for real and SQLite can checkpoint between
+        // them. A failing batch rolls back only itself; earlier batches stay
+        // indexed.
         Transaction tx(db_);
         for (const auto& row : batch) {
             // LR S90: also between records — inside the batch transaction a
             // cancel rolls this batch back (nothing half-indexed) and keeps
-            // earlier batches. reindex_all's outer transaction turns the
-            // whole run into all-or-nothing, as PHASE9B intended.
+            // every earlier batch committed. X16: there is no outer
+            // transaction any more, so an interrupted run is a partial index
+            // by design; the `reindexing` flag says so and re-running repairs
+            // it (never data surgery).
             if (cancel && cancel->load())
                 throw cancelled_error(std::format(
                     "reindex {}: cancelled after {} row(s)", table, done));

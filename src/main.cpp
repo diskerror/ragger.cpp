@@ -125,11 +125,20 @@ static std::string join_args(const std::vector<std::string>& args, size_t from) 
 
 // S11 (C m9): `re-embed` and `reindex` both back the DB up before touching
 // it, with the same messages; failure warns and proceeds (as before).
+// X16 clause 9: both CLI call sites go through this ONE function, so the same
+// two settings rows the pre-migration backup writes are recorded here too —
+// basename plus local RFC 3339 timestamp with offset. UserStore::set_setting
+// throws on a failed write (rule 9), and a failed record lands in the same
+// catch as a failed archive: the backup itself already succeeded, so it warns
+// rather than aborting the verb.
 static void backup_db_or_warn(const std::string& path) {
     std::println("{}", ragger::lang::MSG_DB_BACKING_UP);
     try {
         std::string archive = ragger::archive_db_files(path);
         std::println(ragger::lang::MSG_DB_BACKED_UP, archive);
+        ragger::UserStore store(path);
+        store.set_setting("backup_file_name", fs::path(archive).filename().string());
+        store.set_setting("backup_timestamp", ragger::local_time_string());
     }
     catch (const std::exception &e) {
         Diskerror::Logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
@@ -1514,13 +1523,14 @@ int main(int argc, char **argv) {
 
             backup_db_or_warn(db_path);
 
-            // PHASE9B step 5: one transaction over the whole index holds the
-            // write lock for the entire run; warn before starting, do not
-            // refuse (the run is still the right call for a stopped daemon).
+            // X16: the reindex now commits per batch, so the write lock is
+            // held per batch rather than for the whole run. Warn before
+            // starting, do not refuse (the run is still the right call for a
+            // stopped daemon).
             if (target == "all" && ragger::find_live_daemon_pid() > 0)
                 std::println(
-                    "note: a daemon is running; its writes wait or fail until "
-                    "the reindex finishes (stop it first for a large database).");
+                    "note: a daemon is running; its writes may wait briefly "
+                    "between batches.");
 
             ragger::RaggerMemory memory(db_path,
                                         /*skip_embedding_guard=*/true);
@@ -1536,11 +1546,11 @@ int main(int argc, char **argv) {
             int total = 0;
             try {
                 if (target == "all") {
-                    // PHASE9B step 5: reset + rebuild of every table in ONE
-                    // transaction (see Backend::reindex_all): either the whole
-                    // index is rebuilt or the old one is untouched. Clears out
-                    // any orphaned/legacy terms accumulated before a tokenizer
-                    // fix and stops term_id from climbing forever.
+                    // X16: reset + rebuild of every table in PER-BATCH COMMITS
+                    // (see Backend::reindex_all) — no outer transaction, so
+                    // SQLite can checkpoint and the -wal stays bounded. An
+                    // interrupted run leaves a partial index and the
+                    // `reindexing` flag set; re-running repairs it.
                     for (const auto& [table, count] : memory.backend()->reindex_all(print_reindex_progress)) {
                         total += count;
                     }

@@ -446,10 +446,19 @@ constexpr const char* kStaleEmbeddingWhere =
 
     // (Re)build the custom index for a single text table. Delegates to the
     // TextIndex engine (schema + tokenize + TF-IDF live there now).
+    // X16 clause 3: this is the direct single-table entry point (CLI
+    // `ragger reindex <table>`, JobRunner), so it owns the flag for that
+    // table: <table> first, 'stopped' only when the last batch committed. A
+    // cancel or a failure leaves the table name in place — the stale value IS
+    // the signal that the index may be incomplete, so there is deliberately
+    // no cleanup here.
     int Backend::Impl::reindex_table(const std::string& table_name,
                                      const ProgressFn& progress,
                                      const CancelFlag* cancel) {
-        return text_index_->reindex_table(table_name, progress, cancel);
+        set_reindexing(table_name);   // throws before any index work if the write fails
+        const int n = text_index_->reindex_table(table_name, progress, cancel);
+        set_reindexing("stopped");
+        return n;
     }
 
 
@@ -463,21 +472,56 @@ constexpr const char* kStaleEmbeddingWhere =
     }
 
 
-    // PHASE9B step 5: `ragger reindex all` used to commit the terms wipe and
-    // then index record by record in autocommit: a crash in between left the
-    // index empty, and the run cost one fsync per statement. One outer
-    // Transaction now makes it all-or-nothing (reset_terms_table and the
-    // per-batch transactions inside reindex_table JOIN it). Known cost: the
-    // write lock is held for the whole run, so a running daemon's writers
-    // wait (busy timeout) or fail — main.cpp prints a note about that.
-    std::vector<std::pair<std::string, int>> Backend::Impl::reindex_all(
+    // X16 clause 3: the `reindexing` state flag in `settings`. Values:
+    // 'stopped' (idle / finished cleanly) | 'all' | '<table name>' (a run is
+    // in progress or was interrupted); absent means 'stopped'. Written as its
+    // own statement, so in autocommit it commits immediately and is visible to
+    // other connections; it joins an outer transaction only when the caller
+    // owns one (the 0.16 -> 0.17 leg stamps it together with db_version).
+    // Rule 9: Stmt::exec() returns false on a constraint failure instead of
+    // throwing, so the return is checked — a failed flag write throws before
+    // any index work starts.
+    void Backend::Impl::set_reindexing(std::string_view value) {
+        Stmt s(db, "INSERT OR REPLACE INTO settings (key, value) VALUES ('reindexing', ?)");
+        s.bind(1, value);
+        if (!s.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+    }
+
+
+    // X16: the per-registry reindex loop, shared by reindex_all() and by the
+    // 0.16 -> 0.17 leg's post-commit reindex (clause 5: the same code path).
+    // Calls TextIndex directly rather than Impl::reindex_table, because the
+    // single-table entry point owns the per-table flag lifecycle and this loop
+    // must not overwrite the caller's 'all'.
+    std::vector<std::pair<std::string, int>> Backend::Impl::reindex_tables(
             const ProgressFn& progress, const CancelFlag* cancel) {
         std::vector<std::pair<std::string, int>> out;
-        Transaction tx(db);
-        reset_terms_table();
         for (const auto& t : kTextTables)
-            out.emplace_back(std::string(t.table), reindex_table(t.table, progress, cancel));
-        tx.commit();
+            out.emplace_back(std::string(t.table),
+                             text_index_->reindex_table(t.table, progress, cancel));
+        return out;
+    }
+
+
+    // PHASE9B step 5 / X16 (Reid, 2026-11-13): rebuild the whole text index in
+    // PER-BATCH COMMITS. The outer Transaction PHASE9B added is gone: SQLite
+    // cannot checkpoint inside a transaction, and Reid's live `ragger reindex
+    // all` grew memories.db-wal to 85 GB for a 322 MB DB. reset_terms_table()
+    // is drop/recreate DDL and autocommits here; every batch inside
+    // reindex_table commits for real (TextIndex::kBatch = 256 records).
+    // Failure paths, by design: a crash or a cancel between the reset and the
+    // end leaves an empty/partial index with `reindexing` still set to 'all' —
+    // now visible instead of silent — and the repair is to re-run the reindex
+    // (the index is derived data; never data surgery). The write lock is held
+    // per batch, so a running daemon's writers only wait briefly between
+    // batches (main.cpp's note says so).
+    std::vector<std::pair<std::string, int>> Backend::Impl::reindex_all(
+            const ProgressFn& progress, const CancelFlag* cancel) {
+        set_reindexing("all");        // before the wipe: the wipe itself is the first risk
+        reset_terms_table();
+        auto out = reindex_tables(progress, cancel);
+        set_reindexing("stopped");    // only after the last table's last batch committed
         return out;
     }
 

@@ -3,6 +3,7 @@
 #include "config.h"
 #include "lang.h"
 #include "util/fs.h"
+#include "util/time.h"
 #include "Logger.h"
 
 
@@ -61,6 +62,17 @@ void require_foreign_keys(Impl& self);
 template <class Impl>
 bool pragma_bool(Impl& self, const char* name);
 
+/// X16 clause 9: upsert one `settings` row as its own statement (autocommit
+/// here — these run before any leg transaction opens). Rule 9: Stmt::exec()
+/// returns false on a failed write instead of throwing, so the return is
+/// checked and a failure throws.
+template <class Impl>
+void record_setting(Impl& self, const char* key, const std::string& value);
+
+/// X16 clause 10: read a `settings` row, `fallback` when absent.
+template <class Impl>
+std::string setting_or(Impl& self, const char* key, const char* fallback);
+
 } // anonymous namespace
 
 
@@ -93,6 +105,23 @@ bool pragma_bool(Impl& self, const char* name);
         sqlite3_busy_timeout(db, 10000);
         text_index_.emplace(db);
         create_schema();
+
+        // X16 clause 4: startup check. A `reindexing` row that is not
+        // 'stopped' means a reindex was interrupted (crash, cancel, or a
+        // failed post-migration reindex) and the text index may be incomplete.
+        // Warn only — never auto-run (rule 11: Reid runs every data
+        // operation). A CLI reindex running while a daemon starts gives a
+        // harmless spurious warning; accepted.
+        {
+            Stmt s(db, "SELECT value FROM settings WHERE key = 'reindexing'");
+            if (s.step()) {
+                const std::string flag = s.column_text(0);
+                if (flag != "stopped")
+                    Diskerror::Logger::warn(std::format(
+                        "text index may be incomplete: reindex {} did not finish; "
+                        "run `ragger reindex {}`", flag, flag));
+            }
+        }
 
         // Load the current embedding version from the settings table.
         // If absent (fresh DB or pre-version DB), default to 0 and stamp it.
@@ -659,6 +688,20 @@ bool pragma_bool(Impl& self, const char* name);
             Diskerror::Logger::info(
                 "Reconnected to DB after close+archive pre-migration backup.");
         }
+
+        // ---- 4. X16 clause 9: record the archive in `settings` ------------
+        // Written AFTER the archive is complete (and after the reopen), but
+        // BEFORE the leg runs, so they survive a rolled-back migration and
+        // clause 10 can name the file from the failure message. Each is its
+        // own committed statement with the return checked. The basename only:
+        // the archive always sits beside the DB, and the DB stays free of
+        // absolute paths. backup_timestamp is local time with its UTC offset
+        // in RFC 3339 form with a space separator ("2026-11-13 00:30:12-08:00")
+        // — SQLite's unixepoch()/datetime() parse it back, so no custom
+        // reader is needed anywhere.
+        record_setting(self, "backup_file_name",
+                       fs::path(archive_path).filename().string());
+        record_setting(self, "backup_timestamp", local_time_string());
     }
     } // anonymous namespace
 
@@ -730,6 +773,31 @@ bool pragma_bool(Impl& self, const char* name);
     bool pragma_bool(Impl& self, const char* name) {
         Stmt s(self.db, std::format("PRAGMA {}", name));
         return s.step() && s.column_int(0) != 0;
+    }
+
+
+    // X16 clause 9: same shape as set_db_version() (the migration's own
+    // settings write), as an upsert with the return value checked.
+    template <class Impl>
+    void record_setting(Impl& self, const char* key, const std::string& value) {
+        Stmt s(self.db,
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+        s.bind(1, key);
+        s.bind(2, value);
+        if (!s.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED,
+                                                 sqlite3_errmsg(self.db)));
+    }
+
+
+    // X16 clause 10: read a settings row for the failure message; `fallback`
+    // when the row is absent (e.g. a DB whose backup step never ran).
+    template <class Impl>
+    std::string setting_or(Impl& self, const char* key, const char* fallback) {
+        Stmt s(self.db, "SELECT value FROM settings WHERE key = ?");
+        s.bind(1, key);
+        return s.step() ? s.column_text(0) : std::string(fallback);
     }
     } // anonymous namespace
 
@@ -1011,20 +1079,20 @@ bool pragma_bool(Impl& self, const char* name);
             // No 0.17 query filters turns by embedding_version.
             exec("DROP INDEX IF EXISTS idx_turns_embedding_version");
 
-            // PHASE5: all-table reindex as the LAST data step. The leg moved
-            // episode rows and rebuilt turn_summaries; a full rebuild of the
-            // terms index from the final table contents is cheaper to reason
-            // about than surgical fixes, and it also repairs the pre-Phase-1
-            // L2 mis-keying on migrated DBs. Later phases keep this block at
-            // the end; only the registry changes.
-            Diskerror::Logger::info("  reindexing all text tables...");
+            // PHASE5 / X16 clause 5: the terms wipe stays the LAST step INSIDE
+            // the leg transaction (it is drop/recreate DDL, and a failed leg
+            // must leave the old index untouched), but the all-table reindex
+            // itself moved BELOW, after the COMMIT: inside one transaction
+            // SQLite cannot checkpoint, which is exactly what turned Reid's
+            // live upgrade into an 85 GB -wal. The flag is stamped in the same
+            // transaction as db_version, so a committed 0.17 always means "a
+            // reindex is owed".
             reset_terms_table();
-            for (const auto& t : kTextTables)
-                reindex_table(t.table);  // silent: library code owns no stdout
 
             // ---- §7 (migrate-0.16-to-0.17.sql): settings cleanup, seq
-            // restore, version stamp — after the reindex, before the final
-            // FK diff (canonical order; PHASE9).
+            // restore, version stamp — before the final FK diff (canonical
+            // order; PHASE9). The reindex that used to sit here now runs after
+            // the COMMIT below (X16 clause 5).
 
             // PHASE5: the boundary-watermark machinery is deleted with the
             // session/project rollups; drop their settings rows, plus the two
@@ -1047,6 +1115,9 @@ bool pragma_bool(Impl& self, const char* name);
                  "AND (SELECT s.seq FROM seq_save s WHERE s.name = sqlite_sequence.name) > seq");
 
             set_db_version("0.17");
+            // X16 clause 5: stamped in the SAME transaction as the version, so
+            // "committed 0.17" and "reindex owed" can never be observed apart.
+            set_reindexing("all");
 
             // Only NEW violations abort; pre-existing ones are carried
             // through and warned about (fk_before baseline above).
@@ -1081,8 +1152,41 @@ bool pragma_bool(Impl& self, const char* name);
                 exec("PRAGMA legacy_alter_table = OFF");
                 if (fk_was_on) exec("PRAGMA foreign_keys = ON");
             } catch (...) {}
-            throw;
+            // X16 clause 10: a failed leg rolls the whole schema transaction
+            // back — the file stays a valid, untouched 0.16 and the next start
+            // reruns the leg (rule 8: there is nothing half-migrated to flag).
+            // The operator must learn WHICH backup to restore straight from
+            // the log line, so the recorded name and time are part of the
+            // error; they were written before the leg and survived the
+            // rollback. Surfacing this through the HTTP/agent API is not in
+            // this step; the daemon exits on it (it never serves a half-open
+            // DB).
+            std::string cause = "unknown error";
+            try { throw; } catch (const std::exception& e) { cause = e.what(); }
+            throw std::runtime_error(std::format(
+                "migration 0.16 -> 0.17 failed and was rolled back; the database "
+                "is unchanged. Pre-migration backup: {} ({})\n{}",
+                setting_or(*this, "backup_file_name", "<none recorded>"),
+                setting_or(*this, "backup_timestamp", "<none recorded>"),
+                cause));
         }
+
+        // X16 clause 5: the all-table reindex runs on the COMMITTED 0.17
+        // schema, outside the leg transaction, in per-batch commits (256
+        // records, TextIndex::kBatch) — the same loop reindex_all() uses.
+        // Deliberately outside the try/catch above: once the schema
+        // transaction committed, the migration counts as complete, so a
+        // failure here is NOT "a rolled-back migration" — it is an incomplete
+        // index, and the `reindexing` flag (still 'all') is what reports it.
+        // Consequence to state plainly: if the process dies during this
+        // reindex the DB is 0.17 with a partial index and the flag set; the
+        // user either runs `ragger reindex all` or swaps back the
+        // pre-migration backup (the maybe_backup_before_migration archive beside
+        // the DB). Never data surgery.
+        Diskerror::Logger::info("  reindexing all text tables...");
+        reindex_tables({});   // silent: library code owns no stdout
+        set_reindexing("stopped");
+        Diskerror::Logger::info("  reindex after 0.16 -> 0.17 complete.");
     }
 
 

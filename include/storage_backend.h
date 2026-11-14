@@ -539,9 +539,12 @@ public:
 
     // --- Memory operations ---
 
-    /// PHASE9B step 5: atomic full text-index rebuild. Returns {table, rows}.
-    /// cancel (LR S90): checked between batches and records; a cancel rolls
-    /// the whole run back (one transaction) and throws cancelled_error.
+    /// PHASE9B step 5 / X16: full text-index rebuild in per-batch commits —
+    /// no outer transaction (SQLite cannot checkpoint inside one). Returns
+    /// {table, rows}. cancel (LR S90): checked between batches and records; a
+    /// cancel throws cancelled_error and the batches already committed STAY
+    /// committed; `settings.reindexing` keeps its 'all' value as the signal
+    /// that the index is incomplete, and a rerun finishes the rest.
     virtual std::vector<std::pair<std::string, int>> reindex_all(
         const ProgressFn& progress = {},
         const CancelFlag* cancel = nullptr) = 0;

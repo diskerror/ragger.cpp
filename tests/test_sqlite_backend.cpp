@@ -5,9 +5,11 @@
  * Uses a temp DB that's deleted after the test.
  */
 #include "config.h"
+#include "config_access.h"
 #include "backfill.h"
 #include "embedder.h"
 #include "inference.h"
+#include "Logger.h"
 #include "sqlite/backend.h"
 #include "store_kind.h"
 #include "sqlite/status.h"
@@ -1335,6 +1337,21 @@ static std::string p1_scalar_text(sqlite3* raw, const std::string& sql) {
     sqlite3_finalize(st);
     return v;
 }
+// The `reindexing` value as this connection sees it ("" when absent, which
+// means 'stopped'). X16: defined next to the other raw readers because both
+// the X16 tests and the older reindex tests read the flag.
+static std::string x16_flag(sqlite3* raw) {
+    sqlite3_stmt* st = nullptr;
+    CHECK(sqlite3_prepare_v2(raw, "SELECT value FROM settings WHERE key = 'reindexing'",
+                             -1, &st, nullptr) == SQLITE_OK);
+    std::string v;
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        const unsigned char* t = sqlite3_column_text(st, 0);
+        v = t ? reinterpret_cast<const char*>(t) : std::string();
+    }
+    sqlite3_finalize(st);
+    return v;
+}
 // Store a turn and its summary; return the new turn_summary_id.
 static int p1_make_turn_summary(ragger::sqlite::Backend& db, const std::string& tag) {
     int t = db.store_turn("Question about " + tag, "Answer about " + tag, "test-model");
@@ -1729,6 +1746,10 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
     }
     sqlite3* raw = p1_open_raw();
     CHECK(p1_scalar_text(raw, "SELECT value FROM settings WHERE key='db_version'") == "0.17");
+    // X16 T5: the leg's reindex runs AFTER the schema transaction commits and
+    // finishes before the leg returns, so the flag is back to 'stopped' here
+    // (and the index-populated assertions below still hold).
+    CHECK(p1_scalar_text(raw, "SELECT value FROM settings WHERE key='reindexing'") == "stopped");
     // Canonical (fresh-install) column order: no project_id anywhere.
     CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('knowledge') WHERE cid = 5") == "trigger");
     CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('knowledge') WHERE cid = 11") == "created_at");
@@ -2041,6 +2062,43 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
         sqlite3_close(r2);
     }
 
+    // X16 T6: the pre-migration archive exists beside the test DB, exactly
+    // one, and is non-empty. (archive_db_files() writes
+    // "<db-stem>_BACKUP_<YYYYMMDD-HHMMSS>.tar.gz" next to the primary DB —
+    // the test base is the scratch TestEnv dir, so it lands there, not in a
+    // separate dump directory.)
+    std::vector<fs::path> x16_archives;
+    for (const auto& e : fs::directory_iterator(fs::path(TEMP_DB).parent_path()))
+        if (e.path().filename().string().starts_with("ragger_test_backend_BACKUP_"))
+            x16_archives.push_back(e.path());
+    CHECK(x16_archives.size() == 1);
+    CHECK(fs::file_size(x16_archives[0]) > 0);
+
+    // X16 T7: the archive's basename and its local RFC 3339 timestamp (space
+    // separator, ±HH:MM offset) are recorded in settings — written before the
+    // leg ran. SQLite itself must parse the value back, and it must be "now".
+    {
+        sqlite3* r = p1_open_raw();
+        const std::string bname =
+            p1_scalar_text(r, "SELECT value FROM settings WHERE key = 'backup_file_name'");
+        const std::string bts =
+            p1_scalar_text(r, "SELECT value FROM settings WHERE key = 'backup_timestamp'");
+        CHECK(bname == x16_archives[0].filename().string());
+        CHECK(std::regex_match(bts,
+              std::regex(R"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d[+-]\d\d:\d\d)")));
+        const long long stamped = p1_scalar_int(r, "SELECT unixepoch('" + bts + "')");
+        const long long now_epoch = p1_scalar_int(r, "SELECT unixepoch('now')");
+        sqlite3_close(r);
+        CHECK(stamped > 0);   // unixepoch() returns NULL -> 0 when it cannot parse
+        const long long drift = stamped > now_epoch ? stamped - now_epoch : now_epoch - stamped;
+        std::println("    backup: {} at {} (drift {} s)", bname, bts, drift);
+        CHECK(drift <= 10);
+    }
+    // local_time_string() pinned against a fixed instant and offset (the same
+    // form the leg stores): 1700000000 = 2023-11-14T22:13:20Z -> 14:13:20-08:00.
+    CHECK(ragger::local_time_string(1700000000, -8 * 3600) == "2023-11-14 14:13:20-08:00");
+    CHECK(ragger::local_time_string(1700000000, 0) == "2023-11-14 22:13:20+00:00");
+
     // The pre-migration backup archive lands next to the DB; remove it.
     for (const auto& e : fs::directory_iterator(fs::path(TEMP_DB).parent_path()))
         if (e.path().filename().string().starts_with("ragger_test_backend_BACKUP_"))
@@ -2110,14 +2168,15 @@ void test_migrate_0_16_to_0_17_rejects(ragger::Embedder& emb) {
 
     auto expect_refused = [&](const char* needle) {
         bool threw = false;
+        std::string msg;
         try {
             ragger::sqlite::Backend db(emb, TEMP_DB);
             db.close();
         } catch (const std::runtime_error& e) {
             threw = true;
-            const std::string m = e.what();
-            CHECK(m.find(needle) != std::string::npos);
-            CHECK(m.find("nothing was changed") != std::string::npos);
+            msg = e.what();
+            CHECK(msg.find(needle) != std::string::npos);
+            CHECK(msg.find("nothing was changed") != std::string::npos);
         }
         CHECK(threw);
         sqlite3* raw = p1_open_raw();
@@ -2125,7 +2184,16 @@ void test_migrate_0_16_to_0_17_rejects(ragger::Embedder& emb) {
         // The placeholder-path UPDATE that runs ahead of the checks must be
         // rolled back with everything else.
         CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM document_sources WHERE path IS NULL") == 1);
+        // X16 T8: nothing of the 0.17 schema survived the rollback, and the
+        // error that reaches the log names the pre-migration backup (recorded
+        // BEFORE the leg, so it survived) — clause 10.
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master "
+                                 "WHERE name IN ('episodes','knowledge')") == 0);
+        const std::string backup =
+            p1_scalar_text(raw, "SELECT value FROM settings WHERE key = 'backup_file_name'");
         sqlite3_close(raw);
+        CHECK(msg.find("migration 0.16 -> 0.17 failed and was rolled back") != std::string::npos);
+        CHECK(msg.find(backup) != std::string::npos);
         for (const auto& e : fs::directory_iterator(fs::path(TEMP_DB).parent_path()))
             if (e.path().filename().string().starts_with("ragger_test_backend_BACKUP_"))
                 fs::remove(e.path());
@@ -5890,7 +5958,10 @@ void x4_test_store_turn_atomicity(ragger::Embedder& emb) {
     std::println(" OK");
 }
 
-// PHASE9B step 5: reindex_all is atomic; reindex_table commits per batch.
+// PHASE9B step 5 / X16: reindex_all commits per batch (no outer transaction);
+// reindex_table commits per batch too. The failure-injection block below
+// states the new contract: a failure in a later table leaves the wipe and the
+// tables already indexed committed, and only the failing batch is gone.
 void p9b_test_reindex_atomic(ragger::Embedder& emb) {
     std::println("  p9b_test_reindex_atomic...");
     cleanup();
@@ -5928,9 +5999,20 @@ void p9b_test_reindex_atomic(ragger::Embedder& emb) {
     bool threw = false;
     try { db.reindex_all({}); } catch (const std::runtime_error&) { threw = true; }
     CHECK(threw);
+    // X16 (deliberate design change, not a weakened assertion): there is no
+    // outer transaction any more, so the wipe and every batch committed before
+    // the failure STAY. The failing table's own batch rolled back, so its
+    // junction is empty, while the table indexed ahead of it is populated
+    // again. `reindexing` stays 'all' — the stale value is the signal.
     const ragger::json after_fail = counts();
-    for (auto& [k, v] : after_fail.items())
-        CHECK(v.get<int>() == before[k].get<int>());
+    CHECK(after_fail["knowledge_terms"].get<int>() > 0);
+    CHECK(after_fail["documents_terms"].get<int>() == 0);
+    CHECK(after_fail["terms"].get<int>() > 0);
+    {
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_text(raw, "SELECT value FROM settings WHERE key = 'reindexing'") == "all");
+        sqlite3_close(raw);
+    }
 
     // Happy path: same totals as the per-table loop, search still works.
     p9b_trigger("DROP TRIGGER p9b_boom_docs");
@@ -6022,11 +6104,15 @@ void x5_test_reindex_all_locking(ragger::Embedder& emb) {
         CHECK(!returned_early);
     }
 
-    // ---- cancel mid-run: the whole run rolls back and the lock comes back.
+    // ---- cancel mid-run: X16 changed this expectation on purpose (the step
+    // removes the outer transaction). The terms wipe is committed, the
+    // in-flight batch rolls back with the exception, and `reindexing` stays
+    // 'all' as the signal; the lock still comes back (RAII).
     {
         sqlite3* raw = p1_open_raw();
         const int terms_before = p1_scalar_int(raw, "SELECT COUNT(*) FROM terms");
         sqlite3_close(raw);
+        CHECK(terms_before > 0);
 
         ragger::CancelFlag cancel{false};
         const ragger::ProgressFn prog = [&](const char*, int done, int) {
@@ -6040,7 +6126,10 @@ void x5_test_reindex_all_locking(ragger::Embedder& emb) {
         // RAII guard: the exception released the mutex — a locking call works.
         CHECK(db.count() == 300);
         sqlite3* raw2 = p1_open_raw();
-        CHECK(p1_scalar_int(raw2, "SELECT COUNT(*) FROM terms") == terms_before);
+        // The wipe landed, the half-written batch did not: an empty index with
+        // the flag set, which is exactly the state the startup warning reports.
+        CHECK(p1_scalar_int(raw2, "SELECT COUNT(*) FROM terms") == 0);
+        CHECK(x16_flag(raw2) == "all");
         sqlite3_close(raw2);
     }
 
@@ -8028,10 +8117,13 @@ void lr90_test_maintenance_verbs(ragger::Embedder& emb) {
     // Chunks hang off one source: kDocEmbedTextSQL is NULL for a source-less
     // chunk (three-valued logic), and such chunks are neither embeddable nor
     // indexable by design — store_document always attaches a source.
+    // X16: 600 rows, so the run spans 3 batches of TextIndex::kBatch = 256
+    // (the old 205-row seed was one batch at kBatch = 200 and would have
+    // pinned nothing here).
     CHECK(sqlite3_exec(raw,
         "INSERT INTO document_sources (title, imported_at) VALUES ('s90 doc', 100)",
         nullptr, nullptr, nullptr) == SQLITE_OK);
-    for (int i = 1; i <= 205; ++i) {
+    for (int i = 1; i <= 600; ++i) {
         const std::string sql = std::format(
             "INSERT INTO documents (text, chunk_index, document_source_id, modified_on)"
             " VALUES ('alpha bravo charlie doc {}', {}, 1, 100)", i, i);
@@ -8039,13 +8131,13 @@ void lr90_test_maintenance_verbs(ragger::Embedder& emb) {
     }
     {
         auto plan = db.reindex_plan("documents");
-        CHECK(plan.size() == 1 && plan[0].first == "documents" && plan[0].second == 205);
+        CHECK(plan.size() == 1 && plan[0].first == "documents" && plan[0].second == 600);
         CHECK(db.reindex_plan("all").size() == ragger::sqlite::kTextTableCount);
     }
     {
         ragger::CancelFlag cancel{false};
         const ragger::ProgressFn prog = [&](const char*, int done, int) {
-            if (done >= 200) cancel.store(true);
+            if (done >= 256) cancel.store(true);
         };
         bool threw = false;
         try { db.reindex_table("documents", prog, &cancel); }
@@ -8053,17 +8145,21 @@ void lr90_test_maintenance_verbs(ragger::Embedder& emb) {
         CHECK(threw);
         // Batch one committed; the rest untouched (consistent partial state).
         CHECK(p1_scalar_int(raw,
-              "SELECT COUNT(DISTINCT document_id) FROM documents_terms") == 200);
+              "SELECT COUNT(DISTINCT document_id) FROM documents_terms") == 256);
         // Rerun without cancel finishes the rest.
-        CHECK(db.reindex_table("documents") == 205);
+        CHECK(db.reindex_table("documents") == 600);
         CHECK(p1_scalar_int(raw,
-              "SELECT COUNT(DISTINCT document_id) FROM documents_terms") == 205);
+              "SELECT COUNT(DISTINCT document_id) FROM documents_terms") == 600);
     }
     {
-        // reindex_all is ONE transaction: a cancel rolls back the terms reset
-        // and every partial batch — the DB reads exactly as before the run.
+        // X16 (deliberate design change): reindex_all is no longer ONE
+        // transaction. The terms wipe commits on its own and the in-flight
+        // batch rolls back with the cancel, so both junction counts read 0
+        // here — a partial index with `reindexing` still 'all', repaired by
+        // re-running (the block above already pins the committed-batch case).
         const int terms_before = p1_scalar_int(raw, "SELECT COUNT(*) FROM terms");
         const int jt_before = p1_scalar_int(raw, "SELECT COUNT(*) FROM documents_terms");
+        CHECK(terms_before > 0 && jt_before > 0);
         ragger::CancelFlag cancel{false};
         const ragger::ProgressFn prog = [&](const char*, int done, int) {
             if (done >= 1) cancel.store(true);
@@ -8072,8 +8168,13 @@ void lr90_test_maintenance_verbs(ragger::Embedder& emb) {
         try { db.reindex_all(prog, &cancel); }
         catch (const ragger::cancelled_error&) { threw = true; }
         CHECK(threw);
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM documents_terms") == 0);
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM terms") == 0);
+        CHECK(x16_flag(raw) == "all");
+        // A rerun to completion clears the flag and rebuilds everything.
+        db.reindex_all({});
         CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM documents_terms") == jt_before);
-        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM terms") == terms_before);
+        CHECK(x16_flag(raw) == "stopped");
     }
 
     // ---- re-embed: cancel after the first row; backfill finishes the rest
@@ -8195,12 +8296,203 @@ void lr90_test_maintenance_verbs(ragger::Embedder& emb) {
         const auto plan = db.housekeeping_plan(100000.0f);   // cutoff far in the past
         CHECK(plan.purge_turns == 0);
         CHECK(plan.unsummarized == 1);
-        CHECK(plan.embed_missing == 205);   // the raw-inserted document chunks
+        CHECK(plan.embed_missing == 600);   // the raw-inserted document chunks
         CHECK(plan.embed_stale == 0);
         CHECK(bf_dump(raw) == before);
     }
     sqlite3_close(raw);
     db.close();
+}
+
+// ---------------------------------------------------------------------------
+// X16 — reindex in batch transactions + the `reindexing` state flag.
+// T1 is the RED-at-HEAD pin (the per-batch commits inside reindex_table must
+// be real commits, not participants in an outer transaction); T2/T3 pin the
+// flag lifecycle and the new cancel contract, T4 the startup warning.
+// ---------------------------------------------------------------------------
+
+// n short turns through the backend (> 3 batches of 256 when n = 800).
+// Distinct question text per row, so nothing merges into one turn.
+static void x16_seed_turns(ragger::sqlite::Backend& db, int n) {
+    for (int i = 0; i < n; ++i)
+        db.store_turn(std::format("x16 question {} alpha bravo charlie", i),
+                      std::format("x16 answer {} delta echo foxtrot", i),
+                      "x16-model", /*defer_embedding=*/true, "x16-s");
+}
+
+// T1 (RED at HEAD): a SECOND raw connection must see turns_terms GROW during
+// reindex_all. Uncommitted work is invisible to another connection, so a
+// growing count is the proof that each batch really committed; with the old
+// outer Transaction every observation reads the same pre-run snapshot.
+// Deterministic: the samples are taken at fixed record numbers, no sleeps.
+void x16_t1_reindex_commits_per_batch(ragger::Embedder& emb) {
+    std::println("  x16_t1_reindex_commits_per_batch...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    x16_seed_turns(db, 800);
+
+    std::vector<long long> observed;
+    const ragger::ProgressFn prog = [&](const char* table, int done, int) {
+        if (done < 0 || std::string(table) != "turns") return;
+        // First record of batches 2, 3 and 4 (kBatch = 256).
+        if (done != 257 && done != 513 && done != 769) return;
+        sqlite3* raw = p1_open_raw();
+        observed.push_back(p1_scalar_int(raw, "SELECT COUNT(*) FROM turns_terms"));
+        sqlite3_close(raw);
+    };
+    db.reindex_all(prog);
+    CHECK(observed.size() == 3);
+    std::println("    turns_terms seen by a second connection: {}, {}, {}",
+                 observed[0], observed[1], observed[2]);
+    CHECK(observed[0] < observed[1]);
+    CHECK(observed[1] < observed[2]);
+    db.close();
+    cleanup();
+}
+
+// T2: flag lifecycle. Absent before; 'all' while reindex_all runs (read from
+// a second connection, so it must be a committed write); 'stopped' after.
+// Same for the single-table entry point, which carries the table name.
+void x16_t2_reindexing_flag_lifecycle(ragger::Embedder& emb) {
+    std::println("  x16_t2_reindexing_flag_lifecycle...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    for (int i = 0; i < 3; ++i)
+        db.store(std::format("x16 flag note {} harpsichord semqlite", i));
+
+    sqlite3* raw = p1_open_raw();
+    CHECK(x16_flag(raw) == "");            // absent == stopped
+    sqlite3_close(raw);
+
+    std::string seen_all;
+    const ragger::ProgressFn prog = [&](const char*, int done, int) {
+        if (done != 1 || !seen_all.empty()) return;
+        sqlite3* r = p1_open_raw();
+        seen_all = x16_flag(r);
+        sqlite3_close(r);
+    };
+    db.reindex_all(prog);
+    CHECK(seen_all == "all");
+    sqlite3* r_after = p1_open_raw();
+    CHECK(x16_flag(r_after) == "stopped");
+
+    // `config get -a` on a base whose settings hold the key still works: the
+    // overlay walks the schema, so an unknown settings key is not an error.
+    {
+        ragger::Config cfg;
+        ragger::overlay_settings_from_db(cfg, TEMP_DB);
+        int listed = 0;
+        for (auto key : ragger::all_config_keys())
+            if (ragger::get_config_value(cfg, key)) ++listed;
+        CHECK(listed > 10);
+    }
+    sqlite3_close(r_after);
+
+    // Single-table run (the CLI/JobRunner path). 'decisions' no longer exists
+    // in 0.17, so the registry's knowledge table stands in.
+    std::string seen_one;
+    const ragger::ProgressFn prog1 = [&](const char*, int done, int) {
+        if (done != 1 || !seen_one.empty()) return;
+        sqlite3* r = p1_open_raw();
+        seen_one = x16_flag(r);
+        sqlite3_close(r);
+    };
+    CHECK(db.reindex_table("knowledge", prog1) == 3);
+    CHECK(seen_one == "knowledge");
+    sqlite3* r_last = p1_open_raw();
+    CHECK(x16_flag(r_last) == "stopped");
+    sqlite3_close(r_last);
+    db.close();
+    cleanup();
+}
+
+// T3: interruption. A cancel after the first batch leaves that batch
+// committed (X16: there is no outer transaction any more), the flag stays
+// 'all' — the stale value IS the signal — and a rerun to completion lands on
+// exactly the count a fresh, never-interrupted full run produces.
+void x16_t3_cancel_keeps_committed_batches(ragger::Embedder& emb) {
+    std::println("  x16_t3_cancel_keeps_committed_batches...");
+    long long partial = 0, after_rerun = 0;
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        x16_seed_turns(db, 800);
+        ragger::CancelFlag cancel{false};
+        const ragger::ProgressFn prog = [&](const char*, int done, int) {
+            if (done >= 256) cancel.store(true);   // batch 1 done, stop before 2
+        };
+        bool threw = false;
+        try { db.reindex_all(prog, &cancel); }
+        catch (const ragger::cancelled_error&) { threw = true; }
+        CHECK(threw);                              // existing cancel contract
+        sqlite3* raw = p1_open_raw();
+        CHECK(x16_flag(raw) == "all");             // NOT cleaned up
+        partial = p1_scalar_int(raw, "SELECT COUNT(*) FROM turns_terms");
+        sqlite3_close(raw);
+        CHECK(partial > 0);                        // earlier batch stayed committed
+        db.reindex_all({});                        // rerun to completion
+        sqlite3* raw2 = p1_open_raw();
+        after_rerun = p1_scalar_int(raw2, "SELECT COUNT(*) FROM turns_terms");
+        CHECK(x16_flag(raw2) == "stopped");
+        sqlite3_close(raw2);
+        db.close();
+    }
+    long long fresh = 0;
+    {
+        cleanup();
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        x16_seed_turns(db, 800);
+        db.reindex_all({});
+        sqlite3* raw = p1_open_raw();
+        fresh = p1_scalar_int(raw, "SELECT COUNT(*) FROM turns_terms");
+        sqlite3_close(raw);
+        db.close();
+    }
+    std::println("    turns_terms: partial {}, after rerun {}, fresh full run {}",
+                 partial, after_rerun, fresh);
+    CHECK(partial > 0 && partial < fresh);
+    CHECK(after_rerun == fresh);
+    cleanup();
+}
+
+// T4: startup check. A flag left on a closed DB warns through the backend
+// constructor; 'stopped' and absent do not. Capture = swapping the static
+// Diskerror::Logger::warn function (the repo's only log seam; there is no
+// log-capture fixture).
+void x16_t4_startup_warns_on_stale_flag(ragger::Embedder& emb) {
+    std::println("  x16_t4_startup_warns_on_stale_flag...");
+    auto write_flag = [&](const char* value) {   // nullptr -> delete the row
+        sqlite3* raw = p1_open_raw();
+        const std::string sql = value
+            ? std::format("INSERT OR REPLACE INTO settings (key, value) "
+                          "VALUES ('reindexing', '{}')", value)
+            : std::string("DELETE FROM settings WHERE key = 'reindexing'");
+        CHECK(sqlite3_exec(raw, sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(raw);
+    };
+    auto reopen_capturing_warn = [&](const char* value) {
+        write_flag(value);
+        std::vector<std::string> warns;
+        auto saved = Diskerror::Logger::warn;
+        Diskerror::Logger::warn = [&](const std::string& m) { warns.push_back(m); };
+        { ragger::sqlite::Backend db(emb, TEMP_DB); db.close(); }
+        Diskerror::Logger::warn = saved;
+        std::string hit;
+        for (const auto& m : warns)
+            if (m.find("text index may be incomplete") != std::string::npos) hit = m;
+        return hit;
+    };
+
+    cleanup();
+    { ragger::sqlite::Backend db(emb, TEMP_DB); db.close(); }   // clean 0.17 DB
+
+    const std::string warned = reopen_capturing_warn("turns");
+    std::println("    warn: '{}'", warned);
+    CHECK(warned == "text index may be incomplete: reindex turns did not finish; "
+                    "run `ragger reindex turns`");
+    CHECK(reopen_capturing_warn("stopped").empty());
+    CHECK(reopen_capturing_warn(nullptr).empty());
+    cleanup();
 }
 
 int main() {
@@ -8356,6 +8648,12 @@ int main() {
     lr80_test_episode_evidence(emb);
     lr81_test_session_corpus(emb);
     lr90_test_maintenance_verbs(emb);
+
+    // X16: batch-transaction reindex + the `reindexing` flag.
+    x16_t1_reindex_commits_per_batch(emb);
+    x16_t2_reindexing_flag_lifecycle(emb);
+    x16_t3_cancel_keeps_committed_batches(emb);
+    x16_t4_startup_warns_on_stale_flag(emb);
 
     cleanup();  // X14: remove the DB and its -wal/-shm siblings on the way out
 

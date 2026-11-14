@@ -157,6 +157,15 @@ struct Backend::Impl {
 
     void set_db_version(const std::string& v);
 
+    /// X16 clause 3: the `reindexing` state flag in `settings` —
+    /// 'stopped' (idle / finished cleanly) | 'all' | '<table name>' (a run is
+    /// in progress or was interrupted). Absent means 'stopped'. One statement,
+    /// so it commits on its own in autocommit and joins an outer transaction
+    /// only when the caller owns one; the return value is checked, so a failed
+    /// write throws before any index work starts. Never reset on exception or
+    /// cancel: the stale value IS the signal that the index may be incomplete.
+    void set_reindexing(std::string_view value);
+
     // ---- in-binary version migrations ------------------------------------
     // Historically, DB schema upgrades were external shell scripts
     // (scripts/migrate_to_db*.sh) and the binary merely hard-gated on the
@@ -207,11 +216,15 @@ struct Backend::Impl {
     /// old decisions/insights/summaries objects (their junction and evidence
     /// tables included), and moves stray category words that leaked into
     /// decisions.status ('fact', 'lesson') into tags, setting status
-    /// 'current'. Ends with reset_terms_table() + a reindex of every
-    /// kTextTables entry (sessions included), then deletes the dead settings
-    /// keys (the two boundary watermarks, phon_weight, ini_migrated) and
-    /// stamps db_version. The turn_summaries indexes and the
-    /// orphan-protection trigger are recreated by create_schema() afterward.
+    /// 'current'. Inside its transaction it wipes the terms index
+    /// (reset_terms_table), stamps db_version = 0.17 AND `reindexing` = 'all';
+    /// the reindex of every kTextTables entry (sessions included) then runs in
+    /// per-batch commits AFTER that transaction commits, and the flag goes
+    /// back to 'stopped' (X16 clause 5 — inside one transaction SQLite cannot
+    /// checkpoint). It also deletes the dead settings keys (the two boundary
+    /// watermarks, phon_weight, ini_migrated). The turn_summaries indexes and
+    /// the orphan-protection trigger are recreated by create_schema()
+    /// afterward.
     void migrate_0_16_to_0_17();
 
     /// PHASE9: the migration chain, declared after the leg methods it names.
@@ -432,11 +445,22 @@ struct Backend::Impl {
     /// one the two call sites used to repeat (PHASE9B step 6 extraction).
     void validate_creatable_status(const std::string& status);
 
-    /// PHASE9B step 5: rebuild the whole text index atomically. One outer
-    /// transaction around reset_terms_table() + every registry table, so the
-    /// old index survives any failure. Returns {table, rows} per table.
+    /// PHASE9B step 5 / X16: full text-index rebuild in PER-BATCH COMMITS —
+    /// no outer transaction (SQLite cannot checkpoint inside one; the live
+    /// run grew an 85 GB -wal). reset_terms_table() autocommits, then every
+    /// batch of every registry table commits on its own. Returns {table, rows}
+    /// per table. cancel (LR S90): checked between batches and records; a
+    /// cancel throws cancelled_error and the batches already committed STAY —
+    /// `reindexing` keeps its 'all' value as the signal, and re-running
+    /// finishes the rest.
     std::vector<std::pair<std::string, int>> reindex_all(const ProgressFn& progress,
                                                              const CancelFlag* cancel = nullptr);
+
+    /// X16: the per-registry reindex loop behind reindex_all(), shared with
+    /// the 0.16 -> 0.17 leg's post-commit reindex. Does NOT touch the
+    /// `reindexing` flag — the caller owns it.
+    std::vector<std::pair<std::string, int>> reindex_tables(
+        const ProgressFn& progress, const CancelFlag* cancel = nullptr);
 
     /// S38: retention purge of raw L1 turns. Deletes turns older than the
     /// cutoff ONLY where a turn_summaries row exists (marker rows count:
@@ -851,6 +875,9 @@ struct Backend::Impl {
 
     // (Re)build the custom index for a single text table. Delegates to the
     // TextIndex engine (schema + tokenize + TF-IDF live there now).
+    // X16 clause 3: the direct single-table entry point owns the flag —
+    // `reindexing` = <table> first, 'stopped' only after the last batch
+    // committed; a cancel or failure leaves the table name set.
     int reindex_table(const std::string& table_name, const ProgressFn& progress = {},
                         const CancelFlag* cancel = nullptr);
     HousekeepingPlan housekeeping_plan(float max_age_hours) const;
