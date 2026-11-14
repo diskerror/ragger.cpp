@@ -212,8 +212,19 @@ std::vector<EpisodeCandidateTurn> Backend::episode_candidate_turns(
     return pImpl->episode_candidate_turns(session_guid, since_ts);
 }
 
+// X5 (M1): hold the backend mutex for the whole run, like every sibling
+// forwarder. JobRunner::run calls this from a worker thread while HTTP
+// handlers, the summarizer and housekeeping use the same sqlite3* and the
+// text index's cached statements — unlocked, that was a data race. Same-
+// process callers stall during a reindex (accepted; per-batch locking is a
+// possible later refinement). RAII: a cancel or a throwing callback releases
+// the lock on the way out. Impl::reindex_all/reindex_table and TextIndex only
+// touch Impl members (never a Backend:: method), and the jobs.cpp/CLI progress
+// callbacks only update their own state or stdout, so nothing here re-enters
+// this mutex (std::mutex is not recursive).
 std::vector<std::pair<std::string, int>> Backend::reindex_all(
         const ProgressFn& progress, const CancelFlag* cancel) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->reindex_all(progress, cancel);
 }
 

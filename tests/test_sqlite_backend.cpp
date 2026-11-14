@@ -5949,6 +5949,115 @@ void p9b_test_reindex_atomic(ragger::Embedder& emb) {
     std::println(" OK");
 }
 
+// X5 (M1): Backend::reindex_all must hold pImpl->mu for its whole duration,
+// like every sibling forwarder. Pin: a second thread that calls a locking
+// Backend getter from inside the progress callback cannot return until the
+// run has finished (without the guard it returns immediately — the data race
+// JobRunner::run's worker thread had against the HTTP handlers). Failure
+// paths: a cancel and a throwing callback both release the lock (RAII) and
+// roll the whole run back.
+void x5_test_reindex_all_locking(ragger::Embedder& emb) {
+    std::println("  x5_test_reindex_all_locking...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    // Enough rows that the run spans many progress calls; embedding is
+    // deferred — this test is about the text index and the mutex.
+    for (int i = 0; i < 300; ++i)
+        db.store(std::format("x5 harpsichord note number {}", i), {}, /*defer_embedding=*/true);
+    CHECK(db.count() == 300);
+
+    // ---- the race pin: locking getter from a second thread, handed off by
+    // the progress callback itself (no timing guesses, no long sleeps).
+    {
+        std::atomic<int> progress_calls{0};
+        std::atomic<bool> getter_started{false};
+        std::atomic<bool> getter_returned{false};
+        std::atomic<int> returned_after_progress{-1};
+        bool returned_early = false;
+
+        std::thread getter;
+        const ragger::ProgressFn prog = [&](const char*, int done, int) {
+            if (done < 0) return;   // table-close line
+            const int n = progress_calls.fetch_add(1) + 1;
+            if (n == 1) {
+                getter = std::thread([&] {
+                    getter_started.store(true);
+                    db.count();      // takes pImpl->mu like every read
+                    returned_after_progress.store(progress_calls.load());
+                    getter_returned.store(true);
+                });
+                while (!getter_started.load())
+                    std::this_thread::yield();
+            } else if (n == 2) {
+                // Bounded hand-off (<= 5 ms): without the mutex the getter
+                // returns here; with it held it cannot return at all until
+                // reindex_all finishes.
+                for (int spin = 0; spin < 5 && !getter_returned.load(); ++spin)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                returned_early = getter_returned.load();
+            }
+        };
+        const auto done = db.reindex_all(prog);
+        CHECK(done.size() == ragger::sqlite::kTextTableCount);
+        const int final_calls = progress_calls.load();
+        getter.join();
+        CHECK(getter_returned.load());
+        // The getter returned only after the LAST progress call, i.e. only
+        // after reindex_all released the lock. Unlocked code returns at ~2.
+        std::println("    getter returned after progress call {} of {}",
+                     returned_after_progress.load(), final_calls);
+        CHECK(returned_after_progress.load() >= final_calls);
+        CHECK(!returned_early);
+    }
+
+    // ---- cancel mid-run: the whole run rolls back and the lock comes back.
+    {
+        sqlite3* raw = p1_open_raw();
+        const int terms_before = p1_scalar_int(raw, "SELECT COUNT(*) FROM terms");
+        sqlite3_close(raw);
+
+        ragger::CancelFlag cancel{false};
+        const ragger::ProgressFn prog = [&](const char*, int done, int) {
+            if (done >= 1) cancel.store(true);
+        };
+        bool threw = false;
+        try { db.reindex_all(prog, &cancel); }
+        catch (const ragger::cancelled_error&) { threw = true; }
+        CHECK(threw);
+
+        // RAII guard: the exception released the mutex — a locking call works.
+        CHECK(db.count() == 300);
+        sqlite3* raw2 = p1_open_raw();
+        CHECK(p1_scalar_int(raw2, "SELECT COUNT(*) FROM terms") == terms_before);
+        sqlite3_close(raw2);
+    }
+
+    // ---- an exception thrown by the callback releases the lock too.
+    {
+        const ragger::ProgressFn boom = [](const char*, int done, int) {
+            if (done >= 1) throw std::runtime_error("x5 callback boom");
+        };
+        bool threw = false;
+        try { db.reindex_all(boom); }
+        catch (const std::runtime_error&) { threw = true; }
+        CHECK(threw);
+        CHECK(db.count() == 300);   // no leaked lock
+    }
+
+    // Happy path still works after both failures.
+    {
+        const auto done = db.reindex_all({});
+        int total = 0;
+        for (const auto& [t, n] : done) total += n;
+        CHECK(total == 300);
+    }
+
+    db.close();
+    cleanup();
+    std::println(" OK");
+}
+
 // PHASE9B step 6: store() is the single implementation of the store verb;
 // category=decision writes kind='decision' (NULL trigger) with store()'s
 // validation and transaction.
@@ -8039,6 +8148,7 @@ int main() {
     p9b_test_checked_writes(emb);
     x4_test_store_turn_atomicity(emb);
     p9b_test_reindex_atomic(emb);
+    x5_test_reindex_all_locking(emb);
     p9b_test_store_one_function(emb);
     lr60_test_decision_status_via_agent_update(emb);
     p5_test_episodes_needing_close(emb);
