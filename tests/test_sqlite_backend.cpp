@@ -20,6 +20,7 @@
 #include "test_env.h"
 #include <sqlite3.h>
 #include "check.h"
+#include <cstdio>
 #include <filesystem>
 #include <iostream>
 #include <print>
@@ -36,6 +37,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 // LR S57: the shared same-exchange merge rule lives in src/sqlite/write.cpp
@@ -6709,6 +6711,69 @@ void lr66_test_backfill_l2(ragger::Embedder& emb) {
     std::println(" ok");
 }
 
+// X9 (M3): the CLI options --model/--ids must take values. They were
+// declared without po::value<>, i.e. as zero-token flags, so
+// `--ids 1,2` left "1,2" as a positional arg (usage error) and
+// opts["model"].as<std::string>() could never succeed. These checks drive
+// the freshly-built binary on the TestEnv scratch base; --port 59999 is
+// unreachable, so the child works directly on the scratch DB and never
+// touches ~/.ragger.
+#ifndef RAGGER_BIN
+#define RAGGER_BIN "ragger"
+#endif
+
+struct X9CliResult {
+    int code;
+    std::string out;  // stdout+stderr merged
+};
+
+X9CliResult x9_invoke_cli(const std::string& base, const std::string& args) {
+    const std::string cmd = std::string(RAGGER_BIN) + " --ragger-base " + base +
+                            " --port 59999 " + args + " 2>&1";
+    X9CliResult r{-1, ""};
+    FILE* pipe = popen(cmd.c_str(), "r");
+    CHECK(pipe != nullptr);
+    char buf[4096];
+    while (fgets(buf, sizeof(buf), pipe) != nullptr) r.out += buf;
+    const int raw = pclose(pipe);
+    r.code = WIFEXITED(raw) ? WEXITSTATUS(raw) : raw;
+    return r;
+}
+
+void x9_cli_backfill_opts(const std::string& base) {
+    std::println("  x9_cli_backfill_opts...");
+    // (1) l2-regenerate with no filter: the existing refusal (unchanged).
+    {
+        const auto r = x9_invoke_cli(base, "backfill l2-regenerate");
+        CHECK(r.code == 1);
+        CHECK(r.out.find("l2-regenerate requires an explicit filter") != std::string::npos);
+    }
+    // (2) --ids <value> parses: no usage / too-many-arguments error, and
+    // the dry-run counts line prints.
+    {
+        const auto r = x9_invoke_cli(base, "backfill l2-regenerate --ids 1,2 --dry-run");
+        CHECK(r.out.find("Usage:") == std::string::npos);
+        CHECK(r.out.find("too many") == std::string::npos);
+        CHECK(r.out.find("unexpected") == std::string::npos);
+        CHECK(r.code == 0);
+        CHECK(r.out.find("l2-regenerate:") != std::string::npos);
+    }
+    // (3) Strict parse: a non-numeric part is rejected with the dedicated
+    // error, not the usage error.
+    {
+        const auto r = x9_invoke_cli(base, "backfill l2-regenerate --ids 1,x --dry-run");
+        CHECK(r.code == 1);
+        CHECK(r.out.find("--ids must be comma-separated positive integers") != std::string::npos);
+    }
+    // (4) --model <value> parses; dry-run counts line prints.
+    {
+        const auto r = x9_invoke_cli(base, "backfill l2-regenerate --model foo --dry-run");
+        CHECK(r.code == 0);
+        CHECK(r.out.find("l2-regenerate:") != std::string::npos);
+    }
+    std::println(" ok");
+}
+
 // S66 kind triggers: decision/insight rows with no trigger get one drafted
 // into the NULL column ONLY, and the row is re-embedded + re-indexed to the
 // trigger+text formula (kKnowledgeEmbedTextSQL). The vector invariant is
@@ -8155,6 +8220,7 @@ int main() {
     p5_test_episode_reads(emb);
     p6_test_pending_predicate(emb);
     lr66_test_backfill_l2(emb);
+    x9_cli_backfill_opts(env.base());
     lr66_test_backfill_triggers(emb);
     lr67_test_backfill_stranded(emb);
     lr67_test_backfill_session_names(emb);

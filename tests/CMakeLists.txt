@@ -7,6 +7,8 @@ add_test(NAME test_config COMMAND test_config)
 
 add_executable(test_sqlite_backend test_sqlite_backend.cpp)
 target_link_libraries(test_sqlite_backend PRIVATE ragger_core)
+# X9: the CLI-option checks spawn the freshly-built ragger binary.
+target_compile_definitions(test_sqlite_backend PRIVATE RAGGER_BIN="$<TARGET_FILE:ragger>")
 add_test(NAME test_sqlite_backend COMMAND test_sqlite_backend)
 
 add_executable(test_import test_import.cpp)

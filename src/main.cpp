@@ -205,8 +205,10 @@ int main(int argc, char **argv) {
             ("yes,y", CLI_YES)
             ("json,j", "config get: format output as JSON")
             ("dry-run", "reindex/re-embed/housekeeping/backfill: report what the run would do, write nothing")
-            ("model", "backfill l2-regenerate: only rows whose turn or summary model has this name")
-            ("ids", "backfill l2-regenerate: comma-separated turn_summary_ids to regenerate")
+            ("model", Diskerror::po::value<std::string>(),
+                "backfill l2-regenerate: only rows whose turn or summary model has this name")
+            ("ids", Diskerror::po::value<std::string>(),
+                "backfill l2-regenerate: comma-separated turn_summary_ids to regenerate")
             ("browser,b", "dashboard: open the URL in the default browser")
             ("embeddings,e", CLI_EMBEDDINGS)
             ("output,o", Diskerror::po::value<std::string>(), "Output file");
