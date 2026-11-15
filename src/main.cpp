@@ -484,7 +484,9 @@ int main(int argc, char **argv) {
                 try {
                     const auto stored = ragger::agent_memory_decision(memory, dargs);
                     std::println("Stored decision {} (status: {}).",
-                                 stored["id"].dump(), status);
+                                 stored["id"].is_string() ? stored["id"].get<std::string>()
+                                                          : stored["id"].dump(),
+                                 status);
                 } catch (const std::invalid_argument& e) {
                     Diskerror::Logger::error(e.what());
                     return 1;

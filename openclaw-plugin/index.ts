@@ -305,6 +305,7 @@ class McpClient {
 interface RaggerTransport {
   search(query: string, limit?: number, min_score?: number, collections?: string[]): Promise<{ results: Array<{ text: string; score: number; metadata: Record<string, string>; timestamp?: string }> }>;
   store(text: string, metadata?: Record<string, unknown>): Promise<{ id: string; status: string }>;
+  decision(args: Record<string, unknown>): Promise<{ id: string; status: string; kind?: string }>;
   captureTurn(user: string, assistant: string, model: string, session_id: string): Promise<{ status: string; turn_id: number }>;
   count(): Promise<{ count: number }>;
   health(): Promise<{ status: string; memories?: number }>;
@@ -317,6 +318,9 @@ function makeHttpTransport(serverUrl: string): RaggerTransport {
     },
     async store(text, metadata) {
       return raggerFetch(serverUrl, "/store", { text, metadata }) as Promise<{ id: string; status: string }>;
+    },
+    async decision(args) {
+      return raggerFetch(serverUrl, "/decision", args) as Promise<{ id: string; status: string; kind?: string }>;
     },
     async captureTurn(user, assistant, model, session_id) {
       return raggerFetch(serverUrl, "/turn", { user, assistant, model, session_id }) as Promise<{ status: string; turn_id: number }>;
@@ -342,6 +346,9 @@ function makeMcpTransport(client: McpClient): RaggerTransport {
     },
     async store(text, metadata) {
       return client.callTool("store", { text, ...(metadata ? { metadata } : {}) }) as Promise<{ id: string; status: string }>;
+    },
+    async decision(args) {
+      return client.callTool("memory_decision", args) as Promise<{ id: string; status: string; kind?: string }>;
     },
     async captureTurn(user, assistant, model, session_id) {
       return client.callTool("capture_turn", { user, assistant, model, session_id }) as Promise<{ status: string; turn_id: number }>;
@@ -451,7 +458,8 @@ const raggerPlugin = {
         name: "memory_store",
         label: "Memory Store",
         description:
-          "Save important information to long-term memory. Use for preferences, facts, decisions, lessons learned.\n\n" +
+          "Save important information to long-term memory. Use for preferences, facts, lessons learned. " +
+          "Decisions are NOT stored here: use memory_decision (a decision needs a trigger).\n\n" +
           DECISION_CAPTURE_POLICY,
         parameters: {
           type: "object",
@@ -462,7 +470,7 @@ const raggerPlugin = {
               type: "object",
               properties: {
                 source: { type: "string", description: "Where this was learned" },
-                category: { type: "string", description: "Free-form label, not a database-enforced enum. Convention: preference, fact, decision, lesson, entity" },
+                category: { type: "string", description: "Free-form label, not a database-enforced enum. Convention: preference, fact, lesson, entity. 'decision' is rejected: use memory_decision" },
                 tags: { type: "array", items: { type: "string" }, description: "Tags for filtering" },
               },
             },
@@ -474,6 +482,12 @@ const raggerPlugin = {
             text: string;
             metadata?: Record<string, unknown>;
           };
+
+          if (metadata && (metadata as { category?: unknown }).category === "decision") {
+            // The daemon rejects category=decision on store (a decision needs
+            // a trigger); fail here with the pointer instead of a round trip.
+            throw new Error("a decision requires a trigger: use memory_decision (text + trigger), not memory_store with category 'decision'");
+          }
 
           const storeMeta = {
             collection: "memory",
@@ -490,6 +504,51 @@ const raggerPlugin = {
         },
       },
       { name: "memory_store" },
+    );
+
+    api.registerTool(
+      {
+        name: "memory_decision",
+        label: "Memory Decision",
+        description:
+          "Record a standing decision: a ruling plus the situation it applies to. `trigger` is REQUIRED and is " +
+          "written the way a FUTURE question would be asked (e.g. 'Use when choosing a full-text index strategy'); " +
+          "search matches on it. To replace an earlier decision, pass its id in `supersedes`; the old one is kept " +
+          "and marked superseded, never overwritten. This is the only way to store a decision.",
+        parameters: {
+          type: "object",
+          required: ["text", "trigger"],
+          properties: {
+            text: { type: "string", description: "The ruling itself, imperative." },
+            trigger: { type: "string", description: "When this applies, in the vocabulary of a future query." },
+            rationale: { type: "string", description: "Why; alternatives considered and rejected." },
+            scope: { type: "string", description: "What this does NOT apply to." },
+            tags: { type: "array", items: { type: "string" } },
+            status: { type: "string", enum: ["current", "provisional", "pending"], description: "Default current." },
+            supersedes: { type: "integer", description: "knowledge id this replaces (any kind)." },
+            evidence: {
+              type: "array",
+              items: { type: ["integer", "string"] },
+              description: "episode ids (or \"episode:<id>\" handles) this decision rests on.",
+            },
+          },
+        },
+        async execute(_toolCallId, params) {
+          if (!transport) throw new Error("Ragger transport not initialized");
+          const args = params as Record<string, unknown>;
+          const text = typeof args.text === "string" ? args.text.trim() : "";
+          const trigger = typeof args.trigger === "string" ? args.trigger.trim() : "";
+          if (!text || !trigger) throw new Error("memory_decision requires both text and trigger");
+
+          const data = await transport.decision({ ...args, text, trigger });
+
+          return {
+            content: [{ type: "text", text: `Decision stored: ${data.id}` }],
+            details: { action: "created", id: data.id },
+          };
+        },
+      },
+      { name: "memory_decision" },
     );
 
     api.registerTool(

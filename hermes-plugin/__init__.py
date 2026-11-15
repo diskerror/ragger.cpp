@@ -283,7 +283,8 @@ STORE_SCHEMA = {
                     "Free-form label, not a database-enforced enum (Ragger does a plain "
                     "string match server-side — any string works, but stick to the "
                     "convention for consistent retrieval). Convention: 'fact', "
-                    "'decision', 'preference', or 'lesson'. Default: 'fact'."
+                    "'preference', or 'lesson'. Default: 'fact'. 'decision' is NOT "
+                    "accepted here: a decision needs a trigger, so use memory_decision."
                 ),
             },
         },
@@ -300,8 +301,8 @@ DECISION_SCHEMA = {
         "asked (e.g. 'Use when choosing a full-text index strategy') -- search "
         "matches on it, so phrase it in the asker's words, not the conclusion's. "
         "To replace an earlier decision, pass its id in `supersedes`; the old one "
-        "is kept and marked superseded, never overwritten. Prefer this over "
-        "ragger_store(category='decision') for anything with a rationale. "
+        "is kept and marked superseded, never overwritten. This is the ONLY "
+        "way to store a decision: ragger_store(category='decision') is rejected. "
         "The result may carry `possible_supersedes`: other active decisions this "
         "one may be replacing (hint only — nothing was changed; review them)."
     ),
@@ -962,6 +963,12 @@ class RaggerMemoryProvider(MemoryProvider):
             if not text:
                 return json.dumps({"error": "Missing required parameter: text"})
             category = str(args.get("category", "fact")).strip() or "fact"
+            if category == "decision":
+                # The daemon rejects category=decision on /store (a decision
+                # needs a trigger); say so here instead of a round trip.
+                return json.dumps({"error": "a decision requires a trigger: use "
+                                            "memory_decision (text + trigger), not "
+                                            "ragger_store(category='decision')"})
             ok, result = self._classify(self._post_status(
                 "/store",
                 {

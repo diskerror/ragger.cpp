@@ -69,10 +69,10 @@ Pick the tool by the shape of the thing:
   *future question* would be asked ("Use when choosing a full-text index
   strategy"), not as the conclusion. Add `rationale` and `scope`. To replace an
   earlier decision pass its id in `supersedes`; the old one is kept, marked
-  superseded, never overwritten. Without `memory_decision`, use `store` with
-  `category: "decision"` — such a decision is stored without a trigger (the
-  trigger is exactly what `memory_decision` records), so prefer
-  `memory_decision` whenever you can supply one.
+  superseded, never overwritten. `store` with `category: "decision"` is
+  rejected (a decision without a trigger cannot be found by the question it
+  answers): if you have no trigger yet, write the situation the ruling applies
+  to as one, or record it as a `memory_note`.
 - **A fact, preference or lesson** -> `memory_note` (or `store`). Tag project
   facts `project:<name>`. If you are synthesizing something from earlier
   results, pass their episode ids as `evidence` and it is stored as an
@@ -121,9 +121,10 @@ core), then include, when known:
 
 Note: `category` is a free-form string, not a database-enforced enum —
 Ragger does a plain string match on it server-side. Stick to the
-convention (`fact`, `decision`, `preference`, `lesson`) so retrieval stays
-consistent across hosts, but any client is technically free to pass other
-values.
+convention (`fact`, `preference`, `lesson`) so retrieval stays consistent
+across hosts, but any client is technically free to pass other values. The one
+exception is `decision`: `store` rejects it, and decisions go through
+`memory_decision`, which requires a trigger.
 
 **This section is the canonical source for decision-capture guidance.**
 Per-host plugins (Hermes, OpenClaw) load this file directly at runtime and
