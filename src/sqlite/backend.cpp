@@ -101,6 +101,12 @@ bool Backend::update_turn_meta(int turn_id, const std::string& timestamp,
     return pImpl->update_turn_meta(turn_id, timestamp, session_guid);
 }
 
+// X22 (Q2/L2): the turn's current assistant_text (see storage_backend.h).
+std::optional<std::string> Backend::turn_assistant_text(int turn_id) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->turn_assistant_text(turn_id);
+}
+
 // PHASE8: the old summary text-update forwarder is gone.
 
 bool Backend::turn_summary_exists(int turn_id) {
@@ -137,6 +143,21 @@ bool Backend::apply_l2_text(int turn_summary_id, const std::string& text,
                             const std::string& summary_model_name, bool overwrite) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->apply_l2_text(turn_summary_id, text, summary_model_name, overwrite);
+}
+
+// X22 (Q2/L2): stale-L2 selection + in-place refresh (see storage_backend.h).
+std::vector<StorageBackend::StaleL2Candidate>
+Backend::stale_l2_candidates(int limit) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->stale_l2_candidates(limit);
+}
+
+bool Backend::refresh_turn_summary(int turn_summary_id, const std::string& text,
+                                   const std::string& summary_model_name,
+                                   int observed_stale, bool clear_stale) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->refresh_turn_summary(turn_summary_id, text, summary_model_name,
+                                       observed_stale, clear_stale);
 }
 
 std::vector<StorageBackend::TriggerCandidate>

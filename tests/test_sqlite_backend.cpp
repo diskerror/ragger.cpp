@@ -1614,6 +1614,225 @@ void test_orphan_turn_summary_protected(ragger::Embedder& emb) {
     cleanup();
 }
 
+// X22 (Q2/L2) PIN: turn_summaries.stale — the schema column and the merge
+// flag. Written against the pre-X22 tree: every `stale` assertion below is
+// RED until the column and the store_turn merge-branch bump exist.
+void x22_test_stale_schema_and_flag(ragger::Embedder& emb) {
+    cleanup();
+    {
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+
+        // Fresh DB: the column exists with its contract (INTEGER NOT NULL
+        // DEFAULT 0) and the partial stale index is present.
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_text(raw,
+            "SELECT type FROM pragma_table_info('turn_summaries') WHERE name = 'stale'") == "INTEGER");
+        CHECK(p1_scalar_int(raw,
+            "SELECT \"notnull\" FROM pragma_table_info('turn_summaries') WHERE name = 'stale'") == 1);
+        CHECK(p1_scalar_text(raw,
+            "SELECT dflt_value FROM pragma_table_info('turn_summaries') WHERE name = 'stale'") == "0");
+        CHECK(p1_scalar_int(raw,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' "
+            "AND name = 'idx_turn_summaries_stale'") == 1);
+        sqlite3_close(raw);
+
+        const auto stale_of_turn = [&](int turn_id) -> long long {
+            sqlite3* r = p1_open_raw();
+            const long long v = p1_scalar_int(r, std::format(
+                "SELECT ifnull(stale, -999) FROM turn_summaries WHERE turn_id = {}", turn_id));
+            sqlite3_close(r);
+            return v;
+        };
+        const auto text_of_turn = [&](int turn_id) -> std::string {
+            sqlite3* r = p1_open_raw();
+            const std::string v = p1_scalar_text(r, std::format(
+                "SELECT ifnull(text, '<null>') FROM turn_summaries WHERE turn_id = {}", turn_id));
+            sqlite3_close(r);
+            return v;
+        };
+
+        // A merge of the source turn bumps stale on its content L2 row; the
+        // L2 text is untouched until a refresh writes it.
+        const std::string guid = "x22-merge";
+        const int t = db.store_turn("x22 question alpha", "first reply part one",
+                                    "test-model", false, guid);
+        CHECK(t > 0);
+        CHECK(db.finalize_turn_summary(t, "Summary about x22 alpha", "summarizer-model"));
+        CHECK(stale_of_turn(t) == 0);
+
+        db.store_turn("x22 question alpha", "second reply part two",
+                      "test-model", false, guid);   // continuation → merge
+        CHECK(stale_of_turn(t) == 1);
+        CHECK(text_of_turn(t) == "Summary about x22 alpha");
+
+        // Two more merges before any refresh accumulate.
+        db.store_turn("x22 question alpha", "third reply part three",
+                      "test-model", false, guid);
+        CHECK(stale_of_turn(t) == 2);
+
+        // The "already held" merge (repeat/contained text) never bumps.
+        db.store_turn("x22 question alpha", "third reply part three",
+                      "test-model", false, guid);
+        CHECK(stale_of_turn(t) == 2);
+
+        // A plain insert (different user_text) flags nothing.
+        const int t2 = db.store_turn("x22 question beta", "beta reply",
+                                     "test-model", false, guid);
+        CHECK(t2 > 0);
+        {
+            sqlite3* r = p1_open_raw();
+            CHECK(p1_scalar_int(r, "SELECT COUNT(*) FROM turn_summaries WHERE turn_id = "
+                                   + std::to_string(t2)) == 0);
+            sqlite3_close(r);
+        }
+
+        // A '' marker row (poison-abandon shape) is never flagged: the
+        // merge UPDATE carries the text predicate.
+        const std::string guid3 = "x22-marker";
+        const int t3 = db.store_turn("x22 question gamma", "gamma reply one",
+                                     "test-model", false, guid3);
+        CHECK(t3 > 0);
+        CHECK(db.mark_turn_summarized(t3, "bad"));
+        db.store_turn("x22 question gamma", "gamma reply two",
+                      "test-model", false, guid3);
+        CHECK(stale_of_turn(t3) == 0);
+
+        // A merge with NO L2 row flags nothing (no row to flag).
+        const std::string guid4 = "x22-nol2";
+        const int t4 = db.store_turn("x22 question delta", "delta reply one",
+                                     "test-model", false, guid4);
+        db.store_turn("x22 question delta", "delta reply two",
+                      "test-model", false, guid4);
+        {
+            sqlite3* r = p1_open_raw();
+            CHECK(p1_scalar_int(r, "SELECT COUNT(*) FROM turn_summaries WHERE turn_id = "
+                                   + std::to_string(t4)) == 0);
+            sqlite3_close(r);
+        }
+    }
+    cleanup();
+}
+
+// X22 (Q2/L2): stale-L2 selection + refresh_turn_summary, including the
+// failure paths (injected BEFORE UPDATE RAISE(ABORT) trigger: a failing
+// refresh leaves text and stale untouched; a failing stale-bump rolls back
+// the whole merge) and the observed_stale guard for a merge that lands
+// between selection and write.
+void x22_test_stale_candidates_and_refresh(ragger::Embedder& emb) {
+    cleanup();
+    {
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        const std::string guid = "x22-cand";
+        const int t = db.store_turn("x22 cand question", "cand reply one",
+                                    "test-model", false, guid);
+        CHECK(t > 0);
+        CHECK(db.finalize_turn_summary(t, "Cand summary one", "summarizer-model"));
+
+        sqlite3* raw = p1_open_raw();
+        const std::string w = " FROM turn_summaries WHERE turn_summary_id = " + std::to_string(
+            p1_scalar_int(raw, "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = "
+                          + std::to_string(t)));
+        const int ts_id = static_cast<int>(p1_scalar_int(raw,
+            "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t)));
+        const long long dt0   = p1_scalar_int(raw, "SELECT turn_datetime" + w);
+        const long long sum0  = p1_scalar_int(raw, "SELECT summarized_on" + w);
+        sqlite3_close(raw);
+
+        // Fresh row: no candidates.
+        CHECK(db.stale_l2_candidates(0).empty());
+
+        // A merge makes exactly one candidate, carrying the observed counter,
+        // the live source texts, the turn's model and the session GUID.
+        db.store_turn("x22 cand question", "cand reply two", "test-model", false, guid);
+        auto cands = db.stale_l2_candidates(0);
+        CHECK(cands.size() == 1);
+        CHECK(cands[0].turn_summary_id == ts_id);
+        CHECK(cands[0].turn_id == t);
+        CHECK(cands[0].stale == 1);
+        CHECK(cands[0].user_text == "x22 cand question");
+        CHECK(cands[0].assistant_text.find("cand reply one") != std::string::npos);
+        CHECK(cands[0].assistant_text.find("cand reply two") != std::string::npos);
+        CHECK(cands[0].turn_model_name == "test-model");
+        CHECK(cands[0].session_guid == guid);
+        CHECK(cands[0].episode_id == 0);
+
+        // Refresh: text + model rewritten, stale cleared, identity columns
+        // (turn_id, session_id, episode_id, turn_datetime, summarized_on)
+        // untouched; the embedding is written.
+        CHECK(db.refresh_turn_summary(ts_id, "Refreshed cand summary", "stub-model", 1, true));
+        raw = p1_open_raw();
+        CHECK(p1_scalar_text(raw, "SELECT text" + w) == "Refreshed cand summary");
+        CHECK(p1_scalar_int(raw, "SELECT stale" + w) == 0);
+        CHECK(p1_scalar_text(raw, "SELECT m.name FROM turn_summaries ts "
+                                  "JOIN models m ON m.model_id = ts.summary_model_id"
+                                  " WHERE turn_summary_id = " + std::to_string(ts_id))
+              == "stub-model");
+        CHECK(p1_scalar_int(raw, "SELECT turn_datetime" + w) == dt0);
+        CHECK(p1_scalar_int(raw, "SELECT summarized_on" + w) == sum0);
+        CHECK(p1_scalar_int(raw, "SELECT turn_id" + w) == t);
+        CHECK(p1_scalar_int(raw, "SELECT episode_id IS NULL" + w) == 1);
+        CHECK(p1_scalar_int(raw, "SELECT embedding IS NOT NULL" + w) == 1);
+        sqlite3_close(raw);
+
+        // A missing row returns false; empty text throws invalid_argument.
+        CHECK(!db.refresh_turn_summary(999999, "x", "m", 0, true));
+        bool threw_empty = false;
+        try { db.refresh_turn_summary(ts_id, "", "m", 0, true); }
+        catch (const std::invalid_argument&) { threw_empty = true; }
+        CHECK(threw_empty);
+
+        // Merge during refresh: two more merges (stale = 2), then a write
+        // that observed 1 updates the text but must NOT clear the counter.
+        db.store_turn("x22 cand question", "cand reply three", "test-model", false, guid);
+        db.store_turn("x22 cand question", "cand reply four", "test-model", false, guid);
+        raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT stale" + w) == 2);
+        sqlite3_close(raw);
+        CHECK(db.refresh_turn_summary(ts_id, "Refreshed while merged", "stub-model", 1, true));
+        raw = p1_open_raw();
+        CHECK(p1_scalar_text(raw, "SELECT text" + w) == "Refreshed while merged");
+        CHECK(p1_scalar_int(raw, "SELECT stale" + w) == 2);   // kept for the next tick
+        sqlite3_close(raw);
+        // The current counter clears it.
+        CHECK(db.refresh_turn_summary(ts_id, "Refreshed final", "stub-model", 2, true));
+        raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT stale" + w) == 0);
+        sqlite3_close(raw);
+
+        // Injected failure on turn_summaries UPDATE: the refresh throws and
+        // leaves text + stale unchanged (the txn rolled back).
+        raw = p1_open_raw();
+        CHECK(sqlite3_exec(raw,
+            "CREATE TRIGGER x22_abort_upd BEFORE UPDATE ON turn_summaries "
+            "BEGIN SELECT RAISE(ABORT, 'x22 injected'); END;",
+            nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(raw);
+        bool threw_upd = false;
+        try { db.refresh_turn_summary(ts_id, "Should not land", "stub-model", 0, true); }
+        catch (const std::runtime_error&) { threw_upd = true; }
+        CHECK(threw_upd);
+        raw = p1_open_raw();
+        CHECK(p1_scalar_text(raw, "SELECT text" + w) == "Refreshed final");
+        CHECK(p1_scalar_int(raw, "SELECT stale" + w) == 0);
+        sqlite3_close(raw);
+
+        // The same failure on the merge's stale bump rolls back the WHOLE
+        // merge: the turns row keeps its pre-merge assistant_text.
+        bool threw_merge = false;
+        try { db.store_turn("x22 cand question", "cand reply five", "test-model", false, guid); }
+        catch (const std::runtime_error&) { threw_merge = true; }
+        CHECK(threw_merge);
+        raw = p1_open_raw();
+        CHECK(p1_scalar_text(raw, "SELECT assistant_text FROM turns WHERE turn_id = "
+                                  + std::to_string(t)).find("cand reply five")
+              == std::string::npos);
+        CHECK(p1_scalar_int(raw, "SELECT stale" + w) == 0);
+        CHECK(sqlite3_exec(raw, "DROP TRIGGER x22_abort_upd;", nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(raw);
+    }
+    cleanup();
+}
+
 // A hand-built 0.16-shaped DB must migrate to 0.17: new columns in canonical
 // order, stray status words moved into tags, evidence table + trigger present,
 // existing decisions_terms rows intact. PHASE5 extends it to cover episodes
@@ -1750,6 +1969,14 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
     // finishes before the leg returns, so the flag is back to 'stopped' here
     // (and the index-populated assertions below still hold).
     CHECK(p1_scalar_text(raw, "SELECT value FROM settings WHERE key='reindexing'") == "stopped");
+    // X22: the 0.16→0.17 leg's turn_summaries rebuild carries the new stale
+    // column (its INSERT names columns explicitly → every migrated row gets
+    // the default 0) and recreates the stale index.
+    CHECK(p1_scalar_text(raw, "SELECT type FROM pragma_table_info('turn_summaries') WHERE name = 'stale'") == "INTEGER");
+    CHECK(p1_scalar_int(raw, "SELECT \"notnull\" FROM pragma_table_info('turn_summaries') WHERE name = 'stale'") == 1);
+    CHECK(p1_scalar_text(raw, "SELECT dflt_value FROM pragma_table_info('turn_summaries') WHERE name = 'stale'") == "0");
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_turn_summaries_stale'") == 1);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turn_summaries WHERE stale = 0") == 6);
     // Canonical (fresh-install) column order: no project_id anywhere.
     CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('knowledge') WHERE cid = 5") == "trigger");
     CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('knowledge') WHERE cid = 11") == "created_at");
@@ -1792,7 +2019,11 @@ void test_migrate_0_16_to_0_17(ragger::Embedder& emb) {
     CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turn_summaries WHERE episode_id IS NOT NULL") == 2);
     // turn_summaries rebuilt in canonical column order with episode_id.
     CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('turn_summaries') WHERE cid = 4") == "episode_id");
-    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_table_info('turn_summaries')") == 13);
+    // X22: stale sits in the canonical order after bigram_count, before
+    // embedding_version (14 columns on both the migrated and the fresh DB).
+    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('turn_summaries') WHERE cid = 11") == "stale");
+    CHECK(p1_scalar_text(raw, "SELECT name FROM pragma_table_info('turn_summaries') WHERE cid = 12") == "embedding_version");
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_table_info('turn_summaries')") == 14);
     // session_id FK gained ON DELETE SET NULL.
     CHECK(p1_scalar_text(raw, "SELECT on_delete FROM pragma_foreign_key_list('turn_summaries') WHERE \"table\" = 'sessions'") == "SET NULL");
     // The seeded AUTOINCREMENT watermark (42 > MAX(id)=6) survived the
@@ -8582,6 +8813,8 @@ int main() {
     test_structured_decision_supersedes(emb);
     test_structured_decision_evidence(emb);
     test_orphan_turn_summary_protected(emb);
+    x22_test_stale_schema_and_flag(emb);
+    x22_test_stale_candidates_and_refresh(emb);
     test_migrate_0_16_to_0_17(emb);
     test_migrate_0_16_to_0_17_rejects(emb);
     test_p9_schema_assembly(emb);

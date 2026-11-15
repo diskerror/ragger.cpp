@@ -64,4 +64,9 @@ indexed separately from conversation turns.
 Captured turns are queued to the summarizer: turn summaries (L2) are
 written per turn (short exchanges are copied verbatim rather than sent to a
 model), and episodes group consecutive summaries of one conversation span.
-See `docs/search-and-rag.md` for how the layers are searched.
+When a captured turn later grows — a same-exchange continuation merges into
+it — its turn summary is marked with a counter of the merges its text does
+not reflect yet, and the daemon's periodic catch-up rewrites the summary in
+place from the whole reply (a summary that already belongs to an episode is
+left for the episode pass). See `docs/search-and-rag.md` for how the layers
+are searched.

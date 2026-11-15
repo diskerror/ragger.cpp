@@ -159,6 +159,8 @@ inline std::string episodes_indexes() {
 // turn_summaries (L2) — one row per summarized turn. Rebuilt at 0.17 to add
 // episode_id (recorded membership; replaces the BETWEEN heuristic) and to
 // place it in canonical column order. session_id gains ON DELETE SET NULL.
+// X22 (Q2/L2): `stale` counts merges of the source turn that the summary
+// text does not reflect yet — the refresh queue's persistent retry counter.
 inline std::string turn_summaries(const std::string& name) {
     return std::format(R"(CREATE TABLE {} (
                 turn_summary_id  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -172,6 +174,8 @@ inline std::string turn_summaries(const std::string& name) {
                 summarized_on    INTEGER NOT NULL DEFAULT (unixepoch()),
                 unigram_count    INTEGER NOT NULL DEFAULT 0,
                 bigram_count     INTEGER NOT NULL DEFAULT 0,
+                -- number of merges of the source turn not yet reflected in `text`; 0 = fresh
+                stale            INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER,
                 embedding        BLOB
             ))", name);
@@ -188,6 +192,7 @@ inline std::string turn_summaries_indexes_and_trigger() {
         CREATE INDEX idx_turn_summaries_episode_id ON turn_summaries(episode_id);
         CREATE INDEX idx_turn_summaries_datetime   ON turn_summaries(turn_datetime);
         CREATE INDEX idx_turn_summaries_embedding_version ON turn_summaries(embedding_version);
+        CREATE INDEX idx_turn_summaries_stale ON turn_summaries(turn_summary_id) WHERE stale > 0;
         CREATE UNIQUE INDEX idx_turn_summaries_turn_id_uniq
             ON turn_summaries(turn_id) WHERE turn_id IS NOT NULL;
         CREATE TRIGGER protect_orphan_turn_summaries

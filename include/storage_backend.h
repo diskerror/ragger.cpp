@@ -257,6 +257,12 @@ public:
                                   const std::string& timestamp = "",
                                   const std::string& session_guid = "") = 0;
 
+    /// X22 (Q2/L2): the turn's CURRENT assistant_text (a NULL column reads
+    /// as empty), nullopt when no such turn exists. `/turn` after a merge
+    /// must enqueue the whole reply for summarization, not just the fragment
+    /// of the request that merged it.
+    virtual std::optional<std::string> turn_assistant_text(int turn_id) = 0;
+
     // PHASE8: the old summary text-update / tag-setter / recent-list are gone
     // with the `summaries` table (text is never rewritten in place;
     // recipes read episodes since PHASE5).
@@ -327,6 +333,38 @@ public:
     virtual bool apply_l2_text(int turn_summary_id, const std::string& text,
                                const std::string& summary_model_name,
                                bool overwrite) = 0;
+
+    /// X22 (Q2/L2): one `turn_summaries` row whose source turn has been
+    /// merged since its text was written (`stale > 0`, non-empty text, a
+    /// live `turn_id`), ordered by turn_summary_id. `stale` is the counter
+    /// observed at selection time — the refresher passes it back to
+    /// refresh_turn_summary so a merge landing meanwhile keeps the row stale.
+    /// `episode_id` is 0 when the row belongs to no episode (X22 refreshes
+    /// only those; in-episode rows are for the episode-regeneration pass).
+    struct StaleL2Candidate {
+        int         turn_summary_id;
+        int         turn_id;
+        int         stale;
+        std::string user_text;
+        std::string assistant_text;
+        std::string turn_model_name;  // provenance for a floor/shorter copy
+        std::string session_guid;     // "" when the row has no session
+        int         episode_id;       // 0 when episode_id IS NULL
+    };
+    virtual std::vector<StaleL2Candidate> stale_l2_candidates(int limit) = 0;
+
+    /// X22 (Q2/L2): rewrite a merged turn's L2 row in place with its refreshed
+    /// summary — text, embedding, embedding_version, summary_model_id, terms
+    /// (same normalizing + model lookup as apply_l2_text). Order: validate ->
+    /// embed outside the txn -> BEGIN -> UPDATE -> index -> COMMIT ->
+    /// invalidate. Empty text -> std::invalid_argument. When `clear_stale`,
+    /// `stale` resets to 0 ONLY where it still equals `observed_stale`: a
+    /// merge that arrived while summarizing keeps the row stale for the next
+    /// tick. episode_id, turn_id, session_id, turn_datetime and summarized_on
+    /// are never touched. Returns true when the row existed.
+    virtual bool refresh_turn_summary(int turn_summary_id, const std::string& text,
+                                      const std::string& summary_model_name,
+                                      int observed_stale, bool clear_stale) = 0;
 
     /// `knowledge` rows of kind decision|insight with no trigger yet.
     struct TriggerCandidate {

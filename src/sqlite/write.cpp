@@ -647,9 +647,22 @@ static std::string tags_from_metadata(const json& metadata) {
             up.bind(5, probe_id);
             if (!up.exec())
                 throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            // X22 (Q2/L2): the merged text is not reflected in the turn's L2
+            // summary yet — bump its stale counter so the periodic catch-up
+            // refreshes it (reliably across restarts; mechanism (b)). Only
+            // content rows: a '' marker is never refreshed, and a turn with
+            // no L2 row has nothing to flag. exec() failure throws inside the
+            // transaction, so the whole merge rolls back together.
+            Stmt st(db,
+                "UPDATE turn_summaries SET stale = stale + 1 "
+                "WHERE turn_id = ? AND text IS NOT NULL AND text <> ''");
+            st.bind(1, probe_id);
+            if (!st.exec())
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
             text_index_->index_record("turns", probe_id, u + "\n" + *merged);
             tx.commit();
             invalidate_raw_turn_cache();  // LR S75
+            invalidate_turn_cache();      // X22: the L2 row's shape changed
             return probe_id;
         }
 
@@ -1231,6 +1244,75 @@ static std::string tags_from_metadata(const json& metadata) {
         return true;
     }
 
+    // X22 (Q2/L2): stale-L2 selection. A merge bumps `stale` on the turn's
+    // content L2 row (store_turn's merge branch); this is the queue read.
+    // The JOIN on turns is the "live turn_id" requirement (a turn deleted
+    // out from under the row leaves it un-refreshable — its source text is
+    // gone). Rows with an episode are returned too (X23's episode-
+    // regeneration pass consumes them); X22's service code skips them.
+    std::vector<Backend::Impl::StaleL2Candidate>
+    Backend::Impl::stale_l2_candidates(int limit) {
+        std::vector<StaleL2Candidate> out;
+        std::string sql =
+            "SELECT ts.turn_summary_id, ts.turn_id, ts.stale, "
+            "       ifnull(t.user_text,''), ifnull(t.assistant_text,''), "
+            "       ifnull(tm.name,''), ifnull(ss.guid,''), ifnull(ts.episode_id, 0) "
+            "FROM turn_summaries ts "
+            "JOIN turns t ON t.turn_id = ts.turn_id "
+            "LEFT JOIN models tm ON tm.model_id = t.model_id "
+            "LEFT JOIN sessions ss ON ss.session_id = ts.session_id "
+            "WHERE ts.stale > 0 AND ts.text IS NOT NULL AND ts.text <> '' "
+            "ORDER BY ts.turn_summary_id ASC";
+        if (limit > 0) sql += " LIMIT ?";
+        Stmt s(db, sql);
+        if (limit > 0) s.bind(1, limit);
+        while (s.step())
+            out.push_back({s.column_int(0), s.column_int(1), s.column_int(2),
+                           s.column_text(3), s.column_text(4), s.column_text(5),
+                           s.column_text(6), s.column_int(7)});
+        return out;
+    }
+
+    // X22 (Q2/L2): refresh a merged turn's L2 row in place. Same order and
+    // the same normalizing + model lookup as apply_l2_text (validate -> embed
+    // outside the txn -> BEGIN -> UPDATE -> index -> COMMIT -> invalidate).
+    // `stale` clears to 0 ONLY where it still equals observed_stale: a merge
+    // that landed while the summary was being built keeps the row stale for
+    // the next tick (the text written here may already miss it). episode_id,
+    // turn_id, session_id, turn_datetime and summarized_on are never touched.
+    bool Backend::Impl::refresh_turn_summary(int turn_summary_id, const std::string& text,
+                                             const std::string& summary_model_name,
+                                             int observed_stale, bool clear_stale) {
+        if (text.empty())
+            throw std::invalid_argument("refresh_turn_summary: empty text");
+        const std::string t = normalize_path(text);
+        const int model_id = get_or_create_model(summary_model_name);
+        // Encode outside the transaction (model call must not hold the lock).
+        auto emb = require_embedder().encode(t);
+        Stmt u(db,
+            "UPDATE turn_summaries SET text = ?, embedding_version = ?, embedding = ?, "
+            "summary_model_id = ?, "
+            "stale = CASE WHEN ? AND stale = ? THEN 0 ELSE stale END "
+            "WHERE turn_summary_id = ?");
+        u.bind(1, t);
+        bind_embedding_version(u.raw(), 2, emb);
+        bind_embedding(u.raw(), 3, emb);
+        if (model_id) u.bind(4, model_id); else u.bind_null(4);
+        u.bind(5, clear_stale ? 1 : 0);
+        u.bind(6, observed_stale);
+        u.bind(7, turn_summary_id);
+        Transaction tx(db);
+        if (!u.exec())
+            throw std::runtime_error(std::format("refresh_turn_summary UPDATE: {}",
+                                                 sqlite3_errmsg(db)));
+        const bool existed = sqlite3_changes(db) > 0;
+        if (existed)
+            text_index_->index_record("turn_summaries", turn_summary_id, t);
+        tx.commit();
+        if (existed) invalidate_turn_cache();
+        return existed;
+    }
+
     std::vector<Backend::Impl::TriggerCandidate>
     Backend::Impl::trigger_backfill_candidates() {
         std::vector<TriggerCandidate> out;
@@ -1370,6 +1452,18 @@ static std::string tags_from_metadata(const json& metadata) {
         if (!g.is_null(1)) m.model_id   = g.column_int(1);
         if (!g.is_null(2)) m.session_id = g.column_int(2);
         return m;
+    }
+
+
+    // X22 (Q2/L2): the turn's current assistant_text (see storage_backend.h).
+    // A partial turn (assistant_text NULL) reads as empty, not nullopt: the
+    // caller's fallback is for "no such turn" or "nothing to enqueue".
+    std::optional<std::string> Backend::Impl::turn_assistant_text(int turn_id) {
+        Stmt g(db, "SELECT assistant_text FROM turns WHERE turn_id = ?");
+        g.bind(1, turn_id);
+        if (!g.step()) return std::nullopt;
+        if (g.is_null(0)) return std::string();
+        return g.column_text(0);
     }
 
 

@@ -104,6 +104,8 @@ CREATE TABLE turn_summaries (
                 summarized_on    INTEGER NOT NULL DEFAULT (unixepoch()),
                 unigram_count    INTEGER NOT NULL DEFAULT 0,
                 bigram_count     INTEGER NOT NULL DEFAULT 0,
+                -- number of merges of the source turn not yet reflected in `text`; 0 = fresh
+                stale            INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER,
                 embedding        BLOB
             );
@@ -282,6 +284,8 @@ CREATE INDEX idx_turn_summaries_episode_id ON turn_summaries(episode_id);
 CREATE INDEX idx_turn_summaries_datetime   ON turn_summaries(turn_datetime);
 
 CREATE INDEX idx_turn_summaries_embedding_version ON turn_summaries(embedding_version);
+
+CREATE INDEX idx_turn_summaries_stale ON turn_summaries(turn_summary_id) WHERE stale > 0;
 
 CREATE UNIQUE INDEX idx_turn_summaries_turn_id_uniq
             ON turn_summaries(turn_id) WHERE turn_id IS NOT NULL;

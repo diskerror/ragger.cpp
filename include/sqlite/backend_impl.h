@@ -129,6 +129,7 @@ struct Backend::Impl {
     using TriggerCandidate    = StorageBackend::TriggerCandidate;
     using StrandedCandidate   = StorageBackend::StrandedCandidate;
     using SessionNameCandidate = StorageBackend::SessionNameCandidate;
+    using StaleL2Candidate    = StorageBackend::StaleL2Candidate;
     using HousekeepingPlan  = StorageBackend::HousekeepingPlan;
 
     // ---- helpers -------------------------------------------------------
@@ -604,6 +605,11 @@ struct Backend::Impl {
     bool apply_l2_text(int turn_summary_id, const std::string& text,
                        const std::string& summary_model_name,
                        bool overwrite);
+    // X22 (Q2/L2): stale-L2 selection + in-place refresh (see storage_backend.h).
+    std::vector<StaleL2Candidate> stale_l2_candidates(int limit);
+    bool refresh_turn_summary(int turn_summary_id, const std::string& text,
+                              const std::string& summary_model_name,
+                              int observed_stale, bool clear_stale);
     std::vector<TriggerCandidate> trigger_backfill_candidates();
     bool apply_trigger(int knowledge_id, const std::string& trigger);
     std::vector<StrandedCandidate> stranded_l2_candidates(int& ties);
@@ -730,6 +736,8 @@ struct Backend::Impl {
     // sessions row same as store_turn.
     bool update_turn_meta(int turn_id, const std::string& timestamp,
                           const std::string& session_guid);
+    // X22 (Q2/L2): the turn's current assistant_text (see storage_backend.h).
+    std::optional<std::string> turn_assistant_text(int turn_id);
 
     // Recipe ingredients (issue #23): current decisions — fetched by recency
     // (not semantic search) for the default tiered payload. Returned

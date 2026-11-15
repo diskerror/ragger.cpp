@@ -128,6 +128,38 @@ void SummarizerService::enqueue_catch_up() {
         ++turn_n;
     }
 
+    // X22 (Q2/L2): stale-L2 refresh catch-up. A turn merged after its L2 was
+    // summarized carries stale > 0 (the persistent counter store_turn's merge
+    // branch bumps), so this pass retries reliably across restarts, MCP
+    // writes and a full queue. Same per-tick cap as the L2 pass above. Only
+    // rows NOT in an episode: refreshing an in-episode L2 has to rebuild the
+    // episode summary with it, which is X23's episode-regeneration job —
+    // those candidates are returned by the same query and skipped here.
+    size_t refresh_n = 0;
+    for (const auto& c : backend->stale_l2_candidates(catch_up_cap)) {
+        if (c.episode_id != 0) continue;  // X23 refreshes in-episode rows
+        Job j{JobKind::L2Refresh, c.turn_id,
+              c.user_text, c.assistant_text, c.turn_model_name,
+              c.session_guid, {}, c.turn_summary_id, c.stale};
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            // Bounded queue, one-time warning, same style as enqueue_turn:
+            // with a dead endpoint the stale counters persist in the DB, so
+            // dropping the live job loses nothing.
+            if (queue_.size() >= 1000) {
+                static std::atomic<bool> warned_refresh_full{false};
+                if (!warned_refresh_full.exchange(true))
+                    Diskerror::Logger::warn(
+                        "[summarizer] catch-up queue full (1000) — dropping stale-L2 "
+                        "refresh jobs; the periodic tick will pick them up "
+                        "(one-time warning)");
+                break;
+            }
+            queue_.push_back(std::move(j));
+        }
+        ++refresh_n;
+    }
+
     // Poison-abandon retry: delete "bad"-tagged turn_summaries rows so the
     // underlying turns fall back into unsummarized_turns()'s candidate set.
     // Whatever caused max_turn_failures consecutive failures (inference
@@ -176,6 +208,9 @@ void SummarizerService::enqueue_catch_up() {
     if (turn_n + ep_n > 0)
         Diskerror::Logger::info(std::format(
             lang::MSG_SUMMARIZER_START, turn_n, ep_n));
+    if (refresh_n)
+        Diskerror::Logger::info(std::format(
+            "[summarizer] queued {} stale-L2 refresh job(s)", refresh_n));
     if (reset_n)
         Diskerror::Logger::info(std::format(
             "[summarizer] housekeeping reset {} poison-abandoned turn_summaries "
@@ -197,6 +232,7 @@ void SummarizerService::worker_loop() {
         try {
             switch (job.kind) {
                 case JobKind::L2Turn:       handle_l2(job);            break;
+                case JobKind::L2Refresh:    handle_l2_refresh(job);    break;
                 case JobKind::EpisodeClose: handle_episode_close(job); break;
             }
         } catch (const std::exception& e) {
@@ -248,14 +284,16 @@ void SummarizerService::pause_timer_loop() {
 // that one is the '' marker with model 'bad' — the old heuristic `draft`
 // row path is gone.
 // --------------------------------------------------------------------
-void SummarizerService::handle_l2(const Job& j) {
-    if (j.assistant_text.empty()) return;  // partial turn
 
-    // Resolve the inference client ONCE for the whole job (C §1.3): a
-    // SIGHUP reload mid-job replaces the daemon's shared_ptr but cannot
-    // free the object this job holds.
-    auto inf = inference_provider_ ? inference_provider_() : nullptr;
-
+// X22 (Q2/L2): the ONE {user, assistant} -> {summary, model} block, moved
+// VERBATIM out of handle_l2 (system-injected blanking, the `user | assistant`
+// source, the LR S62 floor copy with no model call, summarize_transcript +
+// choose_summary). handle_l2's behavior is bit-for-bit unchanged; the extra
+// `source`/`floor_copy` fields exist only so handle_l2 keeps its exact
+// floor-copy log and its poison-abandon accounting around the call.
+SummarizerService::L2Text SummarizerService::make_l2_text(
+        InferenceClient* inf, const std::string& user,
+        const std::string& assistant, const std::string& turn_model_name) {
     // System-injected turns (model-switch notes, compaction handoffs,
     // interruption notices, background-process reports) carry no *user*
     // content — but the assistant side may still be a real, substantive
@@ -264,8 +302,47 @@ void SummarizerService::handle_l2(const Job& j) {
     // skipping the turn: skipping would drop a good answer, and feeding the
     // system note to the summarizer produced degenerate output like
     // "The assistant " / "System". The raw turn row is untouched.
-    std::string eff_user = is_system_injected_turn(j.user_text)
-                               ? std::string{} : j.user_text;
+    const std::string eff_user = is_system_injected_turn(user)
+                                   ? std::string{} : user;
+
+    // LR S62: the exact text the summarizer would see for this turn (the
+    // system-injected user side already blanked). Doubles as the copy text
+    // for the floor and the shorter-text rule below.
+    const std::string source = eff_user.empty()
+        ? assistant
+        : eff_user + " | " + assistant;
+
+    // LR S62 floor: a source at/below summarizer_min_words words is copied
+    // verbatim with NO model call — this path needs no endpoint at all, so
+    // short turns still leave the unsummarized queue with inference down
+    // (the PHASE6 3 invariant, now carried by the floor instead of the
+    // trivial-skip marker). Provenance of a copy is the TURN's model
+    // (addendum 3; NULL = unknown allowed).
+    if (count_words(source) <= static_cast<size_t>(std::max(0, config().summarizer_min_words)))
+        return {source, turn_model_name, source, true};
+
+    if (!inf) return {};  // not configured: nothing to summarize against
+
+    const std::string summary = summarize_transcript(
+        *inf,
+        {{ eff_user, assistant }});
+    if (summary.empty()) return {};  // inference unreachable or garbage
+
+    // LR S62 (shorter-text rule): a summary that measures >= its source
+    // (ties included) is rejected in favor of a verbatim copy — and a copy
+    // records the TURN's model, not the summarizer's (addendum 3).
+    const auto choice = choose_summary(source, summary);
+    return {choice.text, choice.copied ? turn_model_name : inf->memory_model,
+            source, false};
+}
+
+void SummarizerService::handle_l2(const Job& j) {
+    if (j.assistant_text.empty()) return;  // partial turn
+
+    // Resolve the inference client ONCE for the whole job (C §1.3): a
+    // SIGHUP reload mid-job replaces the daemon's shared_ptr but cannot
+    // free the object this job holds.
+    auto inf = inference_provider_ ? inference_provider_() : nullptr;
 
     // LR S63: the old "trivial turn" filter (combined < 80 chars or
     // assistant < 20 chars -> mark_turn_summarized with the "(skipped)"
@@ -285,57 +362,42 @@ void SummarizerService::handle_l2(const Job& j) {
     if (backend_.turn_summary_exists(j.turn_id))
         return;
 
-    // LR S62: the exact text the summarizer would see for this turn (the
-    // system-injected user side already blanked). Doubles as the copy text
-    // for the floor and the shorter-text rule below.
-    const std::string source = eff_user.empty()
-        ? j.assistant_text
-        : eff_user + " | " + j.assistant_text;
-
-    // LR S62 floor: a source at/below summarizer_min_words words is copied
-    // verbatim with NO model call — this path needs no endpoint at all, so
-    // short turns still leave the unsummarized queue with inference down
-    // (the PHASE6 3 invariant, now carried by the floor instead of the
-    // trivial-skip marker). Provenance of a copy is the TURN's model
-    // (addendum 3; NULL = unknown allowed).
-    if (count_words(source) <= static_cast<size_t>(std::max(0, config().summarizer_min_words))) {
-        if (!backend_.finalize_turn_summary(j.turn_id, source, j.model_name)) {
-            Diskerror::Logger::warn(std::format(
-                "[summarizer] floor-copy finalize_turn_summary failed for turn_id={} "
-                "(session={}, ts={})", j.turn_id,
-                j.session_guid.empty() ? "-" : j.session_guid, j.source_timestamp));
-            return;
-        }
-        Diskerror::Logger::info(std::format(
-            "[summarizer] L2 floor copy ({} words, no model call) for session {}",
-            count_words(source), j.session_guid.empty() ? "-" : j.session_guid));
-        return;
-    }
-
-    // S25 (C M10): "not configured" is not "unreachable". With no inference
-    // endpoint there is nothing to retry against: counting failures here
-    // stamped turns 'bad' after max_turn_failures ticks, the back-off job
-    // reset them, and the cycle repeated forever on a fresh install. Leave
-    // the turn unsummarized (an endpoint appearing later resumes it) and
-    // say so once per service lifetime.
-    if (!inf) {
-        std::call_once(no_inference_warned_, [] {
-            Diskerror::Logger::info(lang::MSG_SUMMARIZER_NO_ENDPOINT);
-        });
-        return;
-    }
-
-    const std::string summarizer_model = inf->memory_model;
-
-    std::string summary = summarize_transcript(
-        *inf,
-        {{ eff_user, j.assistant_text }});
-
     const std::string& guid = j.session_guid;
     const std::string& ts   = j.source_timestamp;
     const std::string  display_guid = guid.empty() ? "-" : guid;
 
-    if (summary.empty()) {
+    const auto made = make_l2_text(inf.get(), j.user_text, j.assistant_text,
+                                   j.model_name);
+
+    // LR S62 floor path: verbatim copy, no model call, no endpoint needed.
+    if (made.floor_copy) {
+        if (!backend_.finalize_turn_summary(j.turn_id, made.text, made.model)) {
+            Diskerror::Logger::warn(std::format(
+                "[summarizer] floor-copy finalize_turn_summary failed for turn_id={} "
+                "(session={}, ts={})", j.turn_id,
+                display_guid, ts));
+            return;
+        }
+        Diskerror::Logger::info(std::format(
+            "[summarizer] L2 floor copy ({} words, no model call) for session {}",
+            count_words(made.source), display_guid));
+        return;
+    }
+
+    if (made.text.empty()) {
+        // S25 (C M10): "not configured" is not "unreachable". With no inference
+        // endpoint there is nothing to retry against: counting failures here
+        // stamped turns 'bad' after max_turn_failures ticks, the back-off job
+        // reset them, and the cycle repeated forever on a fresh install. Leave
+        // the turn unsummarized (an endpoint appearing later resumes it) and
+        // say so once per service lifetime.
+        if (!inf) {
+            std::call_once(no_inference_warned_, [] {
+                Diskerror::Logger::info(lang::MSG_SUMMARIZER_NO_ENDPOINT);
+            });
+            return;
+        }
+
         // Inference unreachable or returned garbage. Track failures so one
         // poison turn can't block the queue forever.
         const int max_fails = config().max_turn_failures;
@@ -367,13 +429,9 @@ void SummarizerService::handle_l2(const Job& j) {
         return;
     }
 
-    // Insert the turn_summaries row. LR S62 (shorter-text rule): a summary
-    // that measures >= its source (ties included) is rejected in favor of a
-    // verbatim copy — and a copy records the TURN's model, not the
-    // summarizer's (addendum 3).
-    const auto choice = choose_summary(source, summary);
-    const std::string& row_model = choice.copied ? j.model_name : summarizer_model;
-    bool ok = backend_.finalize_turn_summary(j.turn_id, choice.text, row_model);
+    // Insert the turn_summaries row (text + provenance already chosen by
+    // make_l2_text: the summarizer's model, or the turn's for a copy).
+    bool ok = backend_.finalize_turn_summary(j.turn_id, made.text, made.model);
     if (!ok) {
         Diskerror::Logger::warn(std::format(
             "[summarizer] finalize_turn_summary failed for turn_id={} "
@@ -392,6 +450,53 @@ void SummarizerService::handle_l2(const Job& j) {
         lang::MSG_SUMMARIZER_L2, display_guid, ts));
 
     return;
+}
+
+// --------------------------------------------------------------------
+// X22 (Q2/L2): refresh the L2 row of a turn that was merged after it was
+// summarized (store_turn's merge branch bumped its `stale` counter). The
+// row stays stale — retried by the next tick — whenever nothing is written:
+// no inference configured, or an empty summary. Nothing here counts toward
+// poison-abandon: the row already holds a real summary, and the persistent
+// counter is this job's retry mechanism.
+// --------------------------------------------------------------------
+void SummarizerService::handle_l2_refresh(const Job& j) {
+    auto inf = inference_provider_ ? inference_provider_() : nullptr;  // once per job
+    if (!inf) {
+        std::call_once(no_inference_warned_, [] {
+            Diskerror::Logger::info(lang::MSG_SUMMARIZER_NO_ENDPOINT);
+        });
+        return;  // the row stays stale; the next tick retries
+    }
+
+    const auto made = make_l2_text(inf.get(), j.user_text, j.assistant_text,
+                                   j.model_name);
+    if (made.text.empty()) {
+        Diskerror::Logger::info(std::format(
+            "[summarizer] L2 refresh deferred (inference unreachable) for "
+            "turn_summary_id={} (session={})", j.turn_summary_id,
+            j.session_guid.empty() ? "-" : j.session_guid));
+        return;  // no write; the row stays stale for the next tick
+    }
+
+    // clear_stale=true with the observed counter: a merge that landed while
+    // this summary was being built keeps the row stale for the next tick.
+    if (!backend_.refresh_turn_summary(j.turn_summary_id, made.text, made.model,
+                                       j.observed_stale, /*clear_stale=*/true)) {
+        Diskerror::Logger::warn(std::format(
+            "[summarizer] refresh_turn_summary found no row for turn_summary_id={}",
+            j.turn_summary_id));
+        return;
+    }
+    {
+        // Inference just worked: reopen the abandoned-reset window (same
+        // signal handle_l2 gives on a successful summary).
+        std::lock_guard<std::mutex> lk(mutex_);
+        reset_backoff_.succeeded();
+    }
+    Diskerror::Logger::info(std::format(
+        "[summarizer] L2 refreshed for turn_summary_id={} (session={})",
+        j.turn_summary_id, j.session_guid.empty() ? "-" : j.session_guid));
 }
 
 // --------------------------------------------------------------------

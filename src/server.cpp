@@ -607,7 +607,16 @@ struct Server::Impl {
         // serve() before the listeners start, so every request thread sees a
         // fully-constructed pointer without locking.
         if (result.captured && summarizer_) {
-            const std::string assistant = body.value("assistant", std::string());
+            // X22 (Q2/L2): after a same-exchange merge the request's
+            // `assistant` fragment is NOT the whole reply — enqueue the
+            // turn's CURRENT assistant_text so a first-time L2 for a turn
+            // that was merged before its first summary summarizes
+            // everything. Fall back to the fragment when the read fails or
+            // comes back empty.
+            std::string assistant = body.value("assistant", std::string());
+            if (const auto full = memory.backend()->turn_assistant_text(result.turn_id);
+                full && !full->empty())
+                assistant = *full;
             if (!assistant.empty())
                 summarizer_->enqueue_turn(result.turn_id, result.clean_user, assistant,
                                           body.value("model", std::string()),

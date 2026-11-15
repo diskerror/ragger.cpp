@@ -792,6 +792,61 @@ static void t_tools_parity_s95(HttpFixture& fx) {
     (void)ragger::set_config_persisted("build_context", "");  // restore default
 }
 
+// X22 (Q2/L2) test 5: /turn after a same-exchange merge must enqueue the
+// turn's CURRENT assistant_text (the whole reply), not just the fragment of
+// the request that merged it. No inference is configured in this fixture, so
+// the summarizer's LR S62 floor copies the enqueued source verbatim: the L2
+// row that reappears after the merge shows exactly what was enqueued.
+void x22_test_turn_merge_enqueues_whole_reply(HttpFixture& fx) {
+    std::println("  x22_test_turn_merge_enqueues_whole_reply...");
+    const std::string guid = "x22-http-merge";
+    RawDb db((fx.env.base() + "/http_test.db").c_str());
+    auto l2_for = [&](int turn_id) -> std::string {
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(db.h,
+            "SELECT text FROM turn_summaries WHERE turn_id = ?", -1, &st, nullptr) == SQLITE_OK);
+        sqlite3_bind_int(st, 1, turn_id);
+        std::string t;
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const unsigned char* c = sqlite3_column_text(st, 0);
+            t = c ? reinterpret_cast<const char*>(c) : "";
+        }
+        sqlite3_finalize(st);
+        return t;
+    };
+
+    // Capture 1; the floor copy lands.
+    const auto r1 = post_json(fx, "/turn",
+        {{"user", "x22 whole reply question"}, {"assistant", "first half alpha"},
+         {"session_id", guid}});
+    CHECK(r1["_status"] == 200);
+    CHECK(r1["status"] == "captured");
+    const int turn_id = r1["turn_id"].get<int>();
+    std::string l2;
+    for (int i = 0; i < 200 && l2.empty(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        l2 = l2_for(turn_id);
+    }
+    CHECK(l2 == "x22 whole reply question | first half alpha");
+
+    // Drop the L2 row, then merge a second reply into the SAME turn. The
+    // live enqueue must carry the merged text — the floor copy proves it.
+    db.exec("DELETE FROM turn_summaries WHERE turn_id = " + std::to_string(turn_id));
+    const auto r2 = post_json(fx, "/turn",
+        {{"user", "x22 whole reply question"}, {"assistant", "second half beta"},
+         {"session_id", guid}});
+    CHECK(r2["_status"] == 200);
+    CHECK(r2["turn_id"] == turn_id);   // merged into the same row
+    l2.clear();
+    for (int i = 0; i < 200 && l2.empty(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        l2 = l2_for(turn_id);
+    }
+    CHECK(l2.find("first half alpha") != std::string::npos);    // not just the fragment
+    CHECK(l2.find("second half beta") != std::string::npos);
+    std::println(" ok");
+}
+
 int main() {
     HttpFixture fx("http");
     CHECK(fx.ready);
@@ -815,6 +870,7 @@ int main() {
     t_document_search_parity_s76(fx);
     t_dashboard_maintenance_s92(fx);
     t_tools_parity_s95(fx);
+    x22_test_turn_merge_enqueues_whole_reply(fx);
 
     std::println("test_http: all passed");
     return 0;

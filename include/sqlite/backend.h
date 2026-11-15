@@ -108,6 +108,7 @@ public:
     bool update_turn_meta(int turn_id,
                           const std::string& timestamp = "",
                           const std::string& session_guid = "") override;
+    std::optional<std::string> turn_assistant_text(int turn_id) override;
     std::vector<std::string> current_decisions(int limit) override;
     std::vector<std::string> decisions_by_status(const std::string& status, int limit) override;
     std::vector<TurnRecord> unsummarized_turns(int limit = 0) override;
@@ -126,6 +127,10 @@ public:
     bool apply_l2_text(int turn_summary_id, const std::string& text,
                        const std::string& summary_model_name,
                        bool overwrite) override;
+    std::vector<StaleL2Candidate> stale_l2_candidates(int limit) override;
+    bool refresh_turn_summary(int turn_summary_id, const std::string& text,
+                              const std::string& summary_model_name,
+                              int observed_stale, bool clear_stale) override;
     std::vector<TriggerCandidate> trigger_backfill_candidates() override;
     bool apply_trigger(int knowledge_id, const std::string& trigger) override;
     std::vector<StrandedCandidate> stranded_l2_candidates(int& ties) override;

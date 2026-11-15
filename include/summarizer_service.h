@@ -78,8 +78,9 @@ public:
 
 private:
     // db 0.17: the session/project rollup and draft job kinds are gone with
-    // session/project rollup layers (PHASE5 D.1).
-    enum class JobKind { L2Turn, EpisodeClose };
+    // session/project rollup layers (PHASE5 D.1). X22 (Q2/L2): L2Refresh
+    // re-summarizes a turn whose L2 row was flagged stale by a merge.
+    enum class JobKind { L2Turn, L2Refresh, EpisodeClose };
 
     struct Job {
         JobKind     kind;
@@ -89,6 +90,10 @@ private:
         std::string model_name;
         std::string session_guid;
         std::string source_timestamp;
+        // X22: L2Refresh carries one stale candidate (the row to rewrite
+        // and the counter observed at selection time).
+        int         turn_summary_id = -1;
+        int         observed_stale  = 0;
     };
 
     void worker_loop();
@@ -96,7 +101,27 @@ private:
 
     /// Handlers — report through logs/DB state only (S25: void).
     void handle_l2(const Job& j);
+    void handle_l2_refresh(const Job& j); // X22: rewrite a merged turn's L2 in place
     void handle_episode_close(const Job& j); // close open episode(s) -> immutable episodes rows
+
+    /// X22 (Q2/L2): the ONE block that turns {user, assistant} into an L2
+    /// summary — system-injected blanking, the `user | assistant` source, the
+    /// summarizer_min_words floor copy (no model call), summarize_transcript +
+    /// choose_summary. Shared by handle_l2 and handle_l2_refresh so both
+    /// produce byte-identical text and provenance. Empty text = inference
+    /// failed or not configured (the caller decides what that means; poison
+    /// accounting stays in handle_l2). `floor_copy` marks the verbatim path
+    /// so handle_l2 keeps its exact pre-X22 logging.
+    struct L2Text {
+        std::string text;
+        std::string model;
+        std::string source;     // the joined source text (for the floor log)
+        bool        floor_copy = false;
+    };
+    L2Text make_l2_text(InferenceClient* inf,
+                        const std::string& user,
+                        const std::string& assistant,
+                        const std::string& turn_model_name);
 
     StorageBackend&  backend_;
     std::function<std::shared_ptr<InferenceClient>()> inference_provider_;
