@@ -32,7 +32,7 @@ inline constexpr std::string_view kCreatable[] = {"current", "provisional", "pen
 // (anything else leaked in as a category word and moves to tags).
 // 'roadmap' and 'deprecated' are legacy words: rows may still carry them,
 // they are no longer offered on any write path. 'deprecated' is terminal
-// like 'retired' (no transition edge exists from it).
+// (no transition edge exists from it).
 inline constexpr std::string_view kMigrationKnown[] = {
     "current", "provisional", "pending", "superseded", "retired", "roadmap", "deprecated"};
 
@@ -65,8 +65,9 @@ bool is_in(const std::string_view (&values)[N], std::string_view v) {
 }
 
 // agent_update transition table, MOVED VERBATIM from agent_write.cpp
-// (kStatuses map). 'superseded' is reachable only through `supersedes` on a
-// new decision, never here; 'retired' is terminal.
+// (kStatuses map), with the X17 (Q3/L3) change: 'retired' is no longer
+// terminal — it can return to current/provisional. 'superseded' is
+// reachable only through `supersedes` on a new decision, never here.
 bool transition_ok(std::string_view from, std::string_view to);
 
 // ---- knowledge kinds (PHASE7) --------------------------------------------

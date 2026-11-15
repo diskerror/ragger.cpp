@@ -3654,7 +3654,8 @@ void test_p4_update_rules(ragger::Embedder& emb) {
         r.status = "current";
         CHECK(throws_invalid(r));
     }
-    {   // current -> provisional -> retired allowed; retired -> anything rejected
+    {   // current -> provisional -> retired allowed; X17 (Q3/L3): retired ->
+        // current is now a legal edge (retired is no longer terminal).
         ragger::UpdateRequest r; r.id = "knowledge:" + std::to_string(pending_id);
         r.status = "provisional";
         db.agent_update(r);
@@ -3662,7 +3663,9 @@ void test_p4_update_rules(ragger::Embedder& emb) {
         db.agent_update(r);
         CHECK(dec_status(pending_id) == "retired");
         r.status = "current";
-        CHECK(throws_invalid(r));
+        auto row = db.agent_update(r);
+        CHECK(row["status"].get<std::string>() == "current");
+        CHECK(dec_status(pending_id) == "current");
     }
 
     db.close();
@@ -3767,6 +3770,24 @@ void test_p4_review(ragger::Embedder& emb) {
     q.query = "kayaks ship dusk";
     for (const auto& h : db.agent_search(q))
         CHECK(h.id != "knowledge:" + std::to_string(b_id));
+
+    // X17 (Q3/L3): reject is reversible — agent_update status=current moves
+    // the retired row back to current, and default search finds it again.
+    {
+        ragger::UpdateRequest u;
+        u.id = "knowledge:" + std::to_string(b_id);
+        u.status = "current";
+        auto row = db.agent_update(u);
+        CHECK(row["status"].get<std::string>() == "current");
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_text(raw, "SELECT status FROM knowledge WHERE knowledge_id = "
+                                  + std::to_string(b_id)) == "current");
+        sqlite3_close(raw);
+    }
+    bool revived_found = false;
+    for (const auto& h : db.agent_search(q))
+        if (h.id == "knowledge:" + std::to_string(b_id)) revived_found = true;
+    CHECK(revived_found);
 
     // Queue is empty now.
     CHECK(db.agent_review("list", {})["pending"].empty());
@@ -5018,7 +5039,14 @@ void p3s_test_status_vocabulary() {
     CHECK(st::transition_ok("roadmap", "current"));
     CHECK(st::transition_ok("roadmap", "provisional"));
     CHECK(!st::transition_ok("superseded", "current"));  // terminal
-    CHECK(!st::transition_ok("retired", "current"));     // terminal
+    // X17 (Q3/L3): 'retired' is no longer terminal — exactly
+    // {current, provisional} leave it; 'pending' is never a target,
+    // same-status and 'superseded' stay off the table.
+    CHECK(st::transition_ok("retired", "current"));
+    CHECK(st::transition_ok("retired", "provisional"));
+    CHECK(!st::transition_ok("retired", "pending"));
+    CHECK(!st::transition_ok("retired", "retired"));
+    CHECK(!st::transition_ok("retired", "superseded"));
     CHECK(!st::transition_ok("deprecated", "current"));  // not in table
     CHECK(!st::transition_ok("nonsense", "current"));
     std::println(" ok");
@@ -5048,10 +5076,12 @@ void p10_test_agent_settable_targets() {
             if (st::transition_ok(from, to)) { any = true; break; }
         CHECK(any);
     }
-    // Terminal: retired and superseded have no outgoing edge; deprecated is
-    // not in the table at all (also terminal).
+    // X17 (Q3/L3): 'retired' is no longer terminal — exactly
+    // {current, provisional} leave it. 'superseded' stays terminal (reachable
+    // only via supersedes); 'deprecated' is not in the table at all (terminal).
     for (const auto& to : st::kMigrationKnown) {
-        CHECK(!st::transition_ok("retired", to));
+        const bool allowed = (to == "current" || to == "provisional");
+        CHECK(st::transition_ok("retired", to) == allowed);
         CHECK(!st::transition_ok("superseded", to));
         CHECK(!st::transition_ok("deprecated", to));
     }
@@ -5096,7 +5126,15 @@ void lr60_test_decision_status_via_agent_update(ragger::Embedder& emb) {
         CHECK(got == "provisional");
     }
     update("retired");                            // legal edge
-    CHECK(throws_iav("current"));                 // retired is terminal
+    // X17 (Q3/L3): 'retired' is no longer terminal — retired -> current is
+    // a legal edge (throws_iav applies it when legal).
+    CHECK(!throws_iav("current"));
+    {
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_text(raw, "SELECT status FROM knowledge WHERE knowledge_id = "
+                                  + std::to_string(id)) == "current");
+        sqlite3_close(raw);
+    }
     {
         ragger::UpdateRequest req;
         req.id = "knowledge:999999";              // no such id -> throws

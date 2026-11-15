@@ -347,7 +347,9 @@ The pending-review queue.
 **Request fields:** `action`: `list | approve | reject`; `ids` (required
 for approve/reject; `knowledge:<n>` handles or bare integers).
 Approve moves each row `pending → current`, reject `pending → retired`;
-a non-pending id fails only that id.
+a non-pending id fails only that id. A rejection is not permanent:
+`memory_update` can move a `retired` row back to `current` or
+`provisional` (`retired` is not terminal).
 
 **Response (list):** `{"pending": [{"id", "trigger", "snippet", ...}]}`
 **Response (approve/reject):** `{"done": [...], "failed": [{"id", "error"}]}`

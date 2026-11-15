@@ -17,7 +17,10 @@ bool transition_ok(std::string_view from, std::string_view to) {
         {"current",     {"provisional", "retired"}},
         {"roadmap",     {"current", "provisional", "retired"}},
         {"superseded",  {}},
-        {"retired",     {}},
+        // X17 (Q3/L3): 'retired' is no longer terminal — a rejected/retired
+        // row can be brought back. 'superseded' stays terminal (reachable
+        // only through `supersedes`); 'pending' is never a target.
+        {"retired",     {"current", "provisional"}},
     };
     auto it = kAllowed.find(std::string(from));
     if (it == kAllowed.end()) return false;
