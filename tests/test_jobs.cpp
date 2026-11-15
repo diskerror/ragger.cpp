@@ -183,22 +183,15 @@ long post_job(HttpFixture& fx, const std::string& name, bool dry_run = false) {
 }
 
 /// Seed a trigger-less decision. `/decision` (store_knowledge) requires a
-/// trigger; `/store category=decision` is the legacy path that produces
-/// exactly the trigger-less rows the back-fill targets.
+/// trigger, and X19 removed the `/store category=decision` path too, so the
+/// back-fill's input rows come from the legacy backend wrapper the importers
+/// use: knowledge kind='decision' with trigger NULL. Embedding is deferred —
+/// the back-fill selects on the trigger, not on the vector.
 long seed_decision(HttpFixture& fx, const std::string& text) {
-    auto r = fx.client.post(fx.url("/store"),
-                            json{{"text", text},
-                                 {"metadata", {{"category", "decision"}}}}.dump(),
-                            fx.auth());
-    CHECK(r.ok());
-    CHECK(r.status == 200);
-    auto parsed = json::parse(r.body);
-    if (parsed.contains("id") && parsed["id"].is_number())
-        return parsed["id"].get<long>();
-    if (parsed.contains("knowledge_id"))
-        return parsed["knowledge_id"].get<long>();
-    CHECK(!parsed.is_null());
-    return -1;
+    const int id = fx.mem->store_decision(text, "current", "", "",
+                                         /*defer_embedding=*/true);
+    CHECK(id > 0);
+    return id;
 }
 
 int triggers_set(sqlite3* db) {

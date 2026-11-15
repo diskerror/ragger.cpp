@@ -112,8 +112,11 @@ constexpr const char* CLI_USAGE_SEARCH        = "Usage: ragger search <query>";
 constexpr const char* CLI_USAGE_STORE         = "Usage: ragger store <text>";
 constexpr const char* CLI_USAGE_DECISION      =
     "Usage:\n"
-    "  ragger decision add <text> [--status=current|provisional|pending] [--tags=a,b,c]\n"
-    "      Store a curated decision. --status defaults to \"current\".\n"
+    "  ragger decision add <text> --trigger=\"Use when ...\" [--status=current|provisional|pending] [--tags=a,b,c]\n"
+    "      Store a curated decision. --trigger is REQUIRED: the situation the\n"
+    "      decision applies to, phrased the way a future question would be\n"
+    "      asked, because that is what search matches against.\n"
+    "      --status defaults to \"current\".\n"
     "  ragger decision list [--status=current|provisional|pending|retired|superseded] [-n N]\n"
     "      List decisions by status, newest first. Defaults to \"current\";\n"
     "      up to 20 rows unless -n says otherwise.\n"
@@ -312,6 +315,13 @@ constexpr const char* ERR_SQL                 = "SQL error: {}";
 constexpr const char* ERR_EMBED_UPDATE_FAILED = "embed_tables: UPDATE {} id {} failed: {}";
 constexpr const char* ERR_EXPORT_SCAN_FAILED  = "export: scan of {} failed mid-read (rc={}): {}";
 constexpr const char* ERR_STORE_FAILED        = "Failed to store: {}";
+
+// X19 (Q9/L6): a decision must have a trigger, and the generic `store` verb
+// can never carry one. One string for every surface (HTTP 400 body, MCP
+// isError text, CLI error) — no per-surface variants.
+constexpr const char* ERR_STORE_DECISION_REQUIRES_TRIGGER =
+    "a decision requires a trigger: store does not accept category 'decision' "
+    "— use the memory_decision verb (POST /decision)";
 
 // --- Errors: embedder ---
 constexpr const char* ERR_MODEL_NOT_FOUND     = "Model file not found: {}";
@@ -545,6 +555,9 @@ constexpr const char* CLI_MIN_CHUNK_SIZE      = "Min chunk size for import";
 constexpr const char* CLI_TITLE               = "Document title (import; default: filename)";
 constexpr const char* CLI_YEAR                = "Document publish year (import)";
 constexpr const char* CLI_TAGS                = "Document tags/subjects, comma-separated (import)";
+constexpr const char* CLI_TRIGGER             =
+    "decision add: the situation the decision applies to, phrased the way a "
+    "future question would be asked (required)";
 constexpr const char* CLI_YES                 = "Skip confirmation prompts (for scripting)";
 
 // --- Main.cpp specific strings (useradd/userdel/add-self) ---

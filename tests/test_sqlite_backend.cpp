@@ -6122,9 +6122,11 @@ void x5_test_reindex_all_locking(ragger::Embedder& emb) {
     std::println(" OK");
 }
 
-// PHASE9B step 6: store() is the single implementation of the store verb;
-// category=decision writes kind='decision' (NULL trigger) with store()'s
-// validation and transaction.
+// PHASE9B step 6: store() is the single implementation of the store verb.
+// X19 (Q9/L6): category=decision is no longer written here (see
+// x19_test_store_rejects_decision); the kind='decision' row shape this test
+// used to pin through store() is now pinned through the legacy wrapper the
+// importers use.
 void p9b_test_store_one_function(ragger::Embedder& emb) {
     std::println("  p9b_test_store_one_function...");
 
@@ -6138,15 +6140,15 @@ void p9b_test_store_one_function(ragger::Embedder& emb) {
     {
         cleanup();
         ragger::sqlite::Backend db(emb, TEMP_DB);
-        const std::string did = db.store("p9bs of by hal use the semqlite shell",
-                                         ragger::json{{"category", "decision"}});
+        const int did = db.store_decision("p9bs of by hal use the semqlite shell",
+                                          "current", "", "", /*defer_embedding=*/true);
         const std::string nid = db.store("p9bs a plain note about harpsichords",
                                          ragger::json::object());
         sqlite3* raw = p1_open_raw();
-        CHECK(p1_scalar_text(raw, "SELECT kind FROM knowledge WHERE knowledge_id = " + did) == "decision");
-        CHECK(p1_scalar_text(raw, "SELECT ifnull(trigger,'NULL') FROM knowledge WHERE knowledge_id = " + did) == "NULL");
+        CHECK(p1_scalar_text(raw, "SELECT kind FROM knowledge WHERE knowledge_id = " + std::to_string(did)) == "decision");
+        CHECK(p1_scalar_text(raw, "SELECT ifnull(trigger,'NULL') FROM knowledge WHERE knowledge_id = " + std::to_string(did)) == "NULL");
         CHECK(p1_scalar_text(raw, "SELECT kind FROM knowledge WHERE knowledge_id = " + nid) == "note");
-        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge_terms WHERE knowledge_id = " + did) > 0);
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge_terms WHERE knowledge_id = " + std::to_string(did)) > 0);
         sqlite3_close(raw);
         // indexed: a keyword search finds it
         auto hits = db.search_text_only("semqlite", 10);
@@ -6163,7 +6165,7 @@ void p9b_test_store_one_function(ragger::Embedder& emb) {
         ragger::sqlite::Backend db(emb, TEMP_DB);
         bool threw = false;
         std::string what;
-        try { db.store("p9bs roadmap note", ragger::json{{"category", "decision"}, {"status", "roadmap"}}); }
+        try { db.store("p9bs roadmap note", ragger::json{{"status", "roadmap"}}); }
         catch (const std::invalid_argument& e) { threw = true; what = e.what(); }
         CHECK(threw);
         CHECK(what == "status must be one of: current, provisional, pending");
@@ -6201,6 +6203,67 @@ void p9b_test_store_one_function(ragger::Embedder& emb) {
         db.close(); cleanup();
     }
 
+    std::println(" OK");
+}
+
+// X19 (Q9/L6): a decision must have a trigger. The generic `store` verb no
+// longer writes kind='decision' at all: it throws std::invalid_argument before
+// any embedding or write, with a message that names the decision verb and says
+// a trigger is required. The case rule is store_kind_for's (an exact
+// "decision" only); every other category is unchanged. defer_embedding is
+// irrelevant — the rejection happens on both paths.
+void x19_test_store_rejects_decision(ragger::Embedder& emb) {
+    std::println("  x19_test_store_rejects_decision...");
+    cleanup();
+    {
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+
+        bool threw = false;
+        std::string what;
+        try { db.store("x19 a ruling with no trigger", ragger::json{{"category", "decision"}}); }
+        catch (const std::invalid_argument& e) { threw = true; what = e.what(); }
+        CHECK(threw);
+        CHECK(what.find("trigger") != std::string::npos);
+        CHECK(what.find("memory_decision") != std::string::npos);
+        // Nothing was written — not the row, not an embedding.
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge") == 0);
+        sqlite3_close(raw);
+
+        // Same rejection with defer_embedding set.
+        threw = false;
+        try { db.store("x19 deferred ruling with no trigger",
+                       ragger::json{{"category", "decision"}}, /*defer_embedding=*/true); }
+        catch (const std::invalid_argument&) { threw = true; }
+        CHECK(threw);
+
+        // Other categories are unchanged (store_kind_for: only an exact
+        // "decision" means kind='decision', so "Decision" stays a note).
+        const std::string nid = db.store("x19 a note about harpsichords",
+                                         ragger::json{{"category", "note"}});
+        const std::string fid = db.store("x19 a fact about the beelink box",
+                                         ragger::json{{"category", "fact"}});
+        const std::string cid = db.store("x19 a capitalised category stays a note",
+                                         ragger::json{{"category", "Decision"}});
+        raw = p1_open_raw();
+        CHECK(p1_scalar_text(raw, "SELECT kind FROM knowledge WHERE knowledge_id = " + nid) == "note");
+        CHECK(p1_scalar_text(raw, "SELECT kind FROM knowledge WHERE knowledge_id = " + fid) == "note");
+        CHECK(p1_scalar_text(raw, "SELECT kind FROM knowledge WHERE knowledge_id = " + cid) == "note");
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge") == 3);
+        sqlite3_close(raw);
+
+        // The decision verb is now the only way to write a decision.
+        ragger::KnowledgeInput in;
+        in.kind    = "decision";
+        in.text    = "x19 rulings go through the decision verb";
+        in.trigger = "when storing a ruling through the generic store verb";
+        const auto r = db.store_knowledge(in);
+        CHECK(r.kind == "decision");
+        raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM knowledge WHERE kind = 'decision'") == 1);
+        sqlite3_close(raw);
+        db.close(); cleanup();
+    }
     std::println(" OK");
 }
 
@@ -8589,6 +8652,7 @@ int main() {
     p9b_test_reindex_atomic(emb);
     x5_test_reindex_all_locking(emb);
     p9b_test_store_one_function(emb);
+    x19_test_store_rejects_decision(emb);
     lr60_test_decision_status_via_agent_update(emb);
     p5_test_episodes_needing_close(emb);
     p5_test_episode_reads(emb);

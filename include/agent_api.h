@@ -22,8 +22,10 @@ namespace ragger {
 
 /// The `store` verb (HTTP POST /store, MCP tool `store`, CLI `ragger store`).
 /// args: {text (required), metadata?: object}. metadata.category == "decision"
-/// stores knowledge kind='decision' (the single rule, store_kind_for);
-/// everything else is a note. metadata.collection defaults to "memory";
+/// is rejected X19 (Q9/L6): a decision needs a trigger, which this verb cannot
+/// carry — the decision verb (memory_decision / POST /decision) is the only way
+/// to write kind='decision'.
+/// Everything else is a note. metadata.collection defaults to "memory";
 /// metadata.source defaults to `default_source` — per-transport provenance
 /// (HTTP: the authenticated user; MCP: "mcp"; CLI: "cli").
 /// Returns the response object {id, status: "stored", kind}.

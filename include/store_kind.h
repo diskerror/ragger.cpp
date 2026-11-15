@@ -6,8 +6,9 @@
  * kind a call means must be decided in exactly one place so the two
  * transports can never disagree. metadata.category == "decision" selects
  * kind='decision'; everything else (absent, empty, "fact", ...) is a note.
- * A trigger-bearing decision goes through memory_decision / POST /decision,
- * never through store.
+ * X19 (Q9/L6): store() rejects the kind this rule selects for "decision" —
+ * every decision, trigger-bearing or not, goes through memory_decision /
+ * POST /decision. The rule itself stays here so the surfaces agree.
  */
 #include "nlohmann_json.hpp"
 

@@ -237,42 +237,59 @@ void t_memory_search_bad_limit(HttpFixture& fx) {
     std::println(" OK");
 }
 
-// A decision stored through the generic surface goes through the SAME
-// validation as POST /decision: a status outside the vocabulary is rejected.
+// X19 (Q9/L6): the generic surface no longer stores decisions at all.
+// `/store category=decision` is a 400 that names the decision verb and says a
+// trigger is required, and writes nothing; the decision verb keeps its own
+// validation (a status outside the vocabulary is still a 400).
 void t_decision_validation_parity(HttpFixture& fx) {
     std::println("  t_decision_validation_parity...");
-    auto good = post_json(fx, "/store",
-                          {{"text", "decision via store surface"},
-                           {"metadata", {{"category", "decision"},
-                                         {"trigger", "when probing parity"}}}});
+    const std::string db_path = fx.env.base() + "/http_test.db";
+
+    auto rejected = post_json(fx, "/store",
+                              {{"text", "decision via store surface"},
+                               {"metadata", {{"category", "decision"},
+                                             {"trigger", "when probing parity"}}}});
+    CHECK(rejected["_status"] == 400);
+    const std::string rmsg = rejected["_raw"].get<std::string>();
+    CHECK(rmsg.rfind("ERROR: ", 0) == 0);
+    CHECK(rmsg.find("trigger") != std::string::npos);
+    CHECK(rmsg.find("memory_decision") != std::string::npos);
+
+    // Nothing was written: the knowledge count is unchanged.
+    {
+        RawDb db(db_path);
+        const long long before = db.scalar("SELECT COUNT(*) FROM knowledge");
+        auto again = post_json(fx, "/store",
+                               {{"text", "decision via store surface, second try"},
+                                {"metadata", {{"category", "decision"}}}});
+        CHECK(again["_status"] == 400);
+        CHECK(db.scalar("SELECT COUNT(*) FROM knowledge") == before);
+    }
+
+    // The decision verb is the way: a trigger writes kind='decision' and the
+    // row is visible through the agent search surface (probed shape: id
+    // "knowledge:<id>", extra.kind).
+    auto good = post_json(fx, "/decision",
+                          {{"text", "decision via the decision verb"},
+                           {"trigger", "when probing parity"}});
     CHECK(good["_status"] == 200);
-    // The generic surface routes by category and reports the stored kind.
     CHECK(good["kind"] == "decision");
 
-    // The row is visible through the agent search surface as knowledge with
-    // kind=decision (probed shape: id "knowledge:<id>", extra.kind).
-    auto found = post_json(fx, "/memory/search", {{"query", "decision via store surface"}});
+    auto found = post_json(fx, "/memory/search", {{"query", "decision via the decision verb"}});
     CHECK(found["_status"] == 200);
     bool seen = false;
-    const std::string want_id = "knowledge:" + good["id"].get<std::string>();
+    const std::string want_id = "knowledge:" + id_of(good);
     for (const auto& hit : found.value("results", json::array()))
         if (hit.value("id", "") == want_id && hit.contains("extra") &&
             hit["extra"].value("kind", "") == "decision")
             seen = true;
     CHECK(seen);
 
-    auto bad = post_json(fx, "/store",
-                         {{"text", "decision with bogus status"},
-                          {"metadata", {{"category", "decision"},
-                                        {"trigger", "when probing status"},
-                                        {"status", "not-a-status"}}}});
+    auto bad = post_json(fx, "/decision",
+                         {{"text", "decision direct with bogus status"},
+                          {"trigger", "when probing status"},
+                          {"status", "not-a-status"}});
     CHECK(bad["_status"] == 400);
-
-    auto direct = post_json(fx, "/decision",
-                            {{"text", "decision direct with bogus status"},
-                             {"trigger", "when probing status"},
-                             {"status", "not-a-status"}});
-    CHECK(direct["_status"] == 400);
     std::println(" OK");
 }
 
@@ -302,17 +319,22 @@ void t_store_http_mcp_parity(HttpFixture& fx) {
     CHECK(h["kind"] == m["kind"]);
     CHECK(!id_of(h).empty() && !id_of(m).empty());
 
-    // decision form: category routes to kind='decision' on both surfaces
+    // X19 (Q9/L6): category=decision is rejected on BOTH surfaces with the
+    // same message (envelope differs per surface: HTTP "ERROR: <msg>" text,
+    // MCP isError with the bare message).
     const json dargs{{"text", "lr70 parity decision"},
                      {"metadata", {{"category", "decision"}}}};
     const auto dh = post_json(fx, "/store", dargs);
-    CHECK(dh["_status"] == 200);
-    CHECK(dh["kind"] == "decision");
-    CHECK(mcp_payload(dargs)["kind"] == "decision");
+    CHECK(dh["_status"] == 400);
+    const auto dr = mcp_call(dargs);
+    CHECK(dr.value("isError", false));
+    const std::string dmsg = dh["_raw"].get<std::string>();
+    CHECK(dmsg.rfind("ERROR: ", 0) == 0);
+    CHECK(dr["content"][0]["text"].get<std::string>() == dmsg.substr(7));
 
     // bad status: rejected with the SAME message (envelope differs)
     const json bargs{{"text", "lr70 parity bad status"},
-                     {"metadata", {{"category", "decision"}, {"status", "not-a-status"}}}};
+                     {"metadata", {{"status", "not-a-status"}}}};
     const auto bh = post_json(fx, "/store", bargs);
     CHECK(bh["_status"] == 400);
     const auto br = mcp_call(bargs);

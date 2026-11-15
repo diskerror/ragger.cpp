@@ -185,6 +185,7 @@ int main(int argc, char **argv) {
             ("title", Diskerror::po::value<std::string>()->default_value(""), CLI_TITLE)
             ("year", Diskerror::po::value<int>()->default_value(0), CLI_YEAR)
             ("tags", Diskerror::po::value<std::string>()->default_value(""), CLI_TAGS)
+            ("trigger", Diskerror::po::value<std::string>()->default_value(""), CLI_TRIGGER)
             ("status", Diskerror::po::value<std::string>()->default_value(""),
                 "decision: status to store (current|provisional|pending) or "
                 "filter list by (any stored status)")
@@ -461,20 +462,33 @@ int main(int argc, char **argv) {
                     Diskerror::Logger::error(ragger::lang::CLI_USAGE_DECISION);
                     return 1;
                 }
+                // X19 (Q9/L6): a decision must have a trigger, so this goes
+                // through the decision verb (the same body as MCP
+                // memory_decision / POST /decision). The generic store verb
+                // now rejects category=decision, so `--trigger` is required
+                // here; --rationale/--scope are verb fields the CLI declares
+                // no option for, so they stay unset.
+                const std::string trigger = opts["trigger"].as<std::string>();
+                if (trigger.empty()) {
+                    Diskerror::Logger::error(ragger::lang::CLI_USAGE_DECISION);
+                    return 1;
+                }
                 std::string text = join_args(args, 1);
                 std::string status = opts["status"].as<std::string>();
                 if (status.empty()) status = "current";
                 std::string tags = opts["tags"].as<std::string>();
-                // LR S70 (R4): one verb body — the same agent_store used by
-                // HTTP /store and MCP `store` with category=decision (the
-                // row, status validation and text handling are identical to
-                // the old store_decision call).
-                nlohmann::json meta{{"category", "decision"}, {"status", status}};
-                if (!tags.empty()) meta["tags"] = tags;
-                const auto stored = ragger::agent_store(
-                    memory, nlohmann::json{{"text", text}, {"metadata", meta}}, "cli");
-                std::println("Stored decision {} (status: {}).",
-                             stored["id"].get<std::string>(), status);
+                nlohmann::json dargs{{"text", text},
+                                     {"trigger", trigger},
+                                     {"status", status}};
+                if (!tags.empty()) dargs["tags"] = tags;
+                try {
+                    const auto stored = ragger::agent_memory_decision(memory, dargs);
+                    std::println("Stored decision {} (status: {}).",
+                                 stored["id"].dump(), status);
+                } catch (const std::invalid_argument& e) {
+                    Diskerror::Logger::error(e.what());
+                    return 1;
+                }
                 return 0;
             }
             if (sub == "list") {

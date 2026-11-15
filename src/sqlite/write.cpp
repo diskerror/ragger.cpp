@@ -144,17 +144,24 @@ static std::string tags_from_metadata(const json& metadata) {
 
 
     // PHASE9B step 6: store() is the ONE implementation of the `store` verb
-    // for both transports. metadata.category == "decision" (the single rule,
-    // store_kind_for) writes knowledge(kind='decision') with a NULL trigger —
-    // the same row store_decision writes for the CLI/importers — instead of a
-    // note. Everything else (status validation, tags, session lookup, model,
-    // transaction, indexing) is shared.
+    // for both transports. X19 (Q9/L6): metadata.category == "decision" (the
+    // single rule, store_kind_for) is now REJECTED — a decision must carry a
+    // trigger and this verb can never supply one, so the trigger-bearing
+    // decision verb (memory_decision / POST /decision) is the only way to
+    // write kind='decision'. The legacy store_decision wrapper stays for the
+    // importers. Everything else (status validation, tags, session lookup,
+    // model, transaction, indexing) is shared.
     std::string Backend::Impl::store(const std::string& raw_text, json metadata, bool defer_embedding) {
         if (metadata.is_null()) metadata = json::object();
 
+        const std::string kind(store_kind_for(metadata));
+        // Before any embedding, before any write: the request is invalid at
+        // the verb level whatever the other fields say.
+        if (kind == "decision")
+            throw std::invalid_argument(std::string(lang::ERR_STORE_DECISION_REQUIRES_TRIGGER));
+
         std::string status = metadata.value("status", std::string("current"));
         validate_creatable_status(status);
-        const std::string kind(store_kind_for(metadata));
 
         // tags: accept a JSON array or a plain string. `keep`/`bad` are
         // flag-tags folded into the tags column — the hard-delete paths that
@@ -808,8 +815,9 @@ static std::string tags_from_metadata(const json& metadata) {
 
     // ---- store_decision: legacy Level 6 curated decision/lesson ----------
     // Thin wrapper over knowledge(kind='decision') WITHOUT the trigger rule
-    // (used by /store category=decision, the CLI, and importers — none of
-    // which ever supplied a trigger). defer_embedding leaves embedding NULL.
+    // (used by the importers — none of which ever supplied a trigger; X19 took
+    // /store category=decision and `ragger decision add` off this path).
+    // defer_embedding leaves embedding NULL.
     int Backend::Impl::store_decision(const std::string& text, const std::string& status,
                        const std::string& tags,
                        const std::string& source_timestamp,

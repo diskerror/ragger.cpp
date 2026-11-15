@@ -1,5 +1,5 @@
 {
-  "description": "Store a memory for later semantic retrieval.",
+  "description": "Store a memory for later semantic retrieval. `metadata.category` is free-form, except that `decision` is rejected: a decision requires a trigger, which this tool cannot carry — use the `memory_decision` tool instead.",
   "inputSchema": {
     "properties": {
       "metadata": {
