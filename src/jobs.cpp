@@ -165,12 +165,11 @@ void JobRunner::run(const std::string& name, bool dry_run) {
         }
         if (name == "housekeeping") {
             if (dry_run) {
-                const auto plan =
-                    backend->housekeeping_plan(config().cleanup_max_age_hours);
+                const auto plan = backend->housekeeping_plan();
                 finish("done",
-                       std::format("would purge {} turn(s), {} unsummarized, "
+                       std::format("{} unsummarized, "
                                    "{} embed missing, {} embed stale",
-                                   plan.purge_turns, plan.unsummarized,
+                                   plan.unsummarized,
                                    plan.embed_missing, plan.embed_stale));
                 return;
             }

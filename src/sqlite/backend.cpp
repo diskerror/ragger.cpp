@@ -327,9 +327,9 @@ int Backend::reindex_table(const std::string& table, const ProgressFn& progress,
     return pImpl->reindex_table(table, progress, cancel);
 }
 
-Backend::HousekeepingPlan Backend::housekeeping_plan(float max_age_hours) const {
+Backend::HousekeepingPlan Backend::housekeeping_plan() const {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->housekeeping_plan(max_age_hours);
+    return pImpl->housekeeping_plan();
 }
 
 std::vector<std::pair<std::string, int>> Backend::reindex_plan(const std::string& table) const {
@@ -438,11 +438,6 @@ std::vector<SearchResult> Backend::search_by_metadata(const json& metadata_filte
                                                            const std::string& before) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->search_by_metadata(metadata_filter, limit, after, before);
-}
-
-int Backend::cleanup_old_conversations(float max_age_hours) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->cleanup_old_conversations(max_age_hours);
 }
 
 // ---- users / settings CRUD (delegate through mutex) -----------------------

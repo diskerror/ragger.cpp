@@ -36,17 +36,45 @@ void test_housekeeping_section_parsing() {
         std::ofstream f(path);
         f << "[server]\nport = 8432\n"
           << "[housekeeping]\n"
-          << "cleanup_max_age_hours = 168\n"
           << "housekeeping_interval = 30\n"
           << "catch_up_batch_size = 25\n";
     }
 
     ragger::Config cfg = ragger::load_config(path).value();
-    assert(cfg.cleanup_max_age_hours == 168.0f);
     assert(cfg.housekeeping_interval == 30);
     assert(cfg.catch_up_batch_size == 25);
 
     fs::remove(path);
+    std::println(" OK");
+}
+
+// X18: cleanup_max_age_hours and the purge are gone. A settings row left over
+// from an older release is an unknown key: silently dropped (policy — no
+// migrate() code for stale keys). It must not crash the DB->config overlay
+// (startup path) and every read path must report no such key.
+void x18_stale_cleanup_key_is_dropped() {
+    std::print("  x18_stale_cleanup_key_is_dropped...");
+    const std::string db = ragger::config().resolved_db_path();
+    ragger::UserStore store(db);
+    store.set_setting("cleanup_max_age_hours", "168");
+
+    // Startup overlay: re-reads only schema keys; the stale row is never
+    // applied and must not throw.
+    bool threw = false;
+    try {
+        ragger::reload_config();
+    } catch (...) {
+        threw = true;
+    }
+    CHECK(!threw);
+
+    // Read paths (`ragger config get`): the key no longer exists anywhere.
+    CHECK(ragger::lang::config_meta("cleanup_max_age_hours") == nullptr);
+    CHECK(!ragger::get_config_value(ragger::config(), "cleanup_max_age_hours"));
+    const auto keys = ragger::all_config_keys();
+    CHECK(std::find(keys.begin(), keys.end(), "cleanup_max_age_hours") == keys.end());
+
+    store.set_setting("cleanup_max_age_hours", "");
     std::println(" OK");
 }
 
@@ -269,7 +297,6 @@ void test_default_values() {
     assert(cfg.bm25_weight == 4.0f);
     assert(cfg.vector_weight == 8.0f);
     assert(cfg.normalize_home_path == true);
-    assert(cfg.cleanup_max_age_hours == 0.0f);  // 0 = keep forever (never delete raw conversations)
     assert(cfg.housekeeping_interval == 60);
     assert(cfg.capture_turns == true);
     assert(cfg.build_context == false);
@@ -563,6 +590,7 @@ int main() {
     TestEnv env("config");  // must be first: set_config_persisted publishes through update_config
     std::print("Running config tests:\n");
     test_housekeeping_section_parsing();
+    x18_stale_cleanup_key_is_dropped();
     p9a_test_shipped_defaults_applied();
     p9b_test_summarizer_prompt_validation();
     p10_pct_validation();

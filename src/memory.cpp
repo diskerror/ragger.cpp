@@ -266,10 +266,6 @@ std::vector<std::pair<int,float>> RaggerMemory::possible_supersedes_for_text(
     return backend_->possible_supersedes_for_text(text);
 }
 
-int RaggerMemory::cleanup_old_conversations(float max_age_hours) {
-    return backend_->cleanup_old_conversations(max_age_hours);
-}
-
 int RaggerMemory::store_note(const std::string& text, const std::string& tags,
                              const std::string& source_timestamp,
                              const std::string& model_name,

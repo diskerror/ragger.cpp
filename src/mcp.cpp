@@ -11,16 +11,16 @@
  *   pending` + `decision set-status`.)
  *   The definitions themselves are tools/*.json, compiled in (LR S95).
  *
- * Housekeeping: if no ragger HTTP server PID file is found, a
- * background thread runs periodic cleanup so the database doesn't
- * grow unbounded when the user only uses MCP mode.
+ * No background housekeeping thread: MCP mode is a short-lived process and
+ * the retention purge it used to run is gone (X18 — honest history has no
+ * opt-out). The summarizer catch-up and embedding backfill live in the
+ * HTTP daemon's housekeeping pass.
  */
 
 #include "build_info.h"
 #include "mcp.h"
 #include "config.h"
 #include "config_access.h"
-#include "daemon_control.h"
 #include "lang.h"
 #include "Logger.h"
 #include "memory.h"
@@ -31,9 +31,6 @@
 #include "nlohmann_json.hpp"
 #include "tools_json.inc"
 
-#include <atomic>
-#include <chrono>
-#include <condition_variable>
 #include <csignal>
 #include <ctime>
 #include <filesystem>
@@ -41,9 +38,7 @@
 #include <iostream>
 #include <map>
 #include <stdexcept>
-#include <mutex>
 #include <print>
-#include <thread>
 #include <unistd.h>
 
 namespace ragger {
@@ -52,12 +47,6 @@ using sqlite::Backend;
 // -----------------------------------------------------------------------
 // Internal helpers
 // -----------------------------------------------------------------------
-
-/// Returns true if a live ragger HTTP daemon owns housekeeping for the
-/// database (S22: the one PID-file scanner in daemon_control.cpp).
-static bool http_server_running() {
-    return ragger::find_live_daemon_pid() > 0;
-}
 
 /// Agent-facing usage guidance, returned in the MCP `initialize` result so
 /// hosts that surface it (per the MCP spec's optional `instructions` field)
@@ -278,49 +267,6 @@ static nlohmann::json tool_call(RaggerMemory& memory,
     }
 }
 
-/// Background thread: periodically remove expired memories when no
-/// HTTP server is doing it.
-// MCP-mode housekeeping loop (S16, C m5): runs on a JOINABLE thread owned by
-// run_mcp — the stop flag + condition variable let the sleep wake at once at
-// shutdown, so the thread never outlives the RaggerMemory it references, and
-// it shares the memory instance instead of opening a second Backend.
-static void housekeeping_thread(RaggerMemory& memory,
-                                const std::atomic<bool>& stop,
-                                std::condition_variable& cv,
-                                std::mutex& cv_mu) {
-    const auto& cfg = config();
-    const float max_age_hours = cfg.cleanup_max_age_hours;
-    const int   interval      = cfg.housekeeping_interval;
-    if (interval == 0) return;
-
-    while (true) {
-        {
-            std::unique_lock<std::mutex> lk(cv_mu);
-            cv.wait_for(lk, std::chrono::seconds(interval),
-                        [&] { return stop.load(); });
-        }
-        if (stop.load()) return;
-        if (http_server_running()) continue;  // hand off to HTTP server
-        if (max_age_hours <= 0) continue;
-
-        try {
-            const int deleted = memory.cleanup_old_conversations(max_age_hours);
-            if (deleted > 0) {
-                std::string msg(ragger::lang::MSG_MCP_HOUSEKEEPING);
-                size_t pos = msg.find("{}");
-                if (pos != std::string::npos) {
-                    msg.replace(pos, 2, std::to_string(deleted));
-                }
-                Diskerror::Logger::info(msg);
-            }
-        } catch (const std::exception& e) {
-            Diskerror::Logger::debug(e.what());
-        } catch (...) {
-            Diskerror::Logger::debug("unknown exception");
-        }
-    }
-}
-
 // -----------------------------------------------------------------------
 // Public entry point
 // -----------------------------------------------------------------------
@@ -340,29 +286,6 @@ nlohmann::json mcp_tool_call(RaggerMemory& memory, const nlohmann::json& params)
 }
 
 void run_mcp(RaggerMemory& memory) {
-    // Spawn housekeeping only when this is the sole Ragger process. The
-    // thread is joinable and owned here (S16): the guard stops it and joins
-    // on every exit path so it can never touch a destroyed RaggerMemory.
-    std::atomic<bool> hk_stop{false};
-    std::mutex hk_mu;
-    std::condition_variable hk_cv;
-    std::thread hk_thread;
-    if (!http_server_running()) {
-        hk_thread = std::thread(housekeeping_thread,
-                                std::ref(memory), std::cref(hk_stop),
-                                std::ref(hk_cv), std::ref(hk_mu));
-    }
-    struct HkJoin {
-        std::atomic<bool>& stop;
-        std::condition_variable& cv;
-        std::thread& t;
-        ~HkJoin() {
-            stop = true;
-            cv.notify_all();
-            if (t.joinable()) t.join();
-        }
-    } hk_join{hk_stop, hk_cv, hk_thread};
-
     // JSON-RPC 2.0 read loop
     auto send = [](const nlohmann::json& msg) {
         std::println("{}", msg.dump());

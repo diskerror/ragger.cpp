@@ -250,29 +250,9 @@ struct Server::Impl {
         }).detach();
     }
 
-    /// Run one housekeeping pass: purge old turns, catch up missing
-    /// summaries, and backfill any NULL embeddings.
+    /// Run one housekeeping pass: catch up missing summaries, and backfill
+    /// any NULL embeddings.
     void run_housekeeping() {
-        const auto& cfg = config();
-        float max_age_hours = cfg.cleanup_max_age_hours;
-
-        // 1. Purge old conversation entries — use the main memory backend,
-        //    not a separate sqlite::Backend. Opening a second connection to the
-        //    same file while the main backend holds it can produce SQLite
-        //    BUSY/LOCKED contention that silently prevents the backfill UPDATE
-        //    in step 3 from committing.
-        if (max_age_hours > 0) {
-            try {
-                int deleted = memory.cleanup_old_conversations(max_age_hours);
-                if (deleted > 0) {
-                    Diskerror::Logger::info(std::format(
-                        lang::MSG_HOUSEKEEPING_EXPIRED, 0, deleted));
-                }
-            } catch (const std::exception& e) {
-                Diskerror::Logger::critical(std::format(lang::ERR_CLEANUP_DB, e.what()));
-            }
-        }
-
         // 2. Catch up unsummarized turns.
         if (summarizer_) {
             summarizer_->enqueue_catch_up();

@@ -13,20 +13,6 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// LR S90: the purge predicate is defined once — cleanup_old_conversations
-// (the real DELETE) and housekeeping_plan (the dry-run count) share it, so
-// the two can never drift apart.
-constexpr const char* kPurgeTurnsWhere =
-    "created_at < ? "
-    "AND EXISTS (SELECT 1 FROM turn_summaries ts WHERE ts.turn_id = turns.turn_id)";
-
-void bind_purge_cutoff(Stmt& s, float max_age_hours) {
-    auto cutoff = std::chrono::system_clock::now() -
-        std::chrono::duration_cast<std::chrono::system_clock::duration>(
-            std::chrono::duration<double, std::ratio<3600>>(max_age_hours));
-    s.bind(1, db_epoch(std::chrono::system_clock::to_time_t(cutoff)));
-}
-
 // LR S90: the embedding staleness filters are defined once — embed_tables
 // and housekeeping_plan share them (the '?' binds the current version).
 constexpr const char* kMissingEmbeddingWhere = "embedding IS NULL";
@@ -392,17 +378,11 @@ constexpr const char* kStaleEmbeddingWhere =
     // LR S90: one housekeeping pass's worth of counts, SELECT-only — the
     // dry-run behind `ragger housekeeping --dry-run` (and S91's dry_run
     // jobs). Predicates are shared with the real pass (server.cpp
-    // run_housekeeping): the purge WHERE, the catch-up selection
+    // run_housekeeping): the catch-up selection
     // (unsummarized_turns in write.cpp + the service's empty-assistant
     // skip), and the embed_tables missing/stale filters.
-    Backend::Impl::HousekeepingPlan Backend::Impl::housekeeping_plan(
-            float max_age_hours) const {
+    Backend::Impl::HousekeepingPlan Backend::Impl::housekeeping_plan() const {
         HousekeepingPlan p;
-        {
-            Stmt s(db, std::string("SELECT COUNT(*) FROM turns WHERE ") + kPurgeTurnsWhere);
-            bind_purge_cutoff(s, max_age_hours);
-            if (s.step()) p.purge_turns = s.column_int(0);
-        }
         {
             Stmt s(db,
                 "SELECT COUNT(*) FROM turns t "
@@ -523,28 +503,6 @@ constexpr const char* kStaleEmbeddingWhere =
         auto out = reindex_tables(progress, cancel);
         set_reindexing("stopped");    // only after the last table's last batch committed
         return out;
-    }
-
-
-    // S38: moved from the Backend wrapper (B §2). v2: raw verbatim exchanges
-    // (L1 turns) are what age out by retention; their gist is preserved in
-    // turn summaries and episodes. Only delete turns that HAVE a
-    // turn_summaries row (marker rows count: '' means done — since LR S63
-    // poison-abandoned; legacy DBs may hold old trivial-skip markers) — a
-    // turn with no summary row is never deleted, so a disabled
-    // summarizer cannot silently destroy unsummarized history. The FK
-    // (turn_summaries.turn_id ON DELETE SET NULL) leaves the summary behind.
-    int Backend::Impl::cleanup_old_conversations(float max_age_hours) {
-        Stmt stmt(db, std::string("DELETE FROM turns WHERE ") + kPurgeTurnsWhere);
-        bind_purge_cutoff(stmt, max_age_hours);
-        if (!stmt.exec())
-            throw std::runtime_error(std::format(
-                "cleanup_old_conversations: DELETE failed: {}", sqlite3_errmsg(db)));
-        const int removed = static_cast<int>(sqlite3_changes(db));
-        // LR S75: raw turns are a warm cache now — dropped rows must not
-        // survive in it.
-        if (removed > 0) invalidate_raw_turn_cache();
-        return removed;
     }
 
 

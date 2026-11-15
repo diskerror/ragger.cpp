@@ -118,8 +118,6 @@ SCHEMA = [
     ("log_max_age_days", "logging", "Log Max Age (days)", "integer", "live", "14", "",
      "Delete rotated backups older than this. 0 disables."),
     # housekeeping
-    ("cleanup_max_age_hours", "housekeeping", "Cleanup Max Age (hrs)", "float", "live", "0", "",
-     "Raw-turn lifetime (0 = keep forever)."),
     ("housekeeping_interval", "housekeeping", "Housekeeping Interval (sec)", "integer", "live", "60", "",
      "Seconds between passes (0 disables)."),
     ("episode_idle_minutes", "housekeeping", "Episode Idle Minutes", "integer", "live", "15", "",

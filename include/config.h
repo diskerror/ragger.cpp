@@ -220,7 +220,6 @@ struct Config {
     std::string default_recipe = "natural_fading";
 
     // --- Housekeeping / retention ---
-    float cleanup_max_age_hours  = 0.0f;  // 0 = keep forever (default)
     int   housekeeping_interval  = 60;      // seconds; 0 = disabled, <10 clamped to 10
     int   summary_pause_minutes  = 20;      // DEPRECATED alias for episode_idle_minutes (kept one release)
     // Idle gap (minutes) after a session's last turn that closes the current

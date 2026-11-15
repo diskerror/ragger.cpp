@@ -366,7 +366,7 @@ static std::expected<Config, ConfigError> parse_config(std::istream& file,
                 int v = std::stoi(val);
                 if (v >= 0) cfg.max_turn_failures = v;
             }
-            else set_raw(key, val);  // cleanup_max_age_hours, episode_threshold_*, episode_step_minutes
+            else set_raw(key, val);  // episode_threshold_*, episode_step_minutes
         }
         else if (section == "llama") {
             // [llama] section removed — use external inference providers
@@ -579,7 +579,6 @@ int reload_config() {
     RELOAD(embed_max_workers);
 
     // Housekeeping / retention
-    RELOAD(cleanup_max_age_hours);
     RELOAD(housekeeping_interval);
     RELOAD(summary_pause_minutes);
     RELOAD(episode_idle_minutes);

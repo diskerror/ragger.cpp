@@ -1700,11 +1700,8 @@ int main(int argc, char **argv) {
             // without a running daemon.
             if (opts.count("dry-run")) {
                 ragger::RaggerMemory memory(db_path, /*skip_embedding_guard=*/true);
-                const auto plan = memory.backend()->housekeeping_plan(
-                    cfg.cleanup_max_age_hours);
+                const auto plan = memory.backend()->housekeeping_plan();
                 std::println("housekeeping (dry run, nothing written):");
-                std::println("  purge turns older than {} h that have a summary: {}",
-                             cfg.cleanup_max_age_hours, plan.purge_turns);
                 std::println("  unsummarized turns (catch-up would enqueue): {}",
                              plan.unsummarized);
                 std::println("  embeddable rows without an embedding: {}", plan.embed_missing);

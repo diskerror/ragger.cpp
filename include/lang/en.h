@@ -455,7 +455,6 @@ constexpr const char* MSG_WARMUP_ERROR          = "Warmup: {}";
 constexpr const char* MSG_PRELOADED_MODEL       = "Preloaded model: {}";
 constexpr const char* MSG_MODEL_PRELOAD_SKIPPED = "Model preload skipped: {}";
 constexpr const char* ERR_CLEANUP_DB            = "Cleanup failed for main DB: {}";
-constexpr const char* MSG_HOUSEKEEPING_EXPIRED  = "Housekeeping: {} sessions expired, {} conversations cleaned";
 constexpr const char* MSG_HOUSEKEEPING_DISABLED = "Housekeeping: disabled (interval = 0)";
 constexpr const char* MSG_HOUSEKEEPING_SIGNAL   = "Housekeeping triggered by signal";
 constexpr const char* MSG_CONFIG_RELOADED_N     = "Config reloaded: {} value(s) changed";
@@ -500,7 +499,6 @@ constexpr const char* ERR_MCP_USER_REQUIRED     = "Error: user parameter require
 constexpr const char* ERR_MCP_QUERY_REQUIRED    = "Error: query parameter required";
 constexpr const char* MSG_MCP_NO_RESULTS        = "No results found.";
 constexpr const char* MSG_MCP_IGNORE_NON_JSON   = "[mcp] ignoring non-JSON input";
-constexpr const char* MSG_MCP_HOUSEKEEPING      = "MCP housekeeping: cleaned {} expired conversations";
 constexpr const char* ERR_MCP_METHOD_NOT_FOUND  = "Method not found: {}";
 
 // --- Client errors ---
@@ -732,9 +730,6 @@ inline constexpr auto kConfigSchema = std::to_array<ConfigMeta>({
      "Delete rotated backups older than this many days. Never touches the live log. 0 disables age-based cleanup."},
 
     // ---- housekeeping ----
-    {"cleanup_max_age_hours", "housekeeping", "Cleanup Max Age (hrs)", CfgType::Float, CfgEdit::Live,
-     "0", "",
-     "Raw-turn lifetime (0 = keep forever). Set to hours to auto-purge."},
     {"housekeeping_interval", "housekeeping", "Housekeeping Interval (sec)", CfgType::Integer, CfgEdit::Live,
      "60", "",
      "Seconds between housekeeping passes (0 disables; values <10 clamp to 10)."},

@@ -139,7 +139,6 @@ log_max_age_days = 14    # delete rotated backups older than this many
 # Housekeeping
 # =====================================================================
 [housekeeping]
-cleanup_max_age_hours = 0     # raw-turn lifetime (0 = keep forever, default; set to hours to auto-purge)
 housekeeping_interval = 60    # seconds between passes (0 disables)
 episode_idle_minutes  = 15    # idle gap (min) that closes an episode of work
                               # within a session (also drives session/project

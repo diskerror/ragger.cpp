@@ -367,7 +367,7 @@ void t_jobs_dry_runs(HttpFixture& fx) {
 
     CHECK(post_job(fx, "housekeeping", true) == 202);
     CHECK(wait_last(fx, "housekeeping", "done"));
-    CHECK(last_message(fx).find("would purge") != std::string::npos);
+    CHECK(last_message(fx).find("unsummarized") != std::string::npos);
 }
 
 void t_jobs_cancel_and_rerun(HttpFixture& fx, job_stub& stub, sqlite3* db,

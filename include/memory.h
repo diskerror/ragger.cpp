@@ -102,9 +102,6 @@ public:
     std::vector<std::pair<int,float>> possible_supersedes_for_text(
         const std::string& text);
 
-    /// Purge conversation turns older than max_age_hours. Returns rows deleted.
-    int cleanup_old_conversations(float max_age_hours);
-
     // PHASE8: the old summary-store / text-update / recent-list wrappers are gone
     // with the `summaries` table. Importers write knowledge notes instead.
     /// Insert a knowledge note (kind='note'): the importer-facing shorthand

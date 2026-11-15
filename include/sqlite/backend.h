@@ -199,7 +199,7 @@ public:
     std::vector<std::pair<std::string, int>> reindex_all(
         const ProgressFn& progress = {},
         const CancelFlag* cancel = nullptr) override;
-    HousekeepingPlan housekeeping_plan(float max_age_hours) const override;
+    HousekeepingPlan housekeeping_plan() const override;
     std::vector<std::pair<std::string, int>> reindex_plan(
         const std::string& table = "all") const override;
 
@@ -209,9 +209,6 @@ public:
                                                  const std::string& before = "") override;
 
     void close() override;
-
-    /// Delete old conversation entries older than specified hours. Returns count deleted.
-    int cleanup_old_conversations(float max_age_hours) override;
 
     // --- Users / settings ---
     std::optional<UserInfo> get_user_by_username(const std::string& username) override;

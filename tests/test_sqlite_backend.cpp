@@ -4485,80 +4485,6 @@ void p2_test_has_embeddings_turn_summaries(ragger::Embedder& emb) {
     std::println(" OK");
 }
 
-// S38: cleanup_old_conversations deletes only OLD turns that HAVE a
-// turn_summaries row (marker rows count); unsummarized turns survive.
-// Failures throw; no open transaction may survive them.
-void p10_cleanup_old_conversations(ragger::Embedder& emb) {
-    std::println("  p10_cleanup_old_conversations...");
-    cleanup();
-    ragger::sqlite::Backend db(emb, TEMP_DB);
-    const std::string old_ts = "2026-01-01 00:00:00";  // far past a 1h cutoff
-    const int a = db.store_turn("old a", "answer a", "", false, "", old_ts);
-    const int b = db.store_turn("old b", "answer b", "", false, "", old_ts);
-    const int c = db.store_turn("old c", "answer c", "", false, "", old_ts);
-    const int d = db.store_turn("recent d", "answer d");
-    CHECK(a > 0 && b > 0 && c > 0 && d > 0);
-    CHECK(db.finalize_turn_summary(a, "summary a", "summarizer-model"));
-    CHECK(db.mark_turn_summarized(b, "trivial-skip-model"));  // marker row
-    // c deliberately gets NO summary row.
-    CHECK(db.finalize_turn_summary(d, "summary d", "summarizer-model"));
-
-    CHECK(db.cleanup_old_conversations(1.0f) == 2);  // A and B only
-
-    sqlite3* raw = nullptr;
-    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
-    CHECK(p1_scalar_int(raw, std::format(
-        "SELECT COUNT(*) FROM turns WHERE turn_id IN ({},{})", a, b)) == 0);
-    CHECK(p1_scalar_int(raw, std::format(
-        "SELECT COUNT(*) FROM turns WHERE turn_id IN ({},{})", c, d)) == 2);
-    // The FK (turn_summaries.turn_id ON DELETE SET NULL) keeps the summaries.
-    CHECK(p1_scalar_int(raw,
-        "SELECT COUNT(*) FROM turn_summaries WHERE turn_id IS NULL AND text = 'summary a'") == 1);
-    // foreign_key_check: no violation rows.
-    {
-        sqlite3_stmt* st = nullptr;
-        CHECK(sqlite3_prepare_v2(raw, "PRAGMA foreign_key_check", -1, &st, nullptr) == SQLITE_OK);
-        CHECK(sqlite3_step(st) == SQLITE_DONE);
-        sqlite3_finalize(st);
-    }
-
-    // Injection (8.0.8): a failing DELETE throws and deletes nothing.
-    // C must match the DELETE first, so mark it summarized (the first pass
-    // correctly skipped it).
-    CHECK(db.mark_turn_summarized(c, "trivial-skip-model"));
-    char* err = nullptr;
-    CHECK(sqlite3_exec(raw,
-        "CREATE TRIGGER p10_boom_del BEFORE DELETE ON turns "
-        "BEGIN SELECT RAISE(ABORT,'p10 injected'); END;",
-        nullptr, nullptr, &err) == SQLITE_OK);
-    sqlite3_free(err);
-    bool threw = false;
-    try {
-        db.cleanup_old_conversations(1.0f);
-    } catch (const std::runtime_error& e) {
-        threw = true;
-        CHECK(std::string(e.what()).find("p10 injected") != std::string::npos);
-    }
-    CHECK(threw);
-    CHECK(p1_scalar_int(raw, std::format(
-        "SELECT COUNT(*) FROM turns WHERE turn_id = {}", c)) == 1);
-    // No open transaction survives the throw (second-connection write works).
-    err = nullptr;
-    CHECK(sqlite3_exec(raw, "INSERT INTO models (name) VALUES ('p10_cleanup_after_throw')",
-                       nullptr, nullptr, &err) == SQLITE_OK);
-    sqlite3_free(err);
-    err = nullptr;
-    CHECK(sqlite3_exec(raw, "DROP TRIGGER p10_boom_del", nullptr, nullptr, &err) == SQLITE_OK);
-    sqlite3_free(err);
-    // After the trigger is gone the marked turn ages out normally.
-    CHECK(db.cleanup_old_conversations(1.0f) == 1);
-    sqlite3_close(raw);
-
-    db.close();
-    cleanup();
-    std::println(" OK");
-}
-
 // S37: finalize_turn_summary/mark_turn_summarized distinguish UNIQUE (false,
 // "already summarized") from any other INSERT failure (throw), and an empty
 // model name on mark_turn_summarized is invalid_argument, not a silent false.
@@ -8331,8 +8257,7 @@ void lr90_test_maintenance_verbs(ragger::Embedder& emb) {
         const std::string before = bf_dump(raw);
         CHECK(db.count_embeddable_rows("all") > 0);
         (void)db.reindex_plan("all");
-        const auto plan = db.housekeeping_plan(100000.0f);   // cutoff far in the past
-        CHECK(plan.purge_turns == 0);
+        const auto plan = db.housekeeping_plan();
         CHECK(plan.unsummarized == 1);
         CHECK(plan.embed_missing == 600);   // the raw-inserted document chunks
         CHECK(plan.embed_stale == 0);
@@ -8639,7 +8564,6 @@ int main() {
     p2_test_write_paths_postings(emb);
     p2_test_store_turn_under_outer_begin(emb);
     p2_test_has_embeddings_turn_summaries(emb);
-    p10_cleanup_old_conversations(emb);
     p10_summary_insert_failures(emb);
     p10_defer_binds_null(emb);
     p10_knowledge_get_absent_keys(emb);

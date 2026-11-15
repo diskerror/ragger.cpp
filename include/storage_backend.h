@@ -553,12 +553,11 @@ public:
     /// only — the dry-run behind `ragger housekeeping --dry-run`. The
     /// predicates are shared with the real pass (no drift).
     struct HousekeepingPlan {
-        int purge_turns = 0;     // old turns with a summary row (cleanup)
         int unsummarized = 0;    // turns awaiting L2 catch-up
         int embed_missing = 0;   // embeddable rows with no embedding
         int embed_stale = 0;     // embeddable rows at an old embedding_version
     };
-    virtual HousekeepingPlan housekeeping_plan(float max_age_hours) const = 0;
+    virtual HousekeepingPlan housekeeping_plan() const = 0;
 
     /// LR S90: what `reindex <table|all>` WOULD walk — row count per text
     /// table (reindex indexes every row; SELECT only).
@@ -573,12 +572,6 @@ public:
 
     /// Close the backend and release resources.
     virtual void close() = 0;
-
-    /// Retention purge of raw L1 turns older than the given age, but ONLY
-    /// turns that already have a turn_summaries row (marker rows count) —
-    /// unsummarized turns are never deleted (S38). Returns count deleted;
-    /// throws on statement failure.
-    virtual int cleanup_old_conversations(float max_age_hours) = 0;
 
     // --- Users / settings table CRUD (gap closure: replaces UserStore's own sqlite3* connection) ---
 

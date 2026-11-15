@@ -83,7 +83,6 @@ const std::unordered_map<std::string_view, float Config::*>& float_fields() {
         {"fts_w_unigram",           &Config::fts_w_unigram},
         {"fts_w_bigram",            &Config::fts_w_bigram},
         {"fts_w_metaphone",         &Config::fts_w_metaphone},
-        {"cleanup_max_age_hours",   &Config::cleanup_max_age_hours},
         {"episode_threshold_base",  &Config::episode_threshold_base},
         {"episode_threshold_cap",   &Config::episode_threshold_cap},
         {"episode_threshold_step",  &Config::episode_threshold_step},

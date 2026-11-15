@@ -462,13 +462,6 @@ struct Backend::Impl {
     std::vector<std::pair<std::string, int>> reindex_tables(
         const ProgressFn& progress, const CancelFlag* cancel = nullptr);
 
-    /// S38: retention purge of raw L1 turns. Deletes turns older than the
-    /// cutoff ONLY where a turn_summaries row exists (marker rows count:
-    /// '' means done/skipped on purpose). A turn that was never summarized
-    /// is never deleted — its raw text would be lost before the gist was
-    /// captured. Throws on any statement failure; returns rows deleted.
-    int cleanup_old_conversations(float max_age_hours);
-
     /// Resolve a session GUID to its compact integer id WITHOUT creating it.
     /// nullopt = no such session. Callers decide whether that is an error
     /// (store, store_episode_close) or merely absent provenance (store_knowledge).
@@ -880,7 +873,7 @@ struct Backend::Impl {
     // committed; a cancel or failure leaves the table name set.
     int reindex_table(const std::string& table_name, const ProgressFn& progress = {},
                         const CancelFlag* cancel = nullptr);
-    HousekeepingPlan housekeeping_plan(float max_age_hours) const;
+    HousekeepingPlan housekeeping_plan() const;
     std::vector<std::pair<std::string, int>> reindex_plan(const std::string& table) const;
 
     // Truncate the shared `terms` table + reset its AUTOINCREMENT counter.
