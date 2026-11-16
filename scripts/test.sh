@@ -38,6 +38,7 @@ cd "$SCRIPT_DIR/.."
 # schema verification needs build/ragger; the schema does not depend on the
 # stats flag.
 "$SCRIPT_DIR/verify-schema-sql.sh"
+python3 "$SCRIPT_DIR/gen-openclaw-tools.py" --check
 
 echo ""
 if [ "$WITH_STATS" -eq 1 ]; then

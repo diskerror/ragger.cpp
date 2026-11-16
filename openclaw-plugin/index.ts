@@ -5,6 +5,11 @@
  * HTTP: connects to the Ragger daemon (multi-user, auth via token).
  * MCP: fork+execs `ragger mcp` as the current user (single-user, no auth needed).
  * Both can run simultaneously — SQLite WAL handles concurrent access.
+ *
+ * Tools follow the Ragger 0.17 agent API (memory_search, memory_get,
+ * memory_timeline, memory_note, memory_decision, memory_update,
+ * document_search), generated from tools/*.json by scripts/gen-openclaw-tools.py.
+ * NOTE: ported to 0.17 without a live OpenClaw to test against.
  */
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
@@ -299,16 +304,75 @@ class McpClient {
 }
 
 // ============================================================================
+// Agent tool definitions (generated from tools/*.json)
+// ============================================================================
+
+// BEGIN GENERATED AGENT_TOOLS (scripts/gen-openclaw-tools.py; do not edit by hand)
+const AGENT_TOOLS: Array<{ name: string; path: string; label: string; description: string; parameters: Record<string, unknown> }> = [
+  {
+    name: "memory_search",
+    path: "/memory/search",
+    label: "Memory Search",
+    description: "Layered search across the conversation and knowledge corpora. Returns handles + snippets only — call memory_get with chosen handles for full text. `layers` narrows by layer (turn_summary, episode, knowledge); empty = all. Documents are NOT searched here — use document_search. `kinds` narrows knowledge hits (decision, insight, note). Legacy layer names 'decision'/'insight' are accepted and mean knowledge restricted to that kind. status: 'active' (default) hides superseded/retired knowledge, 'any' includes them. since/until: 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or relative ('30d', '12h'). For conversation history use memory_get(session=..., after_turn=...).",
+    parameters: {"properties": {"exclude_session": {"description": "Drop results from this session GUID.", "type": "string"}, "layers": {"description": "Restrict to these layers (turn_summary, episode, knowledge). 'turn' is raw exchange text, searched only when named explicitly; prefer the summaries. 'session' matches session titles (lexical only, opt-in). Documents use document_search.", "items": {"type": "string"}, "type": "array"}, "limit": {"description": "Max results (default 10, max 50).", "type": "integer"}, "max_tokens": {"description": "Token budget (~chars/4) over snippets; 0 = none.", "type": "integer"}, "mode": {"description": "hybrid (default) | semantic (vector only; needs an embedder) | keyword (text index only).", "type": "string"}, "query": {"description": "The search query.", "type": "string"}, "session": {"description": "Only results from this session GUID.", "type": "string"}, "since": {"description": "Only results at/after this time.", "type": "string"}, "status": {"description": "Knowledge rows only (any kind): active (default) | any | one exact status.", "type": "string"}, "tags": {"description": "Knowledge rows must carry ALL listed tags (AND rule; trimmed, case-insensitive; `project:<name>` is just a tag). A comma string is accepted. Layers without tags are excluded.", "items": {"type": "string"}, "type": ["array", "string"]}, "until": {"description": "Only results at/before this time.", "type": "string"}}, "required": ["query"], "type": "object"},
+  },
+  {
+    name: "memory_get",
+    path: "/memory/get",
+    label: "Memory Get",
+    description: "Read full rows by typed handles ('<layer>:<rowid>' from memory_search), or page through one session's conversation history. Exactly one mode per call: ids, or session (+optional after_turn/before_turn/limit). expand: none | context (neighbouring turns/chunks) | sources (one level down: knowledge -> its episodes, episode -> its summaries, summary -> its turn) | chain (knowledge supersede lineage, oldest to newest; may cross kinds).",
+    parameters: {"properties": {"after_turn": {"description": "History: turns with turn_id > this (0 = from start).", "type": "integer"}, "before_turn": {"description": "History: turns with turn_id < this (0 = to end).", "type": "integer"}, "expand": {"description": "none | context | sources | chain.", "type": "string"}, "ids": {"description": "Typed handles (mode 1).", "items": {"type": "string"}, "type": "array"}, "limit": {"description": "History page size (default 20, max 100).", "type": "integer"}, "session": {"description": "Session GUID for history paging (mode 2).", "type": "string"}}, "type": "object"},
+  },
+  {
+    name: "memory_timeline",
+    path: "/memory/timeline",
+    label: "Memory Timeline",
+    description: "What happened recently, as a deterministic newest-first list (no search ranking). granularity 'turn' = per-exchange summaries (falling back to raw user text), 'episode' = episode summaries (default), 'session' = one row per session (guid, name, turn span, episode count, newest episode text), 'knowledge' = stored knowledge rows newest first (id, kind, status). Filters: session GUID, since/until ('YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or relative '30d'/'12h'). Page through with the returned next_cursor; null means the end.",
+    parameters: {"properties": {"cursor": {"description": "Opaque next_cursor from the previous page.", "type": "string"}, "granularity": {"description": "turn | episode | session | knowledge (default episode).", "enum": ["turn", "episode", "session", "knowledge"], "type": "string"}, "limit": {"description": "Page size (default 20, max 100).", "type": "integer"}, "session": {"description": "Only this session GUID.", "type": "string"}, "since": {"description": "Lower time bound.", "type": "string"}, "until": {"description": "Upper time bound (bare date = end of day).", "type": "string"}}, "type": "object"},
+  },
+  {
+    name: "memory_note",
+    path: "/memory/note",
+    label: "Memory Note",
+    description: "Store a note (fact, preference, lesson) into memory. To scope a note to a project, tag it (e.g. `project:ragger`). The result may carry the working directory when `cwd` is given. The result may carry `possible_supersedes`: current decisions this note may contradict (hint only — nothing was changed; review them, and record a real ruling with memory_decision instead). Pass evidence (episode ids from search) when you are recording a synthesized insight; it is stored as an insight linked to those sources. `trigger` is only valid on an insight (with evidence); `session` records which session the note came from.",
+    parameters: {"properties": {"evidence": {"description": "episode ids (or \"episode:<id>\" handles) this note synthesizes; get ids from memory_search (layer 'episode') hits. When present the note is stored as an insight (response carries \"kind\":\"insight\") instead of a plain note.", "items": {"type": ["integer", "string"]}, "type": "array"}, "session": {"description": "Session GUID to record as provenance (stored on the row; unknown GUID stores without a link, not an error).", "type": "string"}, "tags": {"description": "Optional tags.", "items": {"type": "string"}, "type": "array"}, "text": {"description": "The note text.", "type": "string"}, "trigger": {"description": "When this insight applies, in the vocabulary of a future query. Only valid together with evidence; on a plain note it is a 400.", "type": "string"}}, "required": ["text"], "type": "object"},
+  },
+  {
+    name: "memory_decision",
+    path: "/decision",
+    label: "Memory Decision",
+    description: "Record a standing decision: a ruling plus the situation it applies to. `trigger` is required and is phrased the way a FUTURE question would be asked (\"Use when choosing a full-text index strategy\"), because that is what search matches against. To replace an earlier decision, pass its id in `supersedes`; the old row is kept and marked superseded.",
+    parameters: {"properties": {"evidence": {"description": "episode ids (or \"episode:<id>\" handles) this decision rests on (optional for decisions). Cite an episode you relied on; get ids from memory_search (layer 'episode') hits.", "items": {"type": ["integer", "string"]}, "type": "array"}, "rationale": {"description": "Why; alternatives considered and rejected.", "type": "string"}, "scope": {"description": "What this does NOT apply to.", "type": "string"}, "session": {"description": "Current session GUID, for provenance.", "type": "string"}, "status": {"description": "Default current. provisional = agreed, not yet proven.", "enum": ["current", "provisional", "pending"], "type": "string"}, "supersedes": {"description": "knowledge_id this replaces (any kind).", "type": "integer"}, "tags": {"description": "Optional tags (use `project:<name>` to scope).", "items": {"type": "string"}, "type": "array"}, "text": {"description": "The ruling itself, imperative.", "type": "string"}, "trigger": {"description": "When this applies, in the vocabulary of a future query.", "type": "string"}}, "required": ["text", "trigger"], "type": "object"},
+  },
+  {
+    name: "memory_update",
+    path: "/memory/update",
+    label: "Memory Update",
+    description: "Curate one row's METADATA by typed handle: knowledge status (legal transitions only; 'superseded' is set only by storing a superseding row), tags (replaces the whole set). Agent notes (summaries without a model) accept tags; summarizer rollups and turn / turn_summary / document rows are not editable. Text is NEVER edited in place — to change what something says, store a new decision (memory_decision with supersedes) or note; passing `text` here is always rejected. Returns the updated row.",
+    parameters: {"properties": {"id": {"description": "Typed handle '<layer>:<rowid>'.", "type": "string"}, "status": {"description": "Knowledge status: current | provisional | pending | retired.", "type": "string"}, "tags": {"description": "Replacement tags (array) or comma-separated string; replaces the whole set.", "items": {"type": "string"}, "type": ["array", "string"]}}, "required": ["id"], "type": "object"},
+  },
+  {
+    name: "document_search",
+    path: "/memory/documents",
+    label: "Document Search",
+    description: "Search imported documents (their own verb; memory_search does not cover them). Returns document:<N> handles + snippets — call memory_get with chosen handles for full text. `source` narrows to paths containing this substring (case-insensitive).",
+    parameters: {"properties": {"limit": {"description": "Max results (default 10, max 50).", "type": "integer"}, "mode": {"description": "hybrid (default) | semantic (vector only; needs an embedder) | keyword (text index only).", "type": "string"}, "query": {"description": "The search query.", "type": "string"}, "source": {"description": "Only documents whose stored source path contains this.", "type": "string"}}, "required": ["query"], "type": "object"},
+  },
+];
+// END GENERATED AGENT_TOOLS
+
+// ============================================================================
 // Transport Abstraction
 // ============================================================================
 
 interface RaggerTransport {
   search(query: string, limit?: number, min_score?: number, collections?: string[]): Promise<{ results: Array<{ text: string; score: number; metadata: Record<string, string>; timestamp?: string }> }>;
   store(text: string, metadata?: Record<string, unknown>): Promise<{ id: string; status: string }>;
-  decision(args: Record<string, unknown>): Promise<{ id: string; status: string; kind?: string }>;
+  /** Any agent-API tool by name (HTTP: POST its route; MCP: tools/call). */
+  call(tool: string, args: Record<string, unknown>): Promise<unknown>;
   captureTurn(user: string, assistant: string, model: string, session_id: string): Promise<{ status: string; turn_id: number }>;
-  count(): Promise<{ count: number }>;
   health(): Promise<{ status: string; memories?: number }>;
+  status(): Promise<unknown>;
 }
 
 function makeHttpTransport(serverUrl: string): RaggerTransport {
@@ -319,17 +383,19 @@ function makeHttpTransport(serverUrl: string): RaggerTransport {
     async store(text, metadata) {
       return raggerFetch(serverUrl, "/store", { text, metadata }) as Promise<{ id: string; status: string }>;
     },
-    async decision(args) {
-      return raggerFetch(serverUrl, "/decision", args) as Promise<{ id: string; status: string; kind?: string }>;
+    async call(tool, args) {
+      const path = AGENT_TOOLS.find((t) => t.name === tool)?.path;
+      if (!path) throw new Error(`unknown Ragger tool: ${tool}`);
+      return raggerFetch(serverUrl, path, args);
     },
     async captureTurn(user, assistant, model, session_id) {
       return raggerFetch(serverUrl, "/turn", { user, assistant, model, session_id }) as Promise<{ status: string; turn_id: number }>;
     },
-    async count() {
-      return raggerFetch(serverUrl, "/count") as Promise<{ count: number }>;
-    },
     async health() {
       return raggerFetch(serverUrl, "/health") as Promise<{ status: string; memories: number }>;
+    },
+    async status() {
+      return raggerFetch(serverUrl, "/health");
     },
   };
 }
@@ -347,20 +413,18 @@ function makeMcpTransport(client: McpClient): RaggerTransport {
     async store(text, metadata) {
       return client.callTool("store", { text, ...(metadata ? { metadata } : {}) }) as Promise<{ id: string; status: string }>;
     },
-    async decision(args) {
-      return client.callTool("memory_decision", args) as Promise<{ id: string; status: string; kind?: string }>;
+    async call(tool, args) {
+      return client.callTool(tool, args);
     },
     async captureTurn(user, assistant, model, session_id) {
       return client.callTool("capture_turn", { user, assistant, model, session_id }) as Promise<{ status: string; turn_id: number }>;
     },
-    async count() {
-      // MCP doesn't have a count tool — do a search with limit 0 or return unknown
-      // For now, return a placeholder since count isn't a critical tool
-      return { count: -1 };
-    },
     async health() {
       // If MCP client is running, it's healthy
       return { status: "ok" };
+    },
+    async status() {
+      return client.callTool("status", {});
     },
   };
 }
@@ -403,55 +467,26 @@ const raggerPlugin = {
     // Tools
     // ========================================================================
 
-    api.registerTool(
-      {
-        name: "memory_search",
-        label: "Memory Search",
-        description:
-          "Search long-term memory by meaning. Use when you need context about past conversations, user preferences, decisions, or facts.",
-        parameters: {
-          type: "object",
-          required: ["query"],
-          properties: {
-            query: { type: "string", description: "Search query (semantic — searches by meaning)" },
-            limit: { type: "number", description: "Max results (default: 5)" },
-            min_score: { type: "number", description: "Minimum similarity 0-1 (default: 0.0)" },
+    // Agent-API tools: one generic registration per generated definition.
+    for (const tool of AGENT_TOOLS) {
+      api.registerTool(
+        {
+          name: tool.name,
+          label: tool.label,
+          description: tool.description,
+          parameters: tool.parameters,
+          async execute(_toolCallId, params) {
+            if (!transport) throw new Error("Ragger transport not initialized");
+            const data = await transport.call(tool.name, (params ?? {}) as Record<string, unknown>);
+            return {
+              content: [{ type: "text", text: JSON.stringify(data) }],
+              details: data as Record<string, unknown>,
+            };
           },
         },
-        async execute(_toolCallId, params) {
-          if (!transport) throw new Error("Ragger transport not initialized");
-          const { query, limit = 5, min_score = 0.0 } = params as {
-            query: string;
-            limit?: number;
-            min_score?: number;
-          };
-
-          const data = await transport.search(query, limit, min_score);
-
-          if (!data.results || data.results.length === 0) {
-            return {
-              content: [{ type: "text", text: "No relevant memories found." }],
-              details: { count: 0 },
-            };
-          }
-
-          const text = data.results
-            .map((r, i) => {
-              const meta = r.metadata?.source ? ` (source: ${r.metadata.source})` : "";
-              return `${i + 1}. [${(r.score * 100).toFixed(0)}%] ${r.text}${meta}`;
-            })
-            .join("\n");
-
-          return {
-            content: [
-              { type: "text", text: `Found ${data.results.length} memories:\n\n${text}` },
-            ],
-            details: { count: data.results.length, results: data.results },
-          };
-        },
-      },
-      { name: "memory_search" },
-    );
+        { name: tool.name },
+      );
+    }
 
     api.registerTool(
       {
@@ -508,71 +543,20 @@ const raggerPlugin = {
 
     api.registerTool(
       {
-        name: "memory_decision",
-        label: "Memory Decision",
-        description:
-          "Record a standing decision: a ruling plus the situation it applies to. `trigger` is REQUIRED and is " +
-          "written the way a FUTURE question would be asked (e.g. 'Use when choosing a full-text index strategy'); " +
-          "search matches on it. To replace an earlier decision, pass its id in `supersedes`; the old one is kept " +
-          "and marked superseded, never overwritten. This is the only way to store a decision.",
-        parameters: {
-          type: "object",
-          required: ["text", "trigger"],
-          properties: {
-            text: { type: "string", description: "The ruling itself, imperative." },
-            trigger: { type: "string", description: "When this applies, in the vocabulary of a future query." },
-            rationale: { type: "string", description: "Why; alternatives considered and rejected." },
-            scope: { type: "string", description: "What this does NOT apply to." },
-            tags: { type: "array", items: { type: "string" } },
-            status: { type: "string", enum: ["current", "provisional", "pending"], description: "Default current." },
-            supersedes: { type: "integer", description: "knowledge id this replaces (any kind)." },
-            evidence: {
-              type: "array",
-              items: { type: ["integer", "string"] },
-              description: "episode ids (or \"episode:<id>\" handles) this decision rests on.",
-            },
-          },
-        },
-        async execute(_toolCallId, params) {
-          if (!transport) throw new Error("Ragger transport not initialized");
-          const args = params as Record<string, unknown>;
-          const text = typeof args.text === "string" ? args.text.trim() : "";
-          const trigger = typeof args.trigger === "string" ? args.trigger.trim() : "";
-          if (!text || !trigger) throw new Error("memory_decision requires both text and trigger");
-
-          const data = await transport.decision({ ...args, text, trigger });
-
-          return {
-            content: [{ type: "text", text: `Decision stored: ${data.id}` }],
-            details: { action: "created", id: data.id },
-          };
-        },
-      },
-      { name: "memory_decision" },
-    );
-
-    api.registerTool(
-      {
-        name: "memory_get",
-        label: "Memory Count",
-        description: "Get the number of stored memories.",
+        name: "memory_status",
+        label: "Memory Status",
+        description: "Ragger daemon status (version, memory counts, embedding health). Read-only.",
         parameters: { type: "object", properties: {} },
         async execute() {
           if (!transport) throw new Error("Ragger transport not initialized");
-          const data = await transport.count();
-          if (data.count < 0) {
-            return {
-              content: [{ type: "text", text: "Memory count not available via MCP transport." }],
-              details: { count: -1 },
-            };
-          }
+          const data = await transport.status();
           return {
-            content: [{ type: "text", text: `Total memories stored: ${data.count}` }],
-            details: { count: data.count },
+            content: [{ type: "text", text: JSON.stringify(data) }],
+            details: data as Record<string, unknown>,
           };
         },
       },
-      { name: "memory_get" },
+      { name: "memory_status" },
     );
 
     // ========================================================================

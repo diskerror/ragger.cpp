@@ -104,13 +104,23 @@ when sub-users need to connect with tokens.
 
 ## Agent Tools
 
-This gives the agent three tools:
-- **memory_search** — Semantic search over stored memories
-- **memory_store** — Save new memories with optional metadata
-- **memory_get** — Get the count of stored memories
+> **Caveat: untested.** This plugin was ported to the Ragger 0.17 agent API
+> without a live OpenClaw to test against. It was only exercised against a stub
+> HTTP server (every tool reaches its route, the recall and capture hooks fire).
+> Expect rough edges; reports welcome.
 
-With `autoRecall` enabled, relevant memories are automatically injected
-into context before each agent turn (via the `before_prompt_build` hook).
-With `autoCapture`, each completed turn is pushed to Ragger's `capture_turn`
-(via the `agent_end` hook) for background summarization — the daemon stores
-it only when `[server] capture_turns` is enabled.
+The tool set is the 0.17 agent API, generated from `tools/*.json`
+(`scripts/gen-openclaw-tools.py`; `--check` fails when the plugin is stale):
+
+- **memory_search**: layered search (turn summaries, episodes, knowledge); handles + snippets
+- **memory_get**: full rows by typed handle, or conversation pages by session
+- **memory_timeline**: newest-first lists by turn / episode / session / knowledge
+- **memory_note**: note or insight (insight when `evidence` is given)
+- **memory_decision**: decision with a required `trigger`
+- **memory_update**: metadata-only curation (status, tags)
+- **document_search**: imported documents
+- **memory_store**: flat store of facts, preferences, lessons (`category: "decision"` is rejected; use `memory_decision`)
+- **memory_status**: daemon status
+
+Upgrading from the 0.16 plugin: `memory_get` used to return the memory count
+(now `memory_status`), and `memory_search` was a flat semantic search.

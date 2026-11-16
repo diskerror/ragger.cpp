@@ -232,8 +232,13 @@ macOS (arm64 and x86_64) and Linux (x86_64 and aarch64) are supported. Windows n
 | [TLS setup](docs/tls-setup.md)                                 | HTTPS via reverse proxy or native cert/key                     |
 | [Agent integration](docs/agent-integration.md)                 | MCP and Claude Desktop                                         |
 | [Agent memory instructions](docs/agent-memory-instructions.md) | Guidance served to agents over MCP                             |
-| [OpenClaw](docs/openclaw.md)                                   | OpenClaw plugin setup                                          |
+| [OpenClaw](docs/openclaw.md)                                   | OpenClaw plugin setup (**untested**, see caveat in the doc)    |
 | [Testing your install](docs/testing-your-install.md)           | End-to-end smoke check                                         |
+
+> **OpenClaw caveat:** the OpenClaw plugin (`openclaw-plugin/`) was ported to
+> the 0.17 agent API without a live OpenClaw to test against. It has only been
+> exercised against a stub HTTP server, not a real OpenClaw host or daemon.
+> The Hermes, Claude Code and Claude Desktop integrations are the tested ones.
 
 ## Tests
 
