@@ -15,6 +15,13 @@
  * the retention purge it used to run is gone (X18 — honest history has no
  * opt-out). The summarizer catch-up and embedding backfill live in the
  * HTTP daemon's housekeeping pass.
+ *
+ * No-daemon rule (Q8, accepted behavior — Reid, 2026-11-14): an install
+ * that runs only `ragger mcp`, without a daemon, stores turns and
+ * knowledge but builds no summaries — L2 rows and episodes are created
+ * when a daemon with a configured summarizer endpoint next runs its
+ * catch-up. Writes from this process also do not invalidate a running
+ * daemon's caches, and this process does not SIGHUP the daemon.
  */
 
 #include "build_info.h"

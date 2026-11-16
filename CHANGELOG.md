@@ -20,6 +20,7 @@
 
 **Summarizer / episodes**
 - Every new turn captured via `/turn` is enqueued to the summarizer immediately instead of waiting for the next catch-up tick
+- No-daemon rule (accepted behavior, not a bug): an install that runs only `ragger mcp` — without a daemon — stores turns and knowledge but builds no summaries — L2 turn summaries and episodes are created when a daemon with a configured summarizer endpoint next runs its catch-up; writes from the `ragger mcp` process do not invalidate a running daemon's caches, and the MCP process does not signal the daemon
 - A turn that merges additional data after it was summarized carries a `stale` counter (merges not yet reflected in its summary text); the periodic catch-up refreshes the summary in place — text, embedding and index — and clears the counter only when no newer merge landed meanwhile
 - Failing turns back off (5 min, doubling to 6 h) instead of retrying every tick
 - Episodes close when a session has been idle past `episode_idle_minutes`, split on embedding-similarity boundaries (the existing rule), with membership recorded

@@ -43,7 +43,9 @@ C++ port of the original Python [Ragger Memory](https://github.com/diskerror/rag
   `ragger re-embed` or the dashboard's "Update now".
 - **HTTP and MCP, same data.** Daemon serves a REST API; `ragger mcp`
   speaks JSON-RPC over stdio. Bearer-token auth on remote requests; unix-socket and loopback are
-  pre-authenticated.
+  pre-authenticated. Running MCP-only (no daemon) stores turns and knowledge but builds no
+  summaries — the daemon's catch-up fills them in later; see
+  [Agent integration](docs/agent-integration.md).
 - **Markdown-aware import.** Heading-aware chunking; Claude Code and claude.ai conversation archives
   import with original timestamps.
 
