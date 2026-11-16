@@ -1685,7 +1685,7 @@ int main(int argc, char **argv) {
                 else if (kind == "triggers")
                     res = ragger::backfill_triggers(*backend, inference, dry_run, progress);
                 else if (kind == "stranded")
-                    res = ragger::backfill_stranded(*backend, dry_run, progress);
+                    res = ragger::backfill_stranded(*backend, inference, dry_run, progress);
                 else
                     res = ragger::backfill_session_names(*backend, inference, dry_run, progress);
             } catch (const std::invalid_argument& e) {
@@ -1696,15 +1696,17 @@ int main(int argc, char **argv) {
             }
 
             if (dry_run) {
-                std::println("{}: {} candidate(s){}{}",
+                std::println("{}: {} candidate(s){}{}{}",
                              kind, res.candidates,
+                             res.episodes ? std::format(", {} episode(s) to regenerate", res.episodes) : "",
                              res.ties ? std::format(", {} tie(s)", res.ties) : "",
                              res.open_tail ? std::format(", {} left alone (open tail)", res.open_tail) : "");
                 audit.done(std::format("{} dry-run: {} candidate(s)", kind, res.candidates));
                 return res.failed > 0 ? 1 : 0;
             }
-            std::println("{}: {} candidate(s), {} applied, {} skipped, {} failed{}{}",
+            std::println("{}: {} candidate(s), {} applied, {} skipped, {} failed{}{}{}",
                          kind, res.candidates, res.applied, res.skipped, res.failed,
+                         res.episodes ? std::format(", {} episode(s)", res.episodes) : "",
                          res.ties ? std::format(", {} tie(s)", res.ties) : "",
                          res.open_tail ? std::format(", {} left alone (open tail)", res.open_tail) : "");
             audit.done(std::format("{}: {} applied, {} failed", kind, res.applied, res.failed));

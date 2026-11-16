@@ -396,6 +396,49 @@ public:
     /// embedding/terms). Guarded on episode_id IS NULL AND text != ''.
     virtual bool attach_stranded_l2(int turn_summary_id, int episode_id) = 0;
 
+    /// X23 (Q5/L4): one `turn_summaries` row as the episode-regeneration
+    /// pass sees it. user_text/assistant_text/turn_model_name come from the
+    /// LIVE turn when turn_id is set (empty otherwise); model_name is the
+    /// summary's provenance model. turn_datetime orders members; episode_id
+    /// is 0 when the row belongs to no episode.
+    struct EpisodeMember {
+        int         turn_summary_id;
+        std::string text;
+        int         turn_id;          // 0 when turn_id IS NULL
+        int         stale;
+        std::string user_text;
+        std::string assistant_text;
+        std::string turn_model_name;
+        std::string model_name;
+        int64_t     turn_datetime;
+        int         episode_id;       // 0 when episode_id IS NULL
+    };
+
+    /// X23 (Q5/L4): the episode's content members (non-empty text), ordered
+    /// turn_datetime ASC, turn_summary_id ASC.
+    virtual std::vector<EpisodeMember> episode_members(int episode_id) = 0;
+
+    /// X23 (Q5/L4): read one turn_summaries row by id (the late-L2 read of
+    /// the episode-regeneration pass). nullopt when no such row.
+    virtual std::optional<EpisodeMember> l2_member_by_id(int turn_summary_id) = 0;
+
+    /// X23 (Q5/L4): replace an episode's DERIVED text in place (no history)
+    /// and, in the SAME transaction, clear the refreshed members' stale
+    /// counters and attach late L2 rows. Order: validate -> embed outside
+    /// the txn -> BEGIN -> UPDATE episodes (must change exactly 1 row, else
+    /// roll back, return false) -> index -> per-cleared-pair
+    /// `stale = 0 WHERE ... AND stale = observed` (zero rows changed is NOT
+    /// an error: a newer merge keeps the row stale for the next tick) -> per
+    /// attach `episode_id = ? WHERE ... episode_id IS NULL AND text != ''`
+    /// (ZERO rows changed rolls EVERYTHING back and returns false — someone
+    /// else attached it) -> COMMIT -> invalidate. Empty text ->
+    /// std::invalid_argument. span_start, span_end, created_at and
+    /// session_id are never touched.
+    virtual bool replace_episode_text(int episode_id, const std::string& text,
+                                      const std::string& model_name,
+                                      const std::vector<std::pair<int,int>>& cleared,
+                                      const std::vector<int>& attach_ids) = 0;
+
     /// Content L2 rows left alone by the stranded pass: no episode, and no
     /// closed span of their session covers their time (the open tail after
     /// the last span, rows in a gap between spans, and sessions with no

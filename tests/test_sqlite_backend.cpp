@@ -7241,32 +7241,270 @@ void lr67_test_backfill_stranded(ragger::Embedder& emb) {
     const std::string g2 = "bf-strand-b";
     auto other = p5_seed_members(db, g2, {"2026-05-01 10:02:00"});
 
-    // Dry-run: counts, nothing written.
+    // Dry-run: counts (candidates AND episodes), nothing written — works
+    // with an unconfigured client (X23: the sweep regenerates too, but a
+    // dry run never needs inference).
+    ragger::InferenceClient none({}, "", 64);
     {
         const std::string before = bf_dump(raw);
-        auto dry = ragger::backfill_stranded(db, true);
+        auto dry = ragger::backfill_stranded(db, none, true);
         CHECK(dry.candidates == 1);            // late[0] (inside ep1/ep2)
+        CHECK(dry.episodes == 1);              // all candidates land on ep1
         CHECK(dry.ties == 1);                  // covered by both spans
         CHECK(dry.open_tail >= 1);             // late[1] after the last span (+ session b's row)
         CHECK(bf_dump(raw) == before);
     }
 
-    auto res = ragger::backfill_stranded(db, false);
-    CHECK(res.candidates == 1);
-    CHECK(res.applied == 1);
-    // Greatest span_start <= t wins: ep1 (10:00) over ep2 (09:55).
-    CHECK(p1_scalar_int(raw, "SELECT episode_id FROM turn_summaries WHERE turn_summary_id = " + std::to_string(late[0])) == ep1);
-    // Open tail untouched; foreign session untouched.
-    CHECK(p1_scalar_int(raw, "SELECT episode_id FROM turn_summaries WHERE turn_summary_id = " + std::to_string(late[1])) == 0 /* NULL reads as 0 */);
-    CHECK(p1_scalar_int(raw, "SELECT episode_id IS NULL FROM turn_summaries WHERE turn_summary_id = " + std::to_string(other[0])) == 1);
-    // The episode itself is unchanged (membership-only).
-    CHECK(p1_scalar_text(raw, "SELECT text FROM episodes WHERE episode_id = " + std::to_string(ep1)) == "bf-strand ep1");
+    // X23 (Q5/L4): the sweep regenerates the episode text too. The member
+    // texts here are short (3 words each): the joined text is at/below the
+    // S62 floor, so the rebuild is a floor copy — NO model call — and the
+    // episode text becomes the member texts joined in turn_datetime order
+    // (m0 10:00, late 10:02, m1 10:05).
+    {
+        bf_stub stub("Stranded regen summary");
+        auto client = stub.client();
+        auto res = ragger::backfill_stranded(db, client, false);
+        CHECK(res.candidates == 1);
+        CHECK(res.applied == 1);               // late rows attached
+        CHECK(res.episodes == 1);
+        // Greatest span_start <= t wins: ep1 (10:00) over ep2 (09:55).
+        CHECK(p1_scalar_int(raw, "SELECT episode_id FROM turn_summaries WHERE turn_summary_id = " + std::to_string(late[0])) == ep1);
+        // Open tail untouched; foreign session untouched.
+        CHECK(p1_scalar_int(raw, "SELECT episode_id FROM turn_summaries WHERE turn_summary_id = " + std::to_string(late[1])) == 0 /* NULL reads as 0 */);
+        CHECK(p1_scalar_int(raw, "SELECT episode_id IS NULL FROM turn_summaries WHERE turn_summary_id = " + std::to_string(other[0])) == 1);
+        // The episode text is REPLACED (derived text, no history) by the
+        // floor copy of the members in order.
+        CHECK(p1_scalar_text(raw, "SELECT text FROM episodes WHERE episode_id = " + std::to_string(ep1))
+              == "p5 summary bf-strand-a0\n\np5 summary bf-strand-a0\n\np5 summary bf-strand-a1");
+        CHECK(stub.calls == 0);                // floor: no model call needed
+    }
 
-    auto again = ragger::backfill_stranded(db, false);
+    auto again = ragger::backfill_stranded(db, none, true);
     CHECK(again.candidates == 0);
 
     sqlite3_close(raw);
     db.close();
+    cleanup();
+    std::println(" ok");
+}
+
+// X23 (Q5/L4): the sweep with an empty (unconfigured) client and NOT dry-run
+// refuses with the existing "inference not configured" error and writes
+// nothing.
+void x23_test_backfill_stranded_refuses(ragger::Embedder& emb) {
+    std::println("  x23_test_backfill_stranded_refuses...");
+    cleanup();
+    {
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        sqlite3* raw = p1_open_raw();
+
+        const std::string g = "x23-refuse";
+        auto m = p5_seed_members(db, g, {"2026-05-01 10:00:00"});
+        ragger::EpisodeClose ec;
+        ec.text = "x23-refuse episode";
+        ec.model_name = "summarizer-model";
+        ec.session_guid = g;
+        ec.span_start = p5_epoch("2026-05-01 09:59:00");
+        ec.span_end   = p5_epoch("2026-05-01 10:05:00");
+        ec.member_turn_summary_ids = {m[0]};
+        CHECK(db.store_episode_close(ec) > 0);
+        auto late = p5_seed_members(db, g, {"2026-05-01 10:02:00"});
+        CHECK(!late.empty());
+
+        ragger::InferenceClient none({}, "", 64);
+        const std::string before = bf_dump(raw);
+        bool refused = false;
+        try {
+            ragger::backfill_stranded(db, none, false);
+        } catch (const std::invalid_argument& e) {
+            refused = std::string(e.what()) == "inference not configured";
+        }
+        CHECK(refused);
+        CHECK(bf_dump(raw) == before);         // nothing written
+
+        sqlite3_close(raw);
+        db.close();
+    }
+    cleanup();
+    std::println(" ok");
+}
+
+// X23 (Q5/L4): the episode-regeneration backend primitives — episode_members
+// (ordered member read), l2_member_by_id (late-row read) and
+// replace_episode_text (atomic text replacement + stale clears + guarded
+// attach). Pinned RED at HEAD: none of these exist yet (compile failure).
+void x23_test_episode_members_and_replace(ragger::Embedder& emb) {
+    std::println("  x23_test_episode_members_and_replace...");
+    cleanup();
+    {
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        sqlite3* raw = p1_open_raw();
+
+        const std::string guid = "x23-be";
+        const int t1 = db.store_turn("x23be q one", "x23be a one", "test-model",
+                                     false, guid, "2026-05-01 10:00:00");
+        const int t2 = db.store_turn("x23be q two", "x23be a two", "test-model",
+                                     false, guid, "2026-05-01 10:10:00");
+        CHECK(t1 > 0 && t2 > 0);
+        CHECK(db.finalize_turn_summary(t1, "x23be member one text", "summarizer-model"));
+        CHECK(db.finalize_turn_summary(t2, "x23be member two text", "summarizer-model"));
+        const int ts1 = bf_ts_id(raw, t1), ts2 = bf_ts_id(raw, t2);
+
+        ragger::EpisodeClose ec;
+        ec.text = "x23be epoldword episode old";
+        ec.model_name = "summarizer-model";
+        ec.session_guid = guid;
+        ec.span_start = p5_epoch("2026-05-01 09:59:00");
+        ec.span_end   = p5_epoch("2026-05-01 10:11:00");
+        ec.member_turn_summary_ids = {ts1, ts2};
+        const int ep = db.store_episode_close(ec);
+        CHECK(ep > 0);
+
+        const auto ep_sql = [&](const char* col) {
+            return p1_scalar_int(raw, std::string("SELECT ") + col +
+                " FROM episodes WHERE episode_id = " + std::to_string(ep));
+        };
+        const long long span_s0 = ep_sql("span_start");
+        const long long span_e0 = ep_sql("span_end");
+        const long long created0 = ep_sql("created_at");
+        const long long sess0 = ep_sql("session_id");
+
+        // episode_members: turn_datetime order, live-turn texts, provenance.
+        auto members = db.episode_members(ep);
+        CHECK(members.size() == 2);
+        CHECK(members[0].turn_summary_id == ts1);
+        CHECK(members[1].turn_summary_id == ts2);
+        CHECK(members[0].text == "x23be member one text");
+        CHECK(members[0].turn_id == t1);
+        CHECK(members[0].stale == 0);
+        CHECK(members[0].user_text == "x23be q one");
+        CHECK(members[0].assistant_text == "x23be a one");
+        CHECK(members[0].turn_model_name == "test-model");
+        CHECK(members[0].model_name == "summarizer-model");
+        CHECK(members[0].episode_id == ep);
+        CHECK(db.episode_members(999999).empty());
+
+        // Late row inside the span (unattached) + the by-id read.
+        const int t3 = db.store_turn("x23be q late", "x23be a late", "test-model",
+                                     false, guid, "2026-05-01 10:05:00");
+        CHECK(db.finalize_turn_summary(t3, "x23be late text", "summarizer-model"));
+        const int ts3 = bf_ts_id(raw, t3);
+        const auto lm = db.l2_member_by_id(ts3);
+        CHECK(lm.has_value());
+        CHECK(lm->episode_id == 0);
+        CHECK(lm->text == "x23be late text");
+        CHECK(lm->turn_datetime == p5_epoch("2026-05-01 10:05:00"));
+        CHECK(!db.l2_member_by_id(999999).has_value());
+
+        // Replace + attach: text/model/embedding rewritten, identity columns
+        // untouched, the late row attached, the index rewritten.
+        CHECK(db.replace_episode_text(ep, "x23be NEWB regenerated span text",
+                                      "stub-model", {}, {ts3}));
+        CHECK(p1_scalar_text(raw, "SELECT text FROM episodes WHERE episode_id = "
+                                  + std::to_string(ep)) == "x23be NEWB regenerated span text");
+        CHECK(p1_scalar_text(raw, "SELECT m.name FROM episodes e "
+                                  "JOIN models m ON m.model_id = e.model_id WHERE e.episode_id = "
+                                  + std::to_string(ep)) == "stub-model");
+        CHECK(ep_sql("embedding IS NOT NULL") == 1);
+        CHECK(ep_sql("span_start") == span_s0);
+        CHECK(ep_sql("span_end") == span_e0);
+        CHECK(ep_sql("created_at") == created0);
+        CHECK(ep_sql("session_id") == sess0);
+        CHECK(p1_scalar_int(raw, "SELECT episode_id FROM turn_summaries WHERE turn_summary_id = "
+                                  + std::to_string(ts3)) == ep);
+        {
+            bool new_hit = false, old_hit = false;
+            for (const auto& r : db.search_text_only("NEWB", 20).results)
+                if (r.metadata.value("source", "") == "episode" && r.id == ep) new_hit = true;
+            for (const auto& r : db.search_text_only("epoldword", 20).results)
+                if (r.metadata.value("source", "") == "episode" && r.id == ep) old_hit = true;
+            CHECK(new_hit);
+            CHECK(!old_hit);
+        }
+
+        // cleared pairs clear stale ONLY where the observed counter still
+        // matches: a merge that landed meanwhile keeps the row stale (zero
+        // rows changed is not an error).
+        CHECK(sqlite3_exec(raw, ("UPDATE turn_summaries SET stale = 2 WHERE turn_summary_id = "
+                                 + std::to_string(ts1)).c_str(),
+                           nullptr, nullptr, nullptr) == SQLITE_OK);
+        CHECK(db.replace_episode_text(ep, "x23be keep stale text", "stub-model",
+                                      {{ts1, 1}}, {}));
+        CHECK(p1_scalar_int(raw, "SELECT stale FROM turn_summaries WHERE turn_summary_id = "
+                                  + std::to_string(ts1)) == 2);
+        CHECK(db.replace_episode_text(ep, "x23be clear stale text", "stub-model",
+                                      {{ts1, 2}}, {}));
+        CHECK(p1_scalar_int(raw, "SELECT stale FROM turn_summaries WHERE turn_summary_id = "
+                                  + std::to_string(ts1)) == 0);
+
+        // Attach race: the row is already attached -> false, and the whole
+        // call rolled back (the episode text stays what the last write left).
+        CHECK(!db.replace_episode_text(ep, "x23be FOURTH not landing", "stub-model",
+                                       {}, {ts3}));
+        CHECK(p1_scalar_text(raw, "SELECT text FROM episodes WHERE episode_id = "
+                                  + std::to_string(ep)) == "x23be clear stale text");
+
+        // Unknown episode -> false; empty text -> invalid_argument.
+        CHECK(!db.replace_episode_text(999999, "x23be whatever text", "m", {}, {}));
+        bool threw_empty = false;
+        try { db.replace_episode_text(ep, "", "m", {}, {}); }
+        catch (const std::invalid_argument&) { threw_empty = true; }
+        CHECK(threw_empty);
+
+        // Empty-text (poison marker) rows: never a member, never a stranded
+        // candidate.
+        const int t4 = db.store_turn("x23be q four", "x23be a four", "test-model",
+                                     false, guid, "2026-05-01 10:07:00");
+        CHECK(db.mark_turn_summarized(t4, "bad"));
+        const int ts4 = bf_ts_id(raw, t4);
+        CHECK(sqlite3_exec(raw, ("UPDATE turn_summaries SET episode_id = " + std::to_string(ep) +
+                                 " WHERE turn_summary_id = " + std::to_string(ts4)).c_str(),
+                           nullptr, nullptr, nullptr) == SQLITE_OK);
+        members = db.episode_members(ep);
+        CHECK(members.size() == 3);   // ts1, ts2, ts3 — the marker is excluded
+        for (const auto& m : members) CHECK(m.turn_summary_id != ts4);
+        const int t5 = db.store_turn("x23be q five", "x23be a five", "test-model",
+                                     false, guid, "2026-05-01 10:08:00");
+        CHECK(db.mark_turn_summarized(t5, "bad"));
+        const int ts5 = bf_ts_id(raw, t5);
+        int ties = 0;
+        for (const auto& c : db.stranded_l2_candidates(ties)) {
+            CHECK(c.turn_summary_id != ts4);
+            CHECK(c.turn_summary_id != ts5);
+        }
+
+        // Injected failure on the episodes UPDATE: replace throws and the
+        // WHOLE unit is atomic — episode text, the member's stale counter and
+        // the late row's episode_id all unchanged.
+        const int t6 = db.store_turn("x23be q six", "x23be a six", "test-model",
+                                     false, guid, "2026-05-01 10:06:00");
+        CHECK(db.finalize_turn_summary(t6, "x23be late six text", "summarizer-model"));
+        const int ts6 = bf_ts_id(raw, t6);
+        CHECK(sqlite3_exec(raw, ("UPDATE turn_summaries SET stale = 1 WHERE turn_summary_id = "
+                                 + std::to_string(ts1)).c_str(),
+                           nullptr, nullptr, nullptr) == SQLITE_OK);
+        CHECK(sqlite3_exec(raw,
+            "CREATE TRIGGER x23_abort_ep BEFORE UPDATE ON episodes "
+            "BEGIN SELECT RAISE(ABORT, 'x23 injected'); END;",
+            nullptr, nullptr, nullptr) == SQLITE_OK);
+        bool threw_upd = false;
+        try {
+            db.replace_episode_text(ep, "x23be ABORTED text", "stub-model",
+                                    {{ts1, 1}}, {ts6});
+        } catch (const std::runtime_error&) { threw_upd = true; }
+        CHECK(threw_upd);
+        CHECK(p1_scalar_text(raw, "SELECT text FROM episodes WHERE episode_id = "
+                                  + std::to_string(ep)) == "x23be clear stale text");
+        CHECK(p1_scalar_int(raw, "SELECT stale FROM turn_summaries WHERE turn_summary_id = "
+                                  + std::to_string(ts1)) == 1);
+        CHECK(p1_scalar_int(raw, "SELECT episode_id IS NULL FROM turn_summaries WHERE turn_summary_id = "
+                                  + std::to_string(ts6)) == 1);
+        CHECK(sqlite3_exec(raw, "DROP TRIGGER x23_abort_ep;",
+                           nullptr, nullptr, nullptr) == SQLITE_OK);
+
+        sqlite3_close(raw);
+        db.close();
+    }
     cleanup();
     std::println(" ok");
 }
@@ -8894,6 +9132,8 @@ int main() {
     x9_cli_backfill_opts(env.base());
     lr66_test_backfill_triggers(emb);
     lr67_test_backfill_stranded(emb);
+    x23_test_backfill_stranded_refuses(emb);
+    x23_test_episode_members_and_replace(emb);
     lr67_test_backfill_session_names(emb);
     lr68_test_time_invariants(emb);
     x12_test_update_turn_meta_l2_invariant(emb);

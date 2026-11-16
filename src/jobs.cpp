@@ -194,14 +194,15 @@ void JobRunner::run(const std::string& name, bool dry_run) {
         else if (kind == "triggers")
             res = backfill_triggers(*backend, inf, dry_run, progress, cancel.get());
         else if (kind == "stranded")
-            res = backfill_stranded(*backend, dry_run, progress, cancel.get());
+            res = backfill_stranded(*backend, inf, dry_run, progress, cancel.get());
         else
             res = backfill_session_names(*backend, inf, dry_run, progress,
                                          cancel.get());
 
         const std::string counts =
-            std::format("{} candidate(s), {} applied, {} skipped, {} failed",
-                        res.candidates, res.applied, res.skipped, res.failed);
+            std::format("{} candidate(s), {} applied, {} skipped, {} failed{}",
+                        res.candidates, res.applied, res.skipped, res.failed,
+                        res.episodes ? std::format(", {} episode(s)", res.episodes) : "");
         finish(res.failed > 0 ? "failed" : "done", counts);
     } catch (const cancelled_error& e) {
         finish("cancelled", e.what());

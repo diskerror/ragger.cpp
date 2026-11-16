@@ -615,6 +615,13 @@ struct Backend::Impl {
     std::vector<StrandedCandidate> stranded_l2_candidates(int& ties);
     bool attach_stranded_l2(int turn_summary_id, int episode_id);
     int stranded_open_tail_count();
+    // X23 (Q5/L4): episode-regeneration primitives (see storage_backend.h).
+    std::vector<EpisodeMember> episode_members(int episode_id);
+    std::optional<EpisodeMember> l2_member_by_id(int turn_summary_id);
+    bool replace_episode_text(int episode_id, const std::string& text,
+                              const std::string& model_name,
+                              const std::vector<std::pair<int,int>>& cleared,
+                              const std::vector<int>& attach_ids);
     std::vector<SessionNameCandidate> unnamed_session_candidates();
     bool apply_session_name(int session_id, const std::string& name,
                             const std::string& name_source);

@@ -187,6 +187,28 @@ int Backend::stranded_open_tail_count() {
     return pImpl->stranded_open_tail_count();
 }
 
+// X23 (Q5/L4): episode-regeneration primitives (see storage_backend.h).
+std::vector<StorageBackend::EpisodeMember>
+Backend::episode_members(int episode_id) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->episode_members(episode_id);
+}
+
+std::optional<StorageBackend::EpisodeMember>
+Backend::l2_member_by_id(int turn_summary_id) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->l2_member_by_id(turn_summary_id);
+}
+
+bool Backend::replace_episode_text(int episode_id, const std::string& text,
+                                   const std::string& model_name,
+                                   const std::vector<std::pair<int,int>>& cleared,
+                                   const std::vector<int>& attach_ids) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->replace_episode_text(episode_id, text, model_name, cleared,
+                                       attach_ids);
+}
+
 std::vector<StorageBackend::SessionNameCandidate>
 Backend::unnamed_session_candidates() {
     std::lock_guard<std::mutex> lk(pImpl->mu);

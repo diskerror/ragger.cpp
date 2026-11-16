@@ -1389,7 +1389,9 @@ void x22_test_l2_refresh_after_merge(const std::string& base, const std::string&
 
 // X22 (Q2/L2): an L2 row that already belongs to an episode is flagged by a
 // merge but NOT refreshed by the X22 tick — refreshing it means rebuilding
-// the episode summary, which is X23's job.
+// the episode summary, which is X23's job. X23 (Q5/L4) added that job, so
+// below the same tick the row IS refreshed, through the episode-regeneration
+// path: the member text and the episode text are rewritten together.
 void x22_test_l2_refresh_skips_in_episode(const std::string& base) {
     std::println("  x22_test_l2_refresh_skips_in_episode...");
 
@@ -1448,9 +1450,10 @@ void x22_test_l2_refresh_skips_in_episode(const std::string& base) {
     ec.span_start = when - 30;
     ec.span_end   = when + 30;
     ec.member_turn_summary_ids = {ts_id};
-    CHECK(backend.store_episode_close(ec) > 0);
+    const int ep = backend.store_episode_close(ec);
+    CHECK(ep > 0);
 
-    // Merge: the in-episode row is flagged, and the X22 tick must leave it.
+    // Merge: the in-episode row is flagged, and the X22 pass must not touch it.
     backend.store_turn(u, "x22 episode answer two continuation tail", "turn-model-x", false, guid);
     db = nullptr;
     CHECK(sqlite3_open(db_path.c_str(), &db) == SQLITE_OK);
@@ -1458,11 +1461,24 @@ void x22_test_l2_refresh_skips_in_episode(const std::string& base) {
     CHECK(scalar("SELECT stale" + w) == 1);
     CHECK(scalar("SELECT episode_id IS NOT NULL" + w) == 1);
 
+    // X23 (Q5/L4) supersedes this test's old "the tick leaves it stale": the
+    // L2Refresh pass still SKIPS an in-episode row (refreshing one has to
+    // rebuild its episode), but the same tick now runs the episode-regeneration
+    // job, which refreshes the member and rebuilds the episode with it. The
+    // episode-text assertion is what proves the row went through the regen
+    // path — a bare L2Refresh would have left the episode text alone. The
+    // merged source is 14 words, at/below the summarizer_min_words floor (20),
+    // so both writes are floor copies: still NO model call.
     svc.enqueue_catch_up();
-    std::this_thread::sleep_for(std::chrono::milliseconds(400));   // drain window
-    CHECK(scalar("SELECT stale" + w) == 1);                        // NOT refreshed
-    CHECK(text("SELECT text" + w) == "Episode member summary");
-    CHECK(stub.calls.load() == 0);                                 // no model call
+    for (int i = 0; i < 200 && scalar("SELECT stale" + w) != 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const std::string refreshed =
+        u + " | " + a1 + "\n\n" + "x22 episode answer two continuation tail";
+    CHECK(scalar("SELECT stale" + w) == 0);
+    CHECK(text("SELECT text" + w) == refreshed);
+    CHECK(text("SELECT text FROM episodes WHERE episode_id = " + std::to_string(ep))
+          == refreshed);
+    CHECK(stub.calls.load() == 0);                                 // floor: no model call
     sqlite3_close(db);
     svc.stop();
     backend.close();
@@ -1536,6 +1552,471 @@ void x22_test_l2_refresh_inference_down(const std::string& base) {
     std::println(" ok");
 }
 
+// ---------------------------------------------------------------------------
+// X23 (Q5/L4): episode regeneration — an in-episode stale L2 refreshes its
+// episode; a late (stranded) L2 attaches and rebuilds it. Pinned RED at HEAD:
+// the EpisodeRegen job kind, its enqueue triggers and the handler do not
+// exist yet, so after a merge/tick the member stays stale and the episode
+// text never changes.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// One long L2 text (n distinct tokens > summarizer_min_words default 20).
+std::string x23_long_text(const std::string& tag, int n = 25) {
+    std::string s;
+    for (int i = 0; i < n; ++i) s += tag + std::to_string(i) + " ";
+    return s;
+}
+
+} // namespace
+
+// (1) Episode of 2 L2s; merge the FIRST member's turn -> its L2 stale == 1;
+// tick + drain -> the member text is refreshed AND the episode text equals
+// the fake summary of the member texts in order (the request body carries
+// the refreshed member 1 text before member 2's), the episode embedding is
+// re-computed, stale == 0, span_*/created_at unchanged, and the text index
+// finds a word only the new summary has (not one only the old had).
+void x23_test_episode_regen_stale_member(const std::string& base, const std::string& model_dir) {
+    std::println("  x23_test_episode_regen_stale_member...");
+
+    namespace fs = std::filesystem;
+    const std::string dir = base + "/x23regen1";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const std::string db_path = dir + "/memories.db";
+
+    const bool have_model = fs::exists(model_dir + "/model.onnx") ||
+                            fs::exists(model_dir + "/onnx/model.onnx");
+    std::unique_ptr<ragger::Embedder> emb = have_model
+        ? std::make_unique<ragger::Embedder>(model_dir)
+        : std::make_unique<ragger::Embedder>();
+    ragger::sqlite::Backend backend(*emb, db_path);
+
+    StubChat stub("X23STUBSUMMARY");
+    ragger::SummarizerService svc(backend, [&stub] { return stub.client(); });
+    svc.start();
+
+    sqlite3* db = nullptr;
+    CHECK(sqlite3_open(db_path.c_str(), &db) == SQLITE_OK);
+    auto scalar = [&](const std::string& sql) -> long long {
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        long long v = -999;
+        if (sqlite3_step(st) == SQLITE_ROW) v = sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+        return v;
+    };
+    auto text = [&](const std::string& sql) -> std::string {
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        std::string v;
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const unsigned char* c = sqlite3_column_text(st, 0);
+            v = c ? reinterpret_cast<const char*>(c) : "";
+        }
+        sqlite3_finalize(st);
+        return v;
+    };
+    auto blob = [&](const std::string& sql) -> std::vector<char> {
+        std::vector<char> out;
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const void* b = sqlite3_column_blob(st, 0);
+            const int n = sqlite3_column_bytes(st, 0);
+            if (b && n > 0) out.assign(static_cast<const char*>(b),
+                                       static_cast<const char*>(b) + n);
+        }
+        sqlite3_finalize(st);
+        return out;
+    };
+
+    const std::string guid = "x23-regen-a";
+    const std::string u1 = "x23 regen question one";
+    const std::string a1 = "x23 regen answer one oldmemberword";
+    const int t1 = backend.store_turn(u1, a1, "turn-model-x", false, guid);
+    CHECK(t1 > 0);
+    CHECK(backend.finalize_turn_summary(t1, "x23 member one summary", "summarizer-model"));
+
+    // Merge a long continuation while t1 is still the newest turn: the L2
+    // row gets stale == 1 (X22), the episode does not exist yet.
+    std::string cont;
+    for (int i = 0; i < 25; ++i) cont += "x23cont" + std::to_string(i) + " ";
+    backend.store_turn(u1, cont, "turn-model-x", false, guid);
+    const int ts1 = static_cast<int>(scalar(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t1)));
+    CHECK(scalar("SELECT stale FROM turn_summaries WHERE turn_summary_id = " +
+                 std::to_string(ts1)) == 1);
+
+    // Second member + the episode over both.
+    const int t2 = backend.store_turn("x23 regen question two", "x23 regen answer two",
+                                      "turn-model-x", false, guid);
+    const std::string m2 = x23_long_text("x23m2tok");
+    CHECK(backend.finalize_turn_summary(t2, m2, "summarizer-model"));
+    const int ts2 = static_cast<int>(scalar(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t2)));
+    const long long dt1 = scalar("SELECT turn_datetime FROM turn_summaries WHERE turn_summary_id = "
+                                 + std::to_string(ts1));
+    const long long dt2 = scalar("SELECT turn_datetime FROM turn_summaries WHERE turn_summary_id = "
+                                 + std::to_string(ts2));
+    ragger::EpisodeClose ec;
+    ec.text = "x23 epoldword episode over two members";
+    ec.model_name = "summarizer-model";
+    ec.session_guid = guid;
+    ec.span_start = dt1 - 30;
+    ec.span_end   = dt2 + 30;
+    ec.member_turn_summary_ids = {ts1, ts2};
+    const int ep = backend.store_episode_close(ec);
+    CHECK(ep > 0);
+
+    const long long span_s0 = scalar("SELECT span_start FROM episodes WHERE episode_id = " + std::to_string(ep));
+    const long long span_e0 = scalar("SELECT span_end FROM episodes WHERE episode_id = " + std::to_string(ep));
+    const long long created0 = scalar("SELECT created_at FROM episodes WHERE episode_id = " + std::to_string(ep));
+    const long long sess0 = scalar("SELECT session_id FROM episodes WHERE episode_id = " + std::to_string(ep));
+    const std::vector<char> ep_emb0 = blob("SELECT embedding FROM episodes WHERE episode_id = " + std::to_string(ep));
+
+    // Tick + drain: the in-episode stale member must be refreshed AND the
+    // episode rebuilt with it (RED at HEAD: nothing happens).
+    svc.enqueue_catch_up();
+    for (int i = 0; i < 200 &&
+         scalar("SELECT stale FROM turn_summaries WHERE turn_summary_id = " +
+                std::to_string(ts1)) != 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const std::string w1 = " FROM turn_summaries WHERE turn_summary_id = " + std::to_string(ts1);
+    CHECK(scalar("SELECT stale" + w1) == 0);
+    CHECK(text("SELECT text" + w1) == "X23STUBSUMMARY");   // model summary of BOTH reply parts
+    svc.stop();
+
+    CHECK(text("SELECT text FROM episodes WHERE episode_id = " + std::to_string(ep))
+          == "X23STUBSUMMARY");
+    // Two model calls: the member refresh, then the episode summary. The
+    // episode request carries the refreshed member text BEFORE member 2's
+    // text (order).
+    CHECK(stub.calls.load() == 2);
+    {
+        std::lock_guard<std::mutex> lk(stub.bmu);
+        CHECK(stub.bodies.size() == 2);
+        CHECK(stub.bodies[0].find("oldmemberword") != std::string::npos);  // refresh source: part 1
+        CHECK(stub.bodies[0].find("x23cont0") != std::string::npos);       // ... and part 2
+        const std::string& ep_body = stub.bodies[1];
+        const auto p_new = ep_body.find("X23STUBSUMMARY");
+        const auto p_m2  = ep_body.find("x23m2tok0");
+        CHECK(p_new != std::string::npos && p_m2 != std::string::npos && p_new < p_m2);
+    }
+
+    // Identity columns untouched; embedding re-computed.
+    CHECK(scalar("SELECT span_start FROM episodes WHERE episode_id = " + std::to_string(ep)) == span_s0);
+    CHECK(scalar("SELECT span_end FROM episodes WHERE episode_id = " + std::to_string(ep)) == span_e0);
+    CHECK(scalar("SELECT created_at FROM episodes WHERE episode_id = " + std::to_string(ep)) == created0);
+    CHECK(scalar("SELECT session_id FROM episodes WHERE episode_id = " + std::to_string(ep)) == sess0);
+    if (have_model) {
+        const std::vector<char> ep_emb1 =
+            blob("SELECT embedding FROM episodes WHERE episode_id = " + std::to_string(ep));
+        CHECK(!ep_emb1.empty());
+        CHECK(ep_emb1 != ep_emb0);
+    } else {
+        std::println("    (episode-embedding-differs check skipped: no embedding model)");
+    }
+    sqlite3_close(db);
+
+    // Text index rewritten: a word only the NEW summary has is found on the
+    // episode corpus; a word only the OLD text had is not.
+    bool new_hit = false, old_hit = false;
+    for (const auto& r : backend.search_text_only("X23STUBSUMMARY", 20).results)
+        if (r.metadata.value("source", "") == "episode" && r.id == ep) new_hit = true;
+    for (const auto& r : backend.search_text_only("epoldword", 20).results)
+        if (r.metadata.value("source", "") == "episode" && r.id == ep) old_hit = true;
+    CHECK(new_hit);
+    CHECK(!old_hit);
+    backend.close();
+    std::println(" ok");
+}
+
+// (2) Episode of 2 L2s closed; a 3rd L2 inserted late INSIDE the span ->
+// tick + drain -> attached, and the episode text summarizes all three in
+// turn_datetime order (the request body carries m1 before late before m2).
+void x23_test_episode_regen_late_l2(const std::string& base) {
+    std::println("  x23_test_episode_regen_late_l2...");
+
+    namespace fs = std::filesystem;
+    const std::string dir = base + "/x23late";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const std::string db_path = dir + "/memories.db";
+
+    ragger::Embedder emb;   // disabled: no embedding needed here
+    ragger::sqlite::Backend backend(emb, db_path);
+
+    StubChat stub("X23LATESTUB");
+    ragger::SummarizerService svc(backend, [&stub] { return stub.client(); });
+    svc.start();
+
+    sqlite3* db = nullptr;
+    CHECK(sqlite3_open(db_path.c_str(), &db) == SQLITE_OK);
+    auto scalar = [&](const std::string& sql) -> long long {
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        long long v = -999;
+        if (sqlite3_step(st) == SQLITE_ROW) v = sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+        return v;
+    };
+    auto text = [&](const std::string& sql) -> std::string {
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        std::string v;
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const unsigned char* c = sqlite3_column_text(st, 0);
+            v = c ? reinterpret_cast<const char*>(c) : "";
+        }
+        sqlite3_finalize(st);
+        return v;
+    };
+
+    const std::string guid = "x23-late-a";
+    const int t1 = backend.store_turn("x23 late q one", "x23 late a one", "test-model",
+                                      false, guid, "2026-05-01 10:00:00");
+    const int t2 = backend.store_turn("x23 late q two", "x23 late a two", "test-model",
+                                      false, guid, "2026-05-01 10:10:00");
+    CHECK(t1 > 0 && t2 > 0);
+    CHECK(backend.finalize_turn_summary(t1, x23_long_text("x23l1tok"), "summarizer-model"));
+    CHECK(backend.finalize_turn_summary(t2, x23_long_text("x23l2tok"), "summarizer-model"));
+    const int ts1 = static_cast<int>(scalar(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t1)));
+    const int ts2 = static_cast<int>(scalar(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t2)));
+
+    ragger::EpisodeClose ec;
+    ec.text = "x23 latep1old episode";
+    ec.model_name = "summarizer-model";
+    ec.session_guid = guid;
+    ec.span_start = scalar("SELECT turn_datetime FROM turn_summaries WHERE turn_summary_id = "
+                           + std::to_string(ts1)) - 60;
+    ec.span_end   = scalar("SELECT turn_datetime FROM turn_summaries WHERE turn_summary_id = "
+                           + std::to_string(ts2)) + 60;
+    ec.member_turn_summary_ids = {ts1, ts2};
+    const int ep = backend.store_episode_close(ec);
+    CHECK(ep > 0);
+
+    // A late L2 inside the closed span.
+    const int t3 = backend.store_turn("x23 late q three", "x23 late a three", "test-model",
+                                      false, guid, "2026-05-01 10:05:00");
+    CHECK(t3 > 0);
+    CHECK(backend.finalize_turn_summary(t3, x23_long_text("x23l3tok"), "summarizer-model"));
+    const int ts3 = static_cast<int>(scalar(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t3)));
+    CHECK(scalar("SELECT episode_id IS NULL FROM turn_summaries WHERE turn_summary_id = "
+                 + std::to_string(ts3)) == 1);
+
+    // Tick + drain: attach + rebuild (RED at HEAD: nothing happens).
+    svc.enqueue_catch_up();
+    for (int i = 0; i < 200 &&
+         scalar("SELECT episode_id FROM turn_summaries WHERE turn_summary_id = "
+                + std::to_string(ts3)) != ep; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(scalar("SELECT episode_id FROM turn_summaries WHERE turn_summary_id = "
+                 + std::to_string(ts3)) == ep);
+    CHECK(text("SELECT text FROM episodes WHERE episode_id = " + std::to_string(ep))
+          == "X23LATESTUB");
+    svc.stop();
+
+    // One model call (the episode summary over all three texts), carrying
+    // them in turn_datetime order: m1 (10:00) before late (10:05) before
+    // m2 (10:10).
+    CHECK(stub.calls.load() == 1);
+    {
+        std::lock_guard<std::mutex> lk(stub.bmu);
+        CHECK(stub.bodies.size() == 1);
+        const std::string& b = stub.bodies[0];
+        const auto p1 = b.find("x23l1tok0");
+        const auto p3 = b.find("x23l3tok0");
+        const auto p2 = b.find("x23l2tok0");
+        CHECK(p1 != std::string::npos && p3 != std::string::npos && p2 != std::string::npos);
+        CHECK(p1 < p3 && p3 < p2);
+    }
+    sqlite3_close(db);
+    backend.close();
+    std::println(" ok");
+}
+
+// (3) One-member episode + one late member: after the attach the episode
+// has TWO members, so this exercises the MULTI-MEMBER path (summarize_texts
+// is called — a single-member episode would copy the one text with NO model
+// call).
+void x23_test_episode_regen_single_to_multi(const std::string& base) {
+    std::println("  x23_test_episode_regen_single_to_multi...");
+
+    namespace fs = std::filesystem;
+    const std::string dir = base + "/x23s2m";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const std::string db_path = dir + "/memories.db";
+
+    ragger::Embedder emb;   // disabled
+    ragger::sqlite::Backend backend(emb, db_path);
+
+    StubChat stub("X23S2MSTUB");
+    ragger::SummarizerService svc(backend, [&stub] { return stub.client(); });
+    svc.start();
+
+    sqlite3* db = nullptr;
+    CHECK(sqlite3_open(db_path.c_str(), &db) == SQLITE_OK);
+    auto scalar = [&](const std::string& sql) -> long long {
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        long long v = -999;
+        if (sqlite3_step(st) == SQLITE_ROW) v = sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+        return v;
+    };
+    auto text = [&](const std::string& sql) -> std::string {
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        std::string v;
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const unsigned char* c = sqlite3_column_text(st, 0);
+            v = c ? reinterpret_cast<const char*>(c) : "";
+        }
+        sqlite3_finalize(st);
+        return v;
+    };
+
+    const std::string guid = "x23-s2m";
+    const int t1 = backend.store_turn("x23 s2m q one", "x23 s2m a one", "test-model",
+                                      false, guid, "2026-05-01 11:00:00");
+    CHECK(t1 > 0);
+    CHECK(backend.finalize_turn_summary(t1, x23_long_text("x23s1tok"), "summarizer-model"));
+    const int ts1 = static_cast<int>(scalar(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t1)));
+
+    ragger::EpisodeClose ec;
+    ec.text = "x23 s2mold single-member episode";
+    ec.model_name = "summarizer-model";
+    ec.session_guid = guid;
+    ec.span_start = scalar("SELECT turn_datetime FROM turn_summaries WHERE turn_summary_id = "
+                           + std::to_string(ts1)) - 60;
+    ec.span_end   = ec.span_start + 600;
+    ec.member_turn_summary_ids = {ts1};
+    const int ep = backend.store_episode_close(ec);
+    CHECK(ep > 0);
+
+    const int t2 = backend.store_turn("x23 s2m q late", "x23 s2m a late", "test-model",
+                                      false, guid, "2026-05-01 11:02:00");
+    CHECK(t2 > 0);
+    CHECK(backend.finalize_turn_summary(t2, x23_long_text("x23s2tok"), "summarizer-model"));
+    const int ts2 = static_cast<int>(scalar(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t2)));
+
+    svc.enqueue_catch_up();
+    for (int i = 0; i < 200 &&
+         scalar("SELECT episode_id FROM turn_summaries WHERE turn_summary_id = "
+                + std::to_string(ts2)) != ep; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(scalar("SELECT episode_id FROM turn_summaries WHERE turn_summary_id = "
+                 + std::to_string(ts2)) == ep);
+    CHECK(text("SELECT text FROM episodes WHERE episode_id = " + std::to_string(ep))
+          == "X23S2MSTUB");
+    svc.stop();
+    // MULTI-MEMBER path proven: exactly one model call (a single-member
+    // episode would copy with zero calls).
+    CHECK(stub.calls.load() == 1);
+    sqlite3_close(db);
+    backend.close();
+    std::println(" ok");
+}
+
+// Failure path: inference down -> NOTHING written anywhere (episode text,
+// member stale and the late row's episode_id all unchanged; no poison
+// markers).
+void x23_test_episode_regen_inference_down(const std::string& base) {
+    std::println("  x23_test_episode_regen_inference_down...");
+
+    namespace fs = std::filesystem;
+    const std::string dir = base + "/x23down23";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const std::string db_path = dir + "/memories.db";
+
+    ragger::Embedder emb;   // disabled
+    ragger::sqlite::Backend backend(emb, db_path);
+
+    ragger::SummarizerService svc(
+        backend, [] { return std::shared_ptr<ragger::InferenceClient>(nullptr); });
+    svc.start();
+
+    sqlite3* db = nullptr;
+    CHECK(sqlite3_open(db_path.c_str(), &db) == SQLITE_OK);
+    auto scalar = [&](const std::string& sql) -> long long {
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        long long v = -999;
+        if (sqlite3_step(st) == SQLITE_ROW) v = sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+        return v;
+    };
+    auto text = [&](const std::string& sql) -> std::string {
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        std::string v;
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const unsigned char* c = sqlite3_column_text(st, 0);
+            v = c ? reinterpret_cast<const char*>(c) : "";
+        }
+        sqlite3_finalize(st);
+        return v;
+    };
+
+    const std::string guid = "x23-down23";
+    const std::string u1 = "x23 down23 q one";
+    const int t1 = backend.store_turn(u1, "x23 down23 a one", "test-model",
+                                      false, guid, "2026-05-01 12:00:00");
+    CHECK(t1 > 0);
+    CHECK(backend.finalize_turn_summary(t1, x23_long_text("x23d1tok"), "summarizer-model"));
+    const int ts1 = static_cast<int>(scalar(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t1)));
+    ragger::EpisodeClose ec;
+    ec.text = "x23 down23 episode";
+    ec.model_name = "summarizer-model";
+    ec.session_guid = guid;
+    ec.span_start = scalar("SELECT turn_datetime FROM turn_summaries WHERE turn_summary_id = "
+                           + std::to_string(ts1)) - 60;
+    ec.span_end   = ec.span_start + 600;
+    ec.member_turn_summary_ids = {ts1};
+    const int ep = backend.store_episode_close(ec);
+    CHECK(ep > 0);
+
+    // A late row inside the span (stranded candidate).
+    const int t2 = backend.store_turn("x23 down23 q late", "x23 down23 a late", "test-model",
+                                      false, guid, "2026-05-01 12:02:00");
+    CHECK(backend.finalize_turn_summary(t2, x23_long_text("x23d2tok"), "summarizer-model"));
+    const int ts2 = static_cast<int>(scalar(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t2)));
+
+    // Stale the member directly (the merge window has passed for a
+    // historical turn): the regen trigger must fire but write nothing.
+    CHECK(sqlite3_exec(db, (
+        "UPDATE turn_summaries SET stale = 1 WHERE turn_summary_id = " +
+        std::to_string(ts1)).c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+
+    for (int i = 0; i < 4; ++i) {
+        svc.enqueue_catch_up();
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
+    CHECK(scalar("SELECT stale FROM turn_summaries WHERE turn_summary_id = "
+                 + std::to_string(ts1)) == 1);
+    CHECK(scalar("SELECT episode_id IS NULL FROM turn_summaries WHERE turn_summary_id = "
+                 + std::to_string(ts2)) == 1);
+    CHECK(text("SELECT text FROM episodes WHERE episode_id = " + std::to_string(ep))
+          == "x23 down23 episode");
+    CHECK(scalar("SELECT COUNT(*) FROM turn_summaries ts JOIN models m "
+                 "ON m.model_id = ts.summary_model_id WHERE m.name = 'bad'") == 0);
+    sqlite3_close(db);
+    svc.stop();
+    backend.close();
+    std::println(" ok");
+}
+
 int main() {
     TestEnv env("summarizer");
     std::println("test_summarizer:");
@@ -1560,6 +2041,10 @@ int main() {
     x22_test_l2_refresh_after_merge(env.base(), env.model_dir());
     x22_test_l2_refresh_skips_in_episode(env.base());
     x22_test_l2_refresh_inference_down(env.base());
+    x23_test_episode_regen_stale_member(env.base(), env.model_dir());
+    x23_test_episode_regen_late_l2(env.base());
+    x23_test_episode_regen_single_to_multi(env.base());
+    x23_test_episode_regen_inference_down(env.base());
     p9b_test_utf8_safe_prefix();
     p9b_test_bad_prompt_no_escape(env.base());
     x10_test_bad_prompt_sends_no_request();

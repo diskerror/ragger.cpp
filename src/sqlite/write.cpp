@@ -1404,6 +1404,135 @@ static std::string tags_from_metadata(const json& metadata) {
         return s.column_int(0);
     }
 
+    // X23 (Q5/L4): episode-regeneration primitives. The member read joins
+    // the LIVE turn for user/assistant text and the turn's model name, the
+    // same shape stale_l2_candidates selects, so make_l2_text rebuilds an L2
+    // identically whether it was selected by the X22 pass or by this one;
+    // rows with empty text (poison markers) are never members. turn_datetime
+    // is NOT NULL on every turn_summaries row, so no ifnull is needed there.
+    namespace {
+        void bind_episode_member_row(Stmt& s, StorageBackend::EpisodeMember& m) {
+            m.turn_summary_id = s.column_int(0);
+            m.text = s.column_text(1);
+            m.turn_id = s.column_int(2);
+            m.stale = s.column_int(3);
+            m.user_text = s.column_text(4);
+            m.assistant_text = s.column_text(5);
+            m.turn_model_name = s.column_text(6);
+            m.model_name = s.column_text(7);
+            m.turn_datetime = s.column_int64(8);
+            m.episode_id = s.column_int(9);
+        }
+        constexpr const char* kEpisodeMemberSelect =
+            "SELECT ts.turn_summary_id, ts.text, ts.turn_id, ts.stale, "
+            "       ifnull(t.user_text,''), ifnull(t.assistant_text,''), "
+            "       ifnull(tm.name,''), ifnull(sm.name,''), "
+            "       ts.turn_datetime, ifnull(ts.episode_id, 0) "
+            "FROM turn_summaries ts "
+            "LEFT JOIN turns t ON t.turn_id = ts.turn_id "
+            "LEFT JOIN models tm ON tm.model_id = t.model_id "
+            "LEFT JOIN models sm ON sm.model_id = ts.summary_model_id ";
+    }
+
+    std::vector<StorageBackend::EpisodeMember>
+    Backend::Impl::episode_members(int episode_id) {
+        std::vector<EpisodeMember> out;
+        Stmt s(db,
+            std::string(kEpisodeMemberSelect) +
+            "WHERE ts.episode_id = ? AND ts.text != '' "
+            "ORDER BY ts.turn_datetime ASC, ts.turn_summary_id ASC");
+        s.bind(1, episode_id);
+        while (s.step()) {
+            EpisodeMember m;
+            bind_episode_member_row(s, m);
+            out.push_back(std::move(m));
+        }
+        return out;
+    }
+
+    std::optional<StorageBackend::EpisodeMember>
+    Backend::Impl::l2_member_by_id(int turn_summary_id) {
+        Stmt s(db,
+            std::string(kEpisodeMemberSelect) +
+            "WHERE ts.turn_summary_id = ?");
+        s.bind(1, turn_summary_id);
+        if (!s.step()) return std::nullopt;
+        EpisodeMember m;
+        bind_episode_member_row(s, m);
+        return m;
+    }
+
+    // X23 (Q5/L4): replace an episode's DERIVED text in place and, in the
+    // SAME transaction, clear the refreshed members' stale counters and
+    // attach late L2 rows. Same order as store_episode_close /
+    // refresh_turn_summary: validate -> embed outside the txn -> BEGIN ->
+    // UPDATE episodes (exactly 1 row, else false) -> index -> per-cleared-
+    // pair stale clear (zero rows is NOT an error: a merge that landed
+    // while the summary was being built keeps the row stale for the next
+    // tick) -> per-attach guarded UPDATE (ZERO rows rolls EVERYTHING back:
+    // someone else attached it) -> COMMIT -> invalidate. span_start,
+    // span_end, created_at and session_id are never touched.
+    bool Backend::Impl::replace_episode_text(
+            int episode_id, const std::string& text, const std::string& model_name,
+            const std::vector<std::pair<int,int>>& cleared,
+            const std::vector<int>& attach_ids) {
+        if (text.empty())
+            throw std::invalid_argument("replace_episode_text: empty text");
+        const std::string t = normalize_path(text);
+        const int model_id = get_or_create_model(model_name);
+        // Encode outside the transaction (model call must not hold the lock).
+        auto emb = require_embedder().encode(t);
+
+        Transaction tx(db);
+        Stmt u(db,
+            "UPDATE episodes SET text = ?, model_id = ?, embedding_version = ?, "
+            "embedding = ? WHERE episode_id = ?");
+        u.bind(1, t);
+        if (model_id) u.bind(2, model_id); else u.bind_null(2);
+        bind_embedding_version(u.raw(), 3, emb);
+        bind_embedding(u.raw(), 4, emb);
+        u.bind(5, episode_id);
+        if (!u.exec())
+            throw std::runtime_error(std::format("replace_episode_text UPDATE: {}",
+                                                 sqlite3_errmsg(db)));
+        if (sqlite3_changes(db) != 1)   // no such episode: roll back, false
+            return false;
+        text_index_->index_record("episodes", episode_id, t);
+
+        // Clear only where the observed counter still matches (and the row
+        // is still a member of THIS episode).
+        for (const auto& [ts_id, observed] : cleared) {
+            Stmt c(db,
+                "UPDATE turn_summaries SET stale = 0 "
+                "WHERE turn_summary_id = ? AND episode_id = ? AND stale = ?");
+            c.bind(1, ts_id).bind(2, episode_id).bind(3, observed);
+            if (!c.exec())
+                throw std::runtime_error(std::format("replace_episode_text clear: {}",
+                                                     sqlite3_errmsg(db)));
+        }
+
+        // Attach late rows; any row that is no longer attachable aborts the
+        // whole unit (the Transaction destructor rolls back).
+        for (const int ts_id : attach_ids) {
+            Stmt a(db,
+                "UPDATE turn_summaries SET episode_id = ? "
+                "WHERE turn_summary_id = ? AND episode_id IS NULL AND text != ''");
+            a.bind(1, episode_id).bind(2, ts_id);
+            if (!a.exec())
+                throw std::runtime_error(std::format("replace_episode_text attach: {}",
+                                                     sqlite3_errmsg(db)));
+            if (sqlite3_changes(db) == 0)
+                return false;   // already attached elsewhere / marker: nothing lands
+        }
+
+        tx.commit();
+        // The caches store_episode_close invalidates, plus the turn cache
+        // (member stale counters changed).
+        invalidate_episode_cache();
+        invalidate_turn_cache();
+        return true;
+    }
+
     std::vector<Backend::Impl::SessionNameCandidate>
     Backend::Impl::unnamed_session_candidates() {
         std::vector<SessionNameCandidate> out;

@@ -40,6 +40,7 @@ struct BackfillResult {
     int failed     = 0;   // inference empty or write threw (row unchanged)
     int ties       = 0;   // stranded kind: rows covered by >1 episode span
     int open_tail  = 0;   // stranded kind: rows after the last span (left)
+    int episodes   = 0;   // stranded kind: episodes selected / regenerated
 };
 
 /// Kinds l2-null / l2-empty / l2-regenerate over `turn_summaries`.
@@ -63,10 +64,19 @@ BackfillResult backfill_triggers(StorageBackend& backend,
                                  const ProgressFn& progress = {},
                                  const CancelFlag* cancel = nullptr);
 
-/// Kind stranded (S67): membership-only attach of L2 rows that lie inside
-/// an already-closed episode span of their session. Rows after the last
-/// span of their session are the open tail: counted, never touched.
-BackfillResult backfill_stranded(StorageBackend& backend, bool dry_run,
+/// Kind stranded (S67, X23/Q5): attach L2 rows that lie inside an
+/// already-closed episode span of their session AND regenerate that episode's
+/// DERIVED text with the new membership (Reid, 2026-11-14: the sweep
+/// regenerates too). Grouped by episode: one `replace_episode_text` per
+/// episode carrying every late row it gains, so the episode text and the
+/// memberships commit together. Rows after the last span of their session are
+/// the open tail: counted, never touched. `inference` is REQUIRED unless
+/// `dry_run` (a dry run counts candidates and episodes and needs no model);
+/// `applied` counts late rows attached, `skipped` episodes whose late rows
+/// could not be attached (already attached, or the attach race lost — the
+/// whole unit rolled back), `failed` an empty summary or a throw.
+BackfillResult backfill_stranded(StorageBackend& backend, InferenceClient& inference,
+                                 bool dry_run,
                                  const ProgressFn& progress = {},
                                  const CancelFlag* cancel = nullptr);
 

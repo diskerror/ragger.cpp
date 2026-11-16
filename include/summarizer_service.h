@@ -32,6 +32,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 namespace ragger {
 
@@ -79,8 +80,10 @@ public:
 private:
     // db 0.17: the session/project rollup and draft job kinds are gone with
     // session/project rollup layers (PHASE5 D.1). X22 (Q2/L2): L2Refresh
-    // re-summarizes a turn whose L2 row was flagged stale by a merge.
-    enum class JobKind { L2Turn, L2Refresh, EpisodeClose };
+    // re-summarizes a turn whose L2 row was flagged stale by a merge. X23
+    // (Q5/L4): EpisodeRegen rebuilds an episode — for its stale members, for
+    // late L2 rows that must be attached to it, or both.
+    enum class JobKind { L2Turn, L2Refresh, EpisodeClose, EpisodeRegen };
 
     struct Job {
         JobKind     kind;
@@ -94,6 +97,13 @@ private:
         // and the counter observed at selection time).
         int         turn_summary_id = -1;
         int         observed_stale  = 0;
+        // X23 (Q5/L4): EpisodeRegen carries the episode to rebuild plus the
+        // late (stranded) L2 rows to attach to it. One job per episode per
+        // pass: the attach ids are grouped, which is also the pass's dedupe
+        // of (episode_id, attach id) — a stale member and a late row in the
+        // same episode are ONE job, not two.
+        int                    episode_id = -1;
+        std::vector<int>       attach_ids;
     };
 
     void worker_loop();
@@ -103,6 +113,10 @@ private:
     void handle_l2(const Job& j);
     void handle_l2_refresh(const Job& j); // X22: rewrite a merged turn's L2 in place
     void handle_episode_close(const Job& j); // close open episode(s) -> immutable episodes rows
+    /// X23 (Q5/L4): rebuild one episode — refresh its stale members first,
+    /// attach its late L2 rows, then replace its DERIVED text with the same
+    /// rules a segment close uses. Nothing is written when inference fails.
+    void handle_episode_regen(const Job& j);
 
     /// X22 (Q2/L2): the ONE block that turns {user, assistant} into an L2
     /// summary — system-injected blanking, the `user | assistant` source, the

@@ -413,4 +413,43 @@ std::string summarize_texts(
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// summarize_member_texts (X23 / Q5, L4) — the episode-segment rules moved
+// VERBATIM out of SummarizerService::handle_episode_close (one member copies
+// that member's summary model with no model call; the LR S62 floor copies the
+// joined text with no model call; otherwise summarize_texts + choose_summary,
+// provenance the summarizer's model). handle_episode_close now calls this and
+// is bit-for-bit unchanged; the episode-regeneration job and the
+// `ragger backfill stranded` sweep call the same code, so an episode rebuilt
+// later reads exactly like one written at close.
+// ---------------------------------------------------------------------------
+MemberSummary summarize_member_texts(
+    InferenceClient& inference,
+    const std::vector<std::string>& texts,
+    const std::string& single_model)
+{
+    if (texts.empty()) return {};
+
+    // A ONE-member segment copies that L2's summary_model_id (no model call
+    // at all — summarizing a single summary is waste).
+    if (texts.size() == 1)
+        return {texts.front(), single_model};
+
+    std::string joined;
+    for (const auto& t : texts) {
+        if (!joined.empty()) joined += "\n\n";
+        joined += t;
+    }
+    if (count_words(joined) <=
+            static_cast<size_t>(std::max(0, config().summarizer_min_words))) {
+        return {joined, inference.memory_model};   // floor: no model call
+    }
+
+    std::string summary = summarize_texts(inference, texts);
+    if (summary.empty()) return {};   // inference failed — caller retries
+    // LR S62 (shorter-text rule): a multi-member copy records the
+    // summarizer's model — there is no single original.
+    return {choose_summary(joined, summary).text, inference.memory_model};
+}
+
 } // namespace ragger

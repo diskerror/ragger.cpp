@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <format>
+#include <map>
 #include <stdexcept>
 
 namespace ragger {
@@ -186,9 +187,16 @@ BackfillResult backfill_triggers(StorageBackend& backend,
     return res;
 }
 
-BackfillResult backfill_stranded(StorageBackend& backend, bool dry_run,
+BackfillResult backfill_stranded(StorageBackend& backend, InferenceClient& inference,
+                                 bool dry_run,
                                  const ProgressFn& progress,
                                  const CancelFlag* cancel) {
+    // X23 (Q5/L4): the sweep regenerates too (Reid, 2026-11-14). Attaching a
+    // late L2 row without rebuilding the episode would leave the DERIVED
+    // episode text describing the old membership. Like every real pass this
+    // one requires inference; a dry run only counts and never needs it.
+    if (!dry_run) require_inference_configured(inference);
+
     BackfillResult res;
     int ties = 0;
     const auto cands = backend.stranded_l2_candidates(ties);
@@ -198,23 +206,69 @@ BackfillResult backfill_stranded(StorageBackend& backend, bool dry_run,
     // last span of their session (or whose session has no episodes at all).
     // Counted, never touched — those spans have not been closed yet.
     res.open_tail = backend.stranded_open_tail_count();
+
+    // One unit of work per episode that gains at least one late row (the
+    // same grouping the live catch-up pass uses). `episodes` is reported for
+    // both modes: a dry run's whole output is its counts.
+    std::map<int, std::vector<int>> by_episode;
+    for (const auto& c : cands) by_episode[c.episode_id].push_back(c.turn_summary_id);
+    res.episodes = static_cast<int>(by_episode.size());
     if (dry_run) return res;
 
     int done = 0;
-    for (const auto& c : cands) {
+    for (const auto& [episode_id, late_ids] : by_episode) {
         check_cancel(cancel, "stranded", res, backend);
         ++done;
-        tick(progress, "stranded", done, res.candidates);
+        tick(progress, "stranded", done, res.episodes);
         try {
-            if (backend.attach_stranded_l2(c.turn_summary_id, c.episode_id))
-                ++res.applied;
+            // Exactly steps 2 and 4 of SummarizerService::handle_episode_regen
+            // (no stale refresh here — the sweep attaches; keeping stale rows
+            // fresh is the live pass's job): the episode's members plus the
+            // late rows, in turn_datetime order.
+            auto members = backend.episode_members(episode_id);
+            std::vector<int> attach;
+            for (const int ts_id : late_ids) {
+                const auto lm = backend.l2_member_by_id(ts_id);
+                if (!lm || lm->episode_id != 0 || lm->text.empty()) continue;
+                if (std::any_of(members.begin(), members.end(),
+                                [ts_id](const auto& m) {
+                                    return m.turn_summary_id == ts_id;
+                                }))
+                    continue;
+                const auto at = std::lower_bound(
+                    members.begin(), members.end(), *lm,
+                    [](const auto& a, const auto& b) {
+                        return a.turn_datetime < b.turn_datetime ||
+                               (a.turn_datetime == b.turn_datetime &&
+                                a.turn_summary_id < b.turn_summary_id);
+                    });
+                members.insert(at, *lm);
+                attach.push_back(ts_id);
+            }
+            if (attach.empty()) { ++res.skipped; continue; }  // attached concurrently
+
+            std::vector<std::string> texts;
+            texts.reserve(members.size());
+            std::string single_model;
+            for (const auto& m : members) {
+                texts.push_back(m.text);
+                single_model = m.model_name;
+            }
+            const auto ms = summarize_member_texts(inference, texts, single_model);
+            if (ms.text.empty()) { ++res.failed; continue; }
+
+            // cleared = {} : the sweep never refreshes a member, so it clears
+            // no stale counters. A row that is no longer attachable rolls the
+            // whole unit back (episode text included) and counts as skipped.
+            if (backend.replace_episode_text(episode_id, ms.text, ms.model, {}, attach))
+                res.applied += static_cast<int>(attach.size());
             else
-                ++res.skipped;
+                ++res.skipped;   // lost the attach race
         } catch (const std::exception&) {
             ++res.failed;
         }
     }
-    tick(progress, "stranded", -1, res.candidates);
+    tick(progress, "stranded", -1, res.episodes);
     if (res.applied > 0) backend.invalidate_all_caches();
     return res;
 }

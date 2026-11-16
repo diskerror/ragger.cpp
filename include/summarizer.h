@@ -30,6 +30,27 @@ std::string summarize_texts(
     InferenceClient& inference,
     const std::vector<std::string>& texts);
 
+/// X23 (Q5/L4): build an EPISODE summary from a segment's member texts with
+/// the rules `handle_episode_close` has always used, moved VERBATIM into one
+/// place so the live close, the episode-regeneration job and the
+/// `ragger backfill stranded` sweep produce byte-identical text:
+///  - ONE member: copy that member's text, provenance = `single_model`
+///    (the member's own summary model) — no model call at all;
+///  - joined text at/below the LR S62 `summarizer_min_words` floor: copy the
+///    joined text, provenance = the summarizer's model — no model call;
+///  - otherwise `summarize_texts` + the strictly-shorter `choose_summary`
+///    rule, provenance = the summarizer's model.
+/// An empty `text` means inference FAILED (the caller retries); it is never a
+/// legitimate summary. Empty `texts` returns empty too (nothing to build).
+struct MemberSummary {
+    std::string text;
+    std::string model;
+};
+MemberSummary summarize_member_texts(
+    InferenceClient& inference,
+    const std::vector<std::string>& texts,
+    const std::string& single_model);
+
 /// LR S62 (shorter-text rule): whitespace-token count of the trimmed
 /// string. A single-token source measures 1.
 size_t count_words(const std::string& s);

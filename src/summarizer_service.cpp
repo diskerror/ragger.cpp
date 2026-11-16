@@ -17,6 +17,8 @@
 #include <cmath>
 #include <cstdint>
 #include <format>
+#include <map>
+#include <set>
 
 namespace ragger {
 
@@ -134,10 +136,15 @@ void SummarizerService::enqueue_catch_up() {
     // writes and a full queue. Same per-tick cap as the L2 pass above. Only
     // rows NOT in an episode: refreshing an in-episode L2 has to rebuild the
     // episode summary with it, which is X23's episode-regeneration job —
-    // those candidates are returned by the same query and skipped here.
+    // those candidates are returned by the same query and skipped here (they
+    // become trigger (a) of that pass below).
     size_t refresh_n = 0;
+    std::set<int> regen_stale_episodes;
     for (const auto& c : backend->stale_l2_candidates(catch_up_cap)) {
-        if (c.episode_id != 0) continue;  // X23 refreshes in-episode rows
+        if (c.episode_id != 0) {          // X23 refreshes in-episode rows
+            regen_stale_episodes.insert(c.episode_id);
+            continue;
+        }
         Job j{JobKind::L2Refresh, c.turn_id,
               c.user_text, c.assistant_text, c.turn_model_name,
               c.session_guid, {}, c.turn_summary_id, c.stale};
@@ -158,6 +165,45 @@ void SummarizerService::enqueue_catch_up() {
             queue_.push_back(std::move(j));
         }
         ++refresh_n;
+    }
+
+    // X23 (Q5/L4): episode-regeneration catch-up, after the X22 pass and
+    // under the same queue-empty / per-tick-cap / bounded-queue rules. Two
+    // triggers: (a) every DISTINCT episode among the stale candidates above
+    // that this pass skipped (episode_id != 0) — its member text changed, so
+    // the episode has to be rebuilt with it; (b) every stranded candidate
+    // (a late L2 inside an already-closed span of its session) — attach it
+    // and fix the episode. Grouping by episode_id IS the pass's dedupe of
+    // (episode_id, attach id): a stale member and a late row in the same
+    // episode are one job, never two.
+    size_t regen_n = 0;
+    {
+        std::map<int, std::vector<int>> regen_jobs;   // episode_id -> late rows
+        for (const int ep : regen_stale_episodes)
+            regen_jobs.try_emplace(ep);
+        int stranded_ties = 0;   // counted for the CLI sweep, not reported here
+        for (const auto& s : backend->stranded_l2_candidates(stranded_ties))
+            regen_jobs[s.episode_id].push_back(s.turn_summary_id);
+
+        for (auto& [ep_id, attach] : regen_jobs) {
+            if (regen_n >= static_cast<size_t>(catch_up_cap)) break;
+            Job j{JobKind::EpisodeRegen, .episode_id = ep_id,
+                  .attach_ids = std::move(attach)};
+            {
+                std::lock_guard<std::mutex> lk(mutex_);
+                if (queue_.size() >= 1000) {
+                    static std::atomic<bool> warned_regen_full{false};
+                    if (!warned_regen_full.exchange(true))
+                        Diskerror::Logger::warn(
+                            "[summarizer] catch-up queue full (1000) — dropping "
+                            "episode-regeneration jobs; the periodic tick will pick "
+                            "them up (one-time warning)");
+                    break;
+                }
+                queue_.push_back(std::move(j));
+            }
+            ++regen_n;
+        }
     }
 
     // Poison-abandon retry: delete "bad"-tagged turn_summaries rows so the
@@ -211,6 +257,9 @@ void SummarizerService::enqueue_catch_up() {
     if (refresh_n)
         Diskerror::Logger::info(std::format(
             "[summarizer] queued {} stale-L2 refresh job(s)", refresh_n));
+    if (regen_n)
+        Diskerror::Logger::info(std::format(
+            "[summarizer] queued {} episode-regeneration job(s)", regen_n));
     if (reset_n)
         Diskerror::Logger::info(std::format(
             "[summarizer] housekeeping reset {} poison-abandoned turn_summaries "
@@ -234,6 +283,7 @@ void SummarizerService::worker_loop() {
                 case JobKind::L2Turn:       handle_l2(job);            break;
                 case JobKind::L2Refresh:    handle_l2_refresh(job);    break;
                 case JobKind::EpisodeClose: handle_episode_close(job); break;
+                case JobKind::EpisodeRegen: handle_episode_regen(job); break;
             }
         } catch (const std::exception& e) {
             Diskerror::Logger::warn(std::format(
@@ -553,8 +603,6 @@ void SummarizerService::handle_episode_close(const Job& j) {
         candidates, EpisodeBoundaryParams{th_base, th_cap, th_step, step_min});
 
     // Summarize each segment.
-    const std::string summarizer_model = inf->memory_model;
-
     struct EpisodeSegment {
         std::string summary;
         std::string model;      // provenance written to episodes.model_id
@@ -580,35 +628,18 @@ void SummarizerService::handle_episode_close(const Job& j) {
             }
         if (texts.empty()) continue;
 
-        // LR S62 (shorter-text rule, addenda 2/3), episode side. The source
-        // is the segment's L2 texts joined exactly the way summarize_texts
-        // joins them. Provenance of a copy: a ONE-member segment copies that
-        // L2's summary_model_id (no model call at all — summarizing a single
-        // summary is waste); a MULTI-member copy (floor, or the concatenation
-        // beating the summary) records the summarizer's model — there is no
-        // single original.
-        std::string summary;
-        std::string model = summarizer_model;
-        if (texts.size() == 1) {
-            summary = texts.front();
-            model   = single_model;
-        } else {
-            std::string joined;
-            for (const auto& t : texts) {
-                if (!joined.empty()) joined += "\n\n";
-                joined += t;
-            }
-            if (count_words(joined) <=
-                    static_cast<size_t>(std::max(0, config().summarizer_min_words))) {
-                summary = joined;   // floor: no model call
-            } else {
-                summary = summarize_texts(*inf, texts);
-                if (summary.empty()) return;  // inference failed — retry ALL next pass
-                summary = choose_summary(joined, summary).text;
-            }
-        }
+        // LR S62 (shorter-text rule, addenda 2/3), episode side: the ONE-
+        // member copy, the joined-text floor and the summarize_texts +
+        // choose_summary path. X23 (Q5/L4) moved that block VERBATIM into
+        // summarize_member_texts so the episode-regeneration job and the
+        // `backfill stranded` sweep rebuild an episode exactly the way a
+        // close writes one; behavior here is bit-for-bit unchanged (an empty
+        // summary is the inference-failure signal that aborts the whole
+        // close for a retry next pass).
+        auto ms = summarize_member_texts(*inf, texts, single_model);
+        if (ms.text.empty()) return;  // inference failed — retry ALL next pass
 
-        segments.push_back({std::move(summary), std::move(model),
+        segments.push_back({std::move(ms.text), std::move(ms.model),
                             start, end, texts.size()});
     }
 
@@ -652,6 +683,140 @@ void SummarizerService::handle_episode_close(const Job& j) {
             j.session_guid, segments.size()));
 
     return;
+}
+
+// --------------------------------------------------------------------
+// X23 (Q5/L4): episode regeneration. Two reasons to rebuild an episode:
+// one of its members' L2 rows went stale (a merge of the source turn —
+// X22's counter), and/or a late L2 row appeared inside its closed span
+// (a stranded row). Reid, 2026-11-14: the episode text is DERIVED, so it is
+// replaced in place (no history, no change-of-meaning detection), and a late
+// summary is attached to the episode it belongs to.
+//
+// Order matters: stale members are refreshed FIRST (their new text is what
+// the episode summarizes), with clear_stale=false — the counters are cleared
+// inside the episode's own transaction, so an episode step that fails leaves
+// everything stale and the whole thing is retried by the next tick. Nothing
+// here counts toward poison-abandon: the persistent `stale` counter and the
+// stranded selection are this job's retry mechanism.
+// --------------------------------------------------------------------
+void SummarizerService::handle_episode_regen(const Job& j) {
+    if (j.episode_id <= 0) return;
+
+    auto inf = inference_provider_ ? inference_provider_() : nullptr;  // once per job
+
+    // (1) No inference: same once-only notice as the other handlers; the
+    // rows stay stale/stranded and the next tick retries.
+    if (!inf) {
+        std::call_once(no_inference_warned_, [] {
+            Diskerror::Logger::info(lang::MSG_SUMMARIZER_NO_ENDPOINT);
+        });
+        return;
+    }
+
+    using Member = StorageBackend::EpisodeMember;
+    std::vector<Member> members = backend_.episode_members(j.episode_id);
+
+    // (2) Slot each late row into the member list at its turn_datetime
+    // (de-duplicated by turn_summary_id). A row that is no longer
+    // unattached/non-empty is dropped — for that row there is nothing to do.
+    std::vector<int> attach_ids;
+    for (const int ts_id : j.attach_ids) {
+        const auto lm = backend_.l2_member_by_id(ts_id);
+        if (!lm || lm->episode_id != 0 || lm->text.empty()) continue;
+        if (std::any_of(members.begin(), members.end(),
+                        [ts_id](const Member& m) { return m.turn_summary_id == ts_id; }))
+            continue;
+        const auto at = std::lower_bound(
+            members.begin(), members.end(), *lm,
+            [](const Member& a, const Member& b) {
+                return a.turn_datetime < b.turn_datetime ||
+                       (a.turn_datetime == b.turn_datetime &&
+                        a.turn_summary_id < b.turn_summary_id);
+            });
+        members.insert(at, *lm);
+        attach_ids.push_back(ts_id);
+    }
+    if (members.empty()) return;   // nothing to build an episode summary from
+
+    // (3) Refresh every stale member BEFORE the episode text is built.
+    std::vector<std::pair<int,int>> cleared;   // {turn_summary_id, observed stale}
+    for (auto& m : members) {
+        if (m.stale <= 0) continue;
+        if (m.turn_id == 0) {
+            // The source turn is gone (turn_id NULL via ON DELETE SET NULL):
+            // there is nothing left to re-summarize. Clear the counter with
+            // the episode instead — otherwise this row would re-trigger a
+            // regeneration (and a model call) every tick forever. Its last
+            // real text stays as the member text.
+            Diskerror::Logger::warn(std::format(
+                "[summarizer] episode regen: stale turn_summary_id={} has no live "
+                "turn; clearing its counter without refreshing (episode {})",
+                m.turn_summary_id, j.episode_id));
+            cleared.emplace_back(m.turn_summary_id, m.stale);
+            continue;
+        }
+        const auto made = make_l2_text(inf.get(), m.user_text, m.assistant_text,
+                                       m.turn_model_name);
+        if (made.text.empty()) {
+            // Inference unreachable: NO episode write at all — the member
+            // keeps its counter and the next tick retries the whole unit.
+            Diskerror::Logger::info(std::format(
+                "[summarizer] episode regen deferred (inference unreachable) for "
+                "turn_summary_id={} (episode {})", m.turn_summary_id, j.episode_id));
+            return;
+        }
+        if (!backend_.refresh_turn_summary(m.turn_summary_id, made.text, made.model,
+                                           m.stale, /*clear_stale=*/false)) {
+            Diskerror::Logger::warn(std::format(
+                "[summarizer] episode regen: refresh_turn_summary found no row for "
+                "turn_summary_id={}", m.turn_summary_id));
+            return;
+        }
+        m.text = made.text;   // the episode summarizes the NEW text
+        cleared.emplace_back(m.turn_summary_id, m.stale);
+    }
+
+    // (4) The episode summary: the SAME rules as a segment of
+    // handle_episode_close (shared helper), over the members in
+    // turn_datetime order.
+    std::vector<std::string> texts;
+    texts.reserve(members.size());
+    std::string single_model;
+    for (const auto& m : members) {
+        texts.push_back(m.text);
+        single_model = m.model_name;
+    }
+    const auto ms = summarize_member_texts(*inf, texts, single_model);
+
+    // (5) An empty summary is inference failure: no episode write, retried
+    // next tick (the refreshed members keep their counters).
+    if (ms.text.empty()) {
+        Diskerror::Logger::info(std::format(
+            "[summarizer] episode regen deferred (inference unreachable) for "
+            "episode {}", j.episode_id));
+        return;
+    }
+
+    if (!backend_.replace_episode_text(j.episode_id, ms.text, ms.model, cleared,
+                                       attach_ids)) {
+        // Lost the attach race (another writer attached the late row first)
+        // or the episode is gone: replace_episode_text rolled the whole unit
+        // back. No retry — the winning writer's state is already correct.
+        Diskerror::Logger::info(std::format(
+            "[summarizer] episode regen skipped for episode {}: already attached "
+            "(or the episode/late row is gone)", j.episode_id));
+        return;
+    }
+    {
+        // Inference just worked: reopen the abandoned-reset window (same
+        // signal handle_l2_refresh gives on a successful refresh).
+        std::lock_guard<std::mutex> lk(mutex_);
+        reset_backoff_.succeeded();
+    }
+    Diskerror::Logger::info(std::format(
+        "[summarizer] episode {} regenerated ({} member(s), {} late row(s) attached)",
+        j.episode_id, members.size(), attach_ids.size()));
 }
 
 } // namespace ragger

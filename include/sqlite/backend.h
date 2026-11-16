@@ -136,6 +136,12 @@ public:
     std::vector<StrandedCandidate> stranded_l2_candidates(int& ties) override;
     bool attach_stranded_l2(int turn_summary_id, int episode_id) override;
     int stranded_open_tail_count() override;
+    std::vector<EpisodeMember> episode_members(int episode_id) override;
+    std::optional<EpisodeMember> l2_member_by_id(int turn_summary_id) override;
+    bool replace_episode_text(int episode_id, const std::string& text,
+                              const std::string& model_name,
+                              const std::vector<std::pair<int,int>>& cleared,
+                              const std::vector<int>& attach_ids) override;
     std::vector<SessionNameCandidate> unnamed_session_candidates() override;
     bool apply_session_name(int session_id, const std::string& name,
                             const std::string& name_source) override;
