@@ -856,6 +856,10 @@ class RaggerMemoryProvider(MemoryProvider):
             elif not health.get("summarizer_engine"):
                 logger.warning("Ragger: summarizer model '%s' is not served by any configured endpoint.",
                                health.get("summarizer_model"))
+            elif health.get("summarizer_reachable") is False:
+                logger.warning("Ragger: the summarizer endpoint '%s' is not answering, so turns are "
+                               "captured but not summarized until it is back.",
+                               health.get("summarizer_engine"))
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Kick off a background search to warm the prefetch cache.

@@ -17,6 +17,8 @@
 #include <filesystem>
 #include <chrono>
 #include <iomanip>
+#include <map>
+#include <mutex>
 #include <functional>
 #include <string_view>
 
@@ -124,14 +126,41 @@ InferenceClient InferenceClient::from_config(const Config& cfg) {
     return client;
 }
 
+namespace {
+/// The endpoint that would serve the summarizer model, or nullptr.
+const Endpoint* summarizer_endpoint(const InferenceClient& client) {
+    if (client.endpoints.empty()) return nullptr;
+    for (const auto& ep : client.endpoints)
+        if (ep.matches(client.memory_model)) return &ep;
+    return nullptr;
+}
+} // namespace
+
 SummarizerInfo describe_summarizer(const InferenceClient& client) {
     SummarizerInfo info;
     if (client.endpoints.empty()) return info;     // nothing configured
     info.model = client.memory_model;
-    for (const auto& ep : client.endpoints) {
-        if (ep.matches(info.model)) { info.engine = ep.name; break; }
-    }
+    if (const Endpoint* ep = summarizer_endpoint(client)) info.engine = ep->name;
     return info;
+}
+
+bool summarizer_reachable(const InferenceClient& client, int timeout_sec, int ttl_sec) {
+    const Endpoint* ep = summarizer_endpoint(client);
+    if (!ep) return false;
+    struct Probe { std::chrono::steady_clock::time_point at; bool ok = false; };
+    static std::mutex mu;
+    static std::map<std::string, Probe> cache;     // key: endpoint url
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = cache.find(ep->api_url);
+        if (it != cache.end() && now - it->second.at < std::chrono::seconds(ttl_sec))
+            return it->second.ok;
+    }
+    const bool ok = ep->is_reachable(timeout_sec);   // outside the lock: may take timeout_sec
+    std::lock_guard<std::mutex> lk(mu);
+    cache[ep->api_url] = Probe{std::chrono::steady_clock::now(), ok};
+    return ok;
 }
 
 // -----------------------------------------------------------------------
@@ -243,7 +272,7 @@ Endpoint& InferenceClient::resolve_endpoint(const std::string& model_name) {
 // -----------------------------------------------------------------------
 // Endpoint health / model listing
 // -----------------------------------------------------------------------
-bool Endpoint::is_reachable() const {
+bool Endpoint::is_reachable(int timeout_sec) const {
     // Try /v1/models first, fall back to base URL
     std::string url = api_url;
     auto pos = url.rfind("/v1");
@@ -258,7 +287,7 @@ bool Endpoint::is_reachable() const {
     }
 
     util::HttpClient http;
-    auto resp = http.get(url, headers, /*timeout_sec=*/3);
+    auto resp = http.get(url, headers, timeout_sec);
     return resp.ok() && resp.status < 400;
 }
 

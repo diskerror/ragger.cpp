@@ -235,6 +235,8 @@ struct StubChat {
                             auto p = head.find("content-length:");
                             if (p != std::string::npos)
                                 cl = std::stoll(head.substr(p + 15));
+                            else
+                                cl = 0;   // a GET (e.g. /v1/models) has no body
                         }
                     }
                     if (cl >= 0 && req.size() >= hdr_end + 4 + static_cast<size_t>(cl))
@@ -2057,11 +2059,46 @@ void test_describe_summarizer() {
     std::println(" OK");
 }
 
+// summarizer_reachable: GET /v1/models against the endpoint serving the
+// summarizer model; false when unconfigured / dead / unserved; cached per TTL.
+void test_summarizer_reachable() {
+    std::println("  test_summarizer_reachable...");
+    {   // unconfigured
+        ragger::InferenceClient c({}, "", 4096);
+        CHECK(!ragger::summarizer_reachable(c));
+    }
+    {   // dead port (connection refused)
+        std::vector<ragger::Endpoint> eps{ragger::Endpoint("dead", "http://127.0.0.1:1/v1", "", "*")};
+        ragger::InferenceClient c(eps, "m", 4096);
+        c.memory_model = "m";
+        CHECK(!ragger::summarizer_reachable(c));
+    }
+    {   // named model, no endpoint serves it: false without any probe
+        std::vector<ragger::Endpoint> eps{ragger::Endpoint("lm", "http://127.0.0.1:1/v1", "", "other-*")};
+        ragger::InferenceClient c(eps, "m", 4096);
+        c.memory_model = "sum-small";
+        CHECK(!ragger::summarizer_reachable(c));
+    }
+    {   // live stub: true; then the stub goes away: the cached answer holds
+        // within the TTL and flips once the TTL is 0.
+        std::shared_ptr<ragger::InferenceClient> client;
+        {
+            StubChat stub("ok");
+            client = stub.client();
+            CHECK(ragger::summarizer_reachable(*client));
+        }
+        CHECK(ragger::summarizer_reachable(*client));                 // cached true
+        CHECK(!ragger::summarizer_reachable(*client, 1, /*ttl*/ 0));  // re-probed: refused
+    }
+    std::println(" OK");
+}
+
 int main() {
     TestEnv env("summarizer");
     std::println("test_summarizer:");
     test_detects_system_markers();
     test_describe_summarizer();
+    test_summarizer_reachable();
     test_ignores_human_turns();
     test_assistant_only_trivial();
     test_strip_system_prefix();

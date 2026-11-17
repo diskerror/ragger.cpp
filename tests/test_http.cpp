@@ -124,6 +124,7 @@ void t_health_no_token(HttpFixture& fx) {
     CHECK(j.contains("capture_turns") && j["capture_turns"].is_boolean());
     CHECK(j.contains("summarizer_model") && j["summarizer_model"].is_string());
     CHECK(j.contains("summarizer_engine") && j["summarizer_engine"].is_string());
+    CHECK(j.contains("summarizer_reachable") && j["summarizer_reachable"].is_boolean());
     std::println(" OK");
 }
 

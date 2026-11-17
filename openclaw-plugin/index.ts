@@ -532,7 +532,7 @@ const raggerPlugin = {
       if (flagsChecked || !transport) return;
       try {
         const st = (await transport.status()) as {
-          capture_turns?: boolean; summarizer_model?: string; summarizer_engine?: string;
+          capture_turns?: boolean; summarizer_model?: string; summarizer_engine?: string; summarizer_reachable?: boolean;
         };
         flagsChecked = true;
         if (st?.capture_turns === false) {
@@ -543,6 +543,8 @@ const raggerPlugin = {
             api.logger.warn("ragger: no summarizer is configured, so captured turns will not be summarized");
           } else if (!st.summarizer_engine) {
             api.logger.warn(`ragger: summarizer model '${st.summarizer_model}' is not served by any configured endpoint`);
+          } else if (st.summarizer_reachable === false) {
+            api.logger.warn(`ragger: the summarizer endpoint '${st.summarizer_engine}' is not answering, so turns are captured but not summarized until it is back`);
           }
         }
       } catch {

@@ -197,7 +197,8 @@ nlohmann::json capture_summarizer_flags(const Config& cfg, const InferenceClient
     const SummarizerInfo s = describe_summarizer(inference);
     return nlohmann::json{{"capture_turns",     cfg.capture_turns},
                           {"summarizer_model",  s.model},
-                          {"summarizer_engine", s.engine}};
+                          {"summarizer_engine", s.engine},
+                          {"summarizer_reachable", summarizer_reachable(inference)}};
 }
 
 nlohmann::json capture_turn_payload(const CaptureResult& result) {

@@ -39,7 +39,7 @@ struct Endpoint {
     bool matches(const std::string& model) const;
 
     /// Check if endpoint is reachable (GET /models or /health, 3s timeout)
-    bool is_reachable() const;
+    bool is_reachable(int timeout_sec = 3) const;
 
     /// True if endpoint appears to be a local/non-commercial engine
     bool is_local() const;
@@ -123,5 +123,11 @@ struct SummarizerInfo {
     std::string engine;
 };
 SummarizerInfo describe_summarizer(const InferenceClient& client);
+
+/// Is the endpoint that serves the summarizer model answering GET /v1/models?
+/// False when no summarizer is configured or no endpoint serves the model.
+/// The answer is cached per endpoint for `ttl_sec` (so a polled /health costs
+/// one probe per TTL, not one per request); a probe waits at most `timeout_sec`.
+bool summarizer_reachable(const InferenceClient& client, int timeout_sec = 1, int ttl_sec = 15);
 
 } // namespace ragger

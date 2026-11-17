@@ -72,7 +72,9 @@ nlohmann::json agent_memory_note(RaggerMemory& mem, const nlohmann::json& args,
 ///   capture_turns      bool    [server] capture_turns (false: /turn is a no-op)
 ///   summarizer_model   string  "" when no inference endpoint is configured
 ///   summarizer_engine  string  endpoint name serving it; "" when none does
-/// Pure config read: no network, no DB.
+///   summarizer_reachable bool  that endpoint answers GET /v1/models (cached
+///                              15 s, 1 s probe timeout; false when none)
+/// Config reads plus at most one cached probe; no DB.
 nlohmann::json capture_summarizer_flags(const Config& cfg, const InferenceClient& inference);
 
 /// Structured decision (HTTP POST /decision, MCP tool memory_decision).

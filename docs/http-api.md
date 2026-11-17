@@ -102,7 +102,8 @@ No auth. Liveness + build identity + row counts.
   "degraded": false,
   "capture_turns": true,
   "summarizer_model": "qwen3-4b",
-  "summarizer_engine": "lmstudio"
+  "summarizer_engine": "lmstudio",
+  "summarizer_reachable": true
 }
 ```
 
@@ -110,9 +111,11 @@ No auth. Liveness + build identity + row counts.
 `POST /turn` records nothing. `summarizer_model` / `summarizer_engine` say what
 would summarize captured turns: both empty strings = no summarizer configured;
 a model with an empty engine = no configured endpoint serves it; engine is the
-endpoint's name, never its URL or key. Configuration only, no network probe, so
-a configured summarizer can still be down. The MCP `status` tool returns the
-same three fields. Agent plugins read them to log why nothing is captured or
+endpoint's name, never its URL or key. `summarizer_reachable` is true when that
+endpoint answers `GET /v1/models` (1 s timeout, result cached 15 s so a polled
+`/health` costs one probe per 15 s; false when nothing is configured). It says
+the engine is up, not that the model is loaded. The MCP `status` tool returns
+the same four fields. Agent plugins read them to log why nothing is captured or
 summarized.
 
 `memories` counts knowledge rows; `embeddable_rows` counts all rows the
