@@ -658,13 +658,20 @@ struct Server::Impl {
     void setup_routes(httplib::Server& svr) {
         // GET /health — no auth required
         svr.Get("/health", [this](const httplib::Request&, httplib::Response& res) {
-            respond_json(res, json{{"status",   "ok"},
-                                 {"version",  RAGGER_VERSION},
-                                 {"commit",   RAGGER_COMMIT},
-                                 {"built",    RAGGER_BUILD_DATE},
-                                 {"memories", memory.count()},
-                                 {"embeddable_rows", memory.count_embeddable_rows()},
-                                 {"degraded", memory.embeddings_degraded()}});
+            json body{{"status",   "ok"},
+                      {"version",  RAGGER_VERSION},
+                      {"commit",   RAGGER_COMMIT},
+                      {"built",    RAGGER_BUILD_DATE},
+                      {"memories", memory.count()},
+                      {"embeddable_rows", memory.count_embeddable_rows()},
+                      {"degraded", memory.embeddings_degraded()}};
+            // capture_turns + summarizer_model/engine: lets a plugin say WHY
+            // nothing is captured or summarized (see capture_summarizer_flags).
+            if (auto inf = inference())
+                body.update(capture_summarizer_flags(config(), *inf));
+            else
+                body.update(capture_summarizer_flags(config(), InferenceClient({}, "")));
+            respond_json(res, body);
             Diskerror::Logger::debug("GET /health 200");
         });
 

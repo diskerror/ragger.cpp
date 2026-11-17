@@ -120,6 +120,10 @@ void t_health_no_token(HttpFixture& fx) {
     CHECK(r.status == 200);
     const auto j = json::parse(r.body);
     CHECK(j["status"] == "ok");
+    // Capture/summarizer readiness flags (capture_summarizer_flags).
+    CHECK(j.contains("capture_turns") && j["capture_turns"].is_boolean());
+    CHECK(j.contains("summarizer_model") && j["summarizer_model"].is_string());
+    CHECK(j.contains("summarizer_engine") && j["summarizer_engine"].is_string());
     std::println(" OK");
 }
 

@@ -20,6 +20,9 @@
 
 namespace ragger {
 
+struct Config;            // config.h
+class InferenceClient;    // inference.h
+
 /// The `store` verb (HTTP POST /store, MCP tool `store`, CLI `ragger store`).
 /// args: {text (required), metadata?: object}. metadata.category == "decision"
 /// is rejected X19 (Q9/L6): a decision needs a trigger, which this verb cannot
@@ -62,6 +65,15 @@ nlohmann::json agent_memory_timeline(RaggerMemory& mem, const nlohmann::json& ar
 /// (HTTP: the authenticated user; MCP: "mcp").
 nlohmann::json agent_memory_note(RaggerMemory& mem, const nlohmann::json& args,
                                  const std::string& default_source);
+
+/// Capture / summarizer readiness flags shared by GET /health and the MCP
+/// `status` tool, so an agent plugin can tell why nothing is being captured or
+/// summarized without guessing:
+///   capture_turns      bool    [server] capture_turns (false: /turn is a no-op)
+///   summarizer_model   string  "" when no inference endpoint is configured
+///   summarizer_engine  string  endpoint name serving it; "" when none does
+/// Pure config read: no network, no DB.
+nlohmann::json capture_summarizer_flags(const Config& cfg, const InferenceClient& inference);
 
 /// Structured decision (HTTP POST /decision, MCP tool memory_decision).
 nlohmann::json agent_memory_decision(RaggerMemory& mem, const nlohmann::json& args);

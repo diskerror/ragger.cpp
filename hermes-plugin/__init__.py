@@ -139,6 +139,67 @@ def _as_bool(value: str, default: bool) -> bool:
     return default
 
 
+# ---------------------------------------------------------------------------
+# Auto-recall modes (Ragger setting `auto_recall_mode`)
+# ---------------------------------------------------------------------------
+#
+# A mode is a request builder plus a hit formatter; add a mode by adding one
+# entry to _RECALL_MODES (and its value to the daemon's auto_recall_mode enum).
+#   decisions: only active decisions, matched against the prompt (decisions
+#              carry a trigger written as a future question); one line each:
+#              "[knowledge:5] <trigger> → <ruling>", with the status appended
+#              when it is not 'current'.
+#   flat:      the legacy flat /search over everything: the bare text.
+_DEFAULT_RECALL_MODE = "decisions"
+_RECALL_LIMIT = {"decisions": 3, "flat": 5}
+
+
+def _recall_request_decisions(query: str) -> tuple:
+    return "/memory/search", {"query": query, "layers": ["knowledge"],
+                              "kinds": ["decision"], "status": "active",
+                              "limit": _RECALL_LIMIT["decisions"]}
+
+
+def _recall_request_flat(query: str) -> tuple:
+    return "/search", {"query": query, "limit": _RECALL_LIMIT["flat"]}
+
+
+def _recall_lines_decisions(hits: list) -> list:
+    lines = []
+    for h in hits:
+        if not isinstance(h, dict) or not h.get("snippet"):
+            continue
+        extra = h.get("extra") if isinstance(h.get("extra"), dict) else {}
+        trigger = str(extra.get("trigger", "")).strip()
+        status = str(extra.get("status", "")).strip()
+        head = f"[{h.get('id', '')}] "
+        body = f"{trigger} → {h['snippet']}" if trigger else h["snippet"]
+        tail = f" ({status})" if status and status != "current" else ""
+        lines.append(head + body + tail)
+    return lines
+
+
+def _recall_lines_flat(hits: list) -> list:
+    return [h.get("text", "") for h in hits if isinstance(h, dict) and h.get("text")]
+
+
+_RECALL_MODES = {
+    "decisions": (_recall_request_decisions, _recall_lines_decisions),
+    "flat": (_recall_request_flat, _recall_lines_flat),
+}
+
+
+def _recall_query(query: str, history: list) -> str:
+    """The text to match against. A short prompt ("yes", "do it") has nothing
+    to match, so it borrows the previous user messages. Kept as one function
+    so the strategy can change without touching the callers."""
+    query = (query or "").strip()
+    if len(query.split()) >= 6:
+        return query
+    prior = [m for m in history if m and m != query][-2:]
+    return " ".join(prior + [query]).strip()
+
+
 def _load_ragger_config() -> dict:
     """Resolve the plugin's connection + behavior settings from the daemon.
 
@@ -167,6 +228,7 @@ def _load_ragger_config() -> dict:
         "port": "8432",
         "auth_token": token,
         "auto_recall": True,
+        "auto_recall_mode": _DEFAULT_RECALL_MODE,
         "socket_enable": True,
         "socket_path": socket_path,
     }
@@ -184,6 +246,9 @@ def _load_ragger_config() -> dict:
         if raw_bind and raw_bind != "0.0.0.0":
             cfg["host"] = raw_bind
         cfg["auto_recall"] = _as_bool(settings.get("auto_recall", ""), True)
+        mode = str(settings.get("auto_recall_mode", "")).split("#")[0].strip()
+        if mode in _RECALL_MODES:
+            cfg["auto_recall_mode"] = mode
         cfg["socket_enable"] = _as_bool(settings.get("socket_enable", ""), True)
 
     return cfg
@@ -522,6 +587,9 @@ class RaggerMemoryProvider(MemoryProvider):
         self._base_url = "http://127.0.0.1:8432"
         self._auth_token = ""
         self._auto_recall = True
+        self._auto_recall_mode = _DEFAULT_RECALL_MODE
+        self._recent_user: List[str] = []     # last few user messages, for short-prompt recall
+        self._flags_warned = False
         self._socket_enable = True
         self._socket_path = str(Path.home() / ".ragger" / "ragger.sock")
         self._prefetch_result = ""
@@ -726,6 +794,11 @@ class RaggerMemoryProvider(MemoryProvider):
         self._base_url = f"http://{cfg['host']}:{cfg['port']}"
         self._auth_token = cfg["auth_token"]
         self._auto_recall = cfg["auto_recall"]
+        self._auto_recall_mode = cfg["auto_recall_mode"]
+        # Learn, once per session and off the gateway thread, whether the daemon
+        # is capturing and summarizing; say so in the log if it is not.
+        threading.Thread(target=self._check_daemon_flags, daemon=True,
+                         name="ragger-flags").start()
         self._socket_enable = cfg["socket_enable"]
         self._socket_path = cfg["socket_path"]
 
@@ -740,6 +813,8 @@ class RaggerMemoryProvider(MemoryProvider):
         model = kwargs.get("model")
         if model:
             self._model = model
+        if message:
+            self._recent_user = (self._recent_user + [str(message)])[-4:]
 
     def system_prompt_block(self) -> str:
         # The full usage guidance, read at call time so an edit to the file
@@ -758,6 +833,30 @@ class RaggerMemoryProvider(MemoryProvider):
             "remembering across conversations."
         )
 
+    def _check_daemon_flags(self) -> None:
+        """Log once if the daemon is not capturing or not summarizing.
+
+        Reads GET /health: capture_turns (bool), summarizer_model and
+        summarizer_engine (strings; "" = not configured). Never raises."""
+        if self._flags_warned:
+            return
+        try:
+            health = self._get("/health", timeout=3.0)
+        except Exception:
+            return
+        if not isinstance(health, dict):
+            return
+        self._flags_warned = True
+        if health.get("capture_turns") is False:
+            logger.warning("Ragger: capture_turns is off, so turns are NOT being recorded "
+                           "(turn it on in the Ragger dashboard or `ragger config set capture_turns true`).")
+        if "summarizer_model" in health:
+            if not health.get("summarizer_model"):
+                logger.warning("Ragger: no summarizer is configured, so captured turns will not be summarized.")
+            elif not health.get("summarizer_engine"):
+                logger.warning("Ragger: summarizer model '%s' is not served by any configured endpoint.",
+                               health.get("summarizer_model"))
+
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Kick off a background search to warm the prefetch cache.
 
@@ -768,18 +867,21 @@ class RaggerMemoryProvider(MemoryProvider):
         if not self._auto_recall or self._breaker_open():
             return
 
+        mode = self._auto_recall_mode if self._auto_recall_mode in _RECALL_MODES else _DEFAULT_RECALL_MODE
+        build_request, format_lines = _RECALL_MODES[mode]
+        path, payload = build_request(_recall_query(query, list(self._recent_user)))
+
         def _run():
             # PHASE9B step 9: a 4xx is our own bad query, not a daemon outage —
             # it must not trip the breaker, and this is a background warm-up,
             # so log it and move on.
-            ok, payload = self._classify(
-                self._post_status("/search", {"query": query, "limit": 5}, timeout=4.0))
+            ok, got = self._classify(self._post_status(path, payload, timeout=4.0))
             if not ok:
-                logger.debug("Ragger prefetch: %s", payload)
+                logger.debug("Ragger prefetch: %s", got)
                 return
-            hits = payload.get("results", []) if isinstance(payload, dict) else []
-            if hits:
-                lines = [h.get("text", "") for h in hits if h.get("text")]
+            hits = got.get("results", []) if isinstance(got, dict) else []
+            lines = format_lines(hits)
+            if lines:
                 with self._prefetch_lock:
                     self._prefetch_result = "\n".join(f"- {line}" for line in lines)
 

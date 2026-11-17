@@ -587,6 +587,7 @@ int reload_config() {
     RELOAD(capture_turns);
     RELOAD(build_context);
     RELOAD(auto_recall);
+    RELOAD(auto_recall_mode);
     RELOAD(default_recipe);
 
     // Episode detection (PHASE9B step 7): summarizer_service reads these on

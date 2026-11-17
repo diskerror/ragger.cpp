@@ -102,6 +102,18 @@ Good for development — connects to daemon when running, spawns MCP when not.
 need a daemon. Use `http` when the daemon is already running, or
 when sub-users need to connect with tokens.
 
+## Auto-recall mode
+
+`autoRecallMode` (plugin config) picks what the recall hook injects:
+`decisions` (default) = only active decisions matched to the prompt, one line
+each, `[knowledge:5] <trigger> → <ruling>`; `flat` = the legacy flat search.
+A short prompt ("yes") borrows the previous user messages as its query. The
+Hermes plugin does the same, driven by the daemon setting `auto_recall_mode`
+(dashboard, Server section); OpenClaw reads its own plugin config.
+
+At startup the plugin also logs a warning if the daemon reports
+`capture_turns: false` or no summarizer (see `GET /health`).
+
 ## Agent Tools
 
 > **Caveat: untested.** This plugin was ported to the Ragger 0.17 agent API

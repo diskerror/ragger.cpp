@@ -99,9 +99,21 @@ No auth. Liveness + build identity + row counts.
   "built": "<build date>",
   "memories": 42,
   "embeddable_rows": 137,
-  "degraded": false
+  "degraded": false,
+  "capture_turns": true,
+  "summarizer_model": "qwen3-4b",
+  "summarizer_engine": "lmstudio"
 }
 ```
+
+`capture_turns` is the live `[server] capture_turns` setting; when false,
+`POST /turn` records nothing. `summarizer_model` / `summarizer_engine` say what
+would summarize captured turns: both empty strings = no summarizer configured;
+a model with an empty engine = no configured endpoint serves it; engine is the
+endpoint's name, never its URL or key. Configuration only, no network probe, so
+a configured summarizer can still be down. The MCP `status` tool returns the
+same three fields. Agent plugins read them to log why nothing is captured or
+summarized.
 
 `memories` counts knowledge rows; `embeddable_rows` counts all rows the
 embedding rebuild would re-encode. `degraded` is true when stored

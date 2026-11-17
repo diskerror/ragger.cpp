@@ -124,6 +124,16 @@ InferenceClient InferenceClient::from_config(const Config& cfg) {
     return client;
 }
 
+SummarizerInfo describe_summarizer(const InferenceClient& client) {
+    SummarizerInfo info;
+    if (client.endpoints.empty()) return info;     // nothing configured
+    info.model = client.memory_model;
+    for (const auto& ep : client.endpoints) {
+        if (ep.matches(info.model)) { info.engine = ep.name; break; }
+    }
+    return info;
+}
+
 // -----------------------------------------------------------------------
 // Model auto-load (LM Studio v1 API)
 // -----------------------------------------------------------------------

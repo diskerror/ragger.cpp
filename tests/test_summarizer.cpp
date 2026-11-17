@@ -2017,10 +2017,51 @@ void x23_test_episode_regen_inference_down(const std::string& base) {
     std::println(" ok");
 }
 
+// describe_summarizer: what status reports. No network; strings are empty
+// when nothing is configured, and engine alone is empty when no endpoint
+// serves the named model.
+void test_describe_summarizer() {
+    std::println("  test_describe_summarizer...");
+    {   // nothing configured
+        ragger::InferenceClient c({}, "", 4096);
+        const auto d = ragger::describe_summarizer(c);
+        CHECK(d.model.empty());
+        CHECK(d.engine.empty());
+    }
+    {   // one endpoint serving everything; memory model falls back to model
+        std::vector<ragger::Endpoint> eps{ragger::Endpoint("lm", "http://127.0.0.1:1/v1", "", "*")};
+        ragger::InferenceClient c(eps, "qwen-x", 4096);
+        c.memory_model = "qwen-x";
+        const auto d = ragger::describe_summarizer(c);
+        CHECK(d.model == "qwen-x");
+        CHECK(d.engine == "lm");
+    }
+    {   // dedicated summarizer endpoint ("memory") wins when its glob matches
+        std::vector<ragger::Endpoint> eps{
+            ragger::Endpoint("memory", "http://127.0.0.1:2/v1", "", "sum-*"),
+            ragger::Endpoint("lm", "http://127.0.0.1:1/v1", "", "*")};
+        ragger::InferenceClient c(eps, "big", 4096);
+        c.memory_model = "sum-small";
+        const auto d = ragger::describe_summarizer(c);
+        CHECK(d.model == "sum-small");
+        CHECK(d.engine == "memory");
+    }
+    {   // model named, but no endpoint serves it: model set, engine empty
+        std::vector<ragger::Endpoint> eps{ragger::Endpoint("lm", "http://127.0.0.1:1/v1", "", "other-*")};
+        ragger::InferenceClient c(eps, "big", 4096);
+        c.memory_model = "sum-small";
+        const auto d = ragger::describe_summarizer(c);
+        CHECK(d.model == "sum-small");
+        CHECK(d.engine.empty());
+    }
+    std::println(" OK");
+}
+
 int main() {
     TestEnv env("summarizer");
     std::println("test_summarizer:");
     test_detects_system_markers();
+    test_describe_summarizer();
     test_ignores_human_turns();
     test_assistant_only_trivial();
     test_strip_system_prefix();

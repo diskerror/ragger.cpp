@@ -112,6 +112,7 @@ const std::unordered_map<std::string_view, std::string Config::*>& string_fields
         {"summarizer_prompt",     &Config::summarizer_prompt},
         {"log_level",             &Config::log_level},
         {"default_recipe",        &Config::default_recipe},
+        {"auto_recall_mode",      &Config::auto_recall_mode},
     };
     return m;
 }

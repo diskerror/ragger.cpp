@@ -498,6 +498,10 @@ void p9b_test_summarizer_prompt_validation() {
     CHECK(!ok("summarizer_prompt", "{:d"));
     // Other Text keys keep accepting anything.
     CHECK(ok("default_recipe", "plain"));
+    // auto_recall_mode is a static enum: only its listed values.
+    CHECK(ok("auto_recall_mode", "decisions"));
+    CHECK(ok("auto_recall_mode", "flat"));
+    CHECK(!ok("auto_recall_mode", "everything"));
     std::println(" OK");
 }
 

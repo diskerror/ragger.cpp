@@ -11,6 +11,7 @@
 
 #include "agent_parse.h"
 #include "config.h"
+#include "inference.h"
 #include "lang.h"
 #include "Logger.h"
 #include "store_kind.h"
@@ -190,6 +191,13 @@ CaptureResult agent_capture_turn(RaggerMemory& mem, const nlohmann::json& args) 
                         args.value("session_id", std::string()),
                         args.value("session_name", std::string()),
                         args.value("name_source", std::string()));
+}
+
+nlohmann::json capture_summarizer_flags(const Config& cfg, const InferenceClient& inference) {
+    const SummarizerInfo s = describe_summarizer(inference);
+    return nlohmann::json{{"capture_turns",     cfg.capture_turns},
+                          {"summarizer_model",  s.model},
+                          {"summarizer_engine", s.engine}};
 }
 
 nlohmann::json capture_turn_payload(const CaptureResult& result) {

@@ -13,6 +13,11 @@
         "type": "boolean",
         "default": true
       },
+      "autoRecallMode": {
+        "type": "string",
+        "enum": ["decisions", "flat"],
+        "default": "decisions"
+      },
       "autoCapture": {
         "type": "boolean",
         "default": true
@@ -43,6 +48,10 @@
     "autoRecall": {
       "label": "Auto-Recall",
       "help": "Automatically inject relevant memories into context before agent runs"
+    },
+    "autoRecallMode": {
+      "label": "Auto-Recall Mode",
+      "help": "decisions: inject only active decisions matched to the prompt (default). flat: the legacy search over all memories."
     },
     "autoCapture": {
       "label": "Auto-Capture",

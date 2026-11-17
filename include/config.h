@@ -214,6 +214,11 @@ struct Config {
     // Purely a hint served to plugins via GET /config — the daemon itself does
     // no injection. Turn capture (capture_turns) is independent and unaffected.
     bool auto_recall = true;
+    // What auto-recall injects when auto_recall is true. "decisions" = only
+    // active decisions matched against the prompt (ranked on their triggers);
+    // "flat" = the legacy flat search over everything. Served to plugins via
+    // GET /config; the daemon does no injection itself.
+    std::string auto_recall_mode = "decisions";
     // Recipe name applied when the caller doesn't specify one. Recipes are
     // loaded from ~/.ragger/recipes (JSON files); built-ins cover the case
     // where the directory is missing or empty.

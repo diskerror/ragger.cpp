@@ -32,6 +32,7 @@
 #include "Logger.h"
 #include "memory.h"
 #include "agent_api.h"
+#include "inference.h"
 #include "sqlite/backend.h"
 #include "sqlite/status.h"
 #include "util/fs.h"
@@ -260,14 +261,18 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         } catch (...) {
             Diskerror::Logger::debug("status: table counts failed: unknown exception");
         }
-        return text_result(nlohmann::json({
+        nlohmann::json st = {
             {"status",    "running"},
             {"version",   RAGGER_VERSION},
             {"memories",  memory.count()},
             {"tables",    tables},
             {"degraded",  memory.embeddings_degraded()},
             {"embeddings_unavailable", memory.embeddings_unavailable()}
-        }).dump());
+        };
+        // Same flags as GET /health. `ragger mcp` runs no summarizer itself
+        // (the daemon does), so these report configuration, not liveness.
+        st.update(capture_summarizer_flags(config(), InferenceClient::from_config(config())));
+        return text_result(st.dump());
 
     } else {
         return error_result(std::format(lang::ERR_MCP_UNKNOWN_TOOL, tool_name));

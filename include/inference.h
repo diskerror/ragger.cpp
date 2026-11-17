@@ -113,4 +113,15 @@ private:
     std::string payload_dump_dir_;  // if set, write raw request JSON here
 };
 
+/// What the summarizer would use, for status reporting (no network I/O).
+/// `model` = the memory model; `engine` = NAME of the first endpoint whose
+/// model globs match it ("memory" for a dedicated [summarizer] api_url).
+/// Both are empty strings when nothing is configured; `engine` alone is empty
+/// when a model is named but no endpoint serves it. Never carries a URL or key.
+struct SummarizerInfo {
+    std::string model;
+    std::string engine;
+};
+SummarizerInfo describe_summarizer(const InferenceClient& client);
+
 } // namespace ragger
