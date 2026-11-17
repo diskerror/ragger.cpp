@@ -121,6 +121,11 @@ struct AgentSearchQuery {
     int limit = 10;
     int max_tokens = 0;                ///< 0 = no budget; else stop adding results past ~max_tokens (chars/4)
     std::string mode = "hybrid";       ///< LR S77: hybrid | semantic | keyword
+    // X25: split mode. The backend ignores these three; the verb layer
+    // (agent_memory_search) reads them and composes two agent_search runs.
+    bool split = false;                ///< three disjoint lists (both / vector_only / fts_only) instead of one blended ranking
+    float min_vector_score = 0.0f;     ///< raw cosine minimum for the vector list (split only); 0 = off
+    float min_fts_score = 0.0f;        ///< raw keyword-score minimum for the FTS list (split only); 0 = off (scores are corpus-dependent)
     std::vector<std::string> tags;     ///< LR S78 (logic §2): knowledge hits must carry ALL
                                        ///  listed tags (trimmed, case-insensitive elements of
                                        ///  the stored comma list); layers without tags are

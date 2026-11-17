@@ -75,6 +75,36 @@ AgentSearchQuery parse_agent_search_query(const json& a) {
     q.limit           = a.value("limit", 10);
     q.max_tokens      = a.value("max_tokens", 0);
     q.mode            = a.value("mode", "hybrid");
+    // X25: split-mode fields (verb layer only; the backend ignores them).
+    // Same nlohmann type-check style as the other typed fields; every
+    // rejection names the key and the expectation.
+    if (a.contains("split")) {
+        if (!a["split"].is_boolean())
+            throw std::invalid_argument("split must be a boolean");
+        q.split = a["split"].get<bool>();
+    }
+    if (a.contains("min_vector_score")) {
+        if (!a["min_vector_score"].is_number())
+            throw std::invalid_argument("min_vector_score must be a number");
+        q.min_vector_score = a["min_vector_score"].get<float>();
+        if (q.min_vector_score < 0.0f)
+            throw std::invalid_argument("min_vector_score must be >= 0");
+    }
+    if (a.contains("min_fts_score")) {
+        if (!a["min_fts_score"].is_number())
+            throw std::invalid_argument("min_fts_score must be a number");
+        q.min_fts_score = a["min_fts_score"].get<float>();
+        if (q.min_fts_score < 0.0f)
+            throw std::invalid_argument("min_fts_score must be >= 0");
+    }
+    // split composes its own two runs (semantic + keyword); an explicit mode
+    // would fight it. mode:"hybrid" is the default value, not a conflict.
+    if (q.split && a.contains("mode") && a["mode"] != "hybrid")
+        throw std::invalid_argument("split cannot be combined with mode");
+    // A minimum without split:true would be a silent no-op — almost always
+    // a forgotten split flag; reject instead.
+    if (!q.split && (a.contains("min_vector_score") || a.contains("min_fts_score")))
+        throw std::invalid_argument("min_vector_score/min_fts_score require split");
     if (a.contains("layers"))
         q.layers = a["layers"].get<std::vector<std::string>>();
     if (a.contains("kinds"))

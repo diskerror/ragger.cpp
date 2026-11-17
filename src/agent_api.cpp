@@ -16,9 +16,13 @@
 #include "Logger.h"
 #include "store_kind.h"
 
+#include <algorithm>
 #include <chrono>
+#include <map>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 namespace ragger {
 
@@ -33,6 +37,104 @@ nlohmann::json agent_hit_to_json(const AgentHit& h) {
                           {"created", h.created},
                           {"snippet", h.snippet},
                           {"extra", h.extra}};
+}
+
+/// X25: one hit of the split response. Deliberately NO `score` and NO
+/// `matched_by`: the blended number is meaningless here, and one name with
+/// two meanings is the bug this feature removes. An absent score is JSON
+/// null (never 0, never omitted); present scores go through the same JSON
+/// number path as agent_hit_to_json's `score` (no extra rounding).
+nlohmann::json split_hit_to_json(const std::string& id, const AgentHit* v,
+                                 const AgentHit* f) {
+    // layer/created/snippet/extra come from the vector run when present,
+    // else from the FTS run (same rows; the vector copy is canonical).
+    const AgentHit& src = v ? *v : *f;
+    return nlohmann::json{{"id", id},
+                          {"layer", src.layer},
+                          {"created", src.created},
+                          {"snippet", src.snippet},
+                          {"extra", src.extra},
+                          {"vector_score", v ? nlohmann::json(v->score)
+                                             : nlohmann::json(nullptr)},
+                          {"fts_score", f ? nlohmann::json(f->score)
+                                          : nlohmann::json(nullptr)}};
+}
+
+/// X25: split mode (Reid's ruling 2026-11-16). Two ordinary agent_search
+/// runs — semantic and keyword — partitioned by handle into three disjoint
+/// lists: both / vector_only / fts_only. Every existing filter applies to
+/// both runs identically because both carry the same query fields. No
+/// storage-layer change.
+nlohmann::json agent_memory_search_split(RaggerMemory& mem, const AgentSearchQuery& q) {
+    AgentSearchQuery qv = q; qv.mode = "semantic";
+    AgentSearchQuery ql = q; ql.mode = "keyword";
+
+    // The keyword run always runs. The vector run degrades to an empty list
+    // ONLY when the embedder is missing; any other invalid_argument (bad
+    // layer/kind/time) must still surface as a 400, so it is rethrown.
+    const auto fts_all = mem.agent_search(ql);
+    std::vector<AgentHit> vec_all;
+    bool vector_available = true;
+    try {
+        vec_all = mem.agent_search(qv);
+    } catch (const std::invalid_argument& e) {
+        if (std::string_view(e.what()).starts_with("semantic search needs an embedder"))
+            vector_available = false;
+        else
+            throw;
+    }
+
+    // Hits arrive sorted by score descending and capped at `limit`, so
+    // dropping the tail below the minimum is exactly "top X above the
+    // minimum" (section 1 definition).
+    std::vector<AgentHit> vec, fts;
+    for (const auto& h : vec_all)
+        if (h.score >= q.min_vector_score) vec.push_back(h);
+    for (const auto& h : fts_all)
+        if (h.score >= q.min_fts_score) fts.push_back(h);
+
+    std::map<std::string, const AgentHit*> vmap, fmap;
+    for (const auto& h : vec) vmap[h.id] = &h;
+    for (const auto& h : fts) fmap[h.id] = &h;
+
+    std::vector<const AgentHit*> vb, vv, vf;   // both / vector_only / fts_only
+    for (const auto& [id, v] : vmap) {
+        const auto f = fmap.count(id) ? fmap[id] : nullptr;
+        (f ? vb : vv).push_back(v);
+    }
+    for (const auto& [id, f] : fmap)
+        if (!vmap.count(id)) vf.push_back(f);
+
+    // Order: both and vector_only by vector_score descending, fts_only by
+    // fts_score descending; ties by handle ascending (deterministic).
+    auto by_vector = [](const AgentHit* a, const AgentHit* b) {
+        if (a->score != b->score) return a->score > b->score;
+        return a->id < b->id;
+    };
+    std::sort(vb.begin(), vb.end(), by_vector);
+    std::sort(vv.begin(), vv.end(), by_vector);
+    std::sort(vf.begin(), vf.end(), [](const AgentHit* a, const AgentHit* b) {
+        if (a->score != b->score) return a->score > b->score;
+        return a->id < b->id;
+    });
+
+    nlohmann::json both = nlohmann::json::array(),
+                   vonly = nlohmann::json::array(),
+                   fonly = nlohmann::json::array();
+    for (const auto* v : vb)
+        both.push_back(split_hit_to_json(v->id, v, fmap[v->id]));
+    for (const auto* v : vv)
+        vonly.push_back(split_hit_to_json(v->id, v, nullptr));
+    for (const auto* f : vf)
+        fonly.push_back(split_hit_to_json(f->id, nullptr, f));
+
+    return nlohmann::json{{"groups",
+                           {{"both", std::move(both)},
+                            {"vector_only", std::move(vonly)},
+                            {"fts_only", std::move(fonly)}}},
+                          {"vector_available", vector_available},
+                          {"min_vector_score", q.min_vector_score},
+                          {"min_fts_score", q.min_fts_score}};
 }
 } // namespace
 
@@ -100,6 +202,10 @@ nlohmann::json agent_memory_search(RaggerMemory& mem, const nlohmann::json& args
     AgentSearchQuery q = parse_agent_search_query(args);
     if (q.query.empty())
         throw std::invalid_argument("query is required");
+    // X25: split mode is composed here in the verb layer from two ordinary
+    // agent_search runs; the default path below is byte-identical to before.
+    if (q.split)
+        return agent_memory_search_split(mem, q);
     const auto hits = mem.agent_search(q);
     nlohmann::json arr = nlohmann::json::array();
     for (const auto& h : hits)

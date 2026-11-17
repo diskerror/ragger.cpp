@@ -46,6 +46,11 @@ nlohmann::json agent_search(RaggerMemory& mem, const nlohmann::json& args);
 /// Layered agent search (HTTP POST /memory/search, MCP tool memory_search).
 /// Returns {results:[AgentHit...]}. The empty-query check used to exist only
 /// on MCP (inventory D12); it is now one rule on every surface.
+/// X25: with args.split == true the response instead is
+/// {groups:{both,vector_only,fts_only}, vector_available, min_vector_score,
+/// min_fts_score} — two ordinary agent_search runs (semantic + keyword)
+/// partitioned by handle, native scores, absent score = null. The default
+/// (split absent/false) path is unchanged.
 nlohmann::json agent_memory_search(RaggerMemory& mem, const nlohmann::json& args);
 
 /// LR S76 (D-7): documents' own verb (HTTP POST /memory/documents, MCP tool

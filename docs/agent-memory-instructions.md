@@ -44,6 +44,15 @@ With the layered tools:
 - `memory_get(session=...)` history pages carry each turn's
   `turn_summary_id` and `episode_id` (`null` when absent), so a reader can
   fill `evidence[]` handles without extra lookups.
+- `memory_search` also takes `split: true`: instead of one blended ranking
+  you get three disjoint lists — `groups.both`, `groups.vector_only`,
+  `groups.fts_only` — each hit with its native scores (`vector_score` = raw
+  cosine, `fts_score` = raw keyword score; absent = `null`). Use it when the
+  blended score cannot tell you whether a hit matched by meaning, by exact
+  words, or both (the blended number is normalized per pool and does not
+  separate relevant from irrelevant); optional `min_vector_score` filters
+  weak vector hits — `min_fts_score` is advisory because keyword scores are
+  corpus-dependent.
 - `memory_timeline` answers "what did we do recently / last session": a
   newest-first list, not a ranked search. `granularity` also accepts
   `knowledge` (stored rows newest first). Pass an explicit session GUID to

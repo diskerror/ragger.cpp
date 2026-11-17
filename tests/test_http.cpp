@@ -15,8 +15,13 @@
 #include "nlohmann_json.hpp"
 
 #include <print>
+#include <algorithm>
+#include <filesystem>
+#include <iterator>
+#include <set>
 #include <sqlite3.h>
 #include <string>
+#include <string_view>
 
 using nlohmann::json;
 using ragger_test::HttpFixture;
@@ -107,9 +112,224 @@ struct RawDb {
     }
 };
 
+// X25 pin (GREEN before AND after the split work): the default (non-split)
+// POST /memory/search response has exactly the top-level key `results`, and
+// every hit has exactly the keys {id, layer, score, matched_by, created,
+// snippet, extra}. This proves the default path is untouched by split mode.
+void x25_test_default_response_shape_pinned(HttpFixture& fx) {
+    std::println("  x25_test_default_response_shape_pinned...");
+    auto stored = post_json(fx, "/store",
+                            {{"text", "x25 shape pin note about flux capacitors"}});
+    CHECK(stored["_status"] == 200);
+    auto r = post_json(fx, "/memory/search", {{"query", "flux capacitor"}});
+    CHECK(r["_status"] == 200);
+    std::set<std::string> top;
+    for (auto it = r.begin(); it != r.end(); ++it) {
+        if (it.key() == "_status" || it.key() == "_raw") continue;  // helper-added
+        top.insert(it.key());
+    }
+    CHECK(top == std::set<std::string>{"results"});
+    CHECK(r["results"].is_array());
+    const std::set<std::string> want{"id", "layer", "score", "matched_by",
+                                     "created", "snippet", "extra"};
+    for (const auto& h : r["results"]) {
+        std::set<std::string> keys;
+        for (auto it = h.begin(); it != h.end(); ++it) keys.insert(it.key());
+        CHECK(keys == want);
+    }
+    std::println(" OK");
+}
+
 // id fields differ per path (plain note: string; insight: int) — normalize.
 std::string id_of(const json& j) {
     return j["id"].is_string() ? j["id"].get<std::string>() : j["id"].dump();
+}
+
+// X25 failure paths (each named in the step): the parser messages arrive
+// prefixed "ERROR: " by guarded(); an unknown layer with split must still be
+// a 400 (not swallowed by the vector run's embedder catch).
+void x25_test_split_validation(HttpFixture& fx) {
+    std::println("  x25_test_split_validation...");
+    auto r = post_json(fx, "/memory/search", {{"query", "x"}, {"split", "yes"}});
+    CHECK(r["_status"] == 400);
+    CHECK(r["_raw"] == "ERROR: split must be a boolean");
+
+    r = post_json(fx, "/memory/search",
+                  {{"query", "x"}, {"split", true}, {"mode", "semantic"}});
+    CHECK(r["_status"] == 400);
+    CHECK(r["_raw"] == "ERROR: split cannot be combined with mode");
+
+    r = post_json(fx, "/memory/search",
+                  {{"query", "x"}, {"split", true}, {"min_vector_score", -1}});
+    CHECK(r["_status"] == 400);
+    CHECK(r["_raw"] == "ERROR: min_vector_score must be >= 0");
+
+    r = post_json(fx, "/memory/search", {{"query", "x"}, {"min_vector_score", 0.3}});
+    CHECK(r["_status"] == 400);
+    CHECK(r["_raw"] == "ERROR: min_vector_score/min_fts_score require split");
+
+    r = post_json(fx, "/memory/search", {{"query", ""}, {"split", true}});
+    CHECK(r["_status"] == 400);
+    CHECK(r["_raw"] == "ERROR: query is required");
+
+    json bad_layer = {{"query", "x"}, {"split", true}};
+    bad_layer["layers"] = json::array({"nonsense"});
+    r = post_json(fx, "/memory/search", bad_layer);
+    CHECK(r["_status"] == 400);
+    CHECK(r["_raw"].get<std::string>().find("unknown layer") != std::string::npos);
+    std::println(" OK");
+}
+
+// X25: split-mode properties on a fixture of 6 knowledge notes (two sharing
+// the rare token x25zorkmid). Scores come from the real embedder, so every
+// assertion is a property, never a constant. Skips (not silently passes)
+// when the embedding model is absent — same rule as test_sqlite_backend.
+void x25_test_split_properties(HttpFixture& fx) {
+    std::println("  x25_test_split_properties...");
+    const auto& md = fx.env.model_dir();
+    if (!std::filesystem::exists(md + "/model.onnx") &&
+        !std::filesystem::exists(md + "/onnx/model.onnx")) {
+        std::println(" SKIPPED (no embedding model)");
+        return;
+    }
+
+    const auto handles = [](const json& arr) {
+        std::set<std::string> s;
+        for (const auto& h : arr) s.insert(h["id"].get<std::string>());
+        return s;
+    };
+    const auto uni = [](const std::set<std::string>& a, const std::set<std::string>& b) {
+        std::set<std::string> r = a;
+        r.insert(b.begin(), b.end());
+        return r;
+    };
+    const auto inter = [](const std::set<std::string>& a, const std::set<std::string>& b) {
+        std::set<std::string> r;
+        std::set_intersection(a.begin(), a.end(), b.begin(), b.end(),
+                              std::inserter(r, r.begin()));
+        return r;
+    };
+    // Score-descending with ties by handle ascending (the specified order).
+    const auto ordered_by = [](const json& arr, const char* key) {
+        for (size_t i = 1; i < arr.size(); ++i) {
+            const double a = arr[i - 1][key].get<double>(), b = arr[i][key].get<double>();
+            CHECK(a >= b);
+            if (a == b)
+                CHECK(arr[i - 1]["id"].get<std::string>() < arr[i]["id"].get<std::string>());
+        }
+    };
+
+    // Fixture: 2 notes carry the rare token, 4 do not.
+    std::string rare1, rare2;
+    for (const char* text : {
+             "The x25zorkmid coin was minted in copper and pays the gear tax",
+             "x25zorkmid settlements are due every third Tuesday at the harbor house",
+             "Hydraulic pump maintenance schedule for the north gallery",
+             "The regatta committee postponed the sail race because of fog",
+             "Sourdough starter needs feeding twice a day in warm weather",
+             "Fiber optic splicing requires a fusion arc and cleaved glass"}) {
+        auto s = post_json(fx, "/store", {{"text", text}});
+        CHECK(s["_status"] == 200);
+        if (std::string_view(text).find("x25zorkmid") != std::string_view::npos)
+            (rare1.empty() ? rare1 : rare2) = "knowledge:" + id_of(s);
+    }
+    CHECK(!rare1.empty() && !rare2.empty());
+
+    const std::string q = "x25zorkmid copper gear settlement";
+    const int limit = 3;
+    const auto sp = post_json(fx, "/memory/search",
+                              {{"query", q}, {"split", true}, {"limit", limit}});
+    CHECK(sp["_status"] == 200);
+
+    // Output shape (exact): four top-level keys, three groups, seven hit keys.
+    std::set<std::string> top;
+    for (auto it = sp.begin(); it != sp.end(); ++it) {
+        if (it.key() == "_status" || it.key() == "_raw") continue;  // helper-added
+        top.insert(it.key());
+    }
+    CHECK(top == (std::set<std::string>{"groups", "vector_available",
+                                        "min_vector_score", "min_fts_score"}));
+    CHECK(sp["vector_available"] == true);
+    CHECK(sp["min_vector_score"] == 0);
+    CHECK(sp["min_fts_score"] == 0);
+    const auto& g = sp["groups"];
+    CHECK(g.size() == 3 && g.contains("both") && g.contains("vector_only") &&
+          g.contains("fts_only"));
+    const std::set<std::string> hit_keys{"id", "layer", "created", "snippet",
+                                         "extra", "vector_score", "fts_score"};
+    for (const char* name : {"both", "vector_only", "fts_only"})
+        for (const auto& h : g[name]) {
+            std::set<std::string> keys;
+            for (auto it = h.begin(); it != h.end(); ++it) keys.insert(it.key());
+            CHECK(keys == hit_keys);
+        }
+
+    const auto hb = handles(g["both"]), hv = handles(g["vector_only"]),
+               hf = handles(g["fts_only"]);
+    // (1) disjoint: no handle appears in two lists.
+    CHECK(inter(hb, hv).empty() && inter(hb, hf).empty() && inter(hv, hf).empty());
+    // (2) null rule: both -> two non-null scores; vector_only -> fts_score
+    // null + non-null vector_score; fts_only the reverse.
+    for (const auto& h : g["both"])
+        CHECK(!h["vector_score"].is_null() && !h["fts_score"].is_null());
+    for (const auto& h : g["vector_only"])
+        CHECK(!h["vector_score"].is_null() && h["fts_score"].is_null());
+    for (const auto& h : g["fts_only"])
+        CHECK(h["vector_score"].is_null() && !h["fts_score"].is_null());
+    // (3) union rule: both ∪ vector_only == the semantic run at limit;
+    // both ∪ fts_only == the keyword run at limit (compared as sets).
+    const auto sem = post_json(fx, "/memory/search",
+                               {{"query", q}, {"mode", "semantic"}, {"limit", limit}});
+    CHECK(sem["_status"] == 200);
+    const auto kw = post_json(fx, "/memory/search",
+                              {{"query", q}, {"mode", "keyword"}, {"limit", limit}});
+    CHECK(kw["_status"] == 200);
+    CHECK(uni(hb, hv) == handles(sem["results"]));
+    CHECK(uni(hb, hf) == handles(kw["results"]));
+    // (5) size: each side at most limit.
+    CHECK(uni(hb, hv).size() <= static_cast<size_t>(limit));
+    CHECK(uni(hb, hf).size() <= static_cast<size_t>(limit));
+    // (7) order: both/vector_only by vector_score desc, fts_only by
+    // fts_score desc (ties by handle ascending).
+    ordered_by(g["both"], "vector_score");
+    ordered_by(g["vector_only"], "vector_score");
+    ordered_by(g["fts_only"], "fts_score");
+
+    // (4) minimums: a vector minimum above every cosine empties both and
+    // vector_only; an unreachable FTS minimum empties fts_only and both
+    // (both requires presence in BOTH lists).
+    const auto sp_v = post_json(fx, "/memory/search",
+                                {{"query", q}, {"split", true}, {"limit", limit},
+                                 {"min_vector_score", 0.99999}});
+    CHECK(sp_v["_status"] == 200);
+    CHECK(sp_v["groups"]["both"].empty());
+    CHECK(sp_v["groups"]["vector_only"].empty());
+    CHECK(sp_v["min_vector_score"].get<double>() > 0.9999);  // echoed (float path)
+    const auto sp_f = post_json(fx, "/memory/search",
+                                {{"query", q}, {"split", true}, {"limit", limit},
+                                 {"min_fts_score", 1e9}});
+    CHECK(sp_f["_status"] == 200);
+    CHECK(sp_f["groups"]["fts_only"].empty());
+    CHECK(sp_f["groups"]["both"].empty());
+
+    // (6) rare token: a query that is exactly the rare token must put both
+    // notes carrying it in fts_only or both. Observed: the FTS run finds
+    // both (exact token match), and the semantic run also ranks them top-2,
+    // so they land in `both`; the contract accepts either side.
+    const auto sp_rare = post_json(fx, "/memory/search",
+                                   {{"query", "x25zorkmid"}, {"split", true},
+                                    {"limit", limit}});
+    CHECK(sp_rare["_status"] == 200);
+    const auto rare_side = uni(handles(sp_rare["groups"]["fts_only"]),
+                               handles(sp_rare["groups"]["both"]));
+    CHECK(rare_side.count(rare1) == 1);
+    CHECK(rare_side.count(rare2) == 1);
+    const auto where = [&](const std::string& id) {
+        return handles(sp_rare["groups"]["both"]).count(id) ? "both" : "fts_only";
+    };
+    std::println("      rare notes landed: {} -> {}, {} -> {}", rare1, where(rare1),
+                 rare2, where(rare2));
+    std::println(" OK");
 }
 
 // GET /health is the unauthenticated readiness probe.
@@ -864,6 +1084,9 @@ int main() {
     t_store_empty_text(fx);
     t_store_metadata_type_error(fx);
     t_memory_search_bad_limit(fx);
+    x25_test_default_response_shape_pinned(fx);
+    x25_test_split_validation(fx);
+    x25_test_split_properties(fx);
     t_decision_validation_parity(fx);
     t_store_http_mcp_parity(fx);
     t_read_verbs_parity_s71(fx);

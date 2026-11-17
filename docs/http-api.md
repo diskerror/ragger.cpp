@@ -257,14 +257,54 @@ scored) — both searched only when named explicitly; naming `document` is a
 carry ALL listed tags — AND rule, trimmed, case-insensitive; layers
 without tags are excluded).
 
-**Response:** `{"results": [AgentHit]}` where each hit is
+**Split mode (X25):** `split: true` (boolean) replaces the blended ranking
+with **three disjoint lists** built from two ordinary runs — semantic and
+keyword — partitioned by handle: `groups.both` (in both top-`limit` lists),
+`groups.vector_only`, `groups.fts_only`. No handle is repeated; `limit`
+applies per list (before partitioning), so at most 2×`limit` hits come
+back. `min_vector_score` (number, default 0 = off) drops vector hits below
+the raw cosine minimum; `min_fts_score` (number, default 0 = off) drops FTS
+hits below the raw keyword-score minimum — keyword scores are
+corpus-dependent and unbounded, so the FTS minimum is advisory. `split`
+cannot be combined with an explicit `mode` other than `hybrid`; a minimum
+without `split: true` is a `400`. `vector_available` is `false` (and the
+vector lists empty) when no embedder is ready; the FTS lists still answer.
+
+**Response (default):** `{"results": [AgentHit]}` where each hit is
 `{"id": "<layer>:<rowid>", "layer", "score", "matched_by":
 "vector|fts|both", "created", "snippet", "extra"}` (`extra` is
 layer-specific: knowledge → `{status, trigger}`, turn_summary →
 `{turn_id, session}`, session → `{started_on, ended_on}` with
 `id = session:<guid>`, …).
 
-**Status codes:** `400` on unknown layer/kind or bad time format.
+**Response (split):**
+`{"groups": {"both": [...], "vector_only": [...], "fts_only": [...]},
+"vector_available": true|false, "min_vector_score": <number>,
+"min_fts_score": <number>}`. Each split hit is
+`{"id", "layer", "created", "snippet", "extra", "vector_score",
+"fts_score"}` — native scores only, no blended `score` and no
+`matched_by`; a score from a list the hit is not in is JSON `null`
+(never 0, never omitted). `both` and `vector_only` are ordered by
+`vector_score` descending, `fts_only` by `fts_score` descending, ties by
+handle ascending. Example:
+
+```json
+{"groups": {
+  "both": [{"id": "knowledge:7", "layer": "knowledge", "created": "2026-11-16 09:12:03",
+            "snippet": "Use FTS for exact tokens…", "extra": {"status": "current", "trigger": "…"},
+            "vector_score": 0.46, "fts_score": 1.83}],
+  "vector_only": [{"id": "knowledge:3", "layer": "knowledge", "created": "2026-11-15 18:02:11",
+                   "snippet": "Paraphrased ruling…", "extra": {"status": "current", "trigger": "…"},
+                   "vector_score": 0.31, "fts_score": null}],
+  "fts_only": []},
+ "vector_available": true, "min_vector_score": 0.3, "min_fts_score": 0}
+```
+
+**Status codes:** `400` on unknown layer/kind or bad time format; also on
+`split` type/combination errors (messages name the key:
+`split must be a boolean`, `split cannot be combined with mode`,
+`min_vector_score/min_fts_score require split`,
+`<name> must be a number`, `<name> must be >= 0`).
 
 ---
 

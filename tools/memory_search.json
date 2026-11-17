@@ -21,6 +21,14 @@
         "description": "Token budget (~chars/4) over snippets; 0 = none.",
         "type": "integer"
       },
+      "min_fts_score": {
+        "description": "Split only (requires `split`): minimum raw keyword score for a hit to stay in the FTS lists. Keyword scores are corpus-dependent and unbounded, so this is advisory; 0 (default) = off.",
+        "type": "number"
+      },
+      "min_vector_score": {
+        "description": "Split only (requires `split`): minimum raw vector cosine (0-1) for a hit to stay in the vector lists; 0 (default) = off.",
+        "type": "number"
+      },
       "mode": {
         "description": "hybrid (default) | semantic (vector only; needs an embedder) | keyword (text index only).",
         "type": "string"
@@ -36,6 +44,10 @@
       "since": {
         "description": "Only results at/after this time.",
         "type": "string"
+      },
+      "split": {
+        "description": "Return three disjoint lists instead of one blended ranking: groups.both, groups.vector_only, groups.fts_only. Each hit carries its native scores (vector_score = raw cosine, fts_score = raw keyword score) and no blended score or matched_by. `limit` applies per list, so up to 2x limit hits come back.",
+        "type": "boolean"
       },
       "status": {
         "description": "Knowledge rows only (any kind): active (default) | any | one exact status.",

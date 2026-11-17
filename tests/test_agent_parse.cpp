@@ -370,6 +370,66 @@ void p12_tools_json_status_enum_drift() {
     CHECK(false);  // memory_decision missing from tools/list
 }
 
+// X25: split-mode field parsing — defaults, explicit values, and the exact
+// rejection messages (the verb layer composes the split from these fields;
+// the backend ignores them).
+void x25_test_split_parsing() {
+    std::println("  x25_test_split_parsing...");
+
+    // Defaults: split off, minimums 0.
+    auto d = ragger::parse_agent_search_query(json{{"query", "gears"}});
+    CHECK(!d.split);
+    CHECK(d.min_vector_score == 0.0f && d.min_fts_score == 0.0f);
+
+    // Explicit values (int and float forms both accepted as numbers).
+    auto p = ragger::parse_agent_search_query(json{{"query", "gears"},
+                                                   {"split", true},
+                                                   {"min_vector_score", 0.3},
+                                                   {"min_fts_score", 2}});
+    CHECK(p.split);
+    CHECK(p.min_vector_score == 0.3f);
+    CHECK(p.min_fts_score == 2.0f);
+
+    // split:true with an explicit mode:"hybrid" is the default value, not a
+    // conflict; only a different mode fights split.
+    bool threw = false;
+    try {
+        ragger::parse_agent_search_query(
+            json{{"query", "g"}, {"split", true}, {"mode", "hybrid"}});
+    } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(!threw);
+
+    // Exact messages (the HTTP/MCP surfaces prefix these; the parser is the
+    // single source).
+    const std::vector<std::pair<json, std::string>> bad = {
+        {json{{"query", "g"}, {"split", "yes"}}, "split must be a boolean"},
+        {json{{"query", "g"}, {"split", 1}}, "split must be a boolean"},
+        {json{{"query", "g"}, {"split", true}, {"min_vector_score", "x"}},
+         "min_vector_score must be a number"},
+        {json{{"query", "g"}, {"split", true}, {"min_fts_score", nullptr}},
+         "min_fts_score must be a number"},
+        {json{{"query", "g"}, {"split", true}, {"min_vector_score", -1}},
+         "min_vector_score must be >= 0"},
+        {json{{"query", "g"}, {"split", true}, {"min_fts_score", -0.5}},
+         "min_fts_score must be >= 0"},
+        {json{{"query", "g"}, {"split", true}, {"mode", "semantic"}},
+         "split cannot be combined with mode"},
+        {json{{"query", "g"}, {"min_vector_score", 0.3}},
+         "min_vector_score/min_fts_score require split"},
+        {json{{"query", "g"}, {"min_fts_score", 1}},
+         "min_vector_score/min_fts_score require split"},
+        {json{{"query", "g"}, {"split", false}, {"min_vector_score", 0.3}},
+         "min_vector_score/min_fts_score require split"},
+    };
+    for (const auto& [args, msg] : bad) {
+        bool got = false;
+        try { ragger::parse_agent_search_query(args); }
+        catch (const std::invalid_argument& e) { got = std::string(e.what()) == msg; }
+        CHECK(got);
+    }
+    std::println(" OK");
+}
+
 int main() {
     TestEnv env("agent_parse");  // must be first: isolates from ~/.ragger
     std::println("Running agent-parse tests:");
@@ -381,6 +441,7 @@ int main() {
     test_parse_update_request();
     test_parse_positive_int();
     test_search_and_timeline_parsing();
+    x25_test_split_parsing();
     test_decision_input_parsing();
 
     {
