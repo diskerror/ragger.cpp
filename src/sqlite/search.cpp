@@ -13,7 +13,7 @@ namespace fs = std::filesystem;
     // Hybrid search across the four corpora: vector cosine (cached
     // embeddings) blended with the custom TF-IDF text index (literal +
     // metaphone, v0.16). Both are min-max normalized and combined with
-    // vector_weight/bm25_weight (bm25_weight is now the single text-index
+    // vector_weight/fts_weight (fts_weight is now the single text-index
     // blend weight; the old separate phon_weight signal is folded into
     // score_query() itself via fts_w_metaphone).
     //
@@ -65,7 +65,7 @@ namespace fs = std::filesystem;
             return v;
         };
 
-        bool use_kw = config().bm25_enabled && !kw.empty();
+        bool use_kw = config().fts_enabled && !kw.empty();
 
         // Normalized [0,1] signal vectors. vec is always computed; kw
         // only when the text-index signal is active. When it doesn't
@@ -79,7 +79,7 @@ namespace fs = std::filesystem;
             combined = config().vector_weight * vec_norm;
             kw_norm = gather(kw);
             norm_minmax(kw_norm);
-            combined += config().bm25_weight * kw_norm;
+            combined += config().fts_weight * kw_norm;
         }
 
         for (int i = 0; i < n; ++i) {
@@ -89,10 +89,10 @@ namespace fs = std::filesystem;
             // "not part of this search". vec_score is the normalized cosine
             // that actually fed the blend (== raw cosine on the vec-only
             // path, since no min-max is applied there). phon_score is no
-            // longer an independent signal (folded into bm25_score by
+            // longer an independent signal (folded into fts_score by
             // score_query()); kept at -1 for API/stats-schema compat.
             sr.vec_score  = vec_norm(i);
-            sr.bm25_score = use_kw   ? kw_norm(i) : -1.0f;
+            sr.fts_score = use_kw   ? kw_norm(i) : -1.0f;
             sr.phon_score = -1.0f;
             sr.blended    = combined(i);
             out.push_back(std::move(sr));
@@ -154,7 +154,7 @@ namespace fs = std::filesystem;
             return m;
         };
         auto no_scores = std::unordered_map<int, float>{};
-        bool bm25_on = config().bm25_enabled;
+        bool bm25_on = config().fts_enabled;
         append(blend_hybrid_corpus(doc_cache_, q_norm,
                      bm25_on ? to_map(text_index_->score_query("documents", query)) : no_scores));
         // Knowledge (PHASE7: one corpus replaces decisions + insights). Same
@@ -228,7 +228,7 @@ namespace fs = std::filesystem;
         std::map<std::string, std::vector<SearchResult>> out;
         auto one = [&](const char* source, EmbeddingCache& c, const char* table) {
             std::unordered_map<int, float> kw;
-            if (use_kw && config().bm25_enabled)
+            if (use_kw && config().fts_enabled)
                 for (const auto& s : text_index_->score_query(table, query))
                     kw[s.id] = s.score;
             auto v = blend_hybrid_corpus(c, q_norm, kw);
@@ -277,8 +277,8 @@ namespace fs = std::filesystem;
 
             SearchResult sr{hit.id, text, hit.score, meta, ts};
             sr.vec_score  = -1.0f;  // no vector signal
-            sr.bm25_score = hit.score;
-            sr.phon_score = -1.0f;  // folded into bm25_score by score_query()
+            sr.fts_score = hit.score;
+            sr.phon_score = -1.0f;  // folded into fts_score by score_query()
             sr.blended    = hit.score;
             out.push_back(std::move(sr));
         }
@@ -343,7 +343,7 @@ namespace fs = std::filesystem;
                 "datetime(created_at,'unixepoch','localtime')",
                 " AND (ifnull(user_text,'') != '' OR ifnull(assistant_text,'') != '')",
                 nullptr, true});
-            // LR S81 (D5): session titles — lexical-only (the table has no
+            // LR S81 (D5): session titles — FTS-only (the table has no
             // embedding column, so hybrid_pools never vector-scores it and
             // semantic mode excludes it). Agent layer only, like raw turns.
             v.push_back({"session", "sessions", "session_id", "name",

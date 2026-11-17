@@ -59,7 +59,7 @@ constexpr const char* kStaleEmbeddingWhere =
     int Backend::Impl::count_embeddable_rows(const std::string& table) const {
         int total = 0;
         for (const auto& t : kTextTables) {
-            if (t.lexical_only) continue;   // LR S81: no embedding column
+            if (t.fts_only) continue;   // LR S81: no embedding column
             if (table != "all" && table != t.table) continue;
             Stmt s(db, std::format("SELECT COUNT(*) FROM {} WHERE {}",
                                    t.table, embeddable_where_sql(t)));
@@ -76,7 +76,7 @@ constexpr const char* kStaleEmbeddingWhere =
         std::string sql = "SELECT EXISTS(";
         bool first = true;
         for (const auto& t : kTextTables) {
-            if (t.lexical_only) continue;   // LR S81: no embedding column
+            if (t.fts_only) continue;   // LR S81: no embedding column
             sql += first ? "SELECT 1 FROM " : " UNION ALL SELECT 1 FROM ";
             sql += t.table;
             sql += " WHERE embedding IS NOT NULL";
@@ -131,7 +131,7 @@ constexpr const char* kStaleEmbeddingWhere =
         std::size_t spec_n = 0;
         for (std::size_t i = 0; i < kSpecCount; ++i) {
             const auto& t = kTextTables[i];
-            if (t.lexical_only) continue;   // LR S81: no embedding column
+            if (t.fts_only) continue;   // LR S81: no embedding column
             if (std::string_view(t.table) == "turns")
                 kAllTables[spec_n] = { t.table, t.pk, "user_text", "assistant_text" };
             else
@@ -392,7 +392,7 @@ constexpr const char* kStaleEmbeddingWhere =
             if (s.step()) p.unsummarized = s.column_int(0);
         }
         for (const auto& t : kTextTables) {
-            if (t.lexical_only) continue;   // LR S81: no embedding column
+            if (t.fts_only) continue;   // LR S81: no embedding column
             const std::string embeddable = embeddable_where_sql(t);
             {
                 Stmt s(db, std::format("SELECT COUNT(*) FROM {} WHERE ({}) AND ({})",
@@ -446,7 +446,7 @@ constexpr const char* kStaleEmbeddingWhere =
     // Delegates to TextIndex; see its header comment for the "only
     // safe immediately before reindexing ALL six text tables" caveat
     // (kTextTables: turns, knowledge, documents, turn_summaries, episodes,
-    // sessions — sessions is lexical-only, no embedding).
+    // sessions — sessions is FTS-only, no embedding).
     void Backend::Impl::reset_terms_table() {
         text_index_->reset_terms_table();
     }

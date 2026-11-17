@@ -499,7 +499,7 @@ MEMORY_SEARCH_SCHEMA = {
         "properties": {
             "query": {"type": "string", "description": "What to search for."},
             "layers": {"type": "array", "items": {"type": "string"},
-                       "description": "Subset of: turn_summary, episode, knowledge. 'turn' is raw exchange text, searched only when named explicitly (prefer turn_summary/episode). 'session' matches session titles (lexical only, opt-in; hits are 'session:<guid>'). Documents use document_search. Legacy 'decision'/'insight' are accepted and mean knowledge of that kind."},
+                       "description": "Subset of: turn_summary, episode, knowledge. 'turn' is raw exchange text, searched only when named explicitly (prefer turn_summary/episode). 'session' matches session titles (FTS only, opt-in; hits are 'session:<guid>'). Documents use document_search. Legacy 'decision'/'insight' are accepted and mean knowledge of that kind."},
             "kinds": {"type": "array", "items": {"type": "string"},
                       "description": "Narrow knowledge hits: decision, insight, note."},
             "since": {"type": "string", "description": "Only results at/after this time."},

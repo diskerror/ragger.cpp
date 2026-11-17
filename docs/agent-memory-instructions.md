@@ -39,7 +39,7 @@ With the layered tools:
   summaries, summary → its turn), or a decision's
   full supersede lineage (`chain`). The default layers are turn summaries,
   episodes and knowledge; raw `turn` text and session titles (`session`,
-  lexical-only, hits `session:<guid>`) are searched **only** when you name
+  FTS-only, hits `session:<guid>`) are searched **only** when you name
   them explicitly — prefer the summaries, which are denser.
 - `memory_get(session=...)` history pages carry each turn's
   `turn_summary_id` and `episode_id` (`null` when absent), so a reader can

@@ -238,14 +238,14 @@ int main() {
         // Two hits: one with all three signals active, one where phon was
         // inactive (-1 sentinel → NULL) to prove the active/inactive distinction.
         SearchResult a = mk(201, "all three active", 0.88f, {{"collection", "doc"}});
-        a.vec_score = 0.9f; a.bm25_score = 0.5f; a.phon_score = 0.2f; a.blended = 8.9f;
+        a.vec_score = 0.9f; a.fts_score = 0.5f; a.phon_score = 0.2f; a.blended = 8.9f;
         SearchResult b = mk(202, "phon inactive", 0.60f, {{"collection", "doc"}});
-        b.vec_score = 0.4f; b.bm25_score = 0.3f; b.phon_score = -1.0f; b.blended = 4.4f;
+        b.vec_score = 0.4f; b.fts_score = 0.3f; b.phon_score = -1.0f; b.blended = 4.4f;
         s.log_lookup("signal probe", 5, 0.0f, {a, b}, 5.0, /*top_n=*/3);
     }
     // Active signals round-trip as their stored values.
     CHECK(std::abs(scalar_real("SELECT vec_score  FROM hits WHERE memory_id=201") - 0.9) < 1e-6);
-    CHECK(std::abs(scalar_real("SELECT bm25_score FROM hits WHERE memory_id=201") - 0.5) < 1e-6);
+    CHECK(std::abs(scalar_real("SELECT fts_score FROM hits WHERE memory_id=201") - 0.5) < 1e-6);
     CHECK(std::abs(scalar_real("SELECT phon_score FROM hits WHERE memory_id=201") - 0.2) < 1e-6);
     CHECK(std::abs(scalar_real("SELECT blended    FROM hits WHERE memory_id=201") - 8.9) < 1e-6);
     // Inactive phon (-1) is stored as NULL, not -1.

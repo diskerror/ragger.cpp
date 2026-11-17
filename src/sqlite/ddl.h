@@ -33,7 +33,7 @@ inline std::string if_not_exists(std::string ddl) {
 // started_on/ended_on are INTEGER epochs: MIN/MAX of the session's turns,
 // maintained on write (Impl::touch_session_span). Dropped: project_id.
 // LR S81 (D5): unigram_count/bigram_count are the text-index TF denominators
-// for the lexical-only title corpus (sessions.name); no embedding column.
+// for the FTS-only title corpus (sessions.name); no embedding column.
 inline std::string sessions(const std::string& name) {
     return std::format(R"(CREATE TABLE {} (
                 session_id  INTEGER PRIMARY KEY AUTOINCREMENT,

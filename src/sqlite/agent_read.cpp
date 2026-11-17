@@ -200,12 +200,12 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
         corpora = {"turn_summary", "episode", "knowledge"};  // LR S76: document left
     std::vector<SearchResult> cands;
     {
-        // LR S81 (D5): lexical-only corpora (session titles) never enter the
+        // LR S81 (D5): FTS-only corpora (session titles) never enter the
         // vector blend; semantic mode excludes them entirely. A request for
-        // lexical corpora only needs no embedder at all.
+        // FTS corpora only needs no embedder at all.
         std::set<std::string> vec_corpora, lex_corpora;
         for (const auto& c : corpora)
-            (is_lexical_layer(c) ? lex_corpora : vec_corpora).insert(c);
+            (is_fts_layer(c) ? lex_corpora : vec_corpora).insert(c);
         if (q.mode == "semantic") lex_corpora.clear();
         auto merge = [&](std::map<std::string, std::vector<SearchResult>> pools) {
             for (auto& [src, v] : pools)
@@ -230,7 +230,7 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
     // 'active' / exact-status needs rows the hybrid cache deliberately hides
     // (superseded/retired/pending). SEPARATE query path — ensure_knowledge_cache()
     // keeps its narrow allow-list for normal search.
-    // Lexical-only signal; ids already scored by the hybrid pass are not
+    // FTS-only signal; ids already scored by the hybrid pass are not
     // duplicated.
     if (q.status != "active") {
         push_text_weights();
@@ -254,7 +254,7 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
                 meta["status"] = status;
                 SearchResult sr{hit.id, s.column_text(0), hit.score, std::move(meta), s.column_text(3)};
                 sr.vec_score  = -1.0f;
-                sr.bm25_score = hit.score;
+                sr.fts_score = hit.score;
                 sr.blended    = hit.score;
                 cands.push_back(std::move(sr));
             }
@@ -453,8 +453,8 @@ std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
         }
         h.layer = layer;
         h.score = r.blended;   // the value that actually ranked this hit
-        if (r.vec_score > 0.0f && r.bm25_score > 0.0f)      h.matched_by = "both";
-        else if (r.bm25_score > 0.0f)                       h.matched_by = "lexical";
+        if (r.vec_score > 0.0f && r.fts_score > 0.0f)      h.matched_by = "both";
+        else if (r.fts_score > 0.0f)                       h.matched_by = "fts";
         else                                                h.matched_by = "vector";
         h.created = r.timestamp;
         h.snippet = agent_snippet(r.text);
@@ -590,8 +590,8 @@ std::vector<AgentHit> Backend::Impl::agent_document_search(const DocumentSearchQ
         h.id    = "document:" + std::to_string(r.id);
         h.layer = "document";
         h.score = r.blended;
-        if (r.vec_score > 0.0f && r.bm25_score > 0.0f)      h.matched_by = "both";
-        else if (r.bm25_score > 0.0f)                       h.matched_by = "lexical";
+        if (r.vec_score > 0.0f && r.fts_score > 0.0f)      h.matched_by = "both";
+        else if (r.fts_score > 0.0f)                       h.matched_by = "fts";
         else                                                h.matched_by = "vector";
         h.created = r.timestamp;
         h.snippet = agent_snippet(r.text);

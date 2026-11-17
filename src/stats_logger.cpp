@@ -180,7 +180,7 @@ void StatsLogger::log_lookup(const std::string& query,
                 if (v < 0.0f) s.bind_null(idx); else s.bind(idx, static_cast<double>(v));
             };
             bind_signal(5, r.vec_score);
-            bind_signal(6, r.bm25_score);
+            bind_signal(6, r.fts_score);
             bind_signal(7, r.phon_score);
             s.bind(8, static_cast<double>(r.blended));
             const std::string coll = collection_of(r);

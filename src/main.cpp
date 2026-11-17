@@ -1391,9 +1391,9 @@ int main(int argc, char **argv) {
                         target, ragger::sqlite::text_table_names()));
                     return 1;
                 }
-                if (row->lexical_only) {   // LR S81: nothing to embed
+                if (row->fts_only) {   // LR S81: nothing to embed
                     Diskerror::Logger::error(std::format(
-                        "Table '{}' is lexical-only (no embeddings).", target));
+                        "Table '{}' is FTS-only (no embeddings).", target));
                     return 1;
                 }
             }
@@ -1412,7 +1412,7 @@ int main(int argc, char **argv) {
             if (opts.count("dry-run")) {
                 if (target == "all")
                     for (const auto& tbl : ragger::sqlite::kTextTables) {
-                        if (tbl.lexical_only) continue;   // LR S81
+                        if (tbl.fts_only) continue;   // LR S81
                         std::println("{}: {} embeddable row(s)", tbl.table,
                                      memory_temp.backend()->count_embeddable_rows(tbl.table));
                     }

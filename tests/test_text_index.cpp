@@ -18,18 +18,18 @@ namespace {
 // PHASE3 Step 1: registry self-consistency.
 void p3_registry_checks() {
     using namespace ragger::sqlite;
-    CHECK(kTextTableCount == 6);  // LR S81: + sessions (lexical-only); PHASE8: summaries gone
+    CHECK(kTextTableCount == 6);  // LR S81: + sessions (FTS-only); PHASE8: summaries gone
     for (const auto& t : kTextTables) {
         CHECK(std::string(t.junction) == std::string(t.table) + "_terms");
         CHECK(find_text_table(t.table) == &t);
     }
     CHECK(find_text_table("nope") == nullptr);
     CHECK(find_text_table("") == nullptr);
-    // LR S81 (D5): exactly one lexical-only row, and it answers by layer too.
-    CHECK(find_text_table("sessions")->lexical_only);
-    CHECK(is_lexical_layer("session"));
-    CHECK(!is_lexical_layer("episode"));
-    CHECK(!is_lexical_layer("nope"));
+    // LR S81 (D5): exactly one FTS-only row, and it answers by layer too.
+    CHECK(find_text_table("sessions")->fts_only);
+    CHECK(is_fts_layer("session"));
+    CHECK(!is_fts_layer("episode"));
+    CHECK(!is_fts_layer("nope"));
     std::cout << "  registry OK\n";
 }
 
@@ -93,7 +93,7 @@ void p3_insert_row(sqlite3* db, const std::string& table, int id,
         sql = "INSERT INTO documents(document_id, text, document_source_id) VALUES ("
               + i + ", '" + text + "', " + i + ")";
     }
-    else if (table == "sessions")   // LR S81 (D5): lexical-only title corpus
+    else if (table == "sessions")   // LR S81 (D5): FTS-only title corpus
         sql = "INSERT INTO sessions(session_id, guid, name) VALUES ("
               + i + ", 'g" + i + "', '" + text + "')";
     else

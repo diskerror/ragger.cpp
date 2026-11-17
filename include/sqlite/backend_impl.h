@@ -209,7 +209,7 @@ struct Backend::Impl {
     /// Rebuilds `sessions` from ddl::sessions (drops project_id, adds
     /// started_on/ended_on span columns computed from the session's turns,
     /// plus the unigram_count/bigram_count TF denominators for the
-    /// lexical-only title corpus — no embedding column), moves the episode
+    /// FTS-only title corpus — no embedding column), moves the episode
     /// rows out of `summaries` into the new `episodes` table and rebuilds
     /// `turn_summaries` with `episode_id`, creates `knowledge` + the two
     /// evidence tables and moves decisions in (kind='decision', ids
@@ -767,7 +767,7 @@ struct Backend::Impl {
     // Hybrid search over the four corpora (turn_summaries, episodes,
     // knowledge, documents): vector cosine (cached embeddings) blended
     // with the custom TF-IDF text index (literal + metaphone, v0.16). Both are
-    // min-max normalized and combined with vector_weight/bm25_weight (bm25_weight
+    // min-max normalized and combined with vector_weight/fts_weight (fts_weight
     // is now the single text-index blend weight; the old separate phon_weight
     // signal is folded into score_query() itself via fts_w_metaphone).
     //
@@ -895,7 +895,7 @@ struct Backend::Impl {
     // Delegates to TextIndex; see its header comment for the "only
     // safe immediately before reindexing ALL six text tables" caveat
     // (kTextTables: turns, knowledge, documents, turn_summaries, episodes,
-    // sessions — sessions is lexical-only, no embedding).
+    // sessions — sessions is FTS-only, no embedding).
     void reset_terms_table();
 
     // Set a document's embedding (used by the import path to write vectors

@@ -71,12 +71,12 @@ struct SearchResult {
     // Each *_score is the min-max-normalized [0,1] signal value that actually
     // fed the weighted blend; a value of -1 means that signal was inactive for
     // this search (bm25 disabled). `blended` is the final weighted ranking
-    // score (vector_weight*vec + bm25_weight*bm25). phon_score is retained at
+    // score (vector_weight*vec + fts_weight*bm25). phon_score is retained at
     // -1 for API/stats-schema compat only -- the old independent phonetic
-    // signal was folded into bm25_score by TextIndex::score_query() (v0.16;
+    // signal was folded into fts_score by TextIndex::score_query() (v0.16;
     // see fts_w_metaphone).
     float vec_score  = -1.0f;
-    float bm25_score = -1.0f;
+    float fts_score = -1.0f;
     float phon_score = -1.0f;
     float blended    = 0.0f;
 };
@@ -140,7 +140,7 @@ struct AgentHit {
     std::string id;          ///< typed handle "<layer>:<rowid>"
     std::string layer;
     float score = 0;
-    std::string matched_by;  ///< "vector" | "lexical" | "both"
+    std::string matched_by;  ///< "vector" | "fts" | "both"
     std::string created;     ///< local "YYYY-MM-DD HH:MM:SS"
     std::string snippet;     ///< first <=240 chars of text, cut at a word boundary, "…" appended if cut
     json extra;              ///< layer-specific: decision → {status, trigger}; summary → {level}; turn_summary → {turn_id, session}

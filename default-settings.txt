@@ -78,13 +78,13 @@ default_min_score = 0.4
 # Cosine threshold for the possible_supersedes hint on stored decisions
 # (flag only — never merges or changes rows).
 decision_supersede_threshold = 0.8
-bm25_enabled      = true
+fts_enabled      = true
 # Weights are ratios — don't need to sum to 1.0. "3 and 7" == "0.3 and 0.7"
-bm25_weight   = 4
+fts_weight   = 4
 vector_weight = 8
 
 # Custom TF-IDF text index (v0.16) — replaces the old FTS5 + Double Metaphone
-# sidecar. bm25_weight above is the overall text-index blend weight (vs.
+# sidecar. fts_weight above is the overall text-index blend weight (vs.
 # vector_weight); the settings below tune the index's OWN internal blend of
 # unigram vs. bigram vs. phonetic (metaphone) term matches.
 fts_w_unigram       = 0.3   # TF-IDF weight for single-word (unigram) matches

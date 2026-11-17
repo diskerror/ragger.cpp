@@ -243,7 +243,7 @@ Documents are **not** searched here (since v0.17, S76) — use
 
 **Request fields:** `query` (required), `layers` (subset of
 `turn | turn_summary | episode | knowledge | session`; `turn` is raw exchange
-text and `session` matches session titles (lexical only, never vector
+text and `session` matches session titles (FTS only, never vector
 scored) — both searched only when named explicitly; naming `document` is a
 `400` pointing to `/memory/documents`; the input aliases `decision` /
 `insight` restrict knowledge to that kind; empty = all),
@@ -259,7 +259,7 @@ without tags are excluded).
 
 **Response:** `{"results": [AgentHit]}` where each hit is
 `{"id": "<layer>:<rowid>", "layer", "score", "matched_by":
-"vector|lexical|both", "created", "snippet", "extra"}` (`extra` is
+"vector|fts|both", "created", "snippet", "extra"}` (`extra` is
 layer-specific: knowledge → `{status, trigger}`, turn_summary →
 `{turn_id, session}`, session → `{started_on, ended_on}` with
 `id = session:<guid>`, …).

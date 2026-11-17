@@ -63,11 +63,11 @@ struct TextTable {
     const char* junction;  // "turn_summaries_terms"   (always <table>_terms)
     const char* layer;     // agent layer name ("turn_summary"); "" = not an agent layer
     const char* embed_sql; // SQL expression for the embedded/indexed text; nullptr = plain `text`
-    // LR S81 (D5 ruling, option a): lexical-only rows have NO embedding
+    // LR S81 (D5 ruling, option a): FTS-only rows have NO embedding
     // column — the text index and reindex loops treat them normally, the
     // embedding loops (embed_tables, has_embeddings, count_embeddable_rows)
     // and the re-embed CLI skip them.
-    bool lexical_only = false;
+    bool fts_only = false;
 };
 
 inline constexpr TextTable kTextTables[] = {
@@ -90,9 +90,9 @@ inline constexpr const TextTable* find_text_table(std::string_view name) {
 }
 
 // LR S81: same question by AGENT LAYER name (agent_search's corpus keys).
-inline constexpr bool is_lexical_layer(std::string_view layer) {
+inline constexpr bool is_fts_layer(std::string_view layer) {
     for (const auto& t : kTextTables)
-        if (layer == t.layer) return t.lexical_only;
+        if (layer == t.layer) return t.fts_only;
     return false;
 }
 

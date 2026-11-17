@@ -519,8 +519,8 @@ int reload_config() {
     RELOAD(default_search_limit);
     RELOAD(default_min_score);
     RELOAD(decision_supersede_threshold);
-    RELOAD(bm25_enabled);
-    RELOAD(bm25_weight);
+    RELOAD(fts_enabled);
+    RELOAD(fts_weight);
     RELOAD(vector_weight);
     RELOAD(fts_w_unigram);
     RELOAD(fts_w_bigram);

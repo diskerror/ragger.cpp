@@ -993,7 +993,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // Cosine near-duplicate scan over active knowledge rows (Phase 2 step 5;
     // PHASE7: one table, optional kind restriction). Purely
     // vector-based on purpose: a near-duplicate ruling is exactly what this
-    // looks like in embedding space, and lexical overlap is already guaranteed
+    // looks like in embedding space, and FTS overlap is already guaranteed
     // by the shared trigger vocabulary. Returns up to 3 (id, cosine) pairs at
     // or above decision_supersede_threshold, highest first. Never changes a row.
     std::vector<std::pair<int,float>> Backend::Impl::supersede_hints(

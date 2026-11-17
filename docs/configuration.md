@@ -93,8 +93,8 @@ independently configurable; hardcoded like every other Ragger path.
 |---------------------|---------|-----------------------------------------------------------------------------|
 | `default_limit`     | `5`     | Default result count.                                                       |
 | `default_min_score` | `0.4`   | Cosine floor for returned results.                                          |
-| `bm25_enabled`      | `true`  | Blend the custom text-index score into the rank.                           |
-| `bm25_weight`       | `4`     | Weight for the text-index signal (ratio, not percentage; integers preferred). |
+| `fts_enabled`      | `true`  | Blend the custom text-index score into the rank.                           |
+| `fts_weight`       | `4`     | Weight for the text-index signal (ratio, not percentage; integers preferred). |
 | `vector_weight`     | `8`     | Weight for the cosine signal.                                               |
 | `fts_w_unigram`     | `0.3`   | Text index's internal weight for single-word (unigram) term matches.        |
 | `fts_w_bigram`      | `0.7`   | Text index's internal weight for adjacent-word-pair (bigram) term matches.   |
@@ -108,7 +108,7 @@ close behind. As of v0.16, keyword/BM25 scoring is done by Ragger's own
 custom TF-IDF text index (unigrams + bigrams + Double Metaphone phonetic
 tokens, all in one flat term table) rather than SQLite FTS5 — see
 `fts_w_unigram`/`fts_w_bigram`/`fts_w_metaphone` above to tune the index's
-own internal blend. `bm25_weight` is still the name of the *overall*
+own internal blend. `fts_weight` is still the name of the *overall*
 text-index-vs-vector weight for backward compatibility.
 
 ## `[summarizer]` — the only inference endpoint
@@ -335,16 +335,16 @@ LIMIT 30;
 
 Each `hits` row records not just the final rank but **how each search signal
 contributed**, so you can judge whether a weight (`vector_weight`,
-`bm25_weight`) needs tuning — or whether a signal earns its keep
+`fts_weight`) needs tuning — or whether a signal earns its keep
 at all:
 
 | column | meaning |
 |--------|---------|
 | `score` | Raw vector cosine similarity — the absolute "how close in meaning" number, also what the API reports. |
 | `vec_score` | The **min-max-normalized** cosine that actually fed the blend (how it competed *within this result set*). |
-| `bm25_score` | Normalized custom-text-index contribution (TF-IDF over stemmed unigrams/bigrams, blended with Double Metaphone phonetic matches internally — see `fts_w_metaphone`), or **NULL** when `bm25_enabled = false`. |
+| `bm25_score` | Normalized custom-text-index contribution (TF-IDF over stemmed unigrams/bigrams, blended with Double Metaphone phonetic matches internally — see `fts_w_metaphone`), or **NULL** when `fts_enabled = false`. |
 | `phon_score` | **Retired as an independent signal in v0.16** — always `NULL`/`-1`, kept only for schema/API compatibility with older `stats.db` rows. The phonetic contribution now lives *inside* `bm25_score` (see `fts_w_metaphone`). |
-| `blended` | The final weighted ranking value: `vector_weight·vec + bm25_weight·bm25`. This is what actually ordered the results. |
+| `blended` | The final weighted ranking value: `vector_weight·vec + fts_weight·bm25`. This is what actually ordered the results. |
 
 A **NULL** in `bm25_score` means that signal was switched off for
 the search (so you can `AVG()`/filter without a sentinel skewing the numbers); a

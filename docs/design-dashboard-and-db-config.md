@@ -39,8 +39,8 @@ A compile-time table. Each config key carries:
 
 | field | purpose |
 |---|---|
-| key | DB row key (`bm25_weight`) |
-| pretty name | UI label ("BM25 Weight") |
+| key | DB row key (`fts_weight`) |
+| pretty name | UI label ("FTS Weight") |
 | type | int / float / bool / enum / string / path |
 | allowed values | enum → popup menu options |
 | validation | e.g. digits-only for int boxes |

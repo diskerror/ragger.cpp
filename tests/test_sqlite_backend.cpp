@@ -4531,7 +4531,7 @@ void p11_time_bound_formats(ragger::Embedder& emb) {
 // On the degraded path (no embedder) every candidate carries vec_score = -1.0f
 // as the "no vector signal" sentinel (search_text_only), and agent_search then
 // labels hits with:
-//     vec>0 && bm25>0 -> "both";  bm25>0 -> "lexical";  else -> "vector"
+//     vec>0 && bm25>0 -> "both";  bm25>0 -> "fts";  else -> "vector"
 // The final `else` therefore reports "vector" for a hit that provably has NO
 // vector signal, whenever its text score is exactly 0.0.
 //
@@ -4875,14 +4875,14 @@ void p10_text_only_one_path(ragger::Embedder& emb) {
     std::vector<std::string> got;
     for (const auto& r : resp.results) {
         std::println("    hit id={} source={} score={:.8f} ts='{}'", r.id,
-                     r.metadata.value("source", "?"), r.bm25_score, r.timestamp);
+                     r.metadata.value("source", "?"), r.fts_score, r.timestamp);
         got.push_back(r.metadata.value("source", "?"));
     }
     // Recorded from the UNFIXED code (hand-expanded documents branch):
     const std::vector<std::string> want{"document", "knowledge", "turn_summary"};
     CHECK(got == want);
     for (const auto& r : resp.results) {
-        CHECK(r.bm25_score == 0.0f);   // idf tie: term in all 3 docs
+        CHECK(r.fts_score == 0.0f);   // idf tie: term in all 3 docs
         // Rendered local datetime, never a bare epoch (9B step 2).
         CHECK(r.timestamp.size() == 19 && r.timestamp[4] == '-' && r.timestamp[13] == ':');
     }
@@ -6212,7 +6212,7 @@ void p9b_test_reindex_atomic(ragger::Embedder& emb) {
     // Happy path: same totals as the per-table loop, search still works.
     p9b_trigger("DROP TRIGGER p9b_boom_docs");
     auto done = db.reindex_all({});
-    CHECK(done.size() == 6);   // LR S81: sessions joins the registry (lexical-only)
+    CHECK(done.size() == 6);   // LR S81: sessions joins the registry (FTS-only)
     int total = 0;
     for (auto& [table, n] : done) total += n;
     CHECK(total == 3 + 2);   // 3 notes + 2 document chunks (turns empty here)
@@ -8030,14 +8030,14 @@ void lr77_test_search_mode(ragger::Embedder& emb) {
         ragger::AgentSearchQuery q;
         q.limit = 10;
 
-        // keyword: exact rare token, matched_by lexical.
+        // keyword: exact rare token, matched_by FTS.
         q.query = "xylophonically";
         q.mode = "keyword";
         bool found = false;
         for (const auto& h : db.agent_search(q))
             if (h.id == "turn_summary:" + std::to_string(t3)) {
                 found = true;
-                CHECK(h.matched_by == "lexical");
+                CHECK(h.matched_by == "fts");
             }
         CHECK(found);
         c_id = t3;
@@ -8092,7 +8092,7 @@ void lr77_test_search_mode(ragger::Embedder& emb) {
         for (const auto& h : db.agent_document_search(dq))
             if (h.id == "document:" + std::to_string(doc_id)) {
                 found = true;
-                CHECK(h.matched_by == "lexical");
+                CHECK(h.matched_by == "fts");
             }
         CHECK(found);
         threw = false;
@@ -8532,8 +8532,8 @@ void lr80_test_episode_evidence(ragger::Embedder& emb) {
 }
 
 
-// LR S81 (D5): sessions as a lexical-only title corpus. Search layer
-// `session` (hit id session:<guid>, matched_by lexical, extra
+// LR S81 (D5): sessions as a FTS-only title corpus. Search layer
+// `session` (hit id session:<guid>, matched_by FTS, extra
 // {started_on, ended_on}); semantic mode excludes it; the default corpus
 // set never includes it; reindex rebuilds sessions_terms from name alone;
 // embedding loops skip the table.
@@ -8556,11 +8556,11 @@ void lr81_test_session_corpus(ragger::Embedder& emb) {
     CHECK(hits.size() == 1);
     CHECK(hits[0].id == "session:" + g1);
     CHECK(hits[0].layer == "session");
-    CHECK(hits[0].matched_by == "lexical");
+    CHECK(hits[0].matched_by == "fts");
     CHECK(hits[0].extra.contains("started_on"));
     CHECK(hits[0].extra.contains("ended_on"));
 
-    // semantic mode excludes the lexical-only corpus; keyword finds it.
+    // semantic mode excludes the FTS-only corpus; keyword finds it.
     q.mode = "semantic";
     CHECK(db.agent_search(q).empty());
     q.mode = "keyword";
@@ -8590,7 +8590,7 @@ void lr81_test_session_corpus(ragger::Embedder& emb) {
     auto rh = db.agent_search(q);
     CHECK(rh.size() == 1 && rh[0].id == "session:" + g3);
 
-    // Embedding loops skip the lexical-only table.
+    // Embedding loops skip the FTS-only table.
     CHECK(db.count_embeddable_rows("sessions") == 0);
     CHECK(db.rebuild_embeddings(emb, {}, "sessions") == 0);
     db.close();

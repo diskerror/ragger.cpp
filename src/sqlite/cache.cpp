@@ -189,7 +189,7 @@ void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
     // Consequence (TODO Q10): retired and superseded rows are NOT in the
     // semantic cache (same as superseded always was); the 0.16 rollups that
     // arrive as retired notes in Phase 8 are therefore invisible to semantic
-    // search — the lexical path and memory_get still reach them.
+    // search — the FTS path and memory_get still reach them.
     void Backend::Impl::ensure_knowledge_cache() {
         if (knowledge_cache_.valid) return;
         load_cache(knowledge_cache_, "knowledge",

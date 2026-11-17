@@ -119,13 +119,13 @@ matching internally (see `fts_w_unigram`/`fts_w_bigram`/`fts_w_metaphone`
 below).
 
 Configure the overall vector-vs-text-index blend via `vector_weight` and
-`bm25_weight` in `[search]` (the name `bm25_weight` is kept for backward
+`fts_weight` in `[search]` (the name `fts_weight` is kept for backward
 compatibility even though the scoring is no longer literally BM25):
 
 ```ini
 [search]
 vector_weight = 8
-bm25_weight   = 4
+fts_weight   = 4
 ```
 
 Then tune the text index's own internal blend via `fts_w_unigram`,
@@ -146,7 +146,7 @@ Using integers avoids floating-point config parsing issues.
 
 ```ini
 [search]
-bm25_enabled    = false   # turn off the text index altogether
+fts_enabled    = false   # turn off the text index altogether
 fts_w_metaphone = 0       # keep literal matching, drop phonetic matching
 ```
 
@@ -155,7 +155,7 @@ fts_w_metaphone = 0       # keep literal matching, drop phonetic matching
 Keyword relevance is computed by Ragger's own TF-IDF text index (see
 "Custom Text Index" above), not an external library — the internal knobs
 (`fts_w_unigram`, `fts_w_bigram`, `fts_w_metaphone`, `fts_literal_enabled`)
-are the tuning surface, alongside the overall `bm25_weight` blend weight.
+are the tuning surface, alongside the overall `fts_weight` blend weight.
 
 ## Chunking Strategy
 

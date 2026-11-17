@@ -7,7 +7,7 @@
         "type": "string"
       },
       "layers": {
-        "description": "Restrict to these layers (turn_summary, episode, knowledge). 'turn' is raw exchange text, searched only when named explicitly; prefer the summaries. 'session' matches session titles (lexical only, opt-in). Documents use document_search.",
+        "description": "Restrict to these layers (turn_summary, episode, knowledge). 'turn' is raw exchange text, searched only when named explicitly; prefer the summaries. 'session' matches session titles (FTS only, opt-in). Documents use document_search.",
         "items": {
           "type": "string"
         },

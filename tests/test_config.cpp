@@ -240,10 +240,10 @@ void test_bool_parsing_variants() {
         {
             std::ofstream f(path);
             f << "[server]\nport = 8432\n"
-              << "[search]\nbm25_enabled = " << val << "\n";
+              << "[search]\nfts_enabled = " << val << "\n";
         }
         ragger::Config cfg = ragger::load_config(path).value();
-        assert(cfg.bm25_enabled == expected);
+        assert(cfg.fts_enabled == expected);
         fs::remove(path);
     };
 
@@ -293,8 +293,8 @@ void test_default_values() {
     assert(cfg.embedding_dimensions == 384);
     assert(cfg.default_search_limit == 5);
     assert(cfg.default_min_score == 0.6f);
-    assert(cfg.bm25_enabled == true);
-    assert(cfg.bm25_weight == 4.0f);
+    assert(cfg.fts_enabled == true);
+    assert(cfg.fts_weight == 4.0f);
     assert(cfg.vector_weight == 8.0f);
     assert(cfg.normalize_home_path == true);
     assert(cfg.housekeeping_interval == 60);
@@ -641,7 +641,7 @@ int main() {
           << "dimensions = 384\n"
           << "\n"
           << "[search]\n"
-          << "bm25_enabled = false\n"
+          << "fts_enabled = false\n"
           << "default_min_score = 0.5\n";
     }
 
@@ -650,10 +650,10 @@ int main() {
     (void)0;
     assert(cfg.port == 9999);
     assert(cfg.embedding_dimensions == 384);
-    assert(cfg.bm25_enabled == false);
+    assert(cfg.fts_enabled == false);
     assert(cfg.default_min_score == 0.5f);
     // Defaults for unspecified values
-    assert(cfg.bm25_weight == 4.0f);
+    assert(cfg.fts_weight == 4.0f);
     assert(cfg.normalize_home_path == true);
 
     std::filesystem::remove(tmp_conf);

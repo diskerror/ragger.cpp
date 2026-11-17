@@ -42,7 +42,8 @@ const std::unordered_map<std::string_view, bool Config::*>& bool_fields() {
         {"capture_turns",  &Config::capture_turns},
         {"build_context",  &Config::build_context},
         {"auto_recall",    &Config::auto_recall},
-        {"bm25_enabled",   &Config::bm25_enabled},
+        {"fts_enabled",   &Config::fts_enabled},
+        {"bm25_enabled",  &Config::fts_enabled},   // legacy key (pre-0.17 name), same field
         {"fts_literal_enabled", &Config::fts_literal_enabled},
         {"normalize_home", &Config::normalize_home_path},
     };
@@ -78,7 +79,8 @@ const std::unordered_map<std::string_view, float Config::*>& float_fields() {
     static const std::unordered_map<std::string_view, float Config::*> m = {
         {"default_min_score",       &Config::default_min_score},
         {"decision_supersede_threshold", &Config::decision_supersede_threshold},
-        {"bm25_weight",             &Config::bm25_weight},
+        {"fts_weight",             &Config::fts_weight},
+        {"bm25_weight",            &Config::fts_weight},   // legacy key (pre-0.17 name), same field
         {"vector_weight",           &Config::vector_weight},
         {"fts_w_unigram",           &Config::fts_w_unigram},
         {"fts_w_bigram",            &Config::fts_w_bigram},

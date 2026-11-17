@@ -109,8 +109,8 @@ struct Config {
     // flags other active decisions it may be replacing (possible_supersedes
     // hint on KnowledgeResult). Flag only — never merges.
     float decision_supersede_threshold = 0.80f;
-    bool  bm25_enabled         = true;
-    float bm25_weight          = 4.0f;
+    bool  fts_enabled         = true;
+    float fts_weight          = 4.0f;
     float vector_weight        = 8.0f;
 
     // TF-IDF text-index blend weights (v0.16 custom terms index). Pushed into
