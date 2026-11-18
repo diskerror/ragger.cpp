@@ -33,7 +33,7 @@ std::string build_system_prompt(const std::string& raw_prompt,
     try {
         return std::vformat(
             raw_prompt.empty()
-                ? Config::kDefaultSummarizerPrompt
+                ? lang::PROMPT_TURN_SUMMARY
                 : std::string_view(raw_prompt),
             std::make_format_args(target_chars, hard_cap));
     } catch (const std::exception& e) {
@@ -84,19 +84,13 @@ std::string system_prompt(const SummaryBudget& b) {
 // slots are the same target/cap pair as the turn-summary prompt, filled the same
 // way, under the same vformat-in-try rule (PHASE9B 3a: a format error must
 // not escape — behave like an inference failure).
-constexpr std::string_view kEpisodePromptTemplate =
-    "You are given {N} consecutive summaries of one conversation span. "
-    "Write a single standalone summary of the whole span that keeps every "
-    "decision, configuration choice, technical fact, name, and date. Do "
-    "not invent anything that is not present in the input. Do not use "
-    "headers, do not wrap the text in quotation marks, and refer to the "
-    "parties by role (the user, the assistant), never by pronoun. The "
-    "summary must never be longer than the input. Target about {} "
-    "characters; never exceed {}.";
-
+// The default template is lang::PROMPT_EPISODE_SUMMARY; summarizer_episode_prompt
+// overrides it (empty = default).
 std::string build_episode_prompt(std::size_t n, const SummaryBudget& b) {
     try {
-        std::string t(kEpisodePromptTemplate);
+        const std::string& raw = config().summarizer_episode_prompt;
+        std::string t(raw.empty() ? lang::PROMPT_EPISODE_SUMMARY
+                                  : std::string_view(raw));
         const auto pos = t.find("{N}");
         if (pos != std::string::npos)
             t.replace(pos, 3, std::to_string(n));

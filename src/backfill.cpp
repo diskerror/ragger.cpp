@@ -6,6 +6,7 @@
 
 #include "config.h"
 #include "inference.h"
+#include "lang/en.h"
 #include "storage_backend.h"
 #include "summarizer.h"
 
@@ -164,7 +165,7 @@ BackfillResult backfill_triggers(StorageBackend& backend,
         tick(progress, "triggers", done, res.candidates);
         try {
             const std::string draft = draft_with_prompt(
-                inference, prompt_or_default(config().summarizer_trigger_prompt, Config::kDefaultTriggerPrompt),
+                inference, prompt_or_default(config().summarizer_trigger_prompt, lang::PROMPT_KNOWLEDGE_TRIGGER),
                 c.text);
             if (draft.empty()) { ++res.failed; continue; }
             // The draft must be a real trigger: strictly shorter than the
@@ -297,7 +298,7 @@ BackfillResult backfill_session_names(StorageBackend& backend,
                 corpus += t;
             }
             const std::string title = draft_with_prompt(
-                inference, prompt_or_default(config().summarizer_title_prompt, Config::kDefaultTitlePrompt),
+                inference, prompt_or_default(config().summarizer_title_prompt, lang::PROMPT_SESSION_TITLE),
                 corpus);
             if (title.empty()) { ++res.failed; continue; }
             if (backend.apply_session_name(c.session_id, title, "summarizer"))

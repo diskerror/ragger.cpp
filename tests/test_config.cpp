@@ -533,6 +533,36 @@ void p10_pct_validation() {
 // the other float knobs). Pin the contract: 0.30, 0, 1 accepted; abc rejected;
 // empty = reset-to-default always valid. Also pin that the struct default and
 // the schema default string agree (both 0.30).
+// The episode prompt is validated like the turn prompt, after {N} is
+// substituted: any number of {N}-free text with exactly two {} slots or none.
+void x28_episode_prompt_validation() {
+    std::print("  x28_episode_prompt_validation...\n");
+    auto ok = [](std::string_view k, std::string_view v) {
+        return ragger::validate_config_value(k, v).has_value();
+    };
+    CHECK(ok("summarizer_episode_prompt", ""));
+    CHECK(ok("summarizer_episode_prompt", "Merge {N} summaries; aim {} cap {}"));
+    CHECK(ok("summarizer_episode_prompt", "no placeholders at all"));
+    CHECK(!ok("summarizer_episode_prompt", "{"));
+    CHECK(!ok("summarizer_episode_prompt", "{2}"));
+    const auto* meta = ragger::lang::config_meta("summarizer_episode_prompt");
+    CHECK(meta != nullptr);
+    if (meta) {
+        CHECK(meta->default_value == std::string_view(""));
+        CHECK(meta->section == std::string_view("summarizer"));
+    }
+    // Dashboard order: turn, episode, session title, knowledge trigger.
+    const char* want[] = {"summarizer_prompt", "summarizer_episode_prompt",
+                          "summarizer_title_prompt", "summarizer_trigger_prompt"};
+    std::size_t idx = 0, last = 0;
+    const auto schema = ragger::lang::config_schema();
+    for (std::size_t i = 0; i < schema.size() && idx < 4; ++i)
+        if (schema[i].key == want[idx]) { last = i; ++idx; }
+    CHECK(idx == 4);
+    (void)last;
+    std::println(" OK");
+}
+
 // X27: the two one-line-job prompts are plain Text: any value is accepted
 // (no placeholder rules, unlike summarizer_prompt: braces are literal here),
 // empty = built-in, and the defaults are empty.
@@ -558,7 +588,7 @@ void x27_summarizer_job_prompts() {
     // The title length lives in the prompt text, not in separate keys.
     CHECK(ragger::lang::config_meta("summarizer_title_min_words") == nullptr);
     CHECK(ragger::lang::config_meta("summarizer_title_max_words") == nullptr);
-    CHECK(ragger::Config::kDefaultTitlePrompt.find("3 to 8 words") != std::string_view::npos);
+    CHECK(ragger::lang::PROMPT_SESSION_TITLE.find("3 to 8 words") != std::string_view::npos);
     CHECK(ragger::default_config().summarizer_title_prompt.empty());
     CHECK(ragger::default_config().summarizer_trigger_prompt.empty());
     std::println(" OK");
@@ -661,6 +691,7 @@ int main() {
     p10_pct_validation();
     x26_auto_recall_min_similarity();
     x27_summarizer_job_prompts();
+    x28_episode_prompt_validation();
     x2_schema_no_blank_entries();
     p9b_test_reload_config_episode_keys();
     p9a_test_config_snapshots();

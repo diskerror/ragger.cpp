@@ -571,6 +571,54 @@ constexpr const char* MSG_HOUSEKEEPING_TRIGGERED= "Housekeeping triggered";
 // --- Main.cpp specific (daemon control) ---
 constexpr const char* ERR_PERMISSION_DENIED_SIGNAL= "Permission denied: cannot send signal to daemon process";
 
+// ---- built-in summarizer prompts --------------------------------------------
+// Model instructions, used when the matching summarizer_*_prompt setting is
+// empty. Kept here with the other English text so a language pack can supply
+// prompts in the language of the stored conversations. Written by a frontier
+// model, not tuned to any particular local model: see docs/configuration.md.
+
+// Turn summary. Two {} placeholders: target chars, hard cap.
+inline constexpr std::string_view PROMPT_TURN_SUMMARY =
+    "Summarize this exchange into a concise memory entry, in third person "
+    "past tense. Keep who said what: record the user's questions, "
+    "requests, decisions and corrections as the user's; record the "
+    "assistant's proposals, findings and actions as the assistant's. A "
+    "proposal is not a decision unless the user accepted it in this "
+    "exchange. Keep concrete names, numbers, file names and conclusions; "
+    "drop pleasantries and narration. Target about {} characters; never "
+    "exceed {}. If the exchange is trivial (a single command like /exit, "
+    "a one-line greeting), reply with a short phrase.";
+
+// Episode summary. {N} = member count, then two {}: target chars, hard cap.
+inline constexpr std::string_view PROMPT_EPISODE_SUMMARY =
+    "You are given {N} consecutive summaries of one conversation span. "
+    "Write a single standalone summary of the whole span that keeps every "
+    "decision, configuration choice, technical fact, name, and date. Do "
+    "not invent anything that is not present in the input. Do not use "
+    "headers, do not wrap the text in quotation marks, and refer to the "
+    "parties by role (the user, the assistant), never by pronoun. The "
+    "summary must never be longer than the input. Target about {} "
+    "characters; never exceed {}.";
+
+// Session title. No placeholders: the length is stated in the text.
+inline constexpr std::string_view PROMPT_SESSION_TITLE =
+    "Name this conversation session from the summaries below. Reply with "
+    "the title only: 3 to 8 words, the main topic, in the style of a "
+    "file name or a heading. No quotes, no trailing punctuation, no "
+    "sentence, no \"Discussion of...\". Prefer the project or feature "
+    "name if one appears.";
+
+// Knowledge trigger. No placeholders.
+inline constexpr std::string_view PROMPT_KNOWLEDGE_TRIGGER =
+    "Write a TRIGGER for the stored memory below: one short line, phrased "
+    "as the question someone would ask, or the situation they would be "
+    "in, when this memory should come back up. Use the words a future "
+    "asker would use, not the memory's own wording where they differ. Do "
+    "not state the decision or its answer. Example: for \"Use unix socket "
+    "for the daemon API, not TCP\" the trigger is \"How should clients "
+    "connect to the Ragger daemon?\" Output the line only: no quotes, no "
+    "prefix.";
+
 // =====================================================================
 // Config schema — single source of truth for CLI + dashboard.
 // One entry per user-editable setting. See config_schema.h for field
@@ -736,13 +784,16 @@ inline constexpr auto kConfigSchema = std::to_array<ConfigMeta>({
      "A source with at most this many words is copied verbatim into the summary store without calling the summarizer model (LR S62). 0 disables the floor."},
     {"summarizer_prompt", "summarizer", "Turn Prompt", CfgType::Text, CfgEdit::Live,
      "", "",
-     "System prompt sent to the summarizer for each turn. Empty uses the built-in default. A single space suppresses the system prompt entirely. Two {} placeholders are required (target chars, hard cap)."},
+     "System prompt for summarizing each turn. Empty uses the built-in default (PROMPT_TURN_SUMMARY in lang/en.h). A single space suppresses the system prompt entirely. Two {} placeholders are required (target chars, hard cap)."},
+    {"summarizer_episode_prompt", "summarizer", "Episode Prompt", CfgType::Text, CfgEdit::Live,
+     "", "",
+     "System prompt for summarizing an episode from its turn summaries. Empty uses the built-in default (PROMPT_EPISODE_SUMMARY). Placeholders: {N} is replaced by the number of summaries given, then two {} are required (target chars, hard cap)."},
     {"summarizer_title_prompt", "summarizer", "Session Title Prompt", CfgType::Text, CfgEdit::Live,
      "", "",
-     "System prompt for naming a session from its turn summaries (the Name sessions job). Empty uses the built-in default. No placeholders: the summaries are sent as the user message. State the wanted title length (for example 3 to 8 words) in the prompt text itself; the built-in default asks for 3 to 8 words."},
+     "System prompt for naming a session from its turn summaries (the Name sessions job). Empty uses the built-in default (PROMPT_SESSION_TITLE). No placeholders: the summaries are sent as the user message. State the wanted title length (for example 3 to 8 words) in the prompt text itself; the built-in default asks for 3 to 8 words."},
     {"summarizer_trigger_prompt", "summarizer", "Knowledge Trigger Prompt", CfgType::Text, CfgEdit::Live,
      "", "",
-     "System prompt for drafting a decision's or insight's trigger (the Back-fill triggers job). Empty uses the built-in default. No placeholders: the memory text is sent as the user message."},
+     "System prompt for drafting a decision's or insight's trigger (the Back-fill triggers job). Empty uses the built-in default (PROMPT_KNOWLEDGE_TRIGGER). No placeholders: the memory text is sent as the user message."},
 
     // ---- logging ----
     {"log_level", "logging", "Log Level", CfgType::Enum, CfgEdit::Live,

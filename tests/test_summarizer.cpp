@@ -1205,6 +1205,44 @@ void lr64_test_episode_prompt() {
     std::println(" ok");
 }
 
+// summarizer_episode_prompt overrides the built-in episode prompt: {N} is the
+// member count, the two {} are the size slots; empty goes back to the default.
+void x28_test_episode_prompt_override() {
+    std::println("  x28_test_episode_prompt_override...");
+    const std::vector<std::string> texts = {
+        "First summary about the Beelink deployment and its Vulkan builds.",
+        "Second summary about llama.cpp server flags and ctx sizes."};
+    CHECK(ragger::update_config([](ragger::Config& c) {
+        c.summarizer_episode_prompt = "X28EPISODE of {N} items, aim {} cap {}"; return true; }));
+    {
+        StubChat stub("SUMMARY");
+        auto inf = stub.client();
+        CHECK(ragger::summarize_texts(*inf, texts) == "SUMMARY");
+        const std::string p = stub.system_of(0);
+        CHECK(p.find("X28EPISODE of 2 items, aim ") == 0);
+        CHECK(p.find("consecutive summaries") == std::string::npos);
+        CHECK(p.find('{') == std::string::npos);
+    }
+    // A malformed value behaves like an inference failure (nothing sent).
+    CHECK(ragger::update_config([](ragger::Config& c) {
+        c.summarizer_episode_prompt = "{"; return true; }));
+    {
+        StubChat stub("SUMMARY");
+        auto inf = stub.client();
+        (void)ragger::summarize_texts(*inf, texts);
+        CHECK(stub.calls.load() == 0);
+    }
+    CHECK(ragger::update_config([](ragger::Config& c) {
+        c.summarizer_episode_prompt = ""; return true; }));
+    {
+        StubChat stub("SUMMARY");
+        auto inf = stub.client();
+        (void)ragger::summarize_texts(*inf, texts);
+        CHECK(stub.system_of(0).find("2 consecutive summaries") != std::string::npos);
+    }
+    std::println(" ok");
+}
+
 // LR S65 (D-5 check): the poison-abandon path stays. With an endpoint that
 // is configured but UNREACHABLE (connection refused — "unreachable", not
 // "not configured"), a long turn failing max_turn_failures (3) times gets
@@ -2169,6 +2207,7 @@ int main() {
     lr62_test_floor_copies_without_model(env.base());
     lr62_test_copy_provenance(env.base());
     lr64_test_episode_prompt();
+    x28_test_episode_prompt_override();
     lr65_test_abandon_marker(env.base());
     p6_test_single_scan(env.base());
     x22_test_turn_summary_refresh_after_merge(env.base(), env.model_dir());

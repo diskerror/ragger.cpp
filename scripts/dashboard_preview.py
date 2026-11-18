@@ -109,6 +109,8 @@ SCHEMA = [
      "Hard cap as % of raw turn; 0 = 60%."),
     ("summarizer_prompt", "summarizer", "Prompt", "text", "live", "", "",
      "System prompt. Empty = built-in default. Two {} placeholders required."),
+    ("summarizer_episode_prompt", "summarizer", "Episode Prompt", "text", "live", "", "",
+     "System prompt for episode summaries. Empty = built-in default. {N} then two {} placeholders."),
     ("summarizer_title_prompt", "summarizer", "Session Title Prompt", "text", "live", "", "",
      "System prompt for naming a session. Empty = built-in default. No placeholders; state the title length (e.g. 3 to 8 words) in the text."),
     ("summarizer_trigger_prompt", "summarizer", "Trigger Prompt", "text", "live", "", "",

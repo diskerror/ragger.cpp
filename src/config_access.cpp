@@ -113,6 +113,7 @@ const std::unordered_map<std::string_view, std::string Config::*>& string_fields
         {"summarizer_api_url",    &Config::summarizer_api_url},
         {"summarizer_api_key_env", &Config::summarizer_api_key_env},
         {"summarizer_prompt",     &Config::summarizer_prompt},
+        {"summarizer_episode_prompt", &Config::summarizer_episode_prompt},
         {"summarizer_title_prompt",   &Config::summarizer_title_prompt},
         {"summarizer_trigger_prompt", &Config::summarizer_trigger_prompt},
         {"log_level",             &Config::log_level},
@@ -325,12 +326,18 @@ std::expected<void, ConfigSetError> validate_config_value(std::string_view key,
             // with two size_t arguments at every summary. Reject a value that
             // would throw there (stray brace, out-of-range index, malformed
             // spec) at the door instead of poisoning the summarizer loop.
-            if (key == "summarizer_prompt") {
+            if (key == "summarizer_prompt" || key == "summarizer_episode_prompt") {
                 std::size_t t = 1, c = 2;   // lvalues: libc++ make_format_args rejects rvalues
+                std::string probe(value);
+                if (key == "summarizer_episode_prompt") {
+                    // {N} is substituted before vformat (see build_episode_prompt).
+                    const auto pos = probe.find("{N}");
+                    if (pos != std::string::npos) probe.replace(pos, 3, "1");
+                }
                 try {
                     // Validation only: vformat throws on a bad spec; the
                     // formatted string itself is unused.
-                    (void)std::vformat(std::string_view(value),
+                    (void)std::vformat(std::string_view(probe),
                                        std::make_format_args(t, c));
                 } catch (const std::format_error&) {
                     return std::unexpected(ConfigSetError::InvalidValue);

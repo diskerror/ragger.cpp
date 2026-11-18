@@ -160,41 +160,16 @@ struct Config {
     // copied verbatim (turn summary / episode text) WITHOUT a model call.
     // 0 disables the floor (only the empty source then copies trivially).
     int         summarizer_min_words   = 20;
-    // System-prompt sent to the summarizer model. Empty (or missing in the
-    // INI) uses the built-in default. Any non-empty value is passed through
-    // as-is — set to a single space " " to suppress the system prompt entirely.
-    // Two positional placeholders {} {} are required (target chars, hard cap)
-    // when overriding; the default already contains them.
-    static constexpr std::string_view kDefaultSummarizerPrompt =
-        "Summarize this exchange into a concise memory entry, in third person "
-        "past tense. Keep who said what: record the user's questions, "
-        "requests, decisions and corrections as the user's; record the "
-        "assistant's proposals, findings and actions as the assistant's. A "
-        "proposal is not a decision unless the user accepted it in this "
-        "exchange. Keep concrete names, numbers, file names and conclusions; "
-        "drop pleasantries and narration. Target about {} characters; never "
-        "exceed {}. If the exchange is trivial (a single command like /exit, "
-        "a one-line greeting), reply with a short phrase.";
+    // System prompts for the four summarizer jobs. Empty or blank = the
+    // built-in default, which lives in lang/en.h (PROMPT_* constants) with the
+    // rest of the English text. A single space in summarizer_prompt suppresses
+    // the system prompt entirely. Placeholders:
+    //   summarizer_prompt          two {} : target chars, hard cap (required)
+    //   summarizer_episode_prompt  {N} member count, then two {} as above
+    //   summarizer_title_prompt    none; state the title length in the text
+    //   summarizer_trigger_prompt  none
     std::string summarizer_prompt = "";
-    // Prompts for the two one-line jobs. Empty or blank = the built-in
-    // default below. Neither takes placeholders: they are sent verbatim as
-    // the system message, so the title length (words) is stated in the
-    // prompt text itself.
-    static constexpr std::string_view kDefaultTitlePrompt =
-        "Name this conversation session from the summaries below. Reply with "
-        "the title only: 3 to 8 words, the main topic, in the style of a "
-        "file name or a heading. No quotes, no trailing punctuation, no "
-        "sentence, no \"Discussion of...\". Prefer the project or feature "
-        "name if one appears.";
-    static constexpr std::string_view kDefaultTriggerPrompt =
-        "Write a TRIGGER for the stored memory below: one short line, phrased "
-        "as the question someone would ask, or the situation they would be "
-        "in, when this memory should come back up. Use the words a future "
-        "asker would use, not the memory's own wording where they differ. Do "
-        "not state the decision or its answer. Example: for \"Use unix socket "
-        "for the daemon API, not TCP\" the trigger is \"How should clients "
-        "connect to the Ragger daemon?\" Output the line only: no quotes, no "
-        "prefix.";
+    std::string summarizer_episode_prompt = "";
     std::string summarizer_title_prompt = "";
     std::string summarizer_trigger_prompt = "";
 
