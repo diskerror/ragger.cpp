@@ -1160,6 +1160,8 @@ function updateStats(s) {
   badges.appendChild(sb);
   const tables = s.tables || {};
   for (const name of Object.keys(tables)) {
+    // One turn summary per turn, so its count only repeats the turns badge.
+    if (name === "turn_summaries") continue;
     const b = document.createElement("span");
     b.className = "badge";
     b.textContent = name + ": " + tables[name].toLocaleString();
