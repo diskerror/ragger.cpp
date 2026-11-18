@@ -61,7 +61,7 @@ indexed separately from conversation turns.
 
 ## What summarization adds
 
-Captured turns are queued to the summarizer: turn summaries (L2) are
+Captured turns are queued to the summarizer: turn summaries are
 written per turn (short exchanges are copied verbatim rather than sent to a
 model), and episodes group consecutive summaries of one conversation span.
 When a captured turn later grows — a same-exchange continuation merges into

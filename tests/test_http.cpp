@@ -462,7 +462,7 @@ void t_memory_search_bad_limit(HttpFixture& fx) {
     std::println(" OK");
 }
 
-// X19 (Q9/L6): the generic surface no longer stores decisions at all.
+// X19: the generic surface no longer stores decisions at all.
 // `/store category=decision` is a 400 that names the decision verb and says a
 // trigger is required, and writes nothing; the decision verb keeps its own
 // validation (a status outside the vocabulary is still a 400).
@@ -544,7 +544,7 @@ void t_store_http_mcp_parity(HttpFixture& fx) {
     CHECK(h["kind"] == m["kind"]);
     CHECK(!id_of(h).empty() && !id_of(m).empty());
 
-    // X19 (Q9/L6): category=decision is rejected on BOTH surfaces with the
+    // X19: category=decision is rejected on BOTH surfaces with the
     // same message (envelope differs per surface: HTTP "ERROR: <msg>" text,
     // MCP isError with the bare message).
     const json dargs{{"text", "lr70 parity decision"},
@@ -982,7 +982,7 @@ static void t_dashboard_maintenance_s92(HttpFixture& fx) {
     const std::string html = r.body;
     CHECK(!html.empty());
     for (const char* needle : {"maintenance-card", "maint-btn-reindex",
-                               "maint-btn-l2null", "maint-btn-triggers",
+                               "maint-btn-turnsummary", "maint-btn-triggers",
                                "maint-btn-stranded", "maint-btn-sessions",
                                "maint-dryrun", "maint-progress",
                                "maint-cancel", "maint-result",
@@ -1017,16 +1017,16 @@ static void t_tools_parity_s95(HttpFixture& fx) {
     (void)ragger::set_config_persisted("build_context", "");  // restore default
 }
 
-// X22 (Q2/L2) test 5: /turn after a same-exchange merge must enqueue the
+// X22 test 5: /turn after a same-exchange merge must enqueue the
 // turn's CURRENT assistant_text (the whole reply), not just the fragment of
 // the request that merged it. No inference is configured in this fixture, so
-// the summarizer's LR S62 floor copies the enqueued source verbatim: the L2
+// the summarizer's LR S62 floor copies the enqueued source verbatim: the turn summary
 // row that reappears after the merge shows exactly what was enqueued.
 void x22_test_turn_merge_enqueues_whole_reply(HttpFixture& fx) {
     std::println("  x22_test_turn_merge_enqueues_whole_reply...");
     const std::string guid = "x22-http-merge";
     RawDb db((fx.env.base() + "/http_test.db").c_str());
-    auto l2_for = [&](int turn_id) -> std::string {
+    auto turn_summary_for = [&](int turn_id) -> std::string {
         sqlite3_stmt* st = nullptr;
         CHECK(sqlite3_prepare_v2(db.h,
             "SELECT text FROM turn_summaries WHERE turn_id = ?", -1, &st, nullptr) == SQLITE_OK);
@@ -1047,14 +1047,14 @@ void x22_test_turn_merge_enqueues_whole_reply(HttpFixture& fx) {
     CHECK(r1["_status"] == 200);
     CHECK(r1["status"] == "captured");
     const int turn_id = r1["turn_id"].get<int>();
-    std::string l2;
-    for (int i = 0; i < 200 && l2.empty(); ++i) {
+    std::string ts_text;
+    for (int i = 0; i < 200 && ts_text.empty(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        l2 = l2_for(turn_id);
+        ts_text = turn_summary_for(turn_id);
     }
-    CHECK(l2 == "x22 whole reply question | first half alpha");
+    CHECK(ts_text == "x22 whole reply question | first half alpha");
 
-    // Drop the L2 row, then merge a second reply into the SAME turn. The
+    // Drop the turn-summary row, then merge a second reply into the SAME turn. The
     // live enqueue must carry the merged text — the floor copy proves it.
     db.exec("DELETE FROM turn_summaries WHERE turn_id = " + std::to_string(turn_id));
     const auto r2 = post_json(fx, "/turn",
@@ -1062,13 +1062,13 @@ void x22_test_turn_merge_enqueues_whole_reply(HttpFixture& fx) {
          {"session_id", guid}});
     CHECK(r2["_status"] == 200);
     CHECK(r2["turn_id"] == turn_id);   // merged into the same row
-    l2.clear();
-    for (int i = 0; i < 200 && l2.empty(); ++i) {
+    ts_text.clear();
+    for (int i = 0; i < 200 && ts_text.empty(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        l2 = l2_for(turn_id);
+        ts_text = turn_summary_for(turn_id);
     }
-    CHECK(l2.find("first half alpha") != std::string::npos);    // not just the fragment
-    CHECK(l2.find("second half beta") != std::string::npos);
+    CHECK(ts_text.find("first half alpha") != std::string::npos);    // not just the fragment
+    CHECK(ts_text.find("second half beta") != std::string::npos);
     std::println(" ok");
 }
 

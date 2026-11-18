@@ -20,7 +20,7 @@ namespace ragger {
 namespace {
 const std::vector<std::string>& backfill_kinds() {
     static const std::vector<std::string> kKinds = {
-        "l2-null", "l2-empty", "l2-regenerate",
+        "turn-summary-null", "turn-summary-empty", "turn-summary-regenerate",
         "triggers", "stranded", "session-names"};
     return kKinds;
 }
@@ -188,8 +188,8 @@ void JobRunner::run(const std::string& name, bool dry_run) {
         InferenceClient& inf = shared_inf ? *shared_inf : empty_client;
 
         BackfillResult res;
-        if (kind == "l2-null" || kind == "l2-empty" || kind == "l2-regenerate")
-            res = backfill_l2(*backend, inf, kind.substr(3), dry_run, {}, {},
+        if (kind == "turn-summary-null" || kind == "turn-summary-empty" || kind == "turn-summary-regenerate")
+            res = backfill_turn_summary(*backend, inf, kind.substr(std::string("turn-summary-").size()), dry_run, {}, {},
                               progress, cancel.get());
         else if (kind == "triggers")
             res = backfill_triggers(*backend, inf, dry_run, progress, cancel.get());

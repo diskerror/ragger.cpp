@@ -4,7 +4,7 @@
  * A recipe walks back from the latest prompt in a session, consuming
  * turns/summaries layer by layer to balance recency-of-detail against
  * token cost. The default `natural_fading` recipe gives the agent the
- * last few raw turns verbatim, then earlier turns as L2 summaries, then
+ * last few raw turns verbatim, then earlier turns as turn summaries, then
  * episode digests, then pertinent decisions — mimicking how a person
  * remembers a conversation.
  *
@@ -13,7 +13,7 @@
  * when the directory is missing or empty. Layer kinds:
  *
  *   raw_turn         — N raw turns, newest-first (consumes the walk)
- *   turn_summary     — N L2 summaries, newest-first (consumes the walk)
+ *   turn_summary     — N turn summaries, newest-first (consumes the walk)
  *   episode          — current session's episodes (newest-first), up to
  *                      `limit`. The JSON kind "session_summary" is accepted
  *                      as an alias of "episode" so user copies of old

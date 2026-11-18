@@ -29,7 +29,7 @@ inside the daemon.
 
 Once turn capture is on, the daemon-resident summarizer takes care of:
 
-- **L2 turn summaries.** Each captured turn gets a per-turn summary
+- **Turn summaries.** Each captured turn gets a per-turn summary
   written *with the source turn's timestamp* so a turn and its summary
   share a join key — no FK column, embedding rebuilds preserve the
   link.
@@ -50,7 +50,7 @@ Once turn capture is on, the daemon-resident summarizer takes care of:
 
 The agent does *not* have to summarize, schedule, retry, or worry
 about which model owns which row. Ragger records the conversing model
-on the turn and on its L2 summary, and records the summarizing model
+on the turn and on its turn summary, and records the summarizing model
 on each episode — so you can always answer "who said this?" vs "who
 wrote this summary?".
 
@@ -75,7 +75,7 @@ wrote this summary?".
 
 3. **After every turn.**
    - Call `capture_turn(user, assistant, model, session_id)`. Cheap;
-     non-blocking; the summarizer queues an L2 job and returns.
+     non-blocking; the summarizer queues a turn-summary job and returns.
    - Don't summarize in the agent. Let Ragger do it.
 
 4. **On session pause / window compaction.**
@@ -164,7 +164,7 @@ post-tool-use signal.
 even MCP can't make the model decide *when* memory is relevant.
 
 **No daemon ⇒ no summarizer.** An install that runs only `ragger mcp`
-stores turns and knowledge but builds **no summaries**: L2 turn
+stores turns and knowledge but builds **no summaries**: turn
 summaries and episodes are created later, when a daemon with a
 configured summarizer endpoint next runs its catch-up. Writes from the
 `ragger mcp` process also do not invalidate a running daemon's caches,

@@ -203,7 +203,7 @@ int main() {
             "  (1, 'E1', 1, 1000, 1020, 1020), "
             "  (2, 'E2', 1, 2000, 2010, 1999), "
             "  (3, '',    1, 3000, 3010, 3010);"
-            // L2 rows: S1 NULL text; S2 empty not-bad; S3 empty bad (marker);
+            // Turn-summary rows: S1 NULL text; S2 empty not-bad; S3 empty bad (marker);
             // S4 mismatched time attached to E1; S5 stranded inside E1's span;
             // S6 open tail in the unnamed session
             "INSERT INTO turn_summaries(turn_summary_id, text, turn_id, session_id, episode_id, "

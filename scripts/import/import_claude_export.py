@@ -204,7 +204,7 @@ def insert_placeholder_summary(cur, user_text: str, asst_text: str,
     if asst_text:
         raw += f"Assistant: {asst_text}"
     cur.execute(
-        # level 'turn' predates schema 0.12, which moved per-turn (L2) summaries
+        # level 'turn' predates schema 0.12, which moved per-turn summaries
         # into their own turn_summaries table and left summaries for
         # episode/session/project. Import these as 'episode' — the coarsest
         # level that still means "one exchange's worth of context".

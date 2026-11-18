@@ -144,7 +144,7 @@ struct Config {
     int inference_max_tokens = 4096;
     std::vector<InferenceEndpointConfig> inference_endpoints;
 
-    // --- [summarizer] section — model, endpoint, and prompt for L2/episode ---
+    // --- [summarizer] section — model, endpoint, and prompt for turn and episode ---
     std::string summarizer_model   = "";
     std::string summarizer_api_url = "";
     std::string summarizer_api_key_env = "RAGGER_SUMMARIZER_API_KEY";  // env var NAME
@@ -260,7 +260,7 @@ struct Config {
     // project-boundary close, per the session/project boundary-detection
     // design (edge-detected on the gap, not an idle-scan like episodes).
     // Any positive integer; default 7.
-    // Per-housekeeping-tick cap on how many unsummarized L2 turns (and,
+    // Per-housekeeping-tick cap on how many unsummarized turns (and,
     // separately, how many draft-tagged retry rows) get enqueued in one
     // pass. Was a hardcoded constexpr of 200; made configurable so a manual
     // resummarize (nulling model_id on a batch of `summaries` rows via

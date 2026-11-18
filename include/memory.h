@@ -45,7 +45,7 @@ public:
     /// (issue #48). Returns the new document id.
     int store_document(const DocumentChunk& chunk, bool defer_embedding = false);
 
-    /// Capture a raw L1 conversation turn into the `turns` table. Empty
+    /// Capture a raw conversation turn into the `turns` table. Empty
     /// assistant_text → partial row (finalize later). `session_guid` groups
     /// the turn under a session (empty leaves it NULL). Returns turn_id.
     int store_turn(const std::string& user_text,

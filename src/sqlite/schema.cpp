@@ -286,7 +286,7 @@ std::string setting_or(Impl& self, const char* key, const char* fallback);
             exec(ddl::if_not_exists(ddl::sessions("sessions")));
         }
 
-        // turns (L1) — raw verbatim exchanges. embedding nullable for the
+        // turns — raw verbatim exchanges. embedding nullable for the
         // deferred-embedding path (partial row written, backfilled later).
         // created_at has NO DEFAULT (matches scripts/schema_db0.17.sql
         // exactly) -- the app always supplies it explicitly on INSERT.
@@ -313,7 +313,7 @@ std::string setting_or(Impl& self, const char* key, const char* fallback);
         // fresh DB never creates it. The legacy ALTERs below stay guarded on
         // table_exists() for pre-0.16 DBs that still have it at open time.
 
-        // turn_summaries (L2) -- NEW at db_version 0.12. One row per
+        // turn_summaries -- NEW at db_version 0.12. One row per
         // summarized turn, split out of `summaries`. turn_id is a real FK,
         // ON DELETE SET NULL: pruning the raw turn leaves the summary behind
         // with turn_id NULL rather than stranding it via a fragile
@@ -496,7 +496,7 @@ std::string setting_or(Impl& self, const char* key, const char* fallback);
         exec(ddl::if_not_exists(ddl::episodes_indexes()));
 
         // turn_summaries indexes + the orphan-protection trigger. An orphaned
-        // turn summary (its turn culled) is the only surviving record of that
+        // Turn summary (its turn culled) is the only surviving record of that
         // exchange; code never deletes one, and this makes the schema refuse
         // too. Empty-text marker rows stay deletable so
         // reset_abandoned_turn_summaries() keeps working. Recreated here after

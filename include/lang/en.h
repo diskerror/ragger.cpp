@@ -292,11 +292,11 @@ constexpr const char* MSG_EMBEDDINGS_REBUILT  = "✓ Embeddings rebuilt: {} rows
 constexpr const char* WARN_EMBED_SUBPROCESS   = "Warning: embed subprocess failed (attempt {}/{}); embedding skipped";
 constexpr const char* WARN_IMPORT_EMBED_SKIPPED = "Warning: {}/{} chunks left unembedded (embed subprocess failed or timed out); re-import to retry";
 
-// --- Summarizer service (daemon-resident L2/episode worker) -------------
+// --- Summarizer service (daemon-resident turn and episode worker) -------------
 constexpr const char* MSG_SUMMARIZER_START    = "[summarizer] catch-up queued {} turn(s), {} episode close(s)";
 constexpr const char* MSG_SUMMARIZER_STOP     = "Summarizer stopped";
-constexpr const char* MSG_SUMMARIZER_L2       = "L2 turn summary written for session {} at {}";
-constexpr const char* WARN_SUMMARIZER_L2      = "Summarizer L2 failed for turn_id {}: {}";
+constexpr const char* MSG_SUMMARIZER_TURN_SUMMARY = "Turn summary written for session {} at {}";
+constexpr const char* WARN_SUMMARIZER_TURN_SUMMARY = "Summarizer turn summary failed for turn_id {}: {}";
 constexpr const char* WARN_SUMMARIZER_L3      = "[summarizer] episode catch-up failed: {}";
 constexpr const char* MSG_SUMMARIZER_NO_ENDPOINT = "[summarizer] disabled: no inference endpoint configured";
 constexpr const char* WARN_SUMMARY            = "Warning: summary generation failed: {}";
@@ -316,7 +316,7 @@ constexpr const char* ERR_EMBED_UPDATE_FAILED = "embed_tables: UPDATE {} id {} f
 constexpr const char* ERR_EXPORT_SCAN_FAILED  = "export: scan of {} failed mid-read (rc={}): {}";
 constexpr const char* ERR_STORE_FAILED        = "Failed to store: {}";
 
-// X19 (Q9/L6): a decision must have a trigger, and the generic `store` verb
+// X19: a decision must have a trigger, and the generic `store` verb
 // can never carry one. One string for every surface (HTTP 400 body, MCP
 // isError text, CLI error) — no per-surface variants.
 constexpr const char* ERR_STORE_DECISION_REQUIRES_TRIGGER =
@@ -433,12 +433,12 @@ Commands:
                      shared terms table + its id counter, clearing orphaned
                      terms)
   backfill <kind>    Repair/back-fill stored data (each kind supports --dry-run):
-                     l2-null        summarize turn_summaries rows with NULL text
-                     l2-empty       fill legacy '' rows whose turn has content
-                     l2-regenerate  re-summarize rows selected by --model or --ids
+                     turn-summary-null        summarize turn_summaries rows with NULL text
+                     turn-summary-empty       fill legacy '' rows whose turn has content
+                     turn-summary-regenerate  re-summarize rows selected by --model or --ids
                                     (refuses with no filter)
                      triggers       draft missing decision/insight triggers
-                     stranded       attach L2 rows lying inside a closed episode span
+                     stranded       attach turn-summary rows lying inside a closed episode span
                      session-names  draft titles for unnamed sessions
   show-embedding-model  Show current embedding model info
   embed               Embed text from stdin, write JSON array to stdout
@@ -715,7 +715,7 @@ inline constexpr auto kConfigSchema = std::to_array<ConfigMeta>({
     // ---- summarizer ----
     {"summarizer_model", "summarizer", "Model", CfgType::String, CfgEdit::Live,
      "qwen3-4b-instruct-2507", "",
-     "Model used for L2 and episode summarization."},
+     "Model used for turn and episode summarization."},
     {"summarizer_api_url", "summarizer", "API URL", CfgType::String, CfgEdit::Live,
      "http://localhost:1234/v1", "",
      "Inference endpoint. Default follows the LM Studio convention."},

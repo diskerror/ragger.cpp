@@ -190,7 +190,7 @@ struct UserInfo {
 };
 
 /// A summary row returned by session-level queries (turn/episode reads).
-/// `id` carries the producer's key: turn_summary_id for l2_summaries_since
+/// `id` carries the producer's key: turn_summary_id for turn_summary_summaries_since
 /// and turn_summaries_by_session_desc; episode_id for episodes_by_session_desc.
 struct SummaryRecord {
     int         id;
@@ -205,10 +205,10 @@ struct SummaryRecord {
 /// into episodes without a second round-trip to the DB.
 struct EpisodeCandidateTurn {
     int                turn_summary_id;
-    std::string        summary_text;     // L2 turn-summary text
+    std::string        summary_text;     // turn-summary text
     std::string        timestamp;        // "%F %T" local-time string for store_episode
     int64_t            epoch;            // created_at epoch seconds (for gap math)
-    std::string        summary_model_name; // L2's summary_model_id resolved ("" = NULL)
+    std::string        summary_model_name; // turn summary's summary_model_id resolved ("" = NULL)
     std::vector<float> turn_embedding;   // from turns.embedding
     std::vector<float> summary_embedding;// from turn_summaries.embedding
 };

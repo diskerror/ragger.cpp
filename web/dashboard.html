@@ -256,7 +256,7 @@ function renderSection(section) {
       '<div class="cur">Maintenance jobs (one at a time; progress below).</div>' +
       '<div class="embed-row">' +
         '<button class="btn" id="maint-btn-reindex" data-job="reindex">Reindex</button>' +
-        '<button class="btn" id="maint-btn-l2null" data-job="backfill:l2-null">Back-fill L2</button>' +
+        '<button class="btn" id="maint-btn-turnsummary" data-job="backfill:turn-summary-null">Back-fill turn summary</button>' +
         '<button class="btn" id="maint-btn-triggers" data-job="backfill:triggers">Back-fill triggers</button>' +
         '<button class="btn" id="maint-btn-stranded" data-job="backfill:stranded">Re-attach stranded</button>' +
         '<button class="btn" id="maint-btn-sessions" data-job="backfill:session-names">Name sessions</button>' +
@@ -787,6 +787,8 @@ async function probeExternalDimensions(host, port, model) {
 // a second start gets 409 and the banner says so.
 
 async function startMaintJob(name) {
+  // Gray the buttons at once: the first SSE/GET /jobs update can lag a click.
+  document.querySelectorAll("#maintenance-card button[data-job]").forEach(el => { el.disabled = true; });
   const dry = document.getElementById("maint-dryrun").checked;
   try {
     const r = await fetch(api("/jobs/" + name), {
@@ -794,9 +796,9 @@ async function startMaintJob(name) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dry_run: dry })
     });
-    if (r.status === 409) { showBanner("A maintenance job is already running."); return; }
-    if (!r.ok) { showBanner("Could not start " + name + ": HTTP " + r.status); return; }
-  } catch (e) { showBanner("Could not start " + name + ": " + e.message); return; }
+    if (r.status === 409) { showBanner("A maintenance job is already running."); refreshJobs(); return; }
+    if (!r.ok) { showBanner("Could not start " + name + ": HTTP " + r.status); refreshJobs(); return; }
+  } catch (e) { showBanner("Could not start " + name + ": " + e.message); refreshJobs(); return; }
   refreshJobs();
 }
 
@@ -823,6 +825,9 @@ function renderJobState(s) {
   bar.max = total || 1;
   bar.value = job ? Math.max(0, job.done) : 0;
   if (cancel) cancel.disabled = !running;
+  // One job at a time: while one runs, only Cancel is live.
+  document.querySelectorAll("#maintenance-card button[data-job], #maint-dryrun")
+    .forEach(el => { el.disabled = running; });
   if (!job) { res.textContent = ""; res.className = "embed-status"; return; }
   const pct = total > 0 ? " (" + job.done + "/" + job.total + ")" : "";
   res.className = "embed-status" +

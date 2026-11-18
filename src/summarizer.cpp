@@ -76,12 +76,12 @@ std::string system_prompt(const SummaryBudget& b) {
     return build_system_prompt(config().summarizer_prompt, b.target_chars, b.hard_cap);
 }
 
-// LR S64: summarize_texts gets its OWN template (R9 / new gap 8). The L2
-// prompt reused verbatim over concatenated L2 texts produced narrative
+// LR S64: summarize_texts gets its OWN template (R9 / new gap 8). The turn summary
+// prompt reused verbatim over concatenated turn-summary texts produced narrative
 // junk ("The assistant confirmed...", wrapping quotes, wrong pronouns)
 // because it never said the input is a SPAN OF SUMMARIES. {N} is
 // substituted with the member count before vformat; the two remaining {}
-// slots are the same target/cap pair as the L2 prompt, filled the same
+// slots are the same target/cap pair as the turn-summary prompt, filled the same
 // way, under the same vformat-in-try rule (PHASE9B 3a: a format error must
 // not escape — behave like an inference failure).
 constexpr std::string_view kEpisodePromptTemplate =
@@ -414,7 +414,7 @@ std::string summarize_texts(
 }
 
 // ---------------------------------------------------------------------------
-// summarize_member_texts (X23 / Q5, L4) — the episode-segment rules moved
+// summarize_member_texts — the episode-segment rules moved
 // VERBATIM out of SummarizerService::handle_episode_close (one member copies
 // that member's summary model with no model call; the LR S62 floor copies the
 // joined text with no model call; otherwise summarize_texts + choose_summary,
@@ -430,7 +430,7 @@ MemberSummary summarize_member_texts(
 {
     if (texts.empty()) return {};
 
-    // A ONE-member segment copies that L2's summary_model_id (no model call
+    // A ONE-member segment copies that turn summary's summary_model_id (no model call
     // at all — summarizing a single summary is waste).
     if (texts.size() == 1)
         return {texts.front(), single_model};

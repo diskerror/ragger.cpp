@@ -18,7 +18,7 @@
  *
  * No-daemon rule (Q8, accepted behavior — Reid, 2026-11-14): an install
  * that runs only `ragger mcp`, without a daemon, stores turns and
- * knowledge but builds no summaries — L2 rows and episodes are created
+ * knowledge but builds no summaries — turn-summary rows and episodes are created
  * when a daemon with a configured summarizer endpoint next runs its
  * catch-up. Writes from this process also do not invalidate a running
  * daemon's caches, and this process does not SIGHUP the daemon.

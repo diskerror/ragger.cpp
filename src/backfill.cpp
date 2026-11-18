@@ -35,10 +35,10 @@ void check_cancel(const CancelFlag* cancel, const std::string& kind,
         kind, res.applied, res.failed));
 }
 
-/// The exact text the summarizer sees for a turn (mirrors handle_l2: the
+/// The exact text the summarizer sees for a turn (mirrors handle_turn_summary: the
 /// system-injected user side is blanked; an assistant-only turn summarizes
 /// the assistant alone). Doubles as the copy text for the S62 rules.
-std::string l2_source(const std::string& user_text, const std::string& assistant_text) {
+std::string turn_summary_source(const std::string& user_text, const std::string& assistant_text) {
     const std::string eff_user =
         is_system_injected_turn(user_text) ? std::string{} : user_text;
     return eff_user.empty() ? assistant_text : eff_user + " | " + assistant_text;
@@ -97,26 +97,26 @@ void require_inference_configured(InferenceClient& inference) {
 
 } // namespace
 
-BackfillResult backfill_l2(StorageBackend& backend, InferenceClient& inference,
+BackfillResult backfill_turn_summary(StorageBackend& backend, InferenceClient& inference,
                            const std::string& kind, bool dry_run,
                            const std::string& model_name,
                            const std::vector<int>& ids,
                            const ProgressFn& progress,
                            const CancelFlag* cancel) {
     if (kind != "null" && kind != "empty" && kind != "regenerate")
-        throw std::invalid_argument("unknown l2 backfill kind '" + kind + "'");
+        throw std::invalid_argument("unknown turn-summary backfill kind '" + kind + "'");
     // Addendum 5: regeneration is eligible, never run by default.
     if (kind == "regenerate" && model_name.empty() && ids.empty())
         throw std::invalid_argument(
-            "l2-regenerate requires an explicit filter (--model <name> or --ids)");
+            "turn-summary-regenerate requires an explicit filter (--model <name> or --ids)");
     if (!dry_run) require_inference_configured(inference);
 
     BackfillResult res;
-    const auto cands = backend.l2_backfill_candidates(kind, model_name, ids);
+    const auto cands = backend.turn_summary_backfill_candidates(kind, model_name, ids);
     res.candidates = static_cast<int>(cands.size());
     if (dry_run) return res;
 
-    const std::string label = "l2-" + kind;
+    const std::string label = "turn-summary-" + kind;
     const bool overwrite = kind == "regenerate";
     const size_t floor_words =
         static_cast<size_t>(std::max(0, config().summarizer_min_words));
@@ -125,7 +125,7 @@ BackfillResult backfill_l2(StorageBackend& backend, InferenceClient& inference,
         check_cancel(cancel, label, res, backend);
         ++done;
         tick(progress, label, done, res.candidates);
-        const std::string source = l2_source(c.user_text, c.assistant_text);
+        const std::string source = turn_summary_source(c.user_text, c.assistant_text);
         if (source.empty()) { ++res.skipped; continue; }  // nothing to write
         try {
             std::string text;
@@ -144,7 +144,7 @@ BackfillResult backfill_l2(StorageBackend& backend, InferenceClient& inference,
                 text  = choice.text;
                 model = choice.copied ? c.turn_model_name : inference.memory_model;
             }
-            if (backend.apply_l2_text(c.turn_summary_id, text, model, overwrite))
+            if (backend.apply_turn_summary_text(c.turn_summary_id, text, model, overwrite))
                 ++res.applied;
             else
                 ++res.skipped;   // guard rejected (concurrent real write)
@@ -200,18 +200,18 @@ BackfillResult backfill_stranded(StorageBackend& backend, InferenceClient& infer
                                  bool dry_run,
                                  const ProgressFn& progress,
                                  const CancelFlag* cancel) {
-    // X23 (Q5/L4): the sweep regenerates too (Reid, 2026-11-14). Attaching a
-    // late L2 row without rebuilding the episode would leave the DERIVED
+    // X23: the sweep regenerates too (Reid, 2026-11-14). Attaching a
+    // late turn-summary row without rebuilding the episode would leave the DERIVED
     // episode text describing the old membership. Like every real pass this
     // one requires inference; a dry run only counts and never needs it.
     if (!dry_run) require_inference_configured(inference);
 
     BackfillResult res;
     int ties = 0;
-    const auto cands = backend.stranded_l2_candidates(ties);
+    const auto cands = backend.stranded_turn_summary_candidates(ties);
     res.candidates = static_cast<int>(cands.size());
     res.ties = ties;
-    // Open tail: content L2 rows with no episode whose time lies after the
+    // Open tail: content turn-summary rows with no episode whose time lies after the
     // last span of their session (or whose session has no episodes at all).
     // Counted, never touched — those spans have not been closed yet.
     res.open_tail = backend.stranded_open_tail_count();
@@ -237,7 +237,7 @@ BackfillResult backfill_stranded(StorageBackend& backend, InferenceClient& infer
             auto members = backend.episode_members(episode_id);
             std::vector<int> attach;
             for (const int ts_id : late_ids) {
-                const auto lm = backend.l2_member_by_id(ts_id);
+                const auto lm = backend.turn_summary_member_by_id(ts_id);
                 if (!lm || lm->episode_id != 0 || lm->text.empty()) continue;
                 if (std::any_of(members.begin(), members.end(),
                                 [ts_id](const auto& m) {
@@ -298,12 +298,12 @@ BackfillResult backfill_session_names(StorageBackend& backend,
         check_cancel(cancel, "session-names", res, backend);
         ++done;
         tick(progress, "session-names", done, res.candidates);
-        if (c.l2_texts.empty()) { ++res.skipped; continue; }
+        if (c.turn_summary_texts.empty()) { ++res.skipped; continue; }
         try {
-            // The L2 texts are the title corpus (D5). Join the way
+            // The turn-summary texts are the title corpus (D5). Join the way
             // summarize_texts joins them so the model sees one document.
             std::string corpus;
-            for (const auto& t : c.l2_texts) {
+            for (const auto& t : c.turn_summary_texts) {
                 if (!corpus.empty()) corpus += "\n\n";
                 corpus += t;
             }

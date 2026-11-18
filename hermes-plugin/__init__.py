@@ -837,8 +837,8 @@ class RaggerMemoryProvider(MemoryProvider):
 
         Hermes switches models mid-session, so we refresh this each turn
         rather than caching it at initialize(). The model name flows to
-        Ragger's /turn endpoint, which stores it on the turn + its L2
-        summary (the row that records *who the user was talking to*).
+        Ragger's /turn endpoint, which stores it on the turn + its turn summary
+        (the row that records *who the user was talking to*).
         """
         model = kwargs.get("model")
         if model:

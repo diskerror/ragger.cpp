@@ -216,9 +216,9 @@ int main(int argc, char **argv) {
             ("json,j", "config get: format output as JSON")
             ("dry-run", "reindex/re-embed/housekeeping/backfill: report what the run would do, write nothing")
             ("model", Diskerror::po::value<std::string>(),
-                "backfill l2-regenerate: only rows whose turn or summary model has this name")
+                "backfill turn-summary-regenerate: only rows whose turn or summary model has this name")
             ("ids", Diskerror::po::value<std::string>(),
-                "backfill l2-regenerate: comma-separated turn_summary_ids to regenerate")
+                "backfill turn-summary-regenerate: comma-separated turn_summary_ids to regenerate")
             ("browser,b", "dashboard: open the URL in the default browser")
             ("embeddings,e", CLI_EMBEDDINGS)
             ("output,o", Diskerror::po::value<std::string>(), "Output file");
@@ -462,7 +462,7 @@ int main(int argc, char **argv) {
                     Diskerror::Logger::error(ragger::lang::CLI_USAGE_DECISION);
                     return 1;
                 }
-                // X19 (Q9/L6): a decision must have a trigger, so this goes
+                // X19: a decision must have a trigger, so this goes
                 // through the decision verb (the same body as MCP
                 // memory_decision / POST /decision). The generic store verb
                 // now rejects category=decision, so `--trigger` is required
@@ -1627,7 +1627,7 @@ int main(int argc, char **argv) {
             // pass exit non-zero after reporting the counts.
             auto args = opts.getParams("args");
             static const std::vector<std::string> kKinds = {
-                "l2-null", "l2-empty", "l2-regenerate",
+                "turn-summary-null", "turn-summary-empty", "turn-summary-regenerate",
                 "triggers", "stranded", "session-names"};
             if (args.size() != 1 ||
                 std::find(kKinds.begin(), kKinds.end(), args[0]) == kKinds.end()) {
@@ -1679,8 +1679,8 @@ int main(int argc, char **argv) {
 
             ragger::BackfillResult res;
             try {
-                if (kind == "l2-null" || kind == "l2-empty" || kind == "l2-regenerate")
-                    res = ragger::backfill_l2(*backend, inference, kind.substr(3),
+                if (kind == "turn-summary-null" || kind == "turn-summary-empty" || kind == "turn-summary-regenerate")
+                    res = ragger::backfill_turn_summary(*backend, inference, kind.substr(std::string("turn-summary-").size()),
                                               dry_run, model, ids, progress);
                 else if (kind == "triggers")
                     res = ragger::backfill_triggers(*backend, inference, dry_run, progress);

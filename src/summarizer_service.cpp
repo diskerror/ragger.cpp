@@ -58,7 +58,7 @@ void SummarizerService::enqueue_turn(int turn_id,
                                      const std::string& session_guid,
                                      const std::string& source_timestamp) {
     if (!running_.load() || assistant_text.empty()) return;
-    Job j{JobKind::L2Turn, turn_id,
+    Job j{JobKind::TurnSummary, turn_id,
           user_text, assistant_text, model_name, session_guid, source_timestamp};
     {
         std::lock_guard<std::mutex> lk(mutex_);
@@ -115,12 +115,12 @@ void SummarizerService::enqueue_catch_up() {
 
     size_t turn_n = 0;
 
-    // L2 catch-up: unsummarized turns (newest first), capped per tick.
+    // Turn-summary catch-up: unsummarized turns (newest first), capped per tick.
     // `session_guid` is empty for anonymous turns (turns.session_id NULL);
-    // we still summarize them — the L2 row just lands without a session.
+    // we still summarize them — the turn-summary row just lands without a session.
     for (const auto& t : backend->unsummarized_turns(catch_up_cap)) {
         if (t.assistant_text.empty()) continue;  // partial turn, skip
-        Job j{JobKind::L2Turn, t.turn_id,
+        Job j{JobKind::TurnSummary, t.turn_id,
               t.user_text, t.assistant_text, t.model_name,
               t.session_guid, t.timestamp};
         {
@@ -130,22 +130,22 @@ void SummarizerService::enqueue_catch_up() {
         ++turn_n;
     }
 
-    // X22 (Q2/L2): stale-L2 refresh catch-up. A turn merged after its L2 was
+    // X22: stale turn-summary refresh catch-up. A turn merged after its turn summary was
     // summarized carries stale > 0 (the persistent counter store_turn's merge
     // branch bumps), so this pass retries reliably across restarts, MCP
-    // writes and a full queue. Same per-tick cap as the L2 pass above. Only
-    // rows NOT in an episode: refreshing an in-episode L2 has to rebuild the
+    // writes and a full queue. Same per-tick cap as the turn-summary pass above. Only
+    // rows NOT in an episode: refreshing an in-episode turn summary has to rebuild the
     // episode summary with it, which is X23's episode-regeneration job —
     // those candidates are returned by the same query and skipped here (they
     // become trigger (a) of that pass below).
     size_t refresh_n = 0;
     std::set<int> regen_stale_episodes;
-    for (const auto& c : backend->stale_l2_candidates(catch_up_cap)) {
+    for (const auto& c : backend->stale_turn_summary_candidates(catch_up_cap)) {
         if (c.episode_id != 0) {          // X23 refreshes in-episode rows
             regen_stale_episodes.insert(c.episode_id);
             continue;
         }
-        Job j{JobKind::L2Refresh, c.turn_id,
+        Job j{JobKind::TurnSummaryRefresh, c.turn_id,
               c.user_text, c.assistant_text, c.turn_model_name,
               c.session_guid, {}, c.turn_summary_id, c.stale};
         {
@@ -157,7 +157,7 @@ void SummarizerService::enqueue_catch_up() {
                 static std::atomic<bool> warned_refresh_full{false};
                 if (!warned_refresh_full.exchange(true))
                     Diskerror::Logger::warn(
-                        "[summarizer] catch-up queue full (1000) — dropping stale-L2 "
+                        "[summarizer] catch-up queue full (1000) — dropping stale turn-summary "
                         "refresh jobs; the periodic tick will pick them up "
                         "(one-time warning)");
                 break;
@@ -167,12 +167,12 @@ void SummarizerService::enqueue_catch_up() {
         ++refresh_n;
     }
 
-    // X23 (Q5/L4): episode-regeneration catch-up, after the X22 pass and
+    // X23: episode-regeneration catch-up, after the X22 pass and
     // under the same queue-empty / per-tick-cap / bounded-queue rules. Two
     // triggers: (a) every DISTINCT episode among the stale candidates above
     // that this pass skipped (episode_id != 0) — its member text changed, so
     // the episode has to be rebuilt with it; (b) every stranded candidate
-    // (a late L2 inside an already-closed span of its session) — attach it
+    // (a late turn summary inside an already-closed span of its session) — attach it
     // and fix the episode. Grouping by episode_id IS the pass's dedupe of
     // (episode_id, attach id): a stale member and a late row in the same
     // episode are one job, never two.
@@ -182,7 +182,7 @@ void SummarizerService::enqueue_catch_up() {
         for (const int ep : regen_stale_episodes)
             regen_jobs.try_emplace(ep);
         int stranded_ties = 0;   // counted for the CLI sweep, not reported here
-        for (const auto& s : backend->stranded_l2_candidates(stranded_ties))
+        for (const auto& s : backend->stranded_turn_summary_candidates(stranded_ties))
             regen_jobs[s.episode_id].push_back(s.turn_summary_id);
 
         for (auto& [ep_id, attach] : regen_jobs) {
@@ -211,7 +211,7 @@ void SummarizerService::enqueue_catch_up() {
     // Whatever caused max_turn_failures consecutive failures (inference
     // outage, bad config) may since be fixed; this is the only path back
     // for a turn that was permanently abandoned. Reset on this tick, picked
-    // up as ordinary L2 catch-up on the NEXT tick (unsummarized_turns() was
+    // up as ordinary turn-summary catch-up on the NEXT tick (unsummarized_turns() was
     // already queried above this tick, before the reset took effect).
     // PHASE6 4: gated by exponential back-off. While inference is down,
     // resetting abandoned turns every tick just re-arms the poison loop;
@@ -256,7 +256,7 @@ void SummarizerService::enqueue_catch_up() {
             lang::MSG_SUMMARIZER_START, turn_n, ep_n));
     if (refresh_n)
         Diskerror::Logger::info(std::format(
-            "[summarizer] queued {} stale-L2 refresh job(s)", refresh_n));
+            "[summarizer] queued {} stale turn-summary refresh job(s)", refresh_n));
     if (regen_n)
         Diskerror::Logger::info(std::format(
             "[summarizer] queued {} episode-regeneration job(s)", regen_n));
@@ -280,8 +280,8 @@ void SummarizerService::worker_loop() {
 
         try {
             switch (job.kind) {
-                case JobKind::L2Turn:       handle_l2(job);            break;
-                case JobKind::L2Refresh:    handle_l2_refresh(job);    break;
+                case JobKind::TurnSummary:       handle_turn_summary(job);            break;
+                case JobKind::TurnSummaryRefresh:    handle_turn_summary_refresh(job);    break;
                 case JobKind::EpisodeClose: handle_episode_close(job); break;
                 case JobKind::EpisodeRegen: handle_episode_regen(job); break;
             }
@@ -313,7 +313,7 @@ void SummarizerService::pause_timer_loop() {
         lk.unlock();
 
         try {
-            // Mop-up scan: anything the L2 worker hasn't picked up (a turn
+            // Mop-up scan: anything the turn-summary worker hasn't picked up (a turn
             // captured during inference-down should still be queued for
             // retry), plus idle episode closes.
             enqueue_catch_up();
@@ -327,7 +327,7 @@ void SummarizerService::pause_timer_loop() {
 }
 
 // --------------------------------------------------------------------
-// L2: summarize one turn into a row that inherits the turn's timestamp.
+// Turn summary: summarize one turn into a row that inherits the turn's timestamp.
 // On inference failure NO row is written: the turn stays in the
 // unsummarized queue and the next catch-up pass retries it. Only the
 // poison-abandon path below (after max_turn_failures) writes a row, and
@@ -335,13 +335,13 @@ void SummarizerService::pause_timer_loop() {
 // row path is gone.
 // --------------------------------------------------------------------
 
-// X22 (Q2/L2): the ONE {user, assistant} -> {summary, model} block, moved
-// VERBATIM out of handle_l2 (system-injected blanking, the `user | assistant`
+// X22: the ONE {user, assistant} -> {summary, model} block, moved
+// VERBATIM out of handle_turn_summary (system-injected blanking, the `user | assistant`
 // source, the LR S62 floor copy with no model call, summarize_transcript +
-// choose_summary). handle_l2's behavior is bit-for-bit unchanged; the extra
-// `source`/`floor_copy` fields exist only so handle_l2 keeps its exact
+// choose_summary). handle_turn_summary's behavior is bit-for-bit unchanged; the extra
+// `source`/`floor_copy` fields exist only so handle_turn_summary keeps its exact
 // floor-copy log and its poison-abandon accounting around the call.
-SummarizerService::L2Text SummarizerService::make_l2_text(
+SummarizerService::TurnSummaryText SummarizerService::make_turn_summary_text(
         InferenceClient* inf, const std::string& user,
         const std::string& assistant, const std::string& turn_model_name) {
     // System-injected turns (model-switch notes, compaction handoffs,
@@ -386,7 +386,7 @@ SummarizerService::L2Text SummarizerService::make_l2_text(
             source, false};
 }
 
-void SummarizerService::handle_l2(const Job& j) {
+void SummarizerService::handle_turn_summary(const Job& j) {
     if (j.assistant_text.empty()) return;  // partial turn
 
     // Resolve the inference client ONCE for the whole job (C §1.3): a
@@ -416,7 +416,7 @@ void SummarizerService::handle_l2(const Job& j) {
     const std::string& ts   = j.source_timestamp;
     const std::string  display_guid = guid.empty() ? "-" : guid;
 
-    const auto made = make_l2_text(inf.get(), j.user_text, j.assistant_text,
+    const auto made = make_turn_summary_text(inf.get(), j.user_text, j.assistant_text,
                                    j.model_name);
 
     // LR S62 floor path: verbatim copy, no model call, no endpoint needed.
@@ -429,7 +429,7 @@ void SummarizerService::handle_l2(const Job& j) {
             return;
         }
         Diskerror::Logger::info(std::format(
-            "[summarizer] L2 floor copy ({} words, no model call) for session {}",
+            "[summarizer] turn-summary floor copy ({} words, no model call) for session {}",
             count_words(made.source), display_guid));
         return;
     }
@@ -474,13 +474,13 @@ void SummarizerService::handle_l2(const Job& j) {
         // No turn_summaries row is created on inference failure — the turn
         // stays in the unsummarized queue and the next catch-up pass retries.
         Diskerror::Logger::info(std::format(
-            "[summarizer] L2 deferred (inference unreachable) for session {} at {}",
+            "[summarizer] turn summary deferred (inference unreachable) for session {} at {}",
             display_guid, ts));
         return;
     }
 
     // Insert the turn_summaries row (text + provenance already chosen by
-    // make_l2_text: the summarizer's model, or the turn's for a copy).
+    // make_turn_summary_text: the summarizer's model, or the turn's for a copy).
     bool ok = backend_.finalize_turn_summary(j.turn_id, made.text, made.model);
     if (!ok) {
         Diskerror::Logger::warn(std::format(
@@ -497,20 +497,20 @@ void SummarizerService::handle_l2(const Job& j) {
         reset_backoff_.succeeded();
     }
     Diskerror::Logger::info(std::format(
-        lang::MSG_SUMMARIZER_L2, display_guid, ts));
+        lang::MSG_SUMMARIZER_TURN_SUMMARY, display_guid, ts));
 
     return;
 }
 
 // --------------------------------------------------------------------
-// X22 (Q2/L2): refresh the L2 row of a turn that was merged after it was
+// X22: refresh the turn-summary row of a turn that was merged after it was
 // summarized (store_turn's merge branch bumped its `stale` counter). The
 // row stays stale — retried by the next tick — whenever nothing is written:
 // no inference configured, or an empty summary. Nothing here counts toward
 // poison-abandon: the row already holds a real summary, and the persistent
 // counter is this job's retry mechanism.
 // --------------------------------------------------------------------
-void SummarizerService::handle_l2_refresh(const Job& j) {
+void SummarizerService::handle_turn_summary_refresh(const Job& j) {
     auto inf = inference_provider_ ? inference_provider_() : nullptr;  // once per job
     if (!inf) {
         std::call_once(no_inference_warned_, [] {
@@ -519,11 +519,11 @@ void SummarizerService::handle_l2_refresh(const Job& j) {
         return;  // the row stays stale; the next tick retries
     }
 
-    const auto made = make_l2_text(inf.get(), j.user_text, j.assistant_text,
+    const auto made = make_turn_summary_text(inf.get(), j.user_text, j.assistant_text,
                                    j.model_name);
     if (made.text.empty()) {
         Diskerror::Logger::info(std::format(
-            "[summarizer] L2 refresh deferred (inference unreachable) for "
+            "[summarizer] turn-summary refresh deferred (inference unreachable) for "
             "turn_summary_id={} (session={})", j.turn_summary_id,
             j.session_guid.empty() ? "-" : j.session_guid));
         return;  // no write; the row stays stale for the next tick
@@ -540,12 +540,12 @@ void SummarizerService::handle_l2_refresh(const Job& j) {
     }
     {
         // Inference just worked: reopen the abandoned-reset window (same
-        // signal handle_l2 gives on a successful summary).
+        // signal handle_turn_summary gives on a successful summary).
         std::lock_guard<std::mutex> lk(mutex_);
         reset_backoff_.succeeded();
     }
     Diskerror::Logger::info(std::format(
-        "[summarizer] L2 refreshed for turn_summary_id={} (session={})",
+        "[summarizer] turn-summary refreshed for turn_summary_id={} (session={})",
         j.turn_summary_id, j.session_guid.empty() ? "-" : j.session_guid));
 }
 
@@ -578,7 +578,7 @@ void SummarizerService::handle_episode_close(const Job& j) {
     auto candidates = backend_.episode_candidate_turns(j.session_guid, since);
     if (candidates.empty()) return;  // nothing new to close
 
-    // S25 (C M10): same "not configured" guard as handle_l2 — an episode
+    // S25 (C M10): same "not configured" guard as handle_turn_summary — an episode
     // cannot be closed without inference; leave it open for a later pass.
     if (!inf) {
         std::call_once(no_inference_warned_, [] {
@@ -630,7 +630,7 @@ void SummarizerService::handle_episode_close(const Job& j) {
 
         // LR S62 (shorter-text rule, addenda 2/3), episode side: the ONE-
         // member copy, the joined-text floor and the summarize_texts +
-        // choose_summary path. X23 (Q5/L4) moved that block VERBATIM into
+        // choose_summary path. X23 moved that block VERBATIM into
         // summarize_member_texts so the episode-regeneration job and the
         // `backfill stranded` sweep rebuild an episode exactly the way a
         // close writes one; behavior here is bit-for-bit unchanged (an empty
@@ -686,9 +686,9 @@ void SummarizerService::handle_episode_close(const Job& j) {
 }
 
 // --------------------------------------------------------------------
-// X23 (Q5/L4): episode regeneration. Two reasons to rebuild an episode:
-// one of its members' L2 rows went stale (a merge of the source turn —
-// X22's counter), and/or a late L2 row appeared inside its closed span
+// X23: episode regeneration. Two reasons to rebuild an episode:
+// one of its members' turn-summary rows went stale (a merge of the source turn —
+// X22's counter), and/or a late turn-summary row appeared inside its closed span
 // (a stranded row). Reid, 2026-11-14: the episode text is DERIVED, so it is
 // replaced in place (no history, no change-of-meaning detection), and a late
 // summary is attached to the episode it belongs to.
@@ -722,7 +722,7 @@ void SummarizerService::handle_episode_regen(const Job& j) {
     // unattached/non-empty is dropped — for that row there is nothing to do.
     std::vector<int> attach_ids;
     for (const int ts_id : j.attach_ids) {
-        const auto lm = backend_.l2_member_by_id(ts_id);
+        const auto lm = backend_.turn_summary_member_by_id(ts_id);
         if (!lm || lm->episode_id != 0 || lm->text.empty()) continue;
         if (std::any_of(members.begin(), members.end(),
                         [ts_id](const Member& m) { return m.turn_summary_id == ts_id; }))
@@ -756,7 +756,7 @@ void SummarizerService::handle_episode_regen(const Job& j) {
             cleared.emplace_back(m.turn_summary_id, m.stale);
             continue;
         }
-        const auto made = make_l2_text(inf.get(), m.user_text, m.assistant_text,
+        const auto made = make_turn_summary_text(inf.get(), m.user_text, m.assistant_text,
                                        m.turn_model_name);
         if (made.text.empty()) {
             // Inference unreachable: NO episode write at all — the member
@@ -810,7 +810,7 @@ void SummarizerService::handle_episode_regen(const Job& j) {
     }
     {
         // Inference just worked: reopen the abandoned-reset window (same
-        // signal handle_l2_refresh gives on a successful refresh).
+        // signal handle_turn_summary_refresh gives on a successful refresh).
         std::lock_guard<std::mutex> lk(mutex_);
         reset_backoff_.succeeded();
     }

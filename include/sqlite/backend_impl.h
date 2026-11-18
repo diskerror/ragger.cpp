@@ -95,9 +95,9 @@ struct Backend::Impl {
     };
 
     // PHASE8: the old summaries vector cache member is gone with its table.
-    EmbeddingCache doc_cache_;       // documents (L5)
-    EmbeddingCache knowledge_cache_; // knowledge (L6; PHASE7 replaces dec+ins)
-    EmbeddingCache turn_cache_;      // turn_summaries (L2)
+    EmbeddingCache doc_cache_;       // documents
+    EmbeddingCache knowledge_cache_; // knowledge (PHASE7 replaced decisions + insights)
+    EmbeddingCache turn_cache_;      // turn_summaries
     EmbeddingCache episode_cache_;   // episodes (db 0.17, PHASE5 B.3)
     // LR S75: raw exchanges (turns) as an OPT-IN agent corpus — loaded and
     // scored only when layers explicitly names `turn`, never in the default
@@ -125,11 +125,11 @@ struct Backend::Impl {
     // LR S66/S67: the back-fill candidate structs are declared on the
     // StorageBackend interface; a nested class does not see the enclosing
     // class's *inherited* names by lookup, so re-export them here.
-    using L2BackfillCandidate = StorageBackend::L2BackfillCandidate;
+    using TurnSummaryBackfillCandidate = StorageBackend::TurnSummaryBackfillCandidate;
     using TriggerCandidate    = StorageBackend::TriggerCandidate;
     using StrandedCandidate   = StorageBackend::StrandedCandidate;
     using SessionNameCandidate = StorageBackend::SessionNameCandidate;
-    using StaleL2Candidate    = StorageBackend::StaleL2Candidate;
+    using StaleTurnSummaryCandidate    = StorageBackend::StaleTurnSummaryCandidate;
     using HousekeepingPlan  = StorageBackend::HousekeepingPlan;
 
     // ---- helpers -------------------------------------------------------
@@ -341,7 +341,7 @@ struct Backend::Impl {
                     const std::string& sql,
                     const std::function<void(Stmt&, nlohmann::json&)>& fill_meta);
 
-    // Loads the documents (L5) table into the vector cache: vector scores
+    // Loads the documents table into the vector cache: vector scores
     // come from here, keyword scores from the custom terms index at query
     // time. Metadata carries source="document" plus the title so search()
     // consumers can distinguish documents from other corpora.
@@ -351,7 +351,7 @@ struct Backend::Impl {
     // carries kind, status, trigger, tags, session_id.
     void ensure_knowledge_cache();
 
-    // Loads the turn_summaries (L2) table into the parallel vector cache.
+    // Loads the turn_summaries table into the parallel vector cache.
     // Vector scores come from here, keyword scores from the custom text
     // index at query time. WHERE text != '' excludes marker rows
     // (known-empty skips) and legacy NULL rows — these must never surface
@@ -429,7 +429,7 @@ struct Backend::Impl {
 
     int store_document(const DocumentChunk& chunk, bool defer_embedding);
 
-    // ---- turns (L1) raw exchange capture ------------------------------
+    // ---- turns raw exchange capture ------------------------------
     // Resolve a model name to its models.model_id, creating the row if it
     // doesn't exist. Empty name → 0 (callers bind NULL).
     int get_or_create_model(const std::string& name);
@@ -476,7 +476,7 @@ struct Backend::Impl {
     // using the same U+001F unit-separator as chat's summary turns.
     static std::string turn_embed_text(const std::string& u, const std::string& a);
 
-    // Store a raw L1 turn. An empty assistant_text writes a *partial* row
+    // Store a raw turn. An empty assistant_text writes a *partial* row
     // (assistant + embedding NULL) for the prompt-arrival/finalize flow;
     // otherwise the exchange is embedded unless defer_embedding. The text
     // index covers user_text/assistant_text. Returns turn_id.
@@ -569,7 +569,7 @@ struct Backend::Impl {
         const std::string& text);
 
     // ---- catch-up / recipe helpers ------------------------------------
-    // Turns lacking an L2 summary, linked by (session_id, timestamp).
+    // Turns lacking a turn summary, linked by (session_id, timestamp).
     // LEFT JOIN keeps turns whose summary row doesn't exist; ordered
     // newest-first so the summarizer works on the most recently active
     // turns first. This matters most for a manual resummarize (nulling
@@ -599,25 +599,25 @@ struct Backend::Impl {
     int reset_abandoned_turn_summaries(int limit);
 
     // ---- LR S66/S67 back-fill primitives (see storage_backend.h) --------
-    std::vector<L2BackfillCandidate> l2_backfill_candidates(
+    std::vector<TurnSummaryBackfillCandidate> turn_summary_backfill_candidates(
         const std::string& kind, const std::string& model_name,
         const std::vector<int>& ids);
-    bool apply_l2_text(int turn_summary_id, const std::string& text,
+    bool apply_turn_summary_text(int turn_summary_id, const std::string& text,
                        const std::string& summary_model_name,
                        bool overwrite);
-    // X22 (Q2/L2): stale-L2 selection + in-place refresh (see storage_backend.h).
-    std::vector<StaleL2Candidate> stale_l2_candidates(int limit);
+    // X22: stale turn-summary selection + in-place refresh (see storage_backend.h).
+    std::vector<StaleTurnSummaryCandidate> stale_turn_summary_candidates(int limit);
     bool refresh_turn_summary(int turn_summary_id, const std::string& text,
                               const std::string& summary_model_name,
                               int observed_stale, bool clear_stale);
     std::vector<TriggerCandidate> trigger_backfill_candidates();
     bool apply_trigger(int knowledge_id, const std::string& trigger);
-    std::vector<StrandedCandidate> stranded_l2_candidates(int& ties);
-    bool attach_stranded_l2(int turn_summary_id, int episode_id);
+    std::vector<StrandedCandidate> stranded_turn_summary_candidates(int& ties);
+    bool attach_stranded_turn_summary(int turn_summary_id, int episode_id);
     int stranded_open_tail_count();
-    // X23 (Q5/L4): episode-regeneration primitives (see storage_backend.h).
+    // X23: episode-regeneration primitives (see storage_backend.h).
     std::vector<EpisodeMember> episode_members(int episode_id);
-    std::optional<EpisodeMember> l2_member_by_id(int turn_summary_id);
+    std::optional<EpisodeMember> turn_summary_member_by_id(int turn_summary_id);
     bool replace_episode_text(int episode_id, const std::string& text,
                               const std::string& model_name,
                               const std::vector<std::pair<int,int>>& cleared,
@@ -664,12 +664,12 @@ struct Backend::Impl {
     // Empty when the session has no episode rows yet.
     std::string last_episode_end(const std::string& session_guid);
 
-    // Non-draft L2 turn summaries for a session with timestamp > since_ts
+    // Non-draft turn summaries for a session with timestamp > since_ts
     // (empty since_ts = all), oldest-first. Composes the closing episode.
     // since_ts arrives as a "%F %T" string (from last_episode_end(), which
     // renders the epoch column back to that format) -- parse it back to
     // epoch seconds to compare against the INTEGER created_at column.
-    std::vector<SummaryRecord> l2_summaries_since(
+    std::vector<SummaryRecord> turn_summary_summaries_since(
             const std::string& session_guid, const std::string& since_ts);
 
     // Candidate turns for similarity-based episode detection: joins
@@ -687,11 +687,11 @@ struct Backend::Impl {
     int store_episode_close(const EpisodeClose& close);
 
     // Sessions whose open episode is ready to close: they have >=1 non-empty
-    // L2 turn summary past the last episode's span_end, and their newest
+    // Turn summary past the last episode's span_end, and their newest
     // turn is older than idle_minutes. Returns session GUIDs.
     std::vector<std::string> episodes_needing_close(int idle_minutes);
 
-    // L2 (turn) summaries for a session, newest-first (reads turn_summaries
+    // Turn summaries for a session, newest-first (reads turn_summaries
     // directly; PHASE5 B.5).
     std::vector<SummaryRecord> turn_summaries_by_session_desc(
             const std::string& session_guid, int limit);
@@ -743,7 +743,7 @@ struct Backend::Impl {
     // sessions row same as store_turn.
     bool update_turn_meta(int turn_id, const std::string& timestamp,
                           const std::string& session_guid);
-    // X22 (Q2/L2): the turn's current assistant_text (see storage_backend.h).
+    // X22: the turn's current assistant_text (see storage_backend.h).
     std::optional<std::string> turn_assistant_text(int turn_id);
 
     // Recipe ingredients (issue #23): current decisions — fetched by recency

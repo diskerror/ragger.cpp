@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Compare each raw turn (L1) to its corresponding turn summary (L2).
-Joined on timestamp — L1 and L2 share the exact same timestamp.
+Compare each raw turn to its corresponding turn summary.
+Joined on timestamp — turn and turn summary share the exact same timestamp.
 
 Goal: high similarity + small reduction% = good summary quality.
 
 Output TSV columns: date, similar, reduction, model
 
   date      — turn timestamp
-  similar   — cosine similarity between L1 turn embedding and L2 summary embedding (0–1, 2 dp)
-  reduction — (L2 text size / L1 text size) * 100, whole number percent
+  similar   — cosine similarity between turn embedding and turn summary embedding (0–1, 2 dp)
+  reduction — (turn summary text size / turn text size) * 100, whole number percent
   model     — summarizer model name from the summaries table
 
 Usage: python embedding_comparison.py <output_file.tsv>
@@ -94,7 +94,7 @@ def main():
             f.write(f"{row['timestamp']}\t{sim:.2f}\t{reduction}\t{row['model_name'] or ''}\n")
             rows_written += 1
 
-    print(f"Wrote {rows_written} rows to {output_path} ({skipped} turns skipped — no matching L2)", file=sys.stderr)
+    print(f"Wrote {rows_written} rows to {output_path} ({skipped} turns skipped — no matching turn summary)", file=sys.stderr)
 
 
 if __name__ == "__main__":

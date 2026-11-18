@@ -377,7 +377,7 @@ void test_summarizer_provider_per_job(const std::string& base) {
 // LR S63 (replaces p6_test_live_enqueue_skipped): the trivial-turn skip is
 // gone. A one-word exchange with NO inference server (provider -> nullptr)
 // now goes through the S62 floor and lands a REAL turn_summaries row:
-// text = the source, embedding/terms like any L2, summary_model_id = the
+// text = the source, embedding/terms like any turn summary, summary_model_id = the
 // turn's model (never the "(skipped)" pseudo-model, never text=''). The turn
 // still leaves the unsummarized queue (the PHASE6 3 invariant, now carried
 // by the floor), and the row is a normal row: an episode candidate.
@@ -688,7 +688,7 @@ void p6_test_single_scan(const std::string& base) {
     std::thread a(hammer), b(hammer);
     a.join(); b.join();
 
-    // 3 unsummarized turns -> at most 3 L2 jobs, never 6+.
+    // 3 unsummarized turns -> at most 3 turn-summary jobs, never 6+.
     CHECK(svc.queue_size() <= 3);
     CHECK(svc.queue_size() == 3);
     backend.close();
@@ -1153,14 +1153,14 @@ void lr62_test_copy_provenance(const std::string& base) {
     std::println(" ok");
 }
 
-// LR S64: summarize_texts gets its OWN episode prompt (the L2 prompt
+// LR S64: summarize_texts gets its OWN episode prompt (the turn-summary prompt
 // reused verbatim over concatenated summaries produced narrative junk).
 // The prompt must: name the input as N consecutive summaries of one span
 // (N substituted), demand a standalone summary keeping decisions /
 // configuration / technical facts / names / dates, forbid invention,
 // headers, wrapping quotes, demand role references, forbid longer-than-
 // input, and carry the two filled size slots. summarize_transcript keeps
-// the L2 prompt (pinned by p10_summarizer_budget_prompt).
+// the turn-summary prompt (pinned by p10_summarizer_budget_prompt).
 void lr64_test_episode_prompt() {
     std::println("  lr64_test_episode_prompt...");
     StubChat stub("SUMMARY");
@@ -1175,7 +1175,7 @@ void lr64_test_episode_prompt() {
     CHECK(stub.calls.load() == 1);
 
     const std::string p = stub.system_of(0);
-    // Not the L2 prompt anymore.
+    // Not the turn-summary prompt anymore.
     CHECK(p.find("Summarize this conversation into a concise memory entry") ==
           std::string::npos);
     // N substituted: three inputs -> "3 consecutive summaries".
@@ -1285,18 +1285,18 @@ void lr65_test_abandon_marker(const std::string& base) {
     std::println(" ok");
 }
 
-// X22 (Q2/L2): a merged turn's OPEN L2 (episode_id NULL) is refreshed in
+// X22: a merged turn's OPEN turn summary (episode_id NULL) is refreshed in
 // place by the catch-up tick. Pin first (RED at HEAD: no `stale` column, no
-// L2Refresh job kind, no refresh path in enqueue_catch_up).
+// TurnSummaryRefresh job kind, no refresh path in enqueue_catch_up).
 //
 // Shape: short first exchange -> LR S62 floor copy (no model call, so the
 // old text carries a word the refreshed text will not). A long continuation
 // merges (stale = 1, text unchanged); enqueue_catch_up + the worker drain
-// must rewrite the L2 from a source containing BOTH reply parts, clear the
+// must rewrite the turn summary from a source containing BOTH reply parts, clear the
 // counter, re-embed, and rewrite the text index — while turn_summary_id,
 // turn_datetime and summarized_on stay exactly as they were.
-void x22_test_l2_refresh_after_merge(const std::string& base, const std::string& model_dir) {
-    std::println("  x22_test_l2_refresh_after_merge...");
+void x22_test_turn_summary_refresh_after_merge(const std::string& base, const std::string& model_dir) {
+    std::println("  x22_test_turn_summary_refresh_after_merge...");
 
     namespace fs = std::filesystem;
     const std::string dir = base + "/x22refresh";
@@ -1372,7 +1372,7 @@ void x22_test_l2_refresh_after_merge(const std::string& base, const std::string&
         sqlite3_finalize(st);
     }
 
-    // Merge a long continuation: stale -> 1, the L2 text stays as it was.
+    // Merge a long continuation: stale -> 1, the turn summary text stays as it was.
     std::string a2;
     for (int i = 0; i < 25; ++i) a2 += "cont" + std::to_string(i) + " ";
     backend.store_turn(u, a2, "turn-model-x", false, guid);
@@ -1440,13 +1440,13 @@ void x22_test_l2_refresh_after_merge(const std::string& base, const std::string&
     std::println(" ok");
 }
 
-// X22 (Q2/L2): an L2 row that already belongs to an episode is flagged by a
+// X22: a turn summary row that already belongs to an episode is flagged by a
 // merge but NOT refreshed by the X22 tick — refreshing it means rebuilding
-// the episode summary, which is X23's job. X23 (Q5/L4) added that job, so
+// the episode summary, which is X23's job. X23 added that job, so
 // below the same tick the row IS refreshed, through the episode-regeneration
 // path: the member text and the episode text are rewritten together.
-void x22_test_l2_refresh_skips_in_episode(const std::string& base) {
-    std::println("  x22_test_l2_refresh_skips_in_episode...");
+void x22_test_turn_summary_refresh_skips_in_episode(const std::string& base) {
+    std::println("  x22_test_turn_summary_refresh_skips_in_episode...");
 
     namespace fs = std::filesystem;
     const std::string dir = base + "/x22episode";
@@ -1514,12 +1514,12 @@ void x22_test_l2_refresh_skips_in_episode(const std::string& base) {
     CHECK(scalar("SELECT stale" + w) == 1);
     CHECK(scalar("SELECT episode_id IS NOT NULL" + w) == 1);
 
-    // X23 (Q5/L4) supersedes this test's old "the tick leaves it stale": the
-    // L2Refresh pass still SKIPS an in-episode row (refreshing one has to
+    // X23 supersedes this test's old "the tick leaves it stale": the
+    // TurnSummaryRefresh pass still SKIPS an in-episode row (refreshing one has to
     // rebuild its episode), but the same tick now runs the episode-regeneration
     // job, which refreshes the member and rebuilds the episode with it. The
     // episode-text assertion is what proves the row went through the regen
-    // path — a bare L2Refresh would have left the episode text alone. The
+    // path — a bare TurnSummaryRefresh would have left the episode text alone. The
     // merged source is 14 words, at/below the summarizer_min_words floor (20),
     // so both writes are floor copies: still NO model call.
     svc.enqueue_catch_up();
@@ -1538,11 +1538,11 @@ void x22_test_l2_refresh_skips_in_episode(const std::string& base) {
     std::println(" ok");
 }
 
-// X22 (Q2/L2): with inference down the refresh writes nothing — the row
+// X22: with inference down the refresh writes nothing — the row
 // stays stale (retried next tick), the text is untouched, and nothing is
 // counted toward poison-abandon (no 'bad' marker appears).
-void x22_test_l2_refresh_inference_down(const std::string& base) {
-    std::println("  x22_test_l2_refresh_inference_down...");
+void x22_test_turn_summary_refresh_inference_down(const std::string& base) {
+    std::println("  x22_test_turn_summary_refresh_inference_down...");
 
     namespace fs = std::filesystem;
     const std::string dir = base + "/x22down";
@@ -1606,8 +1606,8 @@ void x22_test_l2_refresh_inference_down(const std::string& base) {
 }
 
 // ---------------------------------------------------------------------------
-// X23 (Q5/L4): episode regeneration — an in-episode stale L2 refreshes its
-// episode; a late (stranded) L2 attaches and rebuilds it. Pinned RED at HEAD:
+// X23: episode regeneration — an in-episode stale turn-summary refreshes its
+// episode; a late (stranded) turn summary attaches and rebuilds it. Pinned RED at HEAD:
 // the EpisodeRegen job kind, its enqueue triggers and the handler do not
 // exist yet, so after a merge/tick the member stays stale and the episode
 // text never changes.
@@ -1615,7 +1615,7 @@ void x22_test_l2_refresh_inference_down(const std::string& base) {
 
 namespace {
 
-// One long L2 text (n distinct tokens > summarizer_min_words default 20).
+// One long turn summary text (n distinct tokens > summarizer_min_words default 20).
 std::string x23_long_text(const std::string& tag, int n = 25) {
     std::string s;
     for (int i = 0; i < n; ++i) s += tag + std::to_string(i) + " ";
@@ -1624,7 +1624,7 @@ std::string x23_long_text(const std::string& tag, int n = 25) {
 
 } // namespace
 
-// (1) Episode of 2 L2s; merge the FIRST member's turn -> its L2 stale == 1;
+// (1) Episode of 2 turn summaries; merge the FIRST member's turn -> its turn summary stale == 1;
 // tick + drain -> the member text is refreshed AND the episode text equals
 // the fake summary of the member texts in order (the request body carries
 // the refreshed member 1 text before member 2's), the episode embedding is
@@ -1692,7 +1692,7 @@ void x23_test_episode_regen_stale_member(const std::string& base, const std::str
     CHECK(t1 > 0);
     CHECK(backend.finalize_turn_summary(t1, "x23 member one summary", "summarizer-model"));
 
-    // Merge a long continuation while t1 is still the newest turn: the L2
+    // Merge a long continuation while t1 is still the newest turn: the turn summary
     // row gets stale == 1 (X22), the episode does not exist yet.
     std::string cont;
     for (int i = 0; i < 25; ++i) cont += "x23cont" + std::to_string(i) + " ";
@@ -1786,11 +1786,11 @@ void x23_test_episode_regen_stale_member(const std::string& base, const std::str
     std::println(" ok");
 }
 
-// (2) Episode of 2 L2s closed; a 3rd L2 inserted late INSIDE the span ->
+// (2) Episode of 2 turn summaries closed; a 3rd turn summary inserted late INSIDE the span ->
 // tick + drain -> attached, and the episode text summarizes all three in
 // turn_datetime order (the request body carries m1 before late before m2).
-void x23_test_episode_regen_late_l2(const std::string& base) {
-    std::println("  x23_test_episode_regen_late_l2...");
+void x23_test_episode_regen_late_turn_summary(const std::string& base) {
+    std::println("  x23_test_episode_regen_late_turn_summary...");
 
     namespace fs = std::filesystem;
     const std::string dir = base + "/x23late";
@@ -1852,7 +1852,7 @@ void x23_test_episode_regen_late_l2(const std::string& base) {
     const int ep = backend.store_episode_close(ec);
     CHECK(ep > 0);
 
-    // A late L2 inside the closed span.
+    // A late turn summary inside the closed span.
     const int t3 = backend.store_turn("x23 late q three", "x23 late a three", "test-model",
                                       false, guid, "2026-05-01 10:05:00");
     CHECK(t3 > 0);
@@ -2167,11 +2167,11 @@ int main() {
     lr64_test_episode_prompt();
     lr65_test_abandon_marker(env.base());
     p6_test_single_scan(env.base());
-    x22_test_l2_refresh_after_merge(env.base(), env.model_dir());
-    x22_test_l2_refresh_skips_in_episode(env.base());
-    x22_test_l2_refresh_inference_down(env.base());
+    x22_test_turn_summary_refresh_after_merge(env.base(), env.model_dir());
+    x22_test_turn_summary_refresh_skips_in_episode(env.base());
+    x22_test_turn_summary_refresh_inference_down(env.base());
     x23_test_episode_regen_stale_member(env.base(), env.model_dir());
-    x23_test_episode_regen_late_l2(env.base());
+    x23_test_episode_regen_late_turn_summary(env.base());
     x23_test_episode_regen_single_to_multi(env.base());
     x23_test_episode_regen_inference_down(env.base());
     x27_test_response_truncated();

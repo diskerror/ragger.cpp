@@ -834,7 +834,7 @@ SessionContext build_context(RaggerMemory& memory,
     auto* backend = memory.backend();
     if (!backend) return out;
 
-    // The walk: turns + L2 summaries newest-first. raw_turn / turn_summary
+    // The walk: turns + turn summaries newest-first. raw_turn / turn_summary
     // layers consume from these in chronological order (newest popped
     // first). Other layers (session/project/decisions) pull recent rows
     // independent of the walk.

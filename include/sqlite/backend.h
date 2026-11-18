@@ -48,7 +48,7 @@ public:
     int store_document(const DocumentChunk& chunk,
                        bool defer_embedding = false) override;
 
-    /// Store / finalize a raw L1 conversation turn (turns table).
+    /// Store / finalize a raw conversation turn (turns table).
     int store_turn(const std::string& user_text,
                    const std::string& assistant_text,
                    const std::string& model_name = "",
@@ -121,23 +121,23 @@ public:
     int  reset_abandoned_turn_summaries(int limit = 0) override;
 
     // --- LR S66/S67 back-fill primitives (see storage_backend.h) ---------
-    std::vector<L2BackfillCandidate> l2_backfill_candidates(
+    std::vector<TurnSummaryBackfillCandidate> turn_summary_backfill_candidates(
         const std::string& kind, const std::string& model_name,
         const std::vector<int>& ids) override;
-    bool apply_l2_text(int turn_summary_id, const std::string& text,
+    bool apply_turn_summary_text(int turn_summary_id, const std::string& text,
                        const std::string& summary_model_name,
                        bool overwrite) override;
-    std::vector<StaleL2Candidate> stale_l2_candidates(int limit) override;
+    std::vector<StaleTurnSummaryCandidate> stale_turn_summary_candidates(int limit) override;
     bool refresh_turn_summary(int turn_summary_id, const std::string& text,
                               const std::string& summary_model_name,
                               int observed_stale, bool clear_stale) override;
     std::vector<TriggerCandidate> trigger_backfill_candidates() override;
     bool apply_trigger(int knowledge_id, const std::string& trigger) override;
-    std::vector<StrandedCandidate> stranded_l2_candidates(int& ties) override;
-    bool attach_stranded_l2(int turn_summary_id, int episode_id) override;
+    std::vector<StrandedCandidate> stranded_turn_summary_candidates(int& ties) override;
+    bool attach_stranded_turn_summary(int turn_summary_id, int episode_id) override;
     int stranded_open_tail_count() override;
     std::vector<EpisodeMember> episode_members(int episode_id) override;
-    std::optional<EpisodeMember> l2_member_by_id(int turn_summary_id) override;
+    std::optional<EpisodeMember> turn_summary_member_by_id(int turn_summary_id) override;
     bool replace_episode_text(int episode_id, const std::string& text,
                               const std::string& model_name,
                               const std::vector<std::pair<int,int>>& cleared,
@@ -147,7 +147,7 @@ public:
                             const std::string& name_source) override;
 
     std::string last_episode_end(const std::string& session_guid) override;
-    std::vector<SummaryRecord> l2_summaries_since(
+    std::vector<SummaryRecord> turn_summary_summaries_since(
         const std::string& session_guid, const std::string& since_ts) override;
     std::vector<EpisodeCandidateTurn> episode_candidate_turns(
         const std::string& session_guid, const std::string& since_ts) override;

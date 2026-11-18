@@ -63,8 +63,8 @@ ragger import-conversations ~/Downloads/claude-export/conversations.json
 ragger import-conversations tg_export.json --format=telegram --self="Jane Doe"
 ~~~
 
-Each exchange becomes one row in the `turns` table (L1), with an
-auto-generated L2 placeholder summary — mirroring exactly what live capture
+Each exchange becomes one row in the `turns` table, with an
+auto-generated placeholder turn summary — mirroring exactly what live capture
 writes, so imported history and live-captured turns are interchangeable
 from a search perspective. Recorded per row:
 
@@ -201,9 +201,9 @@ get the list with `ls ~/.claude/projects/<slug>/`.
 ## See also
 
 - `ragger import-docs` — general markdown/text import (paragraph-aware
-  chunking) into L5 documents. Not conversation-aware; use
+  chunking) into `documents`. Not conversation-aware; use
   `import-conversations` for chat history.
 - `ragger import-conversations summaries <file> [file...]` /
-  `--jsonl=FILE` — bulk-load hand-authored L4 project notes directly (a
+  `--jsonl=FILE` — bulk-load hand-authored notes directly, stored as knowledge notes (a
   simpler one-shot ingest path for notes you wrote yourself, as opposed to
   conversation exports).

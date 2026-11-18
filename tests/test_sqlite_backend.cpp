@@ -316,7 +316,7 @@ void test_search_text_only(ragger::Embedder& emb) {
     db.store_decision("Decided to buy a harpsichord.", "current", "music");
     int turn_id = db.store_turn("What is a harpsichord?",
                                 "A plucked keyboard instrument.", "test-model");
-    // An L2 turn summary is the corpus that carried the bug. It only matters
+    // An turn summary is the corpus that carried the bug. It only matters
     // if the query actually HITS it — the bad column sat in the per-row fetch,
     // which never runs when a corpus has no matches, so an empty
     // turn_summaries table would let the bug through.
@@ -565,7 +565,7 @@ void test_store_document(ragger::Embedder& emb) {
     cleanup();
 }
 
-// Uniform turn capture (issue #41): store_turn writes a raw L1 exchange into
+// Uniform turn capture (issue #41): store_turn writes a raw exchange into
 // the `turns` table with a model reference; the partial/finalize flow embeds
 // the exchange once the assistant reply arrives.
 void test_store_turn(ragger::Embedder& emb) {
@@ -1125,8 +1125,8 @@ void test_path_normalization(ragger::Embedder& emb) {
     cleanup();
 }
 
-// search() merges three corpora — summaries (L2/L3/L4), documents (L5), and
-// decisions (L6) — into one ranked result set, tagging each hit with a
+// search() merges three corpora — summaries (turn and episode), documents, and
+// decisions — into one ranked result set, tagging each hit with a
 // metadata["source"]. This drives the general_search recipe layer. Decisions
 // and documents are embedded via backfill (they may be inserted without an
 // embedding), so this also exercises backfill_embeddings() invalidating the
@@ -1186,7 +1186,7 @@ void test_search_merges_three_corpora(ragger::Embedder& emb) {
     cleanup();
 }
 
-// A turn_summary (L2) hit carries metadata source="turn_summary", a
+// A turn_summary hit carries metadata source="turn_summary", a
 // human-readable "datetime" (mirrors turns.created_at), the session_id,
 // and the turn_id (raw-turn lookup key). datetime is the addition; keeping
 // turn_id follows the "more data is fine, too little is bad" principle.
@@ -1615,7 +1615,7 @@ void test_orphan_turn_summary_protected(ragger::Embedder& emb) {
     cleanup();
 }
 
-// X22 (Q2/L2) PIN: turn_summaries.stale — the schema column and the merge
+// X22 PIN: turn_summaries.stale — the schema column and the merge
 // flag. Written against the pre-X22 tree: every `stale` assertion below is
 // RED until the column and the store_turn merge-branch bump exist.
 void x22_test_stale_schema_and_flag(ragger::Embedder& emb) {
@@ -1652,8 +1652,8 @@ void x22_test_stale_schema_and_flag(ragger::Embedder& emb) {
             return v;
         };
 
-        // A merge of the source turn bumps stale on its content L2 row; the
-        // L2 text is untouched until a refresh writes it.
+        // A merge of the source turn bumps stale on its content turn-summary row; the
+        // Turn summary text is untouched until a refresh writes it.
         const std::string guid = "x22-merge";
         const int t = db.store_turn("x22 question alpha", "first reply part one",
                                     "test-model", false, guid);
@@ -1698,7 +1698,7 @@ void x22_test_stale_schema_and_flag(ragger::Embedder& emb) {
                       "test-model", false, guid3);
         CHECK(stale_of_turn(t3) == 0);
 
-        // A merge with NO L2 row flags nothing (no row to flag).
+        // A merge with NO turn-summary row flags nothing (no row to flag).
         const std::string guid4 = "x22-nol2";
         const int t4 = db.store_turn("x22 question delta", "delta reply one",
                                      "test-model", false, guid4);
@@ -1714,7 +1714,7 @@ void x22_test_stale_schema_and_flag(ragger::Embedder& emb) {
     cleanup();
 }
 
-// X22 (Q2/L2): stale-L2 selection + refresh_turn_summary, including the
+// X22: stale turn-summary selection + refresh_turn_summary, including the
 // failure paths (injected BEFORE UPDATE RAISE(ABORT) trigger: a failing
 // refresh leaves text and stale untouched; a failing stale-bump rolls back
 // the whole merge) and the observed_stale guard for a merge that lands
@@ -1740,12 +1740,12 @@ void x22_test_stale_candidates_and_refresh(ragger::Embedder& emb) {
         sqlite3_close(raw);
 
         // Fresh row: no candidates.
-        CHECK(db.stale_l2_candidates(0).empty());
+        CHECK(db.stale_turn_summary_candidates(0).empty());
 
         // A merge makes exactly one candidate, carrying the observed counter,
         // the live source texts, the turn's model and the session GUID.
         db.store_turn("x22 cand question", "cand reply two", "test-model", false, guid);
-        auto cands = db.stale_l2_candidates(0);
+        auto cands = db.stale_turn_summary_candidates(0);
         CHECK(cands.size() == 1);
         CHECK(cands[0].turn_summary_id == ts_id);
         CHECK(cands[0].turn_id == t);
@@ -3886,7 +3886,7 @@ void test_p4_update_rules(ragger::Embedder& emb) {
         r.status = "current";
         CHECK(throws_invalid(r));
     }
-    {   // current -> provisional -> retired allowed; X17 (Q3/L3): retired ->
+    {   // current -> provisional -> retired allowed; X17: retired ->
         // current is now a legal edge (retired is no longer terminal).
         ragger::UpdateRequest r; r.id = "knowledge:" + std::to_string(pending_id);
         r.status = "provisional";
@@ -4003,7 +4003,7 @@ void test_p4_review(ragger::Embedder& emb) {
     for (const auto& h : db.agent_search(q))
         CHECK(h.id != "knowledge:" + std::to_string(b_id));
 
-    // X17 (Q3/L3): reject is reversible — agent_update status=current moves
+    // X17: reject is reversible — agent_update status=current moves
     // the retired row back to current, and default search finds it again.
     {
         ragger::UpdateRequest u;
@@ -5197,7 +5197,7 @@ void p3s_test_status_vocabulary() {
     CHECK(st::transition_ok("roadmap", "current"));
     CHECK(st::transition_ok("roadmap", "provisional"));
     CHECK(!st::transition_ok("superseded", "current"));  // terminal
-    // X17 (Q3/L3): 'retired' is no longer terminal — exactly
+    // X17: 'retired' is no longer terminal — exactly
     // {current, provisional} leave it; 'pending' is never a target,
     // same-status and 'superseded' stay off the table.
     CHECK(st::transition_ok("retired", "current"));
@@ -5234,7 +5234,7 @@ void p10_test_agent_settable_targets() {
             if (st::transition_ok(from, to)) { any = true; break; }
         CHECK(any);
     }
-    // X17 (Q3/L3): 'retired' is no longer terminal — exactly
+    // X17: 'retired' is no longer terminal — exactly
     // {current, provisional} leave it. 'superseded' stays terminal (reachable
     // only via supersedes); 'deprecated' is not in the table at all (terminal).
     for (const auto& to : st::kMigrationKnown) {
@@ -5284,7 +5284,7 @@ void lr60_test_decision_status_via_agent_update(ragger::Embedder& emb) {
         CHECK(got == "provisional");
     }
     update("retired");                            // legal edge
-    // X17 (Q3/L3): 'retired' is no longer terminal — retired -> current is
+    // X17: 'retired' is no longer terminal — retired -> current is
     // a legal edge (throws_iav applies it when legal).
     CHECK(!throws_iav("current"));
     {
@@ -6355,7 +6355,7 @@ void x5_test_reindex_all_locking(ragger::Embedder& emb) {
 }
 
 // PHASE9B step 6: store() is the single implementation of the store verb.
-// X19 (Q9/L6): category=decision is no longer written here (see
+// X19: category=decision is no longer written here (see
 // x19_test_store_rejects_decision); the kind='decision' row shape this test
 // used to pin through store() is now pinned through the legacy wrapper the
 // importers use.
@@ -6438,7 +6438,7 @@ void p9b_test_store_one_function(ragger::Embedder& emb) {
     std::println(" OK");
 }
 
-// X19 (Q9/L6): a decision must have a trigger. The generic `store` verb no
+// X19: a decision must have a trigger. The generic `store` verb no
 // longer writes kind='decision' at all: it throws std::invalid_argument before
 // any embedding or write, with a message that names the decision verb and says
 // a trigger is required. The case rule is store_kind_for's (an exact
@@ -6532,10 +6532,10 @@ void p5_test_episodes_needing_close(ragger::Embedder& emb) {
     }
     closes = db.episodes_needing_close(60);
     CHECK(std::find(closes.begin(), closes.end(), gc) == closes.end());
-    // l2_summaries_since: nothing after the episode end for gc; content-only
+    // turn_summary_summaries_since: nothing after the episode end for gc; content-only
     // rows (no markers) for gq since ''.
-    CHECK(db.l2_summaries_since(gc, db.last_episode_end(gc)).empty());
-    auto since_all = db.l2_summaries_since(gq, "");
+    CHECK(db.turn_summary_summaries_since(gc, db.last_episode_end(gc)).empty());
+    auto since_all = db.turn_summary_summaries_since(gq, "");
     CHECK(since_all.size() == 1);
     CHECK(since_all[0].text == "p5 summary " + gq + "0");
 
@@ -6633,7 +6633,7 @@ void p5_test_episode_reads(ragger::Embedder& emb) {
 }
 
 
-// PHASE6 6: the single "pending content L2" predicate — episodes_needing_close
+// PHASE6 6: the single "pending content turn summary" predicate — episodes_needing_close
 // and episode_candidate_turns agree; unsummarized turns block a close.
 void p6_test_pending_predicate(ragger::Embedder& emb) {
     std::println("  p6_test_pending_predicate...");
@@ -6645,7 +6645,7 @@ void p6_test_pending_predicate(ragger::Embedder& emb) {
         return std::find(v.begin(), v.end(), g) != v.end();
     };
 
-    // (a) post-episode content L2 without an embedding -> NOT queued; with
+    // (a) post-episode content turn summary without an embedding -> NOT queued; with
     //     one -> queued (the old disagreement, fixed).
     const std::string ga = "p6pp-a";
     auto a = p5_seed_members(db, ga, {"2020-02-01 10:00:00"});
@@ -6680,12 +6680,12 @@ void p6_test_pending_predicate(ragger::Embedder& emb) {
     const int t2 = db.store_turn("p6pp extra q",
                                  "p6pp extra answer " + std::string(60, 'u'),
                                  "test-model", false, gb, "2020-02-01 11:00:00");
-    CHECK(!queued(gb));                      // late L2 could still land in-span
+    CHECK(!queued(gb));                      // late turn summary could still land in-span
     CHECK(db.mark_turn_summarized(t2, "bad"));
     CHECK(queued(gb));
 
     // (c) rows already carrying an episode_id are never candidates again,
-    //     even with since='' (a late L2 inside a closed span must not be
+    //     even with since='' (a late turn summary inside a closed span must not be
     //     re-episoded into an overlapping episode).
     {
         ragger::EpisodeClose ec;
@@ -6897,13 +6897,13 @@ int bf_ts_id(sqlite3* raw, int turn_id) {
 
 } // namespace
 
-// S66 kinds l2-null / l2-empty / l2-regenerate: counts, written values, the
+// S66 kinds turn-summary-null / turn-summary-empty / turn-summary-regenerate: counts, written values, the
 // in-place column rules (turn_datetime/session_id/episode_id/summarized_on
 // never change), floor copy without a model call, guard behavior, rerun
 // no-op, dry-run byte-identity, failure injection, unfiltered-regenerate
 // refusal, and the not-configured refusal.
-void lr66_test_backfill_l2(ragger::Embedder& emb) {
-    std::println("  lr66_test_backfill_l2...");
+void lr66_test_backfill_turn_summary(ragger::Embedder& emb) {
+    std::println("  lr66_test_backfill_turn_summary...");
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
     sqlite3* raw = p1_open_raw();
@@ -6927,7 +6927,7 @@ void lr66_test_backfill_l2(ragger::Embedder& emb) {
     CHECK(db.mark_turn_summarized(t_empty, "old-model"));
     const int ts_empty = bf_ts_id(raw, t_empty);
 
-    // (3) poison-abandon '' row -> never an l2-empty candidate.
+    // (3) poison-abandon '' row -> never an turn-summary-empty candidate.
     const int t_bad = db.store_turn(long_u, long_a, "turn-model", false, "bf-l2-a");
     CHECK(db.mark_turn_summarized(t_bad, "bad"));
 
@@ -6945,12 +6945,12 @@ void lr66_test_backfill_l2(ragger::Embedder& emb) {
         auto client = stub.client();
         // Dry-run first: byte-identical DB.
         const std::string before = bf_dump(raw);
-        auto dry = ragger::backfill_l2(db, client, "null", /*dry_run=*/true);
+        auto dry = ragger::backfill_turn_summary(db, client, "null", /*dry_run=*/true);
         CHECK(dry.candidates == 1);
         CHECK(dry.applied == 0);
         CHECK(bf_dump(raw) == before);
 
-        auto res = ragger::backfill_l2(db, client, "null", false);
+        auto res = ragger::backfill_turn_summary(db, client, "null", false);
         CHECK(res.candidates == 1);
         CHECK(res.applied == 1);
         CHECK(stub.calls == 1);   // long source: exactly one model call
@@ -6964,22 +6964,22 @@ void lr66_test_backfill_l2(ragger::Embedder& emb) {
         CHECK(p1_scalar_int(raw, "SELECT ts.turn_datetime == t.created_at FROM turn_summaries ts JOIN turns t ON t.turn_id = ts.turn_id WHERE ts.turn_summary_id = " + std::to_string(ts_null)) == 1);
 
         // Rerun: nothing left to fix.
-        auto again = ragger::backfill_l2(db, client, "null", false);
+        auto again = ragger::backfill_turn_summary(db, client, "null", false);
         CHECK(again.candidates == 0);
     }
 
-    // l2-empty: only the legacy '' row (not 'bad', not the blanked turn).
+    // turn-summary-empty: only the legacy '' row (not 'bad', not the blanked turn).
     {
         bf_stub stub("Concise recap.");
         auto client = stub.client();
-        auto res = ragger::backfill_l2(db, client, "empty", false);
+        auto res = ragger::backfill_turn_summary(db, client, "empty", false);
         CHECK(res.candidates == 1);
         CHECK(res.applied == 1);
         CHECK(p1_scalar_text(raw, "SELECT text FROM turn_summaries WHERE turn_summary_id = " + std::to_string(ts_empty)) == "Concise recap.");
         // The blanked turn's '' row and the poison row are untouched.
         CHECK(p1_scalar_text(raw, "SELECT text FROM turn_summaries WHERE turn_id = " + std::to_string(t_blank)).empty());
         CHECK(p1_scalar_text(raw, "SELECT text FROM turn_summaries WHERE turn_id = " + std::to_string(t_bad)).empty());
-        auto again = ragger::backfill_l2(db, client, "empty", false);
+        auto again = ragger::backfill_turn_summary(db, client, "empty", false);
         CHECK(again.candidates == 0);
     }
 
@@ -7002,7 +7002,7 @@ void lr66_test_backfill_l2(ragger::Embedder& emb) {
         const int ts_short = bf_ts_id(raw, t_short);
         bf_stub stub("NEVER USED");
         auto client = stub.client();
-        auto res = ragger::backfill_l2(db, client, "null", false);
+        auto res = ragger::backfill_turn_summary(db, client, "null", false);
         CHECK(res.candidates == 1);
         CHECK(res.applied == 1);
         CHECK(stub.calls == 0);   // floor: no model call at all
@@ -7010,20 +7010,20 @@ void lr66_test_backfill_l2(ragger::Embedder& emb) {
         CHECK(p1_scalar_text(raw, "SELECT m.name FROM turn_summaries ts JOIN models m ON m.model_id = ts.summary_model_id WHERE ts.turn_summary_id = " + std::to_string(ts_short)) == "turn-model");
     }
 
-    // l2-regenerate: refuses with no filter; --ids and --model select.
+    // turn-summary-regenerate: refuses with no filter; --ids and --model select.
     {
         bf_stub stub("Regenerated text.");
         auto client = stub.client();
         bool threw = false;
-        try { ragger::backfill_l2(db, client, "regenerate", false); }
+        try { ragger::backfill_turn_summary(db, client, "regenerate", false); }
         catch (const std::invalid_argument&) { threw = true; }
         CHECK(threw);
-        auto res = ragger::backfill_l2(db, client, "regenerate", false, "", {ts_null});
+        auto res = ragger::backfill_turn_summary(db, client, "regenerate", false, "", {ts_null});
         CHECK(res.candidates == 1);
         CHECK(res.applied == 1);
         CHECK(p1_scalar_text(raw, "SELECT text FROM turn_summaries WHERE turn_summary_id = " + std::to_string(ts_null)) == "Regenerated text.");
         // By model: every row whose summary_model is 'stub-model'.
-        auto by_model = ragger::backfill_l2(db, client, "regenerate", false, "stub-model");
+        auto by_model = ragger::backfill_turn_summary(db, client, "regenerate", false, "stub-model");
         CHECK(by_model.candidates >= 2);
         CHECK(by_model.applied == by_model.candidates);
     }
@@ -7045,14 +7045,14 @@ void lr66_test_backfill_l2(ragger::Embedder& emb) {
             ts_x).c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
         bf_stub stub("Injected-fail summary.");
         auto client = stub.client();
-        auto res = ragger::backfill_l2(db, client, "null", false);
+        auto res = ragger::backfill_turn_summary(db, client, "null", false);
         CHECK(res.candidates == 1);
         CHECK(res.applied == 0);
         CHECK(res.failed == 1);
         CHECK(p1_scalar_int(raw, "SELECT text IS NULL FROM turn_summaries WHERE turn_summary_id = " + std::to_string(ts_x)) == 1);
         CHECK(sqlite3_exec(raw, "DROP TRIGGER bf_fail", nullptr, nullptr, nullptr) == SQLITE_OK);
         // With the trigger gone the same pass fixes it (resumable).
-        auto res2 = ragger::backfill_l2(db, client, "null", false);
+        auto res2 = ragger::backfill_turn_summary(db, client, "null", false);
         CHECK(res2.candidates == 1);
         CHECK(res2.applied == 1);
     }
@@ -7062,7 +7062,7 @@ void lr66_test_backfill_l2(ragger::Embedder& emb) {
         ragger::InferenceClient none({}, "", 64);
         const std::string before = bf_dump(raw);
         bool threw = false;
-        try { ragger::backfill_l2(db, none, "empty", false); }
+        try { ragger::backfill_turn_summary(db, none, "empty", false); }
         catch (const std::invalid_argument& e) {
             threw = true;
             CHECK(std::string(e.what()) == "inference not configured");
@@ -7108,34 +7108,34 @@ X9CliResult x9_invoke_cli(const std::string& base, const std::string& args) {
 
 void x9_cli_backfill_opts(const std::string& base) {
     std::println("  x9_cli_backfill_opts...");
-    // (1) l2-regenerate with no filter: the existing refusal (unchanged).
+    // (1) turn-summary-regenerate with no filter: the existing refusal (unchanged).
     {
-        const auto r = x9_invoke_cli(base, "backfill l2-regenerate");
+        const auto r = x9_invoke_cli(base, "backfill turn-summary-regenerate");
         CHECK(r.code == 1);
-        CHECK(r.out.find("l2-regenerate requires an explicit filter") != std::string::npos);
+        CHECK(r.out.find("turn-summary-regenerate requires an explicit filter") != std::string::npos);
     }
     // (2) --ids <value> parses: no usage / too-many-arguments error, and
     // the dry-run counts line prints.
     {
-        const auto r = x9_invoke_cli(base, "backfill l2-regenerate --ids 1,2 --dry-run");
+        const auto r = x9_invoke_cli(base, "backfill turn-summary-regenerate --ids 1,2 --dry-run");
         CHECK(r.out.find("Usage:") == std::string::npos);
         CHECK(r.out.find("too many") == std::string::npos);
         CHECK(r.out.find("unexpected") == std::string::npos);
         CHECK(r.code == 0);
-        CHECK(r.out.find("l2-regenerate:") != std::string::npos);
+        CHECK(r.out.find("turn-summary-regenerate:") != std::string::npos);
     }
     // (3) Strict parse: a non-numeric part is rejected with the dedicated
     // error, not the usage error.
     {
-        const auto r = x9_invoke_cli(base, "backfill l2-regenerate --ids 1,x --dry-run");
+        const auto r = x9_invoke_cli(base, "backfill turn-summary-regenerate --ids 1,x --dry-run");
         CHECK(r.code == 1);
         CHECK(r.out.find("--ids must be comma-separated positive integers") != std::string::npos);
     }
     // (4) --model <value> parses; dry-run counts line prints.
     {
-        const auto r = x9_invoke_cli(base, "backfill l2-regenerate --model foo --dry-run");
+        const auto r = x9_invoke_cli(base, "backfill turn-summary-regenerate --model foo --dry-run");
         CHECK(r.code == 0);
-        CHECK(r.out.find("l2-regenerate:") != std::string::npos);
+        CHECK(r.out.find("turn-summary-regenerate:") != std::string::npos);
     }
     std::println(" ok");
 }
@@ -7235,7 +7235,7 @@ void lr66_test_backfill_triggers(ragger::Embedder& emb) {
     std::println(" ok");
 }
 
-// S67 kind stranded: membership-only attach of L2 rows inside a closed span
+// S67 kind stranded: membership-only attach of turn-summary rows inside a closed span
 // of the SAME session; the greatest-span_start episode wins on overlap (ties
 // counted); the open tail is counted and left alone; rerun is a no-op.
 void lr67_test_backfill_stranded(ragger::Embedder& emb) {
@@ -7257,7 +7257,7 @@ void lr67_test_backfill_stranded(ragger::Embedder& emb) {
     const int ep1 = db.store_episode_close(ec);
     CHECK(ep1 > 0);
 
-    // A late L2 inside ep1's span (stranded), and one after the last span
+    // A late turn summary inside ep1's span (stranded), and one after the last span
     // (open tail).
     auto late = p5_seed_members(db, g, {"2026-05-01 10:02:00", "2026-05-01 10:20:00"});
 
@@ -7291,7 +7291,7 @@ void lr67_test_backfill_stranded(ragger::Embedder& emb) {
         CHECK(bf_dump(raw) == before);
     }
 
-    // X23 (Q5/L4): the sweep regenerates the episode text too. The member
+    // X23: the sweep regenerates the episode text too. The member
     // texts here are short (3 words each): the joined text is at/below the
     // S62 floor, so the rebuild is a floor copy — NO model call — and the
     // episode text becomes the member texts joined in turn_datetime order
@@ -7324,7 +7324,7 @@ void lr67_test_backfill_stranded(ragger::Embedder& emb) {
     std::println(" ok");
 }
 
-// X23 (Q5/L4): the sweep with an empty (unconfigured) client and NOT dry-run
+// X23: the sweep with an empty (unconfigured) client and NOT dry-run
 // refuses with the existing "inference not configured" error and writes
 // nothing.
 void x23_test_backfill_stranded_refuses(ragger::Embedder& emb) {
@@ -7365,8 +7365,8 @@ void x23_test_backfill_stranded_refuses(ragger::Embedder& emb) {
     std::println(" ok");
 }
 
-// X23 (Q5/L4): the episode-regeneration backend primitives — episode_members
-// (ordered member read), l2_member_by_id (late-row read) and
+// X23: the episode-regeneration backend primitives — episode_members
+// (ordered member read), turn_summary_member_by_id (late-row read) and
 // replace_episode_text (atomic text replacement + stale clears + guarded
 // attach). Pinned RED at HEAD: none of these exist yet (compile failure).
 void x23_test_episode_members_and_replace(ragger::Embedder& emb) {
@@ -7425,12 +7425,12 @@ void x23_test_episode_members_and_replace(ragger::Embedder& emb) {
                                      false, guid, "2026-05-01 10:05:00");
         CHECK(db.finalize_turn_summary(t3, "x23be late text", "summarizer-model"));
         const int ts3 = bf_ts_id(raw, t3);
-        const auto lm = db.l2_member_by_id(ts3);
+        const auto lm = db.turn_summary_member_by_id(ts3);
         CHECK(lm.has_value());
         CHECK(lm->episode_id == 0);
         CHECK(lm->text == "x23be late text");
         CHECK(lm->turn_datetime == p5_epoch("2026-05-01 10:05:00"));
-        CHECK(!db.l2_member_by_id(999999).has_value());
+        CHECK(!db.turn_summary_member_by_id(999999).has_value());
 
         // Replace + attach: text/model/embedding rewritten, identity columns
         // untouched, the late row attached, the index rewritten.
@@ -7504,7 +7504,7 @@ void x23_test_episode_members_and_replace(ragger::Embedder& emb) {
         CHECK(db.mark_turn_summarized(t5, "bad"));
         const int ts5 = bf_ts_id(raw, t5);
         int ties = 0;
-        for (const auto& c : db.stranded_l2_candidates(ties)) {
+        for (const auto& c : db.stranded_turn_summary_candidates(ties)) {
             CHECK(c.turn_summary_id != ts4);
             CHECK(c.turn_summary_id != ts5);
         }
@@ -7545,7 +7545,7 @@ void x23_test_episode_members_and_replace(ragger::Embedder& emb) {
     std::println(" ok");
 }
 
-// S67 kind session-names: unnamed sessions with L2 content get a drafted
+// S67 kind session-names: unnamed sessions with turn summary content get a drafted
 // title with name_source='summarizer'; a named session is never touched;
 // rerun is a no-op.
 void lr67_test_backfill_session_names(ragger::Embedder& emb) {
@@ -7554,15 +7554,15 @@ void lr67_test_backfill_session_names(ragger::Embedder& emb) {
     ragger::sqlite::Backend db(emb, TEMP_DB);
     sqlite3* raw = p1_open_raw();
 
-    // Unnamed session with one L2 row.
+    // Unnamed session with one turn-summary row.
     const int t1 = db.store_turn("bf-name question", "bf-name answer about the pipeline",
                                  "test-model", false, "bf-name-a");
     CHECK(db.finalize_turn_summary(t1, "bf-name summary", "summarizer-model"));
-    // Named session with L2 rows: never touched.
+    // Named session with turn-summary rows: never touched.
     const int t2 = db.store_turn("bf-name2 q", "bf-name2 a", "test-model", false,
                                  "bf-name-b", "", "user-given-title", "hermes_title");
     CHECK(db.finalize_turn_summary(t2, "bf-name2 summary", "summarizer-model"));
-    // Unnamed session with NO L2 rows: not a candidate.
+    // Unnamed session with NO turn-summary rows: not a candidate.
     db.store_turn("bf-name3 q", "bf-name3 a", "test-model", false, "bf-name-c");
 
     {
@@ -7622,7 +7622,7 @@ void lr67_test_backfill_session_names(ragger::Embedder& emb) {
     std::println(" ok");
 }
 
-// S68 (rule 18): the time invariants as one scenario — L2 turn_datetime
+// S68 (rule 18): the time invariants as one scenario — turn_datetime
 // always equals its turn's created_at (before AND after a regenerate
 // back-fill), episodes carry created_at = span_end, and copy rows record
 // the S62 provenance model.
@@ -7654,7 +7654,7 @@ void lr68_test_time_invariants(ragger::Embedder& emb) {
     {
         bf_stub stub("Regenerated time text.");
         auto client = stub.client();
-        auto res = ragger::backfill_l2(db, client, "regenerate", false, "", {m[0], m[1]});
+        auto res = ragger::backfill_turn_summary(db, client, "regenerate", false, "", {m[0], m[1]});
         CHECK(res.candidates == 2);
         CHECK(res.applied == 2);
     }
@@ -7674,7 +7674,7 @@ void lr68_test_time_invariants(ragger::Embedder& emb) {
     {
         bf_stub stub("unused");
         auto client = stub.client();
-        auto res = ragger::backfill_l2(db, client, "null", false);
+        auto res = ragger::backfill_turn_summary(db, client, "null", false);
         CHECK(res.applied == 1);
     }
     CHECK(p1_scalar_text(raw,
@@ -7690,16 +7690,16 @@ void lr68_test_time_invariants(ragger::Embedder& emb) {
     std::println(" ok");
 }
 
-// X12 (M5): update_turn_meta keeps the L2 invariant (Reid's rule 18:
+// X12 (M5): update_turn_meta keeps the turn-summary invariant (Reid's rule 18:
 // turn_summaries.turn_datetime always equals its turn's created_at, and its
 // session_id follows the turn). Moving a turn's time/session must carry the
-// L2 row along, in the SAME transaction, so a failed L2 write rolls the whole
+// Turn-summary row along, in the SAME transaction, so a failed turn-summary write rolls the whole
 // thing back. Pinned RED at HEAD: the old code moved turns.created_at /
-// session_id and left turn_summaries behind, and never touched the L2 row.
-void x12_test_update_turn_meta_l2_invariant(ragger::Embedder& emb) {
-    std::println("  x12_test_update_turn_meta_l2_invariant...");
+// session_id and left turn_summaries behind, and never touched the turn-summary row.
+void x12_test_update_turn_meta_turn_summary_invariant(ragger::Embedder& emb) {
+    std::println("  x12_test_update_turn_meta_turn_summary_invariant...");
 
-    // (a) move TIME: the L2 turn_datetime must follow turns.created_at.
+    // (a) move TIME: the turn_datetime must follow turns.created_at.
     {
         cleanup();
         ragger::sqlite::Backend db(emb, TEMP_DB);
@@ -7719,7 +7719,7 @@ void x12_test_update_turn_meta_l2_invariant(ragger::Embedder& emb) {
         cleanup();
     }
 
-    // (b) move SESSION: the L2 session_id must equal the turn's (new) session.
+    // (b) move SESSION: the turn summary session_id must equal the turn's (new) session.
     {
         cleanup();
         ragger::sqlite::Backend db(emb, TEMP_DB);
@@ -7729,18 +7729,18 @@ void x12_test_update_turn_meta_l2_invariant(ragger::Embedder& emb) {
         CHECK(db.finalize_turn_summary(t, "x12b summary", "summarizer-model"));
         CHECK(db.update_turn_meta(t, "", "x12b-guid-b"));   // move to a new session
         sqlite3* raw = p1_open_raw();
-        const long long l2_session = p1_scalar_int(raw,
+        const long long turn_summary_session = p1_scalar_int(raw,
             "SELECT session_id FROM turn_summaries WHERE turn_id = " + std::to_string(t));
-        CHECK(l2_session == p1_scalar_int(raw,
+        CHECK(turn_summary_session == p1_scalar_int(raw,
             "SELECT session_id FROM turns WHERE turn_id = " + std::to_string(t)));
-        CHECK(l2_session == p1_scalar_int(raw,
+        CHECK(turn_summary_session == p1_scalar_int(raw,
             "SELECT session_id FROM sessions WHERE guid = 'x12b-guid-b'"));
         sqlite3_close(raw);
         db.close();
         cleanup();
     }
 
-    // (c) a turn WITHOUT an L2 row: unchanged behavior — no crash, and no L2
+    // (c) a turn WITHOUT a turn summary row: unchanged behavior — no crash, and no turn summary
     // row is created by the move.
     {
         cleanup();
@@ -7751,7 +7751,7 @@ void x12_test_update_turn_meta_l2_invariant(ragger::Embedder& emb) {
         CHECK(db.update_turn_meta(t, "2026-08-09 08:00:00", "x12c-guid-new"));
         sqlite3* raw = p1_open_raw();
         CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM turn_summaries WHERE turn_id = "
-                          + std::to_string(t)) == 0);   // still no L2 row
+                          + std::to_string(t)) == 0);   // still no turn-summary row
         CHECK(p1_scalar_int(raw, "SELECT created_at FROM turns WHERE turn_id = "
                           + std::to_string(t)) == p5_epoch("2026-08-09 08:00:00"));
         sqlite3_close(raw);
@@ -7760,7 +7760,7 @@ void x12_test_update_turn_meta_l2_invariant(ragger::Embedder& emb) {
     }
 
     // (d) failure injection: a BEFORE UPDATE trigger on turn_summaries that
-    // RAISE(ABORT) makes the L2 UPDATE fail. update_turn_meta must throw and
+    // RAISE(ABORT) makes the turn summary UPDATE fail. update_turn_meta must throw and
     // the turns row must NOT change either (atomic — the whole transaction
     // rolls back, including the new session get_or_create_session created).
     {
@@ -7789,7 +7789,7 @@ void x12_test_update_turn_meta_l2_invariant(ragger::Embedder& emb) {
               == "x12d-guid");
         // The new session was rolled back too.
         CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sessions WHERE guid = 'x12d-guid-new'") == 0);
-        // The L2 row is unchanged.
+        // The turn-summary row is unchanged.
         CHECK(p1_scalar_int(raw, "SELECT turn_datetime FROM turn_summaries WHERE turn_id = "
                           + std::to_string(t)) == p5_epoch("2026-08-01 10:00:00"));
         sqlite3_close(raw);
@@ -7869,7 +7869,7 @@ void lr73_test_episode_session_filter_and_extra(ragger::Embedder& emb) {
 
 // LR S75: raw turns are an OPT-IN corpus. Default layers never return a
 // turn:* hit; layers:["turn"] finds a phrase that exists only in the raw
-// assistant text (never in its L2 summary); hits carry turn:<N>, created =
+// assistant text (never in its turn summary); hits carry turn:<N>, created =
 // the turn's time, extra.session; memory_get("turn:<N>") works; degraded
 // (no embedder) mirrors the contract with text-only scoring per corpus.
 void lr75_test_raw_turn_opt_in(ragger::Embedder& emb) {
@@ -8391,7 +8391,7 @@ void lr79_test_history_hierarchy(ragger::Embedder& emb) {
 // LR S74 (review #2, Q-A): per-corpus candidate pools. One merged pool of
 // max(limit*5,50) lets a big corpus starve a narrow filter (live probe:
 // layers:[turn_summary] + session -> 0 hits at limit 3). Fixture: 3 target
-// L2 rows in one session, outranked on the query by 80 denser L2 rows in
+// Turn-summary rows in one session, outranked on the query by 80 denser turn-summary rows in
 // another session and 60 knowledge rows. Per-corpus pools must return all
 // 3 targets at limit 3.
 void lr74_test_per_corpus_pools(ragger::Embedder& emb) {
@@ -8781,12 +8781,12 @@ void lr90_test_maintenance_verbs(ragger::Embedder& emb) {
             if (done >= 1) cancel.store(true);
         };
         bool threw = false;
-        try { ragger::backfill_l2(db, client, "null", false, "", {}, prog, &cancel); }
+        try { ragger::backfill_turn_summary(db, client, "null", false, "", {}, prog, &cancel); }
         catch (const ragger::cancelled_error&) { threw = true; }
         CHECK(threw);
         CHECK(p1_scalar_int(raw,
               "SELECT COUNT(*) FROM turn_summaries WHERE text = 'Brief recap.'") == 1);
-        auto res = ragger::backfill_l2(db, client, "null", false);
+        auto res = ragger::backfill_turn_summary(db, client, "null", false);
         CHECK(res.candidates == 2 && res.applied == 2);
     }
 
@@ -9187,7 +9187,7 @@ int main() {
     p5_test_episodes_needing_close(emb);
     p5_test_episode_reads(emb);
     p6_test_pending_predicate(emb);
-    lr66_test_backfill_l2(emb);
+    lr66_test_backfill_turn_summary(emb);
     x9_cli_backfill_opts(env.base());
     lr66_test_backfill_triggers(emb);
     lr67_test_backfill_stranded(emb);
@@ -9195,7 +9195,7 @@ int main() {
     x23_test_episode_members_and_replace(emb);
     lr67_test_backfill_session_names(emb);
     lr68_test_time_invariants(emb);
-    x12_test_update_turn_meta_l2_invariant(emb);
+    x12_test_update_turn_meta_turn_summary_invariant(emb);
     lr73_test_episode_session_filter_and_extra(emb);
     lr74_test_per_corpus_pools(emb);
     lr75_test_raw_turn_opt_in(emb);

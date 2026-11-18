@@ -709,8 +709,8 @@ supervisor re-execs.
 ### POST /jobs/&lt;name&gt;
 
 Start a maintenance job in the daemon (LR S91). One job runs at a time.
-Names: `reindex`, `housekeeping`, `backfill:<kind>` (`l2-null`,
-`l2-empty`, `l2-regenerate`, `triggers`, `stranded`, `session-names`).
+Names: `reindex`, `housekeeping`, `backfill:<kind>` (`turn-summary-null`,
+`turn-summary-empty`, `turn-summary-regenerate`, `triggers`, `stranded`, `session-names`).
 There is deliberately **no** re-embed job — re-embedding is a CLI
 operation the user runs (`ragger re-embed`).
 

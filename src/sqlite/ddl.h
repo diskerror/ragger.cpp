@@ -156,10 +156,10 @@ inline std::string episodes_indexes() {
     )";
 }
 
-// turn_summaries (L2) — one row per summarized turn. Rebuilt at 0.17 to add
+// turn_summaries — one row per summarized turn. Rebuilt at 0.17 to add
 // episode_id (recorded membership; replaces the BETWEEN heuristic) and to
 // place it in canonical column order. session_id gains ON DELETE SET NULL.
-// X22 (Q2/L2): `stale` counts merges of the source turn that the summary
+// X22: `stale` counts merges of the source turn that the summary
 // text does not reflect yet — the refresh queue's persistent retry counter.
 inline std::string turn_summaries(const std::string& name) {
     return std::format(R"(CREATE TABLE {} (

@@ -96,7 +96,7 @@ SCHEMA = [
      "System ceiling on default_limit (0 = no ceiling)."),
     # summarizer
     ("summarizer_model", "summarizer", "Model", "string", "live", "qwen3-4b-instruct-2507", "",
-     "Model used for L2/L3 summarization."),
+     "Model used for turn and episode summarization."),
     ("summarizer_api_url", "summarizer", "API URL", "string", "live", "http://localhost:1234/v1", "",
      "Inference endpoint (LM Studio convention)."),
     ("summarizer_api_key_env", "summarizer", "API Key Variable", "string", "live", "RAGGER_SUMMARIZER_API_KEY", "",
@@ -189,7 +189,7 @@ FAKE_ACTIVITY = [
     "GET /search 200 (12ms)",
     "POST /store 200",
     "housekeeping: closed episode (idle 15m)",
-    "summarizer: wrote L2 summary for turn 8841",
+    "summarizer: wrote turn summary for turn 8841",
     "GET /count 200",
     "backfill_embeddings: 3 rows updated",
 ]

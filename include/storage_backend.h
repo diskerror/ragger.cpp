@@ -36,7 +36,7 @@ using json = nlohmann::json;
 
 class Embedder;
 
-/// One raw L1 turn as read back from the `turns` table. `model_name` is
+/// One raw turn as read back from the `turns` table. `model_name` is
 /// empty when the turn recorded no model; `session_guid` is empty when the
 /// turn was captured outside a session (turns.session_id IS NULL).
 struct TurnRecord {
@@ -85,7 +85,7 @@ public:
     virtual int store_document(const DocumentChunk& chunk,
                                bool defer_embedding = false) = 0;
 
-    /// Store a raw L1 conversation turn into the `turns` table. An empty
+    /// Store a raw conversation turn into the `turns` table. An empty
     /// `assistant_text` writes a partial row (embedding NULL) for the
     /// prompt-arrival/finalize flow. `model_name` resolves/creates a models
     /// row (turns.model_id). `session_guid` resolves/creates a sessions row
@@ -257,7 +257,7 @@ public:
                                   const std::string& timestamp = "",
                                   const std::string& session_guid = "") = 0;
 
-    /// X22 (Q2/L2): the turn's CURRENT assistant_text (a NULL column reads
+    /// X22: the turn's CURRENT assistant_text (a NULL column reads
     /// as empty), nullopt when no such turn exists. `/turn` after a merge
     /// must enqueue the whole reply for summarization, not just the fragment
     /// of the request that merged it.
@@ -304,9 +304,9 @@ public:
     // step's in-place rules allow (turn_datetime/turn_id/session_id/
     // episode_id/summarized_on never change; knowledge: trigger only).
 
-    /// One `turn_summaries` row selected for an L2 back-fill kind, joined
+    /// One `turn_summaries` row selected for a turn summary back-fill kind, joined
     /// against its turn (the raw texts the summarizer consumes).
-    struct L2BackfillCandidate {
+    struct TurnSummaryBackfillCandidate {
         int         turn_summary_id;
         int         turn_id;
         std::string user_text;
@@ -320,28 +320,28 @@ public:
     ///   (matches turn_model OR summary_model) and/or explicit
     ///   turn_summary_ids. NO filter = empty result (the verb refuses;
     ///   addendum 5: regeneration is eligible, not run by default).
-    virtual std::vector<L2BackfillCandidate> l2_backfill_candidates(
+    virtual std::vector<TurnSummaryBackfillCandidate> turn_summary_backfill_candidates(
         const std::string& kind, const std::string& model_name,
         const std::vector<int>& ids) = 0;
 
-    /// Rewrite one L2 row in place: text, embedding, embedding_version,
+    /// Rewrite one turn-summary row in place: text, embedding, embedding_version,
     /// summary_model_id, terms. `overwrite=false` (kinds null/empty) guards
     /// `text IS NULL OR text = ''` so a concurrent real write is never
     /// clobbered; returns false when the guard rejects the row.
     /// `overwrite=true` (kind regenerate) replaces derived text by design.
     /// Embeds OUTSIDE the transaction; UPDATE + index inside (S37 order).
-    virtual bool apply_l2_text(int turn_summary_id, const std::string& text,
+    virtual bool apply_turn_summary_text(int turn_summary_id, const std::string& text,
                                const std::string& summary_model_name,
                                bool overwrite) = 0;
 
-    /// X22 (Q2/L2): one `turn_summaries` row whose source turn has been
+    /// X22: one `turn_summaries` row whose source turn has been
     /// merged since its text was written (`stale > 0`, non-empty text, a
     /// live `turn_id`), ordered by turn_summary_id. `stale` is the counter
     /// observed at selection time — the refresher passes it back to
     /// refresh_turn_summary so a merge landing meanwhile keeps the row stale.
     /// `episode_id` is 0 when the row belongs to no episode (X22 refreshes
     /// only those; in-episode rows are for the episode-regeneration pass).
-    struct StaleL2Candidate {
+    struct StaleTurnSummaryCandidate {
         int         turn_summary_id;
         int         turn_id;
         int         stale;
@@ -351,11 +351,11 @@ public:
         std::string session_guid;     // "" when the row has no session
         int         episode_id;       // 0 when episode_id IS NULL
     };
-    virtual std::vector<StaleL2Candidate> stale_l2_candidates(int limit) = 0;
+    virtual std::vector<StaleTurnSummaryCandidate> stale_turn_summary_candidates(int limit) = 0;
 
-    /// X22 (Q2/L2): rewrite a merged turn's L2 row in place with its refreshed
+    /// X22: rewrite a merged turn's turn-summary row in place with its refreshed
     /// summary — text, embedding, embedding_version, summary_model_id, terms
-    /// (same normalizing + model lookup as apply_l2_text). Order: validate ->
+    /// (same normalizing + model lookup as apply_turn_summary_text). Order: validate ->
     /// embed outside the txn -> BEGIN -> UPDATE -> index -> COMMIT ->
     /// invalidate. Empty text -> std::invalid_argument. When `clear_stale`,
     /// `stale` resets to 0 ONLY where it still equals `observed_stale`: a
@@ -382,7 +382,7 @@ public:
     /// supersedes never change. Returns false when the guard rejects.
     virtual bool apply_trigger(int knowledge_id, const std::string& trigger) = 0;
 
-    /// Stranded L2 rows (R12/#7): episode_id IS NULL, text != '', whose
+    /// Stranded turn-summary rows (R12/#7): episode_id IS NULL, text != '', whose
     /// turn_datetime lies INSIDE a closed episode span of the SAME session.
     /// Where two spans cover the time, the episode with the greatest
     /// span_start <= t wins; `ties` counts the ambiguous rows.
@@ -390,13 +390,13 @@ public:
         int turn_summary_id;
         int episode_id;
     };
-    virtual std::vector<StrandedCandidate> stranded_l2_candidates(int& ties) = 0;
+    virtual std::vector<StrandedCandidate> stranded_turn_summary_candidates(int& ties) = 0;
 
     /// Membership-only attach (no change to the episode's text/span/
     /// embedding/terms). Guarded on episode_id IS NULL AND text != ''.
-    virtual bool attach_stranded_l2(int turn_summary_id, int episode_id) = 0;
+    virtual bool attach_stranded_turn_summary(int turn_summary_id, int episode_id) = 0;
 
-    /// X23 (Q5/L4): one `turn_summaries` row as the episode-regeneration
+    /// X23: one `turn_summaries` row as the episode-regeneration
     /// pass sees it. user_text/assistant_text/turn_model_name come from the
     /// LIVE turn when turn_id is set (empty otherwise); model_name is the
     /// summary's provenance model. turn_datetime orders members; episode_id
@@ -414,17 +414,17 @@ public:
         int         episode_id;       // 0 when episode_id IS NULL
     };
 
-    /// X23 (Q5/L4): the episode's content members (non-empty text), ordered
+    /// X23: the episode's content members (non-empty text), ordered
     /// turn_datetime ASC, turn_summary_id ASC.
     virtual std::vector<EpisodeMember> episode_members(int episode_id) = 0;
 
-    /// X23 (Q5/L4): read one turn_summaries row by id (the late-L2 read of
+    /// X23: read one turn_summaries row by id (the late turn-summary read of
     /// the episode-regeneration pass). nullopt when no such row.
-    virtual std::optional<EpisodeMember> l2_member_by_id(int turn_summary_id) = 0;
+    virtual std::optional<EpisodeMember> turn_summary_member_by_id(int turn_summary_id) = 0;
 
-    /// X23 (Q5/L4): replace an episode's DERIVED text in place (no history)
+    /// X23: replace an episode's DERIVED text in place (no history)
     /// and, in the SAME transaction, clear the refreshed members' stale
-    /// counters and attach late L2 rows. Order: validate -> embed outside
+    /// counters and attach late turn-summary rows. Order: validate -> embed outside
     /// the txn -> BEGIN -> UPDATE episodes (must change exactly 1 row, else
     /// roll back, return false) -> index -> per-cleared-pair
     /// `stale = 0 WHERE ... AND stale = observed` (zero rows changed is NOT
@@ -439,18 +439,18 @@ public:
                                       const std::vector<std::pair<int,int>>& cleared,
                                       const std::vector<int>& attach_ids) = 0;
 
-    /// Content L2 rows left alone by the stranded pass: no episode, and no
+    /// Content turn-summary rows left alone by the stranded pass: no episode, and no
     /// closed span of their session covers their time (the open tail after
     /// the last span, rows in a gap between spans, and sessions with no
     /// episodes at all). Counted for the report, never touched.
     virtual int stranded_open_tail_count() = 0;
 
-    /// Sessions with name IS NULL that have at least one content L2 row
-    /// (D5: the L2 texts are the title corpus).
+    /// Sessions with name IS NULL that have at least one content turn-summary row
+    /// (D5: the turn-summary texts are the title corpus).
     struct SessionNameCandidate {
         int         session_id;
         std::string guid;
-        std::vector<std::string> l2_texts;  // oldest-first
+        std::vector<std::string> turn_summary_texts;  // oldest-first
     };
     virtual std::vector<SessionNameCandidate> unnamed_session_candidates() = 0;
 
@@ -465,16 +465,16 @@ public:
     /// Marks where the next open episode begins.
     virtual std::string last_episode_end(const std::string& session_guid) = 0;
 
-    /// L2 turn summaries for a session with timestamp strictly greater than
+    /// Turn summaries for a session with timestamp strictly greater than
     /// `since_ts` (pass the previous episode's end; empty = all), oldest-first.
     /// These compose the closing episode. Returned as SummaryRecords so the
     /// caller can read each row's timestamp to derive the episode span.
-    virtual std::vector<SummaryRecord> l2_summaries_since(
+    virtual std::vector<SummaryRecord> turn_summary_summaries_since(
         const std::string& session_guid, const std::string& since_ts) = 0;
 
     /// Candidate turns for similarity-based episode detection: joins
     /// turn_summaries against turns to fetch both embeddings plus the
-    /// turn-summary text, for all turns after the last episode's end.
+    /// Turn-summary text, for all turns after the last episode's end.
     /// Oldest-first, skipping rows where either embedding is NULL.
     virtual std::vector<EpisodeCandidateTurn> episode_candidate_turns(
         const std::string& session_guid, const std::string& since_ts) = 0;
@@ -491,7 +491,7 @@ public:
     /// Returns the new episode_id.
     virtual int store_episode_close(const EpisodeClose& close) = 0;
 
-    /// Sessions with at least one non-empty L2 turn summary past their last
+    /// Sessions with at least one non-empty turn summary past their last
     /// episode's end AND whose most recent turn is older than `idle_minutes`
     /// (idle) — i.e. ready to have their open episode closed. Returns session
     /// GUIDs. Anonymous (session_id NULL) turns are skipped.
@@ -504,7 +504,7 @@ public:
     virtual std::vector<TurnRecord> turns_by_session_desc(
         const std::string& session_guid, int limit = 0) = 0;
 
-    /// Turn-level (L2) summaries for a session, newest-first up to `limit`
+    /// Turn-level summaries for a session, newest-first up to `limit`
     /// (PHASE5 B.5: reads `turn_summaries` directly — the old
     /// summaries.level='turn' rows have been gone since 0.12). Empty-text
     /// marker rows are excluded.
@@ -634,7 +634,7 @@ public:
     /// only — the dry-run behind `ragger housekeeping --dry-run`. The
     /// predicates are shared with the real pass (no drift).
     struct HousekeepingPlan {
-        int unsummarized = 0;    // turns awaiting L2 catch-up
+        int unsummarized = 0;    // turns awaiting turn-summary catch-up
         int embed_missing = 0;   // embeddable rows with no embedding
         int embed_stale = 0;     // embeddable rows at an old embedding_version
     };

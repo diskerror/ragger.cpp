@@ -101,7 +101,7 @@ bool Backend::update_turn_meta(int turn_id, const std::string& timestamp,
     return pImpl->update_turn_meta(turn_id, timestamp, session_guid);
 }
 
-// X22 (Q2/L2): the turn's current assistant_text (see storage_backend.h).
+// X22: the turn's current assistant_text (see storage_backend.h).
 std::optional<std::string> Backend::turn_assistant_text(int turn_id) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->turn_assistant_text(turn_id);
@@ -131,25 +131,25 @@ int Backend::reset_abandoned_turn_summaries(int limit) {
 }
 
 // LR S66/S67: back-fill primitives (see storage_backend.h for contracts).
-std::vector<StorageBackend::L2BackfillCandidate>
-Backend::l2_backfill_candidates(const std::string& kind,
+std::vector<StorageBackend::TurnSummaryBackfillCandidate>
+Backend::turn_summary_backfill_candidates(const std::string& kind,
                                 const std::string& model_name,
                                 const std::vector<int>& ids) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->l2_backfill_candidates(kind, model_name, ids);
+    return pImpl->turn_summary_backfill_candidates(kind, model_name, ids);
 }
 
-bool Backend::apply_l2_text(int turn_summary_id, const std::string& text,
+bool Backend::apply_turn_summary_text(int turn_summary_id, const std::string& text,
                             const std::string& summary_model_name, bool overwrite) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->apply_l2_text(turn_summary_id, text, summary_model_name, overwrite);
+    return pImpl->apply_turn_summary_text(turn_summary_id, text, summary_model_name, overwrite);
 }
 
-// X22 (Q2/L2): stale-L2 selection + in-place refresh (see storage_backend.h).
-std::vector<StorageBackend::StaleL2Candidate>
-Backend::stale_l2_candidates(int limit) {
+// X22: stale turn-summary selection + in-place refresh (see storage_backend.h).
+std::vector<StorageBackend::StaleTurnSummaryCandidate>
+Backend::stale_turn_summary_candidates(int limit) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->stale_l2_candidates(limit);
+    return pImpl->stale_turn_summary_candidates(limit);
 }
 
 bool Backend::refresh_turn_summary(int turn_summary_id, const std::string& text,
@@ -172,14 +172,14 @@ bool Backend::apply_trigger(int knowledge_id, const std::string& trigger) {
 }
 
 std::vector<StorageBackend::StrandedCandidate>
-Backend::stranded_l2_candidates(int& ties) {
+Backend::stranded_turn_summary_candidates(int& ties) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->stranded_l2_candidates(ties);
+    return pImpl->stranded_turn_summary_candidates(ties);
 }
 
-bool Backend::attach_stranded_l2(int turn_summary_id, int episode_id) {
+bool Backend::attach_stranded_turn_summary(int turn_summary_id, int episode_id) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->attach_stranded_l2(turn_summary_id, episode_id);
+    return pImpl->attach_stranded_turn_summary(turn_summary_id, episode_id);
 }
 
 int Backend::stranded_open_tail_count() {
@@ -187,7 +187,7 @@ int Backend::stranded_open_tail_count() {
     return pImpl->stranded_open_tail_count();
 }
 
-// X23 (Q5/L4): episode-regeneration primitives (see storage_backend.h).
+// X23: episode-regeneration primitives (see storage_backend.h).
 std::vector<StorageBackend::EpisodeMember>
 Backend::episode_members(int episode_id) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
@@ -195,9 +195,9 @@ Backend::episode_members(int episode_id) {
 }
 
 std::optional<StorageBackend::EpisodeMember>
-Backend::l2_member_by_id(int turn_summary_id) {
+Backend::turn_summary_member_by_id(int turn_summary_id) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->l2_member_by_id(turn_summary_id);
+    return pImpl->turn_summary_member_by_id(turn_summary_id);
 }
 
 bool Backend::replace_episode_text(int episode_id, const std::string& text,
@@ -243,10 +243,10 @@ std::string Backend::last_episode_end(const std::string& session_guid) {
     return pImpl->last_episode_end(session_guid);
 }
 
-std::vector<SummaryRecord> Backend::l2_summaries_since(
+std::vector<SummaryRecord> Backend::turn_summary_summaries_since(
         const std::string& session_guid, const std::string& since_ts) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->l2_summaries_since(session_guid, since_ts);
+    return pImpl->turn_summary_summaries_since(session_guid, since_ts);
 }
 
 std::vector<EpisodeCandidateTurn> Backend::episode_candidate_turns(

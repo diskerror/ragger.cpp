@@ -65,7 +65,7 @@ bool is_in(const std::string_view (&values)[N], std::string_view v) {
 }
 
 // agent_update transition table, MOVED VERBATIM from agent_write.cpp
-// (kStatuses map), with the X17 (Q3/L3) change: 'retired' is no longer
+// (kStatuses map), with the X17 change: 'retired' is no longer
 // terminal — it can return to current/provisional. 'superseded' is
 // reachable only through `supersedes` on a new decision, never here.
 bool transition_ok(std::string_view from, std::string_view to);

@@ -324,7 +324,7 @@ namespace fs = std::filesystem;
                 "datetime(created_at,'unixepoch','localtime')",
                 " AND status IN (" + status::in_list_sql(status::kCacheLoaded) + ")",
                 nullptr});
-            // Turn summaries. NOTE: this table has no created_at — an L2 summary
+            // Turn summaries. NOTE: this table has no created_at — a turn summary
             // inherits its source turn's timestamp in turn_datetime (the
             // (session_id, turn_datetime) pair is the join back to the turn).
             v.push_back({"turn_summary", "turn_summaries", "turn_summary_id", "text",

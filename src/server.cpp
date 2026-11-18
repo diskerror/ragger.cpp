@@ -600,16 +600,16 @@ struct Server::Impl {
                      httplib::Response& res) {
         auto body = json::parse(req.body);
         const auto result = agent_capture_turn(memory, body);
-        // PHASE6 2.2: hand the fresh turn straight to the summarizer so L2
+        // PHASE6 2.2: hand the fresh turn straight to the summarizer so turn summary
         // runs as soon as the single worker is free (the periodic tick is
         // the safety net, not the primary path). Non-blocking: enqueue only,
         // the request never waits for inference. summarizer_ is assigned in
         // serve() before the listeners start, so every request thread sees a
         // fully-constructed pointer without locking.
         if (result.captured && summarizer_) {
-            // X22 (Q2/L2): after a same-exchange merge the request's
+            // X22: after a same-exchange merge the request's
             // `assistant` fragment is NOT the whole reply — enqueue the
-            // turn's CURRENT assistant_text so a first-time L2 for a turn
+            // turn's CURRENT assistant_text so a first-time turn summary for a turn
             // that was merged before its first summary summarizes
             // everything. Fall back to the fragment when the read fails or
             // comes back empty.

@@ -43,12 +43,12 @@ struct BackfillResult {
     int episodes   = 0;   // stranded kind: episodes selected / regenerated
 };
 
-/// Kinds l2-null / l2-empty / l2-regenerate over `turn_summaries`.
+/// Kinds turn-summary-null / turn-summary-empty / turn-summary-regenerate over `turn_summaries`.
 /// `regenerate` REQUIRES a filter (model_name or ids) — addendum 5: the
 /// default selection is empty and running with no filter refuses.
 /// Throws std::invalid_argument on an unknown kind or an unfiltered
 /// regenerate. `dry_run` selects and counts only — nothing is written.
-BackfillResult backfill_l2(StorageBackend& backend, InferenceClient& inference,
+BackfillResult backfill_turn_summary(StorageBackend& backend, InferenceClient& inference,
                            const std::string& kind, bool dry_run,
                            const std::string& model_name = {},
                            const std::vector<int>& ids = {},
@@ -64,7 +64,7 @@ BackfillResult backfill_triggers(StorageBackend& backend,
                                  const ProgressFn& progress = {},
                                  const CancelFlag* cancel = nullptr);
 
-/// Kind stranded (S67, X23/Q5): attach L2 rows that lie inside an
+/// Kind stranded (S67, X23/Q5): attach turn-summary rows that lie inside an
 /// already-closed episode span of their session AND regenerate that episode's
 /// DERIVED text with the new membership (Reid, 2026-11-14: the sweep
 /// regenerates too). Grouped by episode: one `replace_episode_text` per
@@ -80,7 +80,7 @@ BackfillResult backfill_stranded(StorageBackend& backend, InferenceClient& infer
                                  const ProgressFn& progress = {},
                                  const CancelFlag* cancel = nullptr);
 
-/// Kind session-names (S67, D5): sessions with no name whose L2 texts form
+/// Kind session-names (S67, D5): sessions with no name whose turn-summary texts form
 /// the title corpus; the summarizer drafts one line, written with
 /// name_source = 'summarizer'. A named session is never touched.
 BackfillResult backfill_session_names(StorageBackend& backend,

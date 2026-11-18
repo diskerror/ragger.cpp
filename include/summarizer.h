@@ -1,6 +1,6 @@
 /**
  * Conversation summarization — used by the HTTP server's daemon-resident
- * summarizer (L2 turn / episode close, idle-triggered housekeeping).
+ * summarizer (turn / episode close, idle-triggered housekeeping).
  */
 #pragma once
 
@@ -21,7 +21,7 @@ std::string summarize_transcript(
     InferenceClient& inference,
     const std::vector<std::pair<std::string, std::string>>& turns);
 
-/// Summarize a flat list of text blobs (e.g. L2 summaries → episode text at
+/// Summarize a flat list of text blobs (e.g. turn summaries → episode text at
 /// close). Each entry is treated as an equal-weight fragment; the same
 /// percentage-based size contract as summarize_transcript applies,
 /// measured against the total character count of all input texts.
@@ -30,7 +30,7 @@ std::string summarize_texts(
     InferenceClient& inference,
     const std::vector<std::string>& texts);
 
-/// X23 (Q5/L4): build an EPISODE summary from a segment's member texts with
+/// X23: build an EPISODE summary from a segment's member texts with
 /// the rules `handle_episode_close` has always used, moved VERBATIM into one
 /// place so the live close, the episode-regeneration job and the
 /// `ragger backfill stranded` sweep produce byte-identical text:
@@ -73,8 +73,8 @@ SummaryChoice choose_summary(const std::string& source, const std::string& summa
 /// annotation rather than something the human typed — model-switch notes,
 /// context-compaction handoffs, interruption notices, background-process
 /// completion reports. These carry no conversational content worth indexing,
-/// so the summarizer skips them deterministically (no inference call, no L2
-/// summary row). The raw turn is still persisted upstream by capture_turn, so
+/// so the summarizer skips them deterministically (no inference call, no turn summary
+/// row). The raw turn is still persisted upstream by capture_turn, so
 /// the system event remains auditable; only the searchable summary is omitted.
 /// Detection is prefix-based on the stable bracketed markers Hermes emits.
 bool is_system_injected_turn(const std::string& user_text);

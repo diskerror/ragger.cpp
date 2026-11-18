@@ -25,7 +25,7 @@ class InferenceClient;    // inference.h
 
 /// The `store` verb (HTTP POST /store, MCP tool `store`, CLI `ragger store`).
 /// args: {text (required), metadata?: object}. metadata.category == "decision"
-/// is rejected X19 (Q9/L6): a decision needs a trigger, which this verb cannot
+/// is rejected X19: a decision needs a trigger, which this verb cannot
 /// carry — the decision verb (memory_decision / POST /decision) is the only way
 /// to write kind='decision'.
 /// Everything else is a note. metadata.collection defaults to "memory";

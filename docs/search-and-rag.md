@@ -246,7 +246,7 @@ ragger import-docs myfile.md --tags docs
 ```
 
 > **Note:** `ragger search` and the `/search` HTTP endpoint cover all
-> four searchable corpora: documents (L5), knowledge (decisions,
+> four searchable corpora: documents, knowledge (decisions,
 > insights, notes), turn summaries, and episodes. Each result's
 > `metadata.source` names its corpus.
 
