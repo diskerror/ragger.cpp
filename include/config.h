@@ -166,17 +166,38 @@ struct Config {
     // Two positional placeholders {} {} are required (target chars, hard cap)
     // when overriding; the default already contains them.
     static constexpr std::string_view kDefaultSummarizerPrompt =
-        "Summarize this conversation into a concise memory entry. "
-        "Extract key facts, decisions, questions asked, topics discussed. "
-        "Write in third person past tense. Target about {} characters; "
-        "never exceed {}. If the exchange is trivial (a single command "
-        "like /exit, a one-line greeting), respond with a short phrase, "
-        "not a full sentence.";
+        "Summarize this exchange into a concise memory entry, in third person "
+        "past tense. Keep who said what: record the user's questions, "
+        "requests, decisions and corrections as the user's; record the "
+        "assistant's proposals, findings and actions as the assistant's. A "
+        "proposal is not a decision unless the user accepted it in this "
+        "exchange. Keep concrete names, numbers, file names and conclusions; "
+        "drop pleasantries and narration. Target about {} characters; never "
+        "exceed {}. If the exchange is trivial (a single command like /exit, "
+        "a one-line greeting), reply with a short phrase.";
     std::string summarizer_prompt = "";
-    // Prompts for the two one-line jobs (session title, trigger). Empty or
-    // blank = the built-in prompt. Unlike summarizer_prompt these take no
-    // placeholders: they are sent verbatim as the system message.
+    // Prompts for the two one-line jobs. Empty or blank = the built-in
+    // default below. The title prompt takes two {} placeholders (min words,
+    // max words), like summarizer_prompt; the trigger prompt takes none and
+    // is sent verbatim as the system message.
+    static constexpr std::string_view kDefaultTitlePrompt =
+        "Name this conversation session from the summaries below. Reply with "
+        "the title only: {} to {} words, the main topic, in the style of a "
+        "file name or a heading. No quotes, no trailing punctuation, no "
+        "sentence, no \"Discussion of...\". Prefer the project or feature "
+        "name if one appears.";
+    static constexpr std::string_view kDefaultTriggerPrompt =
+        "Write a TRIGGER for the stored memory below: one short line, phrased "
+        "as the question someone would ask, or the situation they would be "
+        "in, when this memory should come back up. Use the words a future "
+        "asker would use, not the memory's own wording where they differ. Do "
+        "not state the decision or its answer. Example: for \"Use unix socket "
+        "for the daemon API, not TCP\" the trigger is \"How should clients "
+        "connect to the Ragger daemon?\" Output the line only: no quotes, no "
+        "prefix.";
     std::string summarizer_title_prompt = "";
+    int         summarizer_title_min_words = 3;
+    int         summarizer_title_max_words = 8;
     std::string summarizer_trigger_prompt = "";
 
     // --- Logging ---

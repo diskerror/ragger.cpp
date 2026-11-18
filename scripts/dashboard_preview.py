@@ -110,7 +110,11 @@ SCHEMA = [
     ("summarizer_prompt", "summarizer", "Prompt", "text", "live", "", "",
      "System prompt. Empty = built-in default. Two {} placeholders required."),
     ("summarizer_title_prompt", "summarizer", "Session Title Prompt", "text", "live", "", "",
-     "System prompt for naming a session. Empty = built-in default."),
+     "System prompt for naming a session. Empty = built-in default. Two {} placeholders (min, max words)."),
+    ("summarizer_title_min_words", "summarizer", "Session Title Min Words", "integer", "live", "3", "",
+     "Fewest words a session title should have."),
+    ("summarizer_title_max_words", "summarizer", "Session Title Max Words", "integer", "live", "8", "",
+     "Most words a session title should have."),
     ("summarizer_trigger_prompt", "summarizer", "Trigger Prompt", "text", "live", "", "",
      "System prompt for drafting a trigger. Empty = built-in default."),
     # logging

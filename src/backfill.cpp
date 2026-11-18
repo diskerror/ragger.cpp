@@ -44,11 +44,11 @@ std::string turn_summary_source(const std::string& user_text, const std::string&
     return eff_user.empty() ? assistant_text : eff_user + " | " + assistant_text;
 }
 
-/// Drafting prompts for the two kinds the turn and episode prompts do not fit:
+/// Drafting call for the two kinds the turn and episode prompts do not fit:
 /// a trigger is phrased in the future query's vocabulary (design §5.3a),
-/// and a session title is one short line. Authored here (not in
-/// summarizer.cpp) because they belong to the back-fill verb, not the live
-/// summarizer flow; same strip_thinking + strictly-shorter contract as
+/// and a session title is a few words. The prompts are settings
+/// (summarizer_trigger_prompt / summarizer_title_prompt) with built-in
+/// defaults in Config; same strip_thinking + strictly-shorter contract as
 /// every other summarizer output.
 std::string draft_with_prompt(InferenceClient& inference,
                               const std::string& system_prompt,
@@ -68,24 +68,30 @@ std::string draft_with_prompt(InferenceClient& inference,
     }
 }
 
-constexpr const char* kTriggerDraftPrompt =
-    "Write a TRIGGER for the stored memory below: one short line phrased as "
-    "the question or situation that should bring this memory up in a future "
-    "search. Use the vocabulary a future asker would use, not the memory's "
-    "own wording where they differ. No quotation marks, no prefix, no "
-    "trailing punctuation beyond a question mark. Never longer than the "
-    "memory itself.";
-
-constexpr const char* kSessionTitlePrompt =
-    "Write a title for a conversation session from the summaries below: a "
-    "few words naming the topic, no quotation marks, no trailing "
-    "punctuation, no sentence.";
-
 /// The configured prompt, or the built-in one when the setting is empty or
 /// blank. Copies at once: config() may be swapped by a live reload.
-std::string prompt_or_default(const std::string& configured, const char* builtin) {
-    if (configured.find_first_not_of(" \t\r\n") == std::string::npos) return builtin;
+std::string prompt_or_default(const std::string& configured, std::string_view builtin) {
+    if (configured.find_first_not_of(" \t\r\n") == std::string::npos)
+        return std::string(builtin);
     return configured;
+}
+
+/// The session-title prompt with the word range filled in. A configured
+/// prompt that fails to format (the settings validator rejects those, but a
+/// hand-edited row could slip through) falls back to the built-in one.
+std::string title_prompt() {
+    const Config c = config();   // a copy: a live reload may swap the shared one
+    std::size_t lo = c.summarizer_title_min_words > 0
+                         ? static_cast<std::size_t>(c.summarizer_title_min_words) : 3;
+    std::size_t hi = c.summarizer_title_max_words > 0
+                         ? static_cast<std::size_t>(c.summarizer_title_max_words) : 8;
+    if (hi < lo) hi = lo;
+    const std::string raw = prompt_or_default(c.summarizer_title_prompt, Config::kDefaultTitlePrompt);
+    try {
+        return std::vformat(raw, std::make_format_args(lo, hi));
+    } catch (const std::exception&) {
+        return std::vformat(Config::kDefaultTitlePrompt, std::make_format_args(lo, hi));
+    }
 }
 
 void require_inference_configured(InferenceClient& inference) {
@@ -175,7 +181,7 @@ BackfillResult backfill_triggers(StorageBackend& backend,
         tick(progress, "triggers", done, res.candidates);
         try {
             const std::string draft = draft_with_prompt(
-                inference, prompt_or_default(config().summarizer_trigger_prompt, kTriggerDraftPrompt),
+                inference, prompt_or_default(config().summarizer_trigger_prompt, Config::kDefaultTriggerPrompt),
                 c.text);
             if (draft.empty()) { ++res.failed; continue; }
             // The draft must be a real trigger: strictly shorter than the
@@ -308,7 +314,7 @@ BackfillResult backfill_session_names(StorageBackend& backend,
                 corpus += t;
             }
             const std::string title = draft_with_prompt(
-                inference, prompt_or_default(config().summarizer_title_prompt, kSessionTitlePrompt),
+                inference, title_prompt(),
                 corpus);
             if (title.empty()) { ++res.failed; continue; }
             if (backend.apply_session_name(c.session_id, title, "summarizer"))

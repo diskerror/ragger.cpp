@@ -519,11 +519,15 @@ void p10_summarizer_budget_prompt() {
 
     // --- canned expectations ------------------------------------------------
     static const std::string EXPECTED_TRANSCRIPT_PROMPT =
-        "Summarize this conversation into a concise memory entry. Extract key "
-        "facts, decisions, questions asked, topics discussed. Write in third "
-        "person past tense. Target about 44 characters; never exceed 89. If "
-        "the exchange is trivial (a single command like /exit, a one-line "
-        "greeting), respond with a short phrase, not a full sentence.";
+        "Summarize this exchange into a concise memory entry, in third person "
+        "past tense. Keep who said what: record the user's questions, "
+        "requests, decisions and corrections as the user's; record the "
+        "assistant's proposals, findings and actions as the assistant's. A "
+        "proposal is not a decision unless the user accepted it in this "
+        "exchange. Keep concrete names, numbers, file names and conclusions; "
+        "drop pleasantries and narration. Target about 44 characters; never "
+        "exceed 89. If the exchange is trivial (a single command like /exit, "
+        "a one-line greeting), reply with a short phrase.";
     static const std::string EXPECTED_TEXTS_PROMPT =
         "You are given 2 consecutive summaries of one conversation span. "
         "Write a single standalone summary of the whole span that keeps every "
@@ -1176,7 +1180,7 @@ void lr64_test_episode_prompt() {
 
     const std::string p = stub.system_of(0);
     // Not the turn-summary prompt anymore.
-    CHECK(p.find("Summarize this conversation into a concise memory entry") ==
+    CHECK(p.find("Summarize this exchange into a concise memory entry") ==
           std::string::npos);
     // N substituted: three inputs -> "3 consecutive summaries".
     CHECK(p.find("3 consecutive summaries") != std::string::npos);

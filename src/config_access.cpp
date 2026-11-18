@@ -65,6 +65,8 @@ const std::unordered_map<std::string_view, int Config::*>& int_fields() {
         {"summarizer_target_pct", &Config::summarizer_target_pct},
         {"summarizer_max_pct",    &Config::summarizer_max_pct},
         {"summarizer_min_words",  &Config::summarizer_min_words},
+        {"summarizer_title_min_words", &Config::summarizer_title_min_words},
+        {"summarizer_title_max_words", &Config::summarizer_title_max_words},
         {"log_max_age_days",      &Config::log_max_age_days},
         {"housekeeping_interval", &Config::housekeeping_interval},
         {"episode_idle_minutes",  &Config::episode_idle_minutes},
@@ -325,7 +327,7 @@ std::expected<void, ConfigSetError> validate_config_value(std::string_view key,
             // with two size_t arguments at every summary. Reject a value that
             // would throw there (stray brace, out-of-range index, malformed
             // spec) at the door instead of poisoning the summarizer loop.
-            if (key == "summarizer_prompt") {
+            if (key == "summarizer_prompt" || key == "summarizer_title_prompt") {
                 std::size_t t = 1, c = 2;   // lvalues: libc++ make_format_args rejects rvalues
                 try {
                     // Validation only: vformat throws on a bad spec; the
