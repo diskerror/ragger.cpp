@@ -62,6 +62,7 @@ The tables below cover every key currently recognized by the parser.
 | `capture_turns`  | `true`          | **Write side.** When `true`, `capture_turn` (MCP) / `POST /turn` ingests agent-pushed turns into the `turns` table. Set `false` to make the call a no-op. |
 | `build_context`  | `false`         | **Read side.** When `true`, `build_context` / `GET /session/<id>` assembles a recipe-shaped payload. Only meaningful when `capture_turns` is also on. Agent-driven `search`/`store` work either way. Not currently documented in `default-settings.txt` — code and default (`false`) remain intact if you want to opt back in by hand. |
 | `default_recipe` | `natural_fading` | Recipe used when the caller doesn't name one. See [Recipes](#recipes) below. Also undocumented in the shipped template for the same reason as `build_context`; both keys are still parsed. |
+| `auto_recall_min_similarity` | `0.30` | Minimum vector similarity (raw cosine, 0-1) for a memory to be injected by auto-recall. Per embedder: calibrated for the current embedding model, re-measure after changing it. `0` injects the top results regardless. Served to plugins via `GET /config`; the daemon does no injection itself. |
 
 Both listeners can run at the same time. If `socket_enable` is false and
 `bind` is empty, the daemon falls back to `bind = 127.0.0.1` so there's

@@ -219,6 +219,11 @@ struct Config {
     // "flat" = the legacy flat search over everything. Served to plugins via
     // GET /config; the daemon does no injection itself.
     std::string auto_recall_mode = "decisions";
+    // Minimum vector similarity (raw cosine, 0-1) for a memory to be injected
+    // by auto-recall. Per embedder: calibrated for the current embedding model,
+    // re-measure after changing it. 0 = inject the top results regardless.
+    // Served to plugins via GET /config; the daemon does no injection itself.
+    float auto_recall_min_similarity = 0.30f;
     // Recipe name applied when the caller doesn't specify one. Recipes are
     // loaded from ~/.ragger/recipes (JSON files); built-ins cover the case
     // where the directory is missing or empty.

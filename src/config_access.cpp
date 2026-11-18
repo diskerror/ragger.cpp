@@ -78,6 +78,7 @@ const std::unordered_map<std::string_view, int Config::*>& int_fields() {
 const std::unordered_map<std::string_view, float Config::*>& float_fields() {
     static const std::unordered_map<std::string_view, float Config::*> m = {
         {"default_min_score",       &Config::default_min_score},
+        {"auto_recall_min_similarity", &Config::auto_recall_min_similarity},
         {"decision_supersede_threshold", &Config::decision_supersede_threshold},
         {"fts_weight",             &Config::fts_weight},
         {"bm25_weight",            &Config::fts_weight},   // legacy key (pre-0.17 name), same field

@@ -527,6 +527,36 @@ void p10_pct_validation() {
     std::println(" OK");
 }
 
+// X26: auto_recall_min_similarity is a Float setting. The existing Float
+// validator (parse_float_strict) accepts any well-formed number and rejects
+// non-numeric text — it does NOT clamp to 0-1 (same as default_min_score and
+// the other float knobs). Pin the contract: 0.30, 0, 1 accepted; abc rejected;
+// empty = reset-to-default always valid. Also pin that the struct default and
+// the schema default string agree (both 0.30).
+void x26_auto_recall_min_similarity() {
+    std::print("  x26_auto_recall_min_similarity...\n");
+    auto ok = [](std::string_view k, std::string_view v) {
+        return ragger::validate_config_value(k, v).has_value();
+    };
+    CHECK(ok("auto_recall_min_similarity", "0.30"));
+    CHECK(ok("auto_recall_min_similarity", "0"));
+    CHECK(ok("auto_recall_min_similarity", "1"));
+    CHECK(!ok("auto_recall_min_similarity", "abc"));
+    CHECK(ok("auto_recall_min_similarity", ""));   // empty = reset to default
+
+    // The two defaults must match: struct field and schema default string.
+    CHECK(std::abs(ragger::default_config().auto_recall_min_similarity - 0.30f) < 1e-6f);
+    const auto* meta = ragger::lang::config_meta("auto_recall_min_similarity");
+    CHECK(meta != nullptr);
+    if (meta) {
+        CHECK(meta->default_value == std::string_view("0.30"));
+        CHECK(meta->section == std::string_view("server"));
+        CHECK(meta->type == ragger::lang::CfgType::Float);
+        CHECK(meta->edit == ragger::lang::CfgEdit::Live);
+    }
+    std::println(" OK");
+}
+
 // PHASE9B step 7: the episode keys are read per use by summarizer_service,
 // so a SIGHUP reload must apply them (they used to be silently dropped).
 void p9b_test_reload_config_episode_keys() {
@@ -598,6 +628,7 @@ int main() {
     p9a_test_shipped_defaults_applied();
     p9b_test_summarizer_prompt_validation();
     p10_pct_validation();
+    x26_auto_recall_min_similarity();
     x2_schema_no_blank_entries();
     p9b_test_reload_config_episode_keys();
     p9a_test_config_snapshots();
