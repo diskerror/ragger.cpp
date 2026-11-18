@@ -111,6 +111,15 @@ A short prompt ("yes") borrows the previous user messages as its query. The
 Hermes plugin does the same, driven by the daemon setting `auto_recall_mode`
 (dashboard, Server section); OpenClaw reads its own plugin config.
 
+In `decisions` mode the plugin calls `memory_search` with `split: true` and
+`min_vector_score` = `autoRecallMinSimilarity` (plugin config, default 0.3, the
+raw vector cosine; the Hermes plugin reads the daemon setting
+`auto_recall_min_similarity`). It injects the `both` list (vector and FTS
+agree) first, then `vector_only`, at most 3 lines; `fts_only` is not used. The
+minimum is calibrated for the current embedding model: re-measure it after
+changing the embedder. Against an older daemon without split mode it falls
+back to the ungated blended results.
+
 At startup the plugin also logs a warning if the daemon reports
 `capture_turns: false` or no summarizer (see `GET /health`).
 

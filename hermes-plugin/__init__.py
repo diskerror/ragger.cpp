@@ -148,23 +148,43 @@ def _as_bool(value: str, default: bool) -> bool:
 #   decisions: only active decisions, matched against the prompt (decisions
 #              carry a trigger written as a future question); one line each:
 #              "[knowledge:5] <trigger> → <ruling>", with the status appended
-#              when it is not 'current'.
+#              when it is not 'current'. Uses memory_search split mode: the
+#              daemon returns only decisions whose raw vector similarity is at
+#              least `auto_recall_min_similarity`; the `both` list (vector and
+#              FTS agree) is injected before `vector_only`; `fts_only` is not
+#              used (an FTS score has no portable threshold).
 #   flat:      the legacy flat /search over everything: the bare text.
+# A mode is (build_request(query, min_similarity) -> (path, payload),
+#            format_lines(response_dict) -> [line]).
 _DEFAULT_RECALL_MODE = "decisions"
+_DEFAULT_MIN_SIMILARITY = 0.30
 _RECALL_LIMIT = {"decisions": 3, "flat": 5}
 
 
-def _recall_request_decisions(query: str) -> tuple:
+def _recall_request_decisions(query: str, min_similarity: float) -> tuple:
     return "/memory/search", {"query": query, "layers": ["knowledge"],
                               "kinds": ["decision"], "status": "active",
-                              "limit": _RECALL_LIMIT["decisions"]}
+                              "limit": _RECALL_LIMIT["decisions"],
+                              "split": True,
+                              "min_vector_score": max(0.0, float(min_similarity))}
 
 
-def _recall_request_flat(query: str) -> tuple:
+def _recall_request_flat(query: str, min_similarity: float) -> tuple:
     return "/search", {"query": query, "limit": _RECALL_LIMIT["flat"]}
 
 
-def _recall_lines_decisions(hits: list) -> list:
+def _recall_lines_decisions(got: dict) -> list:
+    groups = got.get("groups") if isinstance(got, dict) else None
+    if isinstance(groups, dict):
+        # Split response: `both` first (the two searches agree), then
+        # `vector_only`; the daemon already applied the similarity minimum.
+        hits = list(groups.get("both") or []) + list(groups.get("vector_only") or [])
+        if got.get("vector_available") is False:
+            logger.debug("Ragger recall: no embedder, nothing to inject")
+    else:
+        # An older daemon without split mode: the blended results, ungated.
+        hits = got.get("results", []) if isinstance(got, dict) else []
+    hits = hits[:_RECALL_LIMIT["decisions"]]
     lines = []
     for h in hits:
         if not isinstance(h, dict) or not h.get("snippet"):
@@ -179,7 +199,8 @@ def _recall_lines_decisions(hits: list) -> list:
     return lines
 
 
-def _recall_lines_flat(hits: list) -> list:
+def _recall_lines_flat(got: dict) -> list:
+    hits = got.get("results", []) if isinstance(got, dict) else []
     return [h.get("text", "") for h in hits if isinstance(h, dict) and h.get("text")]
 
 
@@ -229,6 +250,7 @@ def _load_ragger_config() -> dict:
         "auth_token": token,
         "auto_recall": True,
         "auto_recall_mode": _DEFAULT_RECALL_MODE,
+        "auto_recall_min_similarity": _DEFAULT_MIN_SIMILARITY,
         "socket_enable": True,
         "socket_path": socket_path,
     }
@@ -249,6 +271,12 @@ def _load_ragger_config() -> dict:
         mode = str(settings.get("auto_recall_mode", "")).split("#")[0].strip()
         if mode in _RECALL_MODES:
             cfg["auto_recall_mode"] = mode
+        raw_sim = str(settings.get("auto_recall_min_similarity", "")).split("#")[0].strip()
+        try:
+            if raw_sim:
+                cfg["auto_recall_min_similarity"] = max(0.0, float(raw_sim))
+        except ValueError:
+            pass   # keep the default
         cfg["socket_enable"] = _as_bool(settings.get("socket_enable", ""), True)
 
     return cfg
@@ -588,6 +616,7 @@ class RaggerMemoryProvider(MemoryProvider):
         self._auth_token = ""
         self._auto_recall = True
         self._auto_recall_mode = _DEFAULT_RECALL_MODE
+        self._auto_recall_min_similarity = _DEFAULT_MIN_SIMILARITY
         self._recent_user: List[str] = []     # last few user messages, for short-prompt recall
         self._flags_warned = False
         self._socket_enable = True
@@ -795,6 +824,7 @@ class RaggerMemoryProvider(MemoryProvider):
         self._auth_token = cfg["auth_token"]
         self._auto_recall = cfg["auto_recall"]
         self._auto_recall_mode = cfg["auto_recall_mode"]
+        self._auto_recall_min_similarity = cfg["auto_recall_min_similarity"]
         # Learn, once per session and off the gateway thread, whether the daemon
         # is capturing and summarizing; say so in the log if it is not.
         threading.Thread(target=self._check_daemon_flags, daemon=True,
@@ -873,7 +903,8 @@ class RaggerMemoryProvider(MemoryProvider):
 
         mode = self._auto_recall_mode if self._auto_recall_mode in _RECALL_MODES else _DEFAULT_RECALL_MODE
         build_request, format_lines = _RECALL_MODES[mode]
-        path, payload = build_request(_recall_query(query, list(self._recent_user)))
+        path, payload = build_request(_recall_query(query, list(self._recent_user)),
+                                      self._auto_recall_min_similarity)
 
         def _run():
             # PHASE9B step 9: a 4xx is our own bad query, not a daemon outage —
@@ -883,8 +914,7 @@ class RaggerMemoryProvider(MemoryProvider):
             if not ok:
                 logger.debug("Ragger prefetch: %s", got)
                 return
-            hits = got.get("results", []) if isinstance(got, dict) else []
-            lines = format_lines(hits)
+            lines = format_lines(got if isinstance(got, dict) else {})
             if lines:
                 with self._prefetch_lock:
                     self._prefetch_result = "\n".join(f"- {line}" for line in lines)

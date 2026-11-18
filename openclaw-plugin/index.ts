@@ -24,6 +24,8 @@ interface RaggerConfig {
   autoRecall?: boolean;
   /** What auto-recall injects: "decisions" (default) or "flat" (legacy search). */
   autoRecallMode?: "decisions" | "flat";
+  /** Minimum raw vector similarity (0-1) for a decision to be injected. Calibrated for the current embedder (Ragger setting auto_recall_min_similarity). */
+  autoRecallMinSimilarity?: number;
   autoCapture?: boolean;
   /** Command to start the HTTP server if it's not running */
   serverCommand?: string;
@@ -436,11 +438,16 @@ function makeMcpTransport(client: McpClient): RaggerTransport {
 // ============================================================================
 //   decisions: active decisions only, matched against the prompt; one line
 //              "[knowledge:5] <trigger> → <ruling>" (+ status when not current).
+//              Uses memory_search split mode: the daemon drops hits below
+//              autoRecallMinSimilarity (raw vector cosine); `both` (vector and
+//              FTS agree) is injected before `vector_only`; `fts_only` unused.
 //   flat:      the legacy flat search over everything: the bare text.
 // Add a mode by adding one entry to RECALL_MODES (and to openclaw.plugin.json).
 
 type RecallMode = "decisions" | "flat";
 const DEFAULT_RECALL_MODE: RecallMode = "decisions";
+const DEFAULT_MIN_SIMILARITY = 0.3;
+const DECISIONS_LIMIT = 3;
 
 interface RecallHit {
   id?: string;
@@ -450,15 +457,20 @@ interface RecallHit {
 }
 
 const RECALL_MODES: Record<RecallMode, {
-  fetch(transport: RaggerTransport, query: string): Promise<RecallHit[]>;
+  fetch(transport: RaggerTransport, query: string, minSimilarity: number): Promise<RecallHit[]>;
   lines(hits: RecallHit[]): string[];
 }> = {
   decisions: {
-    async fetch(transport, query) {
+    async fetch(transport, query, minSimilarity) {
       const r = (await transport.call("memory_search", {
-        query, layers: ["knowledge"], kinds: ["decision"], status: "active", limit: 3,
-      })) as { results?: RecallHit[] };
-      return r?.results ?? [];
+        query, layers: ["knowledge"], kinds: ["decision"], status: "active",
+        limit: DECISIONS_LIMIT, split: true, min_vector_score: Math.max(0, minSimilarity),
+      })) as { results?: RecallHit[]; groups?: { both?: RecallHit[]; vector_only?: RecallHit[] } };
+      // An older daemon without split mode answers with blended results, ungated.
+      const hits = r?.groups
+        ? [...(r.groups.both ?? []), ...(r.groups.vector_only ?? [])]
+        : (r?.results ?? []);
+      return hits.slice(0, DECISIONS_LIMIT);
     },
     lines(hits) {
       const out: string[] = [];
@@ -473,7 +485,7 @@ const RECALL_MODES: Record<RecallMode, {
     },
   },
   flat: {
-    async fetch(transport, query) {
+    async fetch(transport, query, _minSimilarity) {
       const r = await transport.search(query, 3, 0.3);
       return (r?.results ?? []) as RecallHit[];
     },
@@ -667,7 +679,8 @@ const raggerPlugin = {
           const query = recallQuery(event.prompt, recentUser);
           recentUser = [...recentUser, event.prompt.trim()].slice(-4);
 
-          const lines = RECALL_MODES[mode].lines(await RECALL_MODES[mode].fetch(transport, query));
+          const lines = RECALL_MODES[mode].lines(await RECALL_MODES[mode].fetch(
+            transport, query, typeof cfg.autoRecallMinSimilarity === "number" ? cfg.autoRecallMinSimilarity : DEFAULT_MIN_SIMILARITY));
           if (lines.length === 0) return;
 
           api.logger.info?.(`ragger: injecting ${lines.length} memories into context (${mode})`);
