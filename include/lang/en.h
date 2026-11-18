@@ -573,10 +573,12 @@ constexpr const char* ERR_PERMISSION_DENIED_SIGNAL= "Permission denied: cannot s
 
 // ---- built-in summarizer prompts --------------------------------------------
 // Model instructions, used when the matching summarizer_*_prompt setting is
-// empty. They live here so all of Ragger's English text is in one place. They
-// are NOT meant to be translated: models follow an English instruction even
-// when summarizing text in another language. Written by a frontier model, not
-// tuned to any particular local model: see docs/configuration.md.
+// empty. They live here so all of Ragger's English text is in one place. The
+// English is only the built-in default: a model usually understands it even
+// when summarizing text in another language, but it may also answer in the
+// language of the instruction, so anyone can override a prompt in their own
+// language (same placeholders). Written by a frontier model, not tuned to any
+// particular local model: see docs/configuration.md.
 
 // Turn summary. Two {} placeholders: target chars, hard cap.
 inline constexpr std::string_view PROMPT_TURN_SUMMARY =
