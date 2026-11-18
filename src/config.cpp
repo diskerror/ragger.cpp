@@ -541,8 +541,6 @@ int reload_config() {
     RELOAD(summarizer_target_pct);
     RELOAD(summarizer_max_pct);
     RELOAD(summarizer_min_words);
-    RELOAD(summarizer_title_min_words);
-    RELOAD(summarizer_title_max_words);
     RELOAD(summarizer_prompt);
     RELOAD(summarizer_title_prompt);
     RELOAD(summarizer_trigger_prompt);

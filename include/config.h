@@ -177,12 +177,12 @@ struct Config {
         "a one-line greeting), reply with a short phrase.";
     std::string summarizer_prompt = "";
     // Prompts for the two one-line jobs. Empty or blank = the built-in
-    // default below. The title prompt takes two {} placeholders (min words,
-    // max words), like summarizer_prompt; the trigger prompt takes none and
-    // is sent verbatim as the system message.
+    // default below. Neither takes placeholders: they are sent verbatim as
+    // the system message, so the title length (words) is stated in the
+    // prompt text itself.
     static constexpr std::string_view kDefaultTitlePrompt =
         "Name this conversation session from the summaries below. Reply with "
-        "the title only: {} to {} words, the main topic, in the style of a "
+        "the title only: 3 to 8 words, the main topic, in the style of a "
         "file name or a heading. No quotes, no trailing punctuation, no "
         "sentence, no \"Discussion of...\". Prefer the project or feature "
         "name if one appears.";
@@ -196,8 +196,6 @@ struct Config {
         "connect to the Ragger daemon?\" Output the line only: no quotes, no "
         "prefix.";
     std::string summarizer_title_prompt = "";
-    int         summarizer_title_min_words = 3;
-    int         summarizer_title_max_words = 8;
     std::string summarizer_trigger_prompt = "";
 
     // --- Logging ---

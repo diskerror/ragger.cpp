@@ -544,13 +544,8 @@ void x27_summarizer_job_prompts() {
     for (const char* key : {"summarizer_title_prompt", "summarizer_trigger_prompt"}) {
         CHECK(ok(key, ""));
         CHECK(ok(key, "A short title, no quotes."));
-        if (std::string_view(key) == "summarizer_title_prompt") {
-            CHECK(ok(key, "{} to {} words"));
-            CHECK(!ok(key, "{"));
-            CHECK(!ok(key, "{2}"));
-        } else {
-            CHECK(ok(key, "{ literal braces } are fine here"));
-        }
+        CHECK(ok(key, "{ literal braces } are fine here"));
+        CHECK(ok(key, "Title of 3 to 8 words"));
         const auto* meta = ragger::lang::config_meta(key);
         CHECK(meta != nullptr);
         if (meta) {
@@ -560,13 +555,10 @@ void x27_summarizer_job_prompts() {
             CHECK(meta->edit == ragger::lang::CfgEdit::Live);
         }
     }
-    for (const char* key : {"summarizer_title_min_words", "summarizer_title_max_words"}) {
-        const auto* meta = ragger::lang::config_meta(key);
-        CHECK(meta != nullptr);
-        if (meta) CHECK(meta->type == ragger::lang::CfgType::Integer);
-    }
-    CHECK(ragger::default_config().summarizer_title_min_words == 3);
-    CHECK(ragger::default_config().summarizer_title_max_words == 8);
+    // The title length lives in the prompt text, not in separate keys.
+    CHECK(ragger::lang::config_meta("summarizer_title_min_words") == nullptr);
+    CHECK(ragger::lang::config_meta("summarizer_title_max_words") == nullptr);
+    CHECK(ragger::Config::kDefaultTitlePrompt.find("3 to 8 words") != std::string_view::npos);
     CHECK(ragger::default_config().summarizer_title_prompt.empty());
     CHECK(ragger::default_config().summarizer_trigger_prompt.empty());
     std::println(" OK");

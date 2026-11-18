@@ -76,23 +76,6 @@ std::string prompt_or_default(const std::string& configured, std::string_view bu
     return configured;
 }
 
-/// The session-title prompt with the word range filled in. A configured
-/// prompt that fails to format (the settings validator rejects those, but a
-/// hand-edited row could slip through) falls back to the built-in one.
-std::string title_prompt() {
-    const Config c = config();   // a copy: a live reload may swap the shared one
-    std::size_t lo = c.summarizer_title_min_words > 0
-                         ? static_cast<std::size_t>(c.summarizer_title_min_words) : 3;
-    std::size_t hi = c.summarizer_title_max_words > 0
-                         ? static_cast<std::size_t>(c.summarizer_title_max_words) : 8;
-    if (hi < lo) hi = lo;
-    const std::string raw = prompt_or_default(c.summarizer_title_prompt, Config::kDefaultTitlePrompt);
-    try {
-        return std::vformat(raw, std::make_format_args(lo, hi));
-    } catch (const std::exception&) {
-        return std::vformat(Config::kDefaultTitlePrompt, std::make_format_args(lo, hi));
-    }
-}
 
 void require_inference_configured(InferenceClient& inference) {
     // S25 (C M10) parity: "not configured" is a refusal, not a failure
@@ -314,7 +297,7 @@ BackfillResult backfill_session_names(StorageBackend& backend,
                 corpus += t;
             }
             const std::string title = draft_with_prompt(
-                inference, title_prompt(),
+                inference, prompt_or_default(config().summarizer_title_prompt, Config::kDefaultTitlePrompt),
                 corpus);
             if (title.empty()) { ++res.failed; continue; }
             if (backend.apply_session_name(c.session_id, title, "summarizer"))

@@ -7607,26 +7607,12 @@ void lr67_test_backfill_session_names(ragger::Embedder& emb) {
         CHECK(p1_scalar_int(raw, "SELECT name IS NULL FROM sessions WHERE guid = 'bf-name-d'") == 1);
         CHECK(cut.body_seen().find("3 to 8 words") != std::string::npos);   // built-in prompt, default range
 
-        // Word range keys fill the placeholders of the built-in prompt.
-        ragger::update_config([](ragger::Config& c) { c.summarizer_title_min_words = 2; c.summarizer_title_max_words = 5; return true; });
-        {
-            bf_stub rng("Range title");
-            auto cl = rng.client();
-            const int t5 = db.store_turn("bf-name5 q", "bf-name5 a", "test-model", false, "bf-name-e");
-            CHECK(db.finalize_turn_summary(t5, "bf-name5 summary", "summarizer-model"));
-            ragger::backfill_session_names(db, cl, false);
-            CHECK(rng.body_seen().find("2 to 5 words") != std::string::npos);
-        }
-        // The range run named both unnamed sessions; seed one more for the override check.
-        const int t6 = db.store_turn("bf-name6 q", "bf-name6 a", "test-model", false, "bf-name-f");
-        CHECK(db.finalize_turn_summary(t6, "bf-name6 summary", "summarizer-model"));
-        ragger::update_config([](ragger::Config& c) { c.summarizer_title_min_words = 3; c.summarizer_title_max_words = 8;
-                                                      c.summarizer_title_prompt = "X27TITLEPROMPT {}-{}"; return true; });
+        ragger::update_config([](ragger::Config& c) { c.summarizer_title_prompt = "X27TITLEPROMPT {} 2-5 words"; return true; });
         bf_stub ok("Whole title");
         auto client2 = ok.client();
         auto res2 = ragger::backfill_session_names(db, client2, false);
         CHECK(res2.applied == 1);
-        CHECK(ok.body_seen().find("X27TITLEPROMPT 3-8") != std::string::npos);
+        CHECK(ok.body_seen().find("X27TITLEPROMPT {} 2-5 words") != std::string::npos);
         ragger::update_config([](ragger::Config& c) { c.summarizer_title_prompt = ""; return true; });
     }
 
