@@ -608,8 +608,10 @@ inline constexpr std::string_view PROMPT_SESSION_TITLE =
     "Name this conversation session from the summaries below. Reply with "
     "the title only: 3 to 8 words, the main topic, in the style of a "
     "file name or a heading. No quotes, no trailing punctuation, no "
-    "sentence, no \"Discussion of...\". Prefer the project or feature "
-    "name if one appears.";
+    "sentence, no \"Discussion of...\". Do not use the words Discussion, "
+    "Summary, Session or Issues. Name the specific thing: the feature, "
+    "file, error or decision. Prefer the project or feature name if one "
+    "appears.";
 
 // Knowledge trigger. No placeholders.
 inline constexpr std::string_view PROMPT_KNOWLEDGE_TRIGGER =
