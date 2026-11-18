@@ -8,5 +8,7 @@
     "stream_content": "delta.text",
     "stream_type_field": "type",
     "stream_type_value": "content_block_delta",
-    "stream_stop": "message_stop"
+    "stream_stop": "message_stop",
+    "response_finish_reason": "stop_reason",
+    "finish_truncated": ["max_tokens"]
 }

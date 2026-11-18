@@ -533,6 +533,32 @@ void p10_pct_validation() {
 // the other float knobs). Pin the contract: 0.30, 0, 1 accepted; abc rejected;
 // empty = reset-to-default always valid. Also pin that the struct default and
 // the schema default string agree (both 0.30).
+// X27: the two one-line-job prompts are plain Text: any value is accepted
+// (no placeholder rules, unlike summarizer_prompt: braces are literal here),
+// empty = built-in, and the defaults are empty.
+void x27_summarizer_job_prompts() {
+    std::print("  x27_summarizer_job_prompts...\n");
+    auto ok = [](std::string_view k, std::string_view v) {
+        return ragger::validate_config_value(k, v).has_value();
+    };
+    for (const char* key : {"summarizer_title_prompt", "summarizer_trigger_prompt"}) {
+        CHECK(ok(key, ""));
+        CHECK(ok(key, "A short title, no quotes."));
+        CHECK(ok(key, "{ literal braces } are fine here"));
+        const auto* meta = ragger::lang::config_meta(key);
+        CHECK(meta != nullptr);
+        if (meta) {
+            CHECK(meta->default_value == std::string_view(""));
+            CHECK(meta->section == std::string_view("summarizer"));
+            CHECK(meta->type == ragger::lang::CfgType::Text);
+            CHECK(meta->edit == ragger::lang::CfgEdit::Live);
+        }
+    }
+    CHECK(ragger::default_config().summarizer_title_prompt.empty());
+    CHECK(ragger::default_config().summarizer_trigger_prompt.empty());
+    std::println(" OK");
+}
+
 void x26_auto_recall_min_similarity() {
     std::print("  x26_auto_recall_min_similarity...\n");
     auto ok = [](std::string_view k, std::string_view v) {
@@ -629,6 +655,7 @@ int main() {
     p9b_test_summarizer_prompt_validation();
     p10_pct_validation();
     x26_auto_recall_min_similarity();
+    x27_summarizer_job_prompts();
     x2_schema_no_blank_entries();
     p9b_test_reload_config_episode_keys();
     p9a_test_config_snapshots();

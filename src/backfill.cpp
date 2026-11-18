@@ -44,7 +44,7 @@ std::string l2_source(const std::string& user_text, const std::string& assistant
     return eff_user.empty() ? assistant_text : eff_user + " | " + assistant_text;
 }
 
-/// Drafting prompts for the two kinds the L2/episode prompts do not fit:
+/// Drafting prompts for the two kinds the turn and episode prompts do not fit:
 /// a trigger is phrased in the future query's vocabulary (design §5.3a),
 /// and a session title is one short line. Authored here (not in
 /// summarizer.cpp) because they belong to the back-fill verb, not the live
@@ -80,6 +80,13 @@ constexpr const char* kSessionTitlePrompt =
     "Write a title for a conversation session from the summaries below: a "
     "few words naming the topic, no quotation marks, no trailing "
     "punctuation, no sentence.";
+
+/// The configured prompt, or the built-in one when the setting is empty or
+/// blank. Copies at once: config() may be swapped by a live reload.
+std::string prompt_or_default(const std::string& configured, const char* builtin) {
+    if (configured.find_first_not_of(" \t\r\n") == std::string::npos) return builtin;
+    return configured;
+}
 
 void require_inference_configured(InferenceClient& inference) {
     // S25 (C M10) parity: "not configured" is a refusal, not a failure
@@ -167,7 +174,9 @@ BackfillResult backfill_triggers(StorageBackend& backend,
         ++done;
         tick(progress, "triggers", done, res.candidates);
         try {
-            const std::string draft = draft_with_prompt(inference, kTriggerDraftPrompt, c.text);
+            const std::string draft = draft_with_prompt(
+                inference, prompt_or_default(config().summarizer_trigger_prompt, kTriggerDraftPrompt),
+                c.text);
             if (draft.empty()) { ++res.failed; continue; }
             // The draft must be a real trigger: strictly shorter than the
             // memory it points at (same measurement as the S62 rule). A
@@ -298,7 +307,9 @@ BackfillResult backfill_session_names(StorageBackend& backend,
                 if (!corpus.empty()) corpus += "\n\n";
                 corpus += t;
             }
-            const std::string title = draft_with_prompt(inference, kSessionTitlePrompt, corpus);
+            const std::string title = draft_with_prompt(
+                inference, prompt_or_default(config().summarizer_title_prompt, kSessionTitlePrompt),
+                corpus);
             if (title.empty()) { ++res.failed; continue; }
             if (backend.apply_session_name(c.session_id, title, "summarizer"))
                 ++res.applied;

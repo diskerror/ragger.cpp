@@ -173,6 +173,11 @@ struct Config {
         "like /exit, a one-line greeting), respond with a short phrase, "
         "not a full sentence.";
     std::string summarizer_prompt = "";
+    // Prompts for the two one-line jobs (session title, trigger). Empty or
+    // blank = the built-in prompt. Unlike summarizer_prompt these take no
+    // placeholders: they are sent verbatim as the system message.
+    std::string summarizer_title_prompt = "";
+    std::string summarizer_trigger_prompt = "";
 
     // --- Logging ---
     std::string log_file;   //  hardcoded to ~/.ragger/logs/activity.log

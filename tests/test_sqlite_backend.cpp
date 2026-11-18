@@ -5,6 +5,7 @@
  * Uses a temp DB that's deleted after the test.
  */
 #include "config.h"
+#include <mutex>
 #include "config_access.h"
 #include "backfill.h"
 #include "embedder.h"
@@ -6787,7 +6788,11 @@ struct bf_stub {
     std::atomic<bool> running{true};
     std::atomic<int> calls{0};
     std::string reply;
+    std::string finish;               // non-empty: sent as choices[0].finish_reason
+    mutable std::mutex bmu;           // guards last_body (written by the server thread)
+    std::string last_body;            // the last chat request body seen
     std::thread srv;
+    std::string body_seen() const { std::lock_guard<std::mutex> lk(bmu); return last_body; }
     explicit bf_stub(std::string reply_text) : reply(std::move(reply_text)) {
         ls = ::socket(AF_INET, SOCK_STREAM, 0);
         CHECK(ls >= 0);
@@ -6827,11 +6832,16 @@ struct bf_stub {
                 }
                 if (cl >= 0) {
                     const std::string body = req.substr(hdr_end + 4, static_cast<size_t>(cl));
-                    if (body.find("\"messages\"") != std::string::npos)
+                    if (body.find("\"messages\"") != std::string::npos) {
                         ++calls;
+                        std::lock_guard<std::mutex> lk(bmu);
+                        last_body = body;
+                    }
                 }
                 const std::string out =
-                    R"({"choices":[{"message":{"content":")" + reply + R"("}}]})";
+                    R"({"choices":[{"message":{"content":")" + reply + R"("})" +
+                    (finish.empty() ? std::string() : R"(,"finish_reason":")" + finish + R"(")") +
+                    R"(}]})";
                 const std::string resp =
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
                     "Content-Length: " + std::to_string(out.size()) +
@@ -7191,6 +7201,32 @@ void lr66_test_backfill_triggers(ragger::Embedder& emb) {
         // Rerun: nothing left.
         auto again = ragger::backfill_triggers(db, client, false);
         CHECK(again.candidates == 0);
+    }
+
+    // A reply cut off at the token limit is a failure, not a trigger; the
+    // row stays a candidate. Then the configured prompt replaces the built-in
+    // one, and a blank setting falls back to it.
+    {
+        const auto d3 = db.store_decision("trigger prompt override pin text for the third decision", "current", "tech", "");
+        CHECK(d3 > 0);
+        bf_stub cut("whentriggerdraft short");
+        cut.finish = "length";
+        auto client = cut.client();
+        auto res = ragger::backfill_triggers(db, client, false);
+        CHECK(res.candidates == 1);
+        CHECK(res.applied == 0);
+        CHECK(res.failed == 1);
+        CHECK(p1_scalar_text(raw, "SELECT COALESCE(trigger,'') FROM knowledge WHERE knowledge_id = " + std::to_string(d3)) == "");
+        CHECK(cut.body_seen().find("Write a TRIGGER") != std::string::npos);   // built-in prompt
+
+        ragger::update_config([](ragger::Config& c) { c.summarizer_trigger_prompt = "X27TRIGGERPROMPT"; return true; });
+        bf_stub ok("whentriggerdraft short");
+        auto client2 = ok.client();
+        auto res2 = ragger::backfill_triggers(db, client2, false);
+        CHECK(res2.applied == 1);
+        CHECK(ok.body_seen().find("X27TRIGGERPROMPT") != std::string::npos);
+        CHECK(ok.body_seen().find("Write a TRIGGER") == std::string::npos);
+        ragger::update_config([](ragger::Config& c) { c.summarizer_trigger_prompt = ""; return true; });
     }
 
     sqlite3_close(raw);
@@ -7555,6 +7591,29 @@ void lr67_test_backfill_session_names(ragger::Embedder& emb) {
             raw, "SELECT session_id FROM sessions WHERE guid = 'bf-name-b'"));
         CHECK(!db.apply_session_name(sid_b, "clobbered", "summarizer"));
         CHECK(p1_scalar_text(raw, "SELECT name FROM sessions WHERE guid = 'bf-name-b'") == "user-given-title");
+    }
+    // Truncated reply: no name written, counted failed, still a candidate.
+    // Then the configured title prompt replaces the built-in one.
+    {
+        const int t4 = db.store_turn("bf-name4 q", "bf-name4 a", "test-model", false, "bf-name-d");
+        CHECK(db.finalize_turn_summary(t4, "bf-name4 summary", "summarizer-model"));
+        bf_stub cut("Cut off title");
+        cut.finish = "length";
+        auto client = cut.client();
+        auto res = ragger::backfill_session_names(db, client, false);
+        CHECK(res.candidates == 1);
+        CHECK(res.applied == 0);
+        CHECK(res.failed == 1);
+        CHECK(p1_scalar_int(raw, "SELECT name IS NULL FROM sessions WHERE guid = 'bf-name-d'") == 1);
+        CHECK(cut.body_seen().find("Write a title for a conversation session") != std::string::npos);
+
+        ragger::update_config([](ragger::Config& c) { c.summarizer_title_prompt = "X27TITLEPROMPT"; return true; });
+        bf_stub ok("Whole title");
+        auto client2 = ok.client();
+        auto res2 = ragger::backfill_session_names(db, client2, false);
+        CHECK(res2.applied == 1);
+        CHECK(ok.body_seen().find("X27TITLEPROMPT") != std::string::npos);
+        ragger::update_config([](ragger::Config& c) { c.summarizer_title_prompt = ""; return true; });
     }
 
     sqlite3_close(raw);

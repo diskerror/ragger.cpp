@@ -525,6 +525,7 @@ constexpr const char* ERR_CURL_INIT           = "Failed to initialize libcurl";
 constexpr const char* ERR_HTTP_REQUEST        = "HTTP request failed: {}";
 constexpr const char* ERR_INFERENCE_API       = "Inference API error {}: {}";
 constexpr const char* ERR_PARSE_RESPONSE      = "Failed to parse response: {}";
+constexpr const char* ERR_RESPONSE_TRUNCATED  = "Response cut off at the token limit (finish reason: {}); not used";
 constexpr const char* ERR_UNKNOWN_ENDPOINT    = "Unknown endpoint: {}";
 constexpr const char* ERR_NO_ENDPOINTS        = "No inference endpoints configured";
 constexpr const char* ERR_ENGINE_UNREACHABLE  = "Inference engine not reachable at {}";
@@ -736,6 +737,12 @@ inline constexpr auto kConfigSchema = std::to_array<ConfigMeta>({
     {"summarizer_prompt", "summarizer", "Prompt", CfgType::Text, CfgEdit::Live,
      "", "",
      "System prompt sent to the summarizer. Empty uses the built-in default. A single space suppresses the system prompt entirely. Two {} placeholders are required (target chars, hard cap)."},
+    {"summarizer_title_prompt", "summarizer", "Session Title Prompt", CfgType::Text, CfgEdit::Live,
+     "", "",
+     "System prompt for naming a session from its turn summaries (the Name sessions job). Empty uses the built-in default. No placeholders: the summaries are sent as the user message."},
+    {"summarizer_trigger_prompt", "summarizer", "Trigger Prompt", CfgType::Text, CfgEdit::Live,
+     "", "",
+     "System prompt for drafting a decision's or insight's trigger (the Back-fill triggers job). Empty uses the built-in default. No placeholders: the memory text is sent as the user message."},
 
     // ---- logging ----
     {"log_level", "logging", "Log Level", CfgType::Enum, CfgEdit::Live,

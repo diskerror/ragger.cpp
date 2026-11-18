@@ -3,6 +3,7 @@
 #include "summarizer.h"
 #include "summarizer_service.h"
 #include "inference.h"
+#include "api_formats.h"
 #include "embedder.h"
 #include "sqlite/backend.h"
 #include "test_env.h"
@@ -200,6 +201,7 @@ struct StubChat {
     std::atomic<bool> running{true};
     std::atomic<int> calls{0};
     std::string reply;
+    std::string finish;       // non-empty: sent as choices[0].finish_reason (set before use)
     mutable std::mutex bmu;   // read from system_of() on a const stub
     std::vector<std::string> bodies;
     std::thread srv;
@@ -251,7 +253,9 @@ struct StubChat {
                     }
                 }
                 const std::string body =
-                    R"({"choices":[{"message":{"content":")" + reply + R"("}}]})";
+                    R"({"choices":[{"message":{"content":")" + reply + R"("})" +
+                    (finish.empty() ? std::string() : R"(,"finish_reason":")" + finish + R"(")") +
+                    R"(}]})";
                 const std::string resp =
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
                     "Content-Length: " + std::to_string(body.size()) +
@@ -787,6 +791,53 @@ void p9a_test_chat_times_out() {
     CHECK(what.find("imeout") != std::string::npos);  // curl: "Timeout was reached"
     srv.join();
     ::close(ls);
+    std::println(" ok");
+}
+
+// X27: a reply cut off at the token limit is reported, per format. The paths
+// and values come from the format (OpenAI: choices[0].finish_reason == length;
+// Anthropic: stop_reason == max_tokens); no path, a missing field, a normal
+// stop, or a non-string value are never "truncated".
+void x27_test_response_truncated() {
+    std::print("  x27_test_response_truncated...\n");
+    using nlohmann::json;
+    ragger::ApiFormat oa;
+    oa.response_finish_reason = "choices[0].finish_reason";
+    oa.finish_truncated_values = {"length"};
+    ragger::ApiFormat an;
+    an.response_finish_reason = "stop_reason";
+    an.finish_truncated_values = {"max_tokens"};
+    ragger::ApiFormat none;   // no path configured
+
+    std::string why;
+    CHECK(ragger::response_truncated(oa, json::parse(R"({"choices":[{"finish_reason":"length"}]})"), &why));
+    CHECK(why == "length");
+    CHECK(!ragger::response_truncated(oa, json::parse(R"({"choices":[{"finish_reason":"stop"}]})"), &why));
+    CHECK(why == "stop");
+    CHECK(!ragger::response_truncated(oa, json::parse(R"({"choices":[{}]})"), &why));
+    CHECK(why.empty());
+    CHECK(!ragger::response_truncated(oa, json::parse(R"({"choices":[{"finish_reason":null}]})")));
+    CHECK(ragger::response_truncated(an, json::parse(R"({"stop_reason":"max_tokens"})")));
+    CHECK(!ragger::response_truncated(an, json::parse(R"({"stop_reason":"end_turn"})")));
+    CHECK(!ragger::response_truncated(none, json::parse(R"({"choices":[{"finish_reason":"length"}]})")));
+
+    // End to end: chat() throws on a truncated reply, returns a complete one.
+    StubChat stub("whole answer");
+    auto client = stub.client();
+    CHECK(client->chat_memory({{"user", "hi"}}) == "whole answer");
+    StubChat cut("half an ans");
+    cut.finish = "length";
+    auto client2 = cut.client();
+    bool threw = false;
+    std::string what;
+    try { client2->chat_memory({{"user", "hi"}}); }
+    catch (const std::exception& e) { threw = true; what = e.what(); }
+    CHECK(threw);
+    CHECK(what.find("token limit") != std::string::npos);
+    CHECK(what.find("length") != std::string::npos);
+    StubChat stopped("whole answer");
+    stopped.finish = "stop";
+    CHECK(stopped.client()->chat_memory({{"user", "hi"}}) == "whole answer");
     std::println(" ok");
 }
 
@@ -2123,6 +2174,7 @@ int main() {
     x23_test_episode_regen_late_l2(env.base());
     x23_test_episode_regen_single_to_multi(env.base());
     x23_test_episode_regen_inference_down(env.base());
+    x27_test_response_truncated();
     p9b_test_utf8_safe_prefix();
     p9b_test_bad_prompt_no_escape(env.base());
     x10_test_bad_prompt_sends_no_request();

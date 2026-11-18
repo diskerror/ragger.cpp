@@ -36,7 +36,9 @@ static const ApiFormat OPENAI_FORMAT = {
     "choices[0].delta.content", // stream_content
     "",                         // stream_type_field
     "",                         // stream_type_value
-    "[DONE]"                    // stream_stop
+    "[DONE]",                   // stream_stop
+    "choices[0].finish_reason", // response_finish_reason
+    { "length" }                // finish_truncated_values
 };
 
 // -----------------------------------------------------------------------
@@ -103,6 +105,17 @@ static std::optional<ApiFormat> _load_format_file(const std::string& name) {
                 fmt.stream_type_field = json_string(j, "stream_type_field", "");
                 fmt.stream_type_value = json_string(j, "stream_type_value", "");
                 fmt.stream_stop = json_string(j, "stream_stop", OPENAI_FORMAT.stream_stop);
+                // A format file without these keys gets the OpenAI shape; on a
+                // differently shaped response the path simply does not resolve
+                // and nothing is reported as truncated.
+                fmt.response_finish_reason =
+                    json_string(j, "response_finish_reason", OPENAI_FORMAT.response_finish_reason);
+                if (j.contains("finish_truncated") && j["finish_truncated"].is_array()) {
+                    for (const auto& v : j["finish_truncated"])
+                        if (v.is_string()) fmt.finish_truncated_values.push_back(v.get<std::string>());
+                } else {
+                    fmt.finish_truncated_values = OPENAI_FORMAT.finish_truncated_values;
+                }
                 
                 // Load auth_extra as a map
                 if (j.contains("auth_extra") && j["auth_extra"].is_object()) {
@@ -344,6 +357,19 @@ std::string extract_content(const ApiFormat& fmt, const nlohmann::json& response
         }
     }
     return "";
+}
+
+bool response_truncated(const ApiFormat& fmt, const nlohmann::json& response,
+                        std::string* reason) {
+    if (reason) reason->clear();
+    if (fmt.response_finish_reason.empty()) return false;
+    auto r = _extract_path(response, fmt.response_finish_reason);
+    if (!r || !r->is_string()) return false;
+    const std::string s = r->get<std::string>();
+    if (reason) *reason = s;
+    for (const auto& v : fmt.finish_truncated_values)
+        if (s == v) return true;
+    return false;
 }
 
 std::string extract_stream_delta(const ApiFormat& fmt, const nlohmann::json& chunk) {

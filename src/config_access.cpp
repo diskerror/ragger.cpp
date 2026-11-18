@@ -113,6 +113,8 @@ const std::unordered_map<std::string_view, std::string Config::*>& string_fields
         {"summarizer_api_url",    &Config::summarizer_api_url},
         {"summarizer_api_key_env", &Config::summarizer_api_key_env},
         {"summarizer_prompt",     &Config::summarizer_prompt},
+        {"summarizer_title_prompt",   &Config::summarizer_title_prompt},
+        {"summarizer_trigger_prompt", &Config::summarizer_trigger_prompt},
         {"log_level",             &Config::log_level},
         {"default_recipe",        &Config::default_recipe},
         {"auto_recall_mode",      &Config::auto_recall_mode},

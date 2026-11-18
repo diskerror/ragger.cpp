@@ -461,8 +461,18 @@ std::string InferenceClient::chat(const std::vector<Message>& messages,
     }
 
     // Parse response using format
+    nlohmann::json response;
     try {
-        auto response = nlohmann::json::parse(resp.body);
+        response = nlohmann::json::parse(resp.body);
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::format(lang::ERR_PARSE_RESPONSE, e.what()));
+    }
+    // A reply cut off at the token limit is not a complete one: report it as
+    // a failure so the caller retries instead of storing it.
+    std::string finish;
+    if (response_truncated(fmt, response, &finish))
+        throw std::runtime_error(std::format(lang::ERR_RESPONSE_TRUNCATED, finish));
+    try {
         return extract_content(fmt, response);
     } catch (const std::exception& e) {
         throw std::runtime_error(std::format(lang::ERR_PARSE_RESPONSE, e.what()));

@@ -542,6 +542,8 @@ int reload_config() {
     RELOAD(summarizer_max_pct);
     RELOAD(summarizer_min_words);
     RELOAD(summarizer_prompt);
+    RELOAD(summarizer_title_prompt);
+    RELOAD(summarizer_trigger_prompt);
     // Endpoints: replace entirely if different
     if (cfg.inference_endpoints.size() != fresh.inference_endpoints.size()) {
         cfg.inference_endpoints = fresh.inference_endpoints;

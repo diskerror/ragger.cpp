@@ -109,6 +109,10 @@ SCHEMA = [
      "Hard cap as % of raw turn; 0 = 60%."),
     ("summarizer_prompt", "summarizer", "Prompt", "text", "live", "", "",
      "System prompt. Empty = built-in default. Two {} placeholders required."),
+    ("summarizer_title_prompt", "summarizer", "Session Title Prompt", "text", "live", "", "",
+     "System prompt for naming a session. Empty = built-in default."),
+    ("summarizer_trigger_prompt", "summarizer", "Trigger Prompt", "text", "live", "", "",
+     "System prompt for drafting a trigger. Empty = built-in default."),
     # logging
     ("log_level", "logging", "Log Level", "enum", "live", "warn",
      "trace,debug,info,warn,error,critical",
