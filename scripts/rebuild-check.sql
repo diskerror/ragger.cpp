@@ -54,10 +54,10 @@ SELECT 'l2_time_mismatch',
         WHERE ts.turn_datetime != t.created_at)
 
 UNION ALL
--- An episode's modified_on is the time its text was last written, so it can
--- never precede the end of the span it summarizes. Expected 0.
-SELECT 'episodes_modified_before_span_end',
-       (SELECT COUNT(*) FROM episodes WHERE modified_on < span_end)
+-- Episodes must be stamped at their span end (rule 18). Expected 0 after
+-- S56 + the one-time semqlite repair (8.3 item 5).
+SELECT 'episodes_created_at_not_span_end',
+       (SELECT COUNT(*) FROM episodes WHERE created_at != span_end)
 
 UNION ALL
 -- Episodes with no member summaries — a closed span nothing points at.
