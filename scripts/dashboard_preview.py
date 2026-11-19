@@ -67,12 +67,6 @@ SCHEMA = [
      "Target on-disk vector precision: f16 or f32."),
     ("desired_embedding_dimensions", "embedding", "Desired Dimensions", "integer", "rebuild", "384", "",
      "Target vector dimensionality. Model-determined."),
-    ("embed_timeout_ms", "embedding", "Embed Timeout (ms)", "integer", "live", "10000", "",
-     "Per-embed subprocess timeout in milliseconds."),
-    ("embed_retries", "embedding", "Embed Retries", "integer", "live", "1", "",
-     "Retries on a failed or timed-out embed."),
-    ("embed_max_workers", "embedding", "Max Workers", "integer", "live", "8", "",
-     "Cap on concurrent embed subprocesses."),
     # search
     ("default_limit", "search", "Default Limit", "integer", "live", "5", "",
      "Number of search results returned by default."),
@@ -116,12 +110,12 @@ SCHEMA = [
     ("summarizer_trigger_prompt", "summarizer", "Trigger Prompt", "text", "live", "", "",
      "System prompt for drafting a trigger. Empty = built-in default."),
     # logging
-    ("log_level", "logging", "Log Level", "enum", "live", "warn",
+    ("log_level", "logging", "Log Level", "enum", "restart", "warn",
      "trace,debug,info,warn,error,critical",
      "Verbosity of the single activity log."),
-    ("log_max_size_mb", "logging", "Log Max Size (MB)", "integer", "live", "1", "",
+    ("log_max_size_mb", "logging", "Log Max Size (MB)", "integer", "restart", "1", "",
      "Rotate activity.log at this size. 0 disables."),
-    ("log_max_age_days", "logging", "Log Max Age (days)", "integer", "live", "14", "",
+    ("log_max_age_days", "logging", "Log Max Age (days)", "integer", "restart", "14", "",
      "Delete rotated backups older than this. 0 disables."),
     # housekeeping
     ("housekeeping_interval", "housekeeping", "Housekeeping Interval (sec)", "integer", "live", "60", "",

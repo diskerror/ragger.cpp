@@ -41,7 +41,6 @@ symlink `~/.ragger` there instead.
 | `[embedding]`    | Model, vector dimensions, on-disk precision                    |
 | `[search]`       | Default limit, score floor, BM25/vector/phonetic blend |
 | `[summarizer]`   | Inference endpoint used by the turn and episode background worker     |
-| `[embed]`        | Embedding subprocess pool — timeouts, retries, concurrency     |
 | `[logging]`      | Log level (one unified log file — see below)                  |
 | `[housekeeping]` | Retention, pass cadence, episode-idle minutes                  |
 | `[import]`       | Minimum chunk size for markdown imports                        |
@@ -176,18 +175,9 @@ The same housekeeping loop catches turns that landed without a
 summary (e.g. captured via MCP while the daemon was down) and resumes
 the summarizer's backoff-deferred retries when inference comes back.
 
-## `[embed]`
-
-The `ragger embed` subprocess pool that actually invokes the embedding
-model.
-
-| Key           | Default | Description                                |
-|---------------|---------|--------------------------------------------|
-| `timeout_ms`  | `10000` | Per-subprocess timeout.                    |
-| `retries`     | `1`     | Retries on a failed or timed-out subprocess. |
-| `max_workers` | `8`     | Cap on concurrent embed subprocesses.      |
-
 ## `[logging]`
+
+All three take effect only after a daemon restart: the logger is set up once at startup. The dashboard marks them "restart required".
 
 | Key                | Default | Description                                                              |
 |--------------------|---------|----------------------------------------------------------------------------|

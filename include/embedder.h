@@ -66,7 +66,7 @@ public:
     std::optional<std::vector<float>> embed(const std::string& text) const override;
 
     /// Embed many texts sequentially (Embedder has no subprocess pool to
-    /// bound, unlike EmbedExecutor — batching here is just a loop).
+    /// bound — batching here is just a loop).
     std::vector<std::optional<std::vector<float>>>
     embed_batch(const std::vector<std::string>& texts) const override;
 

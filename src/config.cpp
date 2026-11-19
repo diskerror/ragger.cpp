@@ -337,13 +337,9 @@ static std::expected<Config, ConfigError> parse_config(std::istream& file,
             set_raw(key, val);  // minimum_chunk_size
         }
         else if (section == "embed") {
-            // Section-local key names (timeout_ms, retries, max_workers)
-            // differ from their schema keys (embed_timeout_ms, ...), so
-            // route through the schema key explicitly rather than passing
-            // the raw INI key.
-            if (key == "timeout_ms") set_config_field_raw(cfg, "embed_timeout_ms", val);
-            else if (key == "retries") set_config_field_raw(cfg, "embed_retries", val);
-            else if (key == "max_workers") set_config_field_raw(cfg, "embed_max_workers", val);
+            // Retired in 0.17 with EmbedExecutor (nothing spawned the
+            // `ragger embed` pool any more). Old INI files may still carry
+            // timeout_ms / retries / max_workers: accepted and ignored.
         }
         else if (section == "housekeeping") {
             if (key == "housekeeping_interval") {
@@ -563,12 +559,10 @@ int reload_config() {
     }
 
     // Logging
-    // (log_level itself is not hot-reloadable — Diskerror::Logger is
-    // constructed once at startup with the level fixed.)
-    // PHASE9B step 7: log_level, log_max_size_mb and log_max_age_days are all
-    // applied once at Logger construction (main.cpp), so reloading them would
-    // be cosmetic — they are deliberately absent here. The config metadata
-    // marks them Live; that mismatch is reported, not edited (Q2).
+    // log_level, log_max_size_mb and log_max_age_days are applied once at
+    // Logger construction (main.cpp), so reloading them would be cosmetic —
+    // they are deliberately absent here, and the schema marks them
+    // RestartRequired.
 
     // Paths
     RELOAD(normalize_home_path);
@@ -577,9 +571,6 @@ int reload_config() {
     RELOAD(minimum_chunk_size);
 
     // Embed (subprocess settings)
-    RELOAD(embed_timeout_ms);
-    RELOAD(embed_retries);
-    RELOAD(embed_max_workers);
 
     // Housekeeping / retention
     RELOAD(housekeeping_interval);

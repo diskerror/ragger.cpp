@@ -723,15 +723,6 @@ inline constexpr auto kConfigSchema = std::to_array<ConfigMeta>({
      "RAGGER_EMBEDDING_API_KEY", "",
      "NAME of the environment variable that holds the embedding endpoint's API key (never the key itself). Also published to the database's semqlite_config so SemanticSQLite reads the same variable. A daemon started by launchd does not inherit your shell environment: set the variable in the launchd plist."},
     // Embedding tweaks (always visible).
-    {"embed_timeout_ms", "embedding", "Embed Timeout (ms)", CfgType::Integer, CfgEdit::Live,
-     "10000", "",
-     "Per-embed subprocess timeout in milliseconds."},
-    {"embed_retries", "embedding", "Embed Retries", CfgType::Integer, CfgEdit::Live,
-     "1", "",
-     "Retries on a failed or timed-out embed."},
-    {"embed_max_workers", "embedding", "Max Workers", CfgType::Integer, CfgEdit::Live,
-     "8", "",
-     "Cap on concurrent embed subprocesses."},
 
     // ---- search ----
     {"default_limit", "search", "Default Limit", CfgType::Integer, CfgEdit::Live,
@@ -801,13 +792,13 @@ inline constexpr auto kConfigSchema = std::to_array<ConfigMeta>({
      "System prompt for drafting a decision's or insight's trigger (the Back-fill triggers job). Empty uses the built-in default (PROMPT_KNOWLEDGE_TRIGGER). No placeholders: the memory text is sent as the user message."},
 
     // ---- logging ----
-    {"log_level", "logging", "Log Level", CfgType::Enum, CfgEdit::Live,
+    {"log_level", "logging", "Log Level", CfgType::Enum, CfgEdit::RestartRequired,
      "warn", "trace,debug,info,warn,error,critical",
      "Verbosity of the single activity log. Everything (query/HTTP/MCP/general) goes to one log."},
-    {"log_max_size_mb", "logging", "Log Max Size (MB)", CfgType::Integer, CfgEdit::Live,
+    {"log_max_size_mb", "logging", "Log Max Size (MB)", CfgType::Integer, CfgEdit::RestartRequired,
      "1", "",
      "Rotate activity.log once it reaches this size (MB). 0 disables size-based rotation. Built in — no external tool or root needed."},
-    {"log_max_age_days", "logging", "Log Max Age (days)", CfgType::Integer, CfgEdit::Live,
+    {"log_max_age_days", "logging", "Log Max Age (days)", CfgType::Integer, CfgEdit::RestartRequired,
      "14", "",
      "Delete rotated backups older than this many days. Never touches the live log. 0 disables age-based cleanup."},
 

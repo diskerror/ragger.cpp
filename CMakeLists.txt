@@ -265,7 +265,6 @@ add_library(ragger_core STATIC
     src/recipe.cpp
     src/recipe_cli.cpp
     src/embedder.cpp
-    src/embed_executor.cpp
     src/tokenizer_wrapper.cpp
     src/fts_tokenize.cpp
     src/text_index.cpp

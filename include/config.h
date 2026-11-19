@@ -121,9 +121,6 @@ struct Config {
     bool  fts_literal_enabled  = true;
 
     // --- Embed (subprocess) ---
-    int embed_timeout_ms  = 10000;
-    int embed_retries     = 1;
-    int embed_max_workers = 8;   // cap concurrent `ragger embed` subprocesses
 
     // --- Inference ---
     struct InferenceEndpointConfig {

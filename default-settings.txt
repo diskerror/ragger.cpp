@@ -105,15 +105,7 @@ max_tokens = 1024
 target_pct = 40    # target summary length as % of raw turn; 0 = 30%
 max_pct    = 60    # hard cap as % of raw turn; 0 = 60%
 # The system prompt is NOT set here: an empty summarizer_prompt selects the
-# built-in default (Config::kDefaultSummarizerPrompt); set it from the dashboard.
-
-# =====================================================================
-# Embedder executor (the spawned `ragger embed` subprocess pool)
-# =====================================================================
-[embed]
-timeout_ms  = 10000  # per-embed subprocess timeout
-retries     = 1      # retries on a failed/timed-out embed
-max_workers = 8      # cap on concurrent embed subprocesses
+# built-in default (lang::PROMPT_TURN_SUMMARY in include/lang/en.h); set it from the dashboard.
 
 # =====================================================================
 # Logging

@@ -1,25 +1,13 @@
 /**
  * IEmbedProvider — common abstract interface for text-embedding providers.
  *
- * Ragger has two ways to turn text into a vector: `Embedder` (in-process
- * ONNX Runtime, or an HTTP call to an external OpenAI-compatible endpoint)
- * and `EmbedExecutor` (spawns a `ragger embed` subprocess so a hung/crashed
- * model can't take the daemon down — issue #41). Call sites that only need
- * "give me a vector for this text" should depend on IEmbedProvider rather
- * than on either concrete class, so a future config knob could pick either
- * implementation without the call site changing.
- *
- * The two concrete classes did not agree on signatures before this
- * interface existed:
- *   - Embedder::encode()  returns std::vector<float>, empty vector == failure
- *   - EmbedExecutor::one() returns std::optional<std::vector<float>>,
- *     nullopt == failure (timeout / spawn / parse error)
- * EmbedExecutor's optional-based, explicit-failure signature is the
- * genuinely safer contract (an empty-vs-nullopt convention is easy to get
- * wrong at call sites), so the interface adopts it; Embedder gains a thin
- * `embed()`/`embed_batch()` adapter on top of its existing encode()/ready()
- * rather than changing encode()'s existing return type (which callers such
- * as memory.cpp already rely on).
+ * `Embedder` (in-process ONNX Runtime, or an HTTP call to an external
+ * OpenAI-compatible endpoint) is the implementation. The interface was cut
+ * when a second one, EmbedExecutor (a `ragger embed` subprocess pool), also
+ * existed; that one was retired in 0.17. The contract it brought stays:
+ * std::optional on failure (nullopt == failure), which is safer at call
+ * sites than an empty-vector convention. Embedder adapts its encode()/
+ * ready() to it through embed()/embed_batch().
  */
 #pragma once
 
