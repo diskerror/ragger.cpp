@@ -11,7 +11,8 @@
 #
 # Usage:
 #   scripts/summarizer-lab.sh --model NAME --output FILE \
-#       [--text "raw text"] [--turns 1,2,42] [--titles 4,9] [--triggers 36,5] \
+#       [--text "raw text"] [--turns 1,2,42] [--episodes 2086,2107] \
+#       [--titles 4,9] [--triggers 36,5] \
 #       [--host 127.0.0.1] [--port 1234] [--api /v1/chat/completions] \
 #       [--db ~/.ragger/memories] [--prompts settings|builtin]
 #
@@ -19,7 +20,9 @@
 #   --prompts settings (default): use the prompts saved in the database's
 #     settings table where set, else the built-ins — what the daemon uses.
 #     builtin: always the built-in defaults from include/lang/en.h.
-#   --titles takes session_id values; --triggers takes knowledge_id values.
+#   --episodes takes episode_id values (its member turn summaries are the
+#     input); --titles takes session_id values; --triggers takes knowledge_id
+#     values.
 #
 # Differences from the daemon, on purpose: every item is sent to the model,
 # including short turns Ragger would copy without a call (marked "floor" in
@@ -37,6 +40,7 @@ MODEL=""
 OUTPUT=""
 TEXT=""
 TURNS=""
+EPISODES=""
 TITLES=""
 TRIGGERS=""
 PROMPTS=settings
@@ -54,6 +58,7 @@ while [ $# -gt 0 ]; do
         --output)   OUTPUT="$2"; shift 2 ;;
         --text)     TEXT="$2"; shift 2 ;;
         --turns)    TURNS="$2"; shift 2 ;;
+        --episodes) EPISODES="$2"; shift 2 ;;
         --titles)   TITLES="$2"; shift 2 ;;
         --triggers) TRIGGERS="$2"; shift 2 ;;
         --prompts)  PROMPTS="$2"; shift 2 ;;
@@ -76,13 +81,13 @@ if [ -z "$MODEL" ]; then
 fi
 
 [ -n "$OUTPUT" ] || die "--output is required"
-[ -n "$TEXT$TURNS$TITLES$TRIGGERS" ] || die "give at least one of --text, --turns, --titles, --triggers"
+[ -n "$TEXT$TURNS$EPISODES$TITLES$TRIGGERS" ] || die "give at least one of --text, --turns, --episodes, --titles, --triggers"
 case "$PROMPTS" in settings|builtin) ;; *) die "--prompts must be settings or builtin" ;; esac
 
 # The database: accept the name with or without .db.
 DB="${DB/#\~/$HOME}"
 [ -f "$DB" ] || [ ! -f "$DB.db" ] || DB="$DB.db"
-if [ -n "$TURNS$TITLES$TRIGGERS" ] || [ "$PROMPTS" = settings ]; then
+if [ -n "$TURNS$EPISODES$TITLES$TRIGGERS" ] || [ "$PROMPTS" = settings ]; then
     [ -f "$DB" ] || die "database not found: $DB"
 fi
 
@@ -124,6 +129,7 @@ prompt_for() {   # prompt_for SETTING_KEY PROMPT_NAME
 }
 
 TURN_PROMPT="$(prompt_for summarizer_prompt PROMPT_TURN_SUMMARY)"
+EPISODE_PROMPT="$(prompt_for summarizer_episode_prompt PROMPT_EPISODE_SUMMARY)"
 TITLE_PROMPT="$(prompt_for summarizer_title_prompt PROMPT_SESSION_TITLE)"
 TRIGGER_PROMPT="$(prompt_for summarizer_trigger_prompt PROMPT_KNOWLEDGE_TRIGGER)"
 
@@ -150,11 +156,11 @@ system_injected() {
     return 1
 }
 
-turn_system_prompt() {   # turn_system_prompt SOURCE_BYTES -> prompt with sizes filled
+turn_system_prompt() {   # turn_system_prompt SOURCE_BYTES [PROMPT] -> prompt with sizes filled
     local n="$1" t c p
     t=$(( n * TARGET_PCT / 100 )); [ "$t" -lt 40 ] && t=40
     c=$(( n * MAX_PCT / 100 ));    [ "$c" -lt "$t" ] && c="$t"
-    p="$TURN_PROMPT"
+    p="${2-$TURN_PROMPT}"
     p="${p/\{\}/$t}"
     p="${p/\{\}/$c}"
     printf '%s' "$p"
@@ -246,6 +252,23 @@ for id in $(ids "$TURNS"); do
     fi
     call "$(turn_system_prompt "$n")" "$conv"
     emit turns "$id" "$src" "$note"
+done
+
+for id in $(ids "$EPISODES"); do
+    # Members as the episode summarizer gets them: non-empty turn summaries in
+    # time order, joined by a blank line; the budget is their summed length.
+    members="$(sql "SELECT group_concat(text, char(10)||char(10)) FROM (
+                      SELECT text FROM turn_summaries
+                      WHERE episode_id = $id AND text IS NOT NULL AND text <> ''
+                      ORDER BY turn_datetime, turn_summary_id);")"
+    if [ -z "$members" ]; then echo "  episodes $id: not found or no member summaries" >&2; continue; fi
+    nmem="$(sql "SELECT count(*) FROM turn_summaries WHERE episode_id = $id AND text IS NOT NULL AND text <> '';")"
+    nbytes="$(sql "SELECT sum(length(CAST(text AS BLOB))) FROM turn_summaries WHERE episode_id = $id AND text IS NOT NULL AND text <> '';")"
+    cur="$(sql "SELECT COALESCE(text,'') FROM episodes WHERE episode_id = $id;")"
+    ep="$EPISODE_PROMPT"
+    ep="${ep/\{N\}/$nmem}"
+    call "$(turn_system_prompt "$nbytes" "$ep")" "$members"
+    emit episodes "$id" "$members" "$nmem member summaries; current episode text ($(bytes "$cur") chars): $cur"
 done
 
 for id in $(ids "$TITLES"); do
