@@ -332,6 +332,30 @@ void x25_test_split_properties(HttpFixture& fx) {
     std::println(" OK");
 }
 
+// Saving the summarizer model through PUT /config takes effect at once:
+// /health reports the model from the live inference client, not from the
+// config, so it changes only if the client was rebuilt.
+void t_summarizer_model_live(HttpFixture& fx) {
+    std::println("  t_summarizer_model_live...");
+    auto put = [&](const char* key, const char* value) {
+        const std::string body = json{{"value", value}}.dump();
+        return fx.client.request("PUT", fx.url(std::string("/config/") + key), body, fx.auth());
+    };
+    auto health_model = [&] {
+        auto r = fx.client.get(fx.url("/health"));
+        return json::parse(r.body).value("summarizer_model", std::string("?"));
+    };
+    CHECK(put("summarizer_api_url", "http://127.0.0.1:9/v1").status == 200);
+    CHECK(put("summarizer_model", "lab-model-a").status == 200);
+    CHECK(health_model() == "lab-model-a");
+    CHECK(put("summarizer_model", "lab-model-b").status == 200);
+    CHECK(health_model() == "lab-model-b");
+    // Restore the fixture's defaults for the tests that follow.
+    CHECK(put("summarizer_model", "").status == 200);
+    CHECK(put("summarizer_api_url", "").status == 200);
+    std::println(" OK");
+}
+
 // GET /health is the unauthenticated readiness probe.
 void t_health_no_token(HttpFixture& fx) {
     std::println("  t_health_no_token...");
@@ -1078,6 +1102,7 @@ int main() {
     std::println("Running HTTP route tests against 127.0.0.1:{}:", fx.port);
 
     t_health_no_token(fx);
+    t_summarizer_model_live(fx);
     t_loopback_auth_contract(fx);
     t_dns_rebinding_host_guard(fx);
     t_store_then_search(fx);

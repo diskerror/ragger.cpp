@@ -328,14 +328,7 @@ struct Server::Impl {
                     if (n > 0) {
                         Diskerror::Logger::info(std::format(ragger::lang::MSG_CONFIG_RELOADED_N, n));
                         // Re-initialize inference client if endpoints changed
-                        try {
-                            auto fresh = std::make_shared<InferenceClient>(
-                                InferenceClient::from_config(config()));
-                            set_inference(std::move(fresh));
-                            Diskerror::Logger::info(lang::MSG_INFERENCE_CLIENT_OK);
-                        } catch (const std::exception& e) {
-                            Diskerror::Logger::critical(std::format(lang::ERR_INFERENCE_CLIENT_FAIL, e.what()));
-                        }
+                        reload_inference();
                     } else {
                         Diskerror::Logger::info(lang::MSG_CONFIG_RELOADED_NONE);
                     }
@@ -388,6 +381,30 @@ struct Server::Impl {
         if (poller_thread_.joinable()) {
             poller_thread_.join();
         }
+    }
+
+    /// Rebuild the inference client from the current config. The client
+    /// copies the model names, endpoints and max_tokens when it is built, so
+    /// a change to any of them takes effect only through a rebuild. Callers
+    /// holding the old snapshot (inference()) finish with it.
+    void reload_inference() {
+        try {
+            auto fresh = std::make_shared<InferenceClient>(
+                InferenceClient::from_config(config()));
+            set_inference(std::move(fresh));
+            Diskerror::Logger::info(lang::MSG_INFERENCE_CLIENT_OK);
+        } catch (const std::exception& e) {
+            Diskerror::Logger::critical(std::format(lang::ERR_INFERENCE_CLIENT_FAIL, e.what()));
+        }
+    }
+
+    /// Settings InferenceClient::from_config reads: saving one of these
+    /// through PUT /config must rebuild the client, or the daemon keeps
+    /// calling the old model/endpoint until a restart or SIGHUP.
+    static bool affects_inference(std::string_view key) {
+        return key == "summarizer_model" || key == "summarizer_api_url" ||
+               key == "summarizer_api_key" || key == "summarizer_max_tokens" ||
+               key.starts_with("inference_");
     }
 
     void init_inference() {
@@ -787,6 +804,7 @@ struct Server::Impl {
                 Diskerror::Logger::debug(std::format("PUT /config/{} {}", key, res.status));
                 return;
             }
+            if (affects_inference(key)) reload_inference();
             // Echo the resolved (post-default) value plus apply flags.
             auto v = get_config_value(config(), key);
             json out = {{"key", key}, {"value", v.value_or("")},
