@@ -711,7 +711,7 @@ inline constexpr auto kConfigSchema = std::to_array<ConfigMeta>({
      "Target on-disk vector precision. f32 (lossless, 4B/dim), f16 (half, 2B/dim), bf16 (bfloat16, 2B/dim), or int8 (quantized, 1B/dim). Changing this stages a re-embed; run 'Update now' or ragger re-embed to re-encode at the new precision."},
     {"desired_embedding_dimensions", "embedding", "Desired Dimensions", CfgType::Integer, CfgEdit::RebuildRequired,
      "", "",
-     "Target vector dimensionality. Model-determined; usually leave as the model's native size."},
+     "Target vector dimensionality. Model-determined; usually leave as the model's native size. The field will not be editable if only one dimension value is available."},
     // External connection details (shown only when engine=external).
     {"embedding_external_host", "embedding", "External Host", CfgType::String, CfgEdit::RebuildRequired,
      "", "",
