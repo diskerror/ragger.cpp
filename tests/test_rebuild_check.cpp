@@ -197,9 +197,10 @@ int main() {
             // turns: T1 has no summary; T2 exists to carry the time mismatch
             "INSERT INTO turns(turn_id, user_text, created_at, session_id) VALUES "
             "  (1, 'u1', 900, 1), (2, 'u2', 1000, 1);"
-            // episodes: E1 clean span covering 1000..1020; E2 wrong created_at
-            // and no members; E3 empty text (evidence target), no members
-            "INSERT INTO episodes(episode_id, text, session_id, span_start, span_end, created_at) VALUES "
+            // episodes: E1 clean span covering 1000..1020 (modified_on ==
+            // span_end); E2 modified_on BELOW its span_end (the one defect);
+            // E3 empty text (evidence target), no members
+            "INSERT INTO episodes(episode_id, text, session_id, span_start, span_end, modified_on) VALUES "
             "  (1, 'E1', 1, 1000, 1020, 1020), "
             "  (2, 'E2', 1, 2000, 2010, 1999), "
             "  (3, '',    1, 3000, 3010, 3010);"
@@ -235,7 +236,7 @@ int main() {
             {"l2_empty_text_not_bad", 2},          // S2 and S7
             {"l2_bad_rows", 1},
             {"l2_time_mismatch", 1},
-            {"episodes_created_at_not_span_end", 1},
+            {"episodes_modified_before_span_end", 1},
             {"episodes_without_members", 2},          // E2 and E3
             {"l2_stranded", 1},
             {"l2_open_tail", 1},

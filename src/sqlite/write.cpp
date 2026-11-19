@@ -1471,7 +1471,8 @@ static std::string tags_from_metadata(const json& metadata) {
     // while the summary was being built keeps the row stale for the next
     // tick) -> per-attach guarded UPDATE (ZERO rows rolls EVERYTHING back:
     // someone else attached it) -> COMMIT -> invalidate. span_start,
-    // span_end, created_at and session_id are never touched.
+    // span_end and session_id are never touched; modified_on is stamped
+    // with unixepoch() on every write (X30).
     bool Backend::Impl::replace_episode_text(
             int episode_id, const std::string& text, const std::string& model_name,
             const std::vector<std::pair<int,int>>& cleared,
@@ -1486,7 +1487,7 @@ static std::string tags_from_metadata(const json& metadata) {
         Transaction tx(db);
         Stmt u(db,
             "UPDATE episodes SET text = ?, model_id = ?, embedding_version = ?, "
-            "embedding = ? WHERE episode_id = ?");
+            "embedding = ?, modified_on = unixepoch() WHERE episode_id = ?");
         u.bind(1, t);
         if (model_id) u.bind(2, model_id); else u.bind_null(2);
         bind_embedding_version(u.raw(), 3, emb);
@@ -1847,20 +1848,20 @@ static std::string tags_from_metadata(const json& metadata) {
         auto emb = require_embedder().encode(t);
 
         Transaction tx(db);
-        // LR S56 (time rule): created_at is the time of the LAST member turn
-        // (= span_end), not the close moment; the DEFAULT unixepoch() stays in
-        // the DDL for rows written outside this path.
+        // X30: modified_on is the time the text is written — left to the
+        // column DEFAULT unixepoch(). The old LR S56 rule (created_at =
+        // span_end) is gone: an episode's span says when its turns happened;
+        // modified_on says when its derived text last changed.
         Stmt ins(db,
             "INSERT INTO episodes (text, tags, session_id, model_id, "
-            "span_start, span_end, embedding_version, embedding, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)");
+            "span_start, span_end, embedding_version, embedding) "
+            "VALUES (?,?,?,?,?,?,?,?)");
         ins.bind(1, t).bind(2, std::string(""));
         ins.bind(3, session_id);
         if (model_id) ins.bind(4, model_id); else ins.bind_null(4);
         ins.bind(5, close.span_start).bind(6, close.span_end);
         bind_embedding_version(ins.raw(), 7, emb);
         bind_embedding(ins.raw(), 8, emb);
-        ins.bind(9, close.span_end);
         if (!ins.exec()) {
             if (sqlite3_extended_errcode(db) == SQLITE_CONSTRAINT_UNIQUE) {
                 // Someone already closed this (session, span_start): not an

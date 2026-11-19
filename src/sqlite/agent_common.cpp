@@ -195,9 +195,12 @@ json fetch_agent_row(sqlite3* db, const std::string& layer, int rowid) {
     // PHASE8: the `summary` layer is gone (notes are knowledge rows; see
     // is_legacy_summary_handle for the pointed rejection).
     if (layer == "episode") {
+        // X30: the API keys keep their names; both time keys read
+        // modified_on — for episodes `created` is the time the text was
+        // last written, not the time the turns happened (the span says that).
         Stmt s(db, "SELECT text, "
-                   "datetime(created_at,'unixepoch','localtime'), "
-                   "datetime(created_at,'unixepoch','localtime'), "   // immutable: updated == created
+                   "datetime(modified_on,'unixepoch','localtime'), "
+                   "datetime(modified_on,'unixepoch','localtime'), "
                    "datetime(span_start,'unixepoch','localtime'), "
                    "datetime(span_end,'unixepoch','localtime'), "
                    "COALESCE((SELECT guid FROM sessions WHERE session_id = episodes.session_id), '') "

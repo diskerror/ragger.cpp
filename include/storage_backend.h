@@ -432,8 +432,8 @@ public:
     /// attach `episode_id = ? WHERE ... episode_id IS NULL AND text != ''`
     /// (ZERO rows changed rolls EVERYTHING back and returns false — someone
     /// else attached it) -> COMMIT -> invalidate. Empty text ->
-    /// std::invalid_argument. span_start, span_end, created_at and
-    /// session_id are never touched.
+    /// std::invalid_argument. span_start, span_end and session_id are never
+    /// touched; `modified_on` is stamped with unixepoch() on every write.
     virtual bool replace_episode_text(int episode_id, const std::string& text,
                                       const std::string& model_name,
                                       const std::vector<std::pair<int,int>>& cleared,

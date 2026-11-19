@@ -881,7 +881,7 @@ std::string setting_or(Impl& self, const char* key, const char* fallback);
                            "GROUP BY 1, 2 HAVING COUNT(*) > 1 LIMIT 1");
                 if (d.step())
                     throw std::runtime_error(std::format(
-                        "0.16 -> 0.17 migration: {} episodes share (session {}, created_at {}). "
+                        "0.16 -> 0.17 migration: {} episodes share (session {}, span_start {}). "
                         "Episode keys must be unique per (session, span_start). Delete or "
                         "fix the duplicates, then restart; nothing was changed.",
                         d.column_int(2), d.column_int64(0), d.column_int64(1)));
@@ -953,7 +953,7 @@ std::string setting_or(Impl& self, const char* key, const char* fallback);
             exec(ddl::episodes());
             exec(R"(
                 INSERT INTO episodes (episode_id, text, tags, session_id, model_id,
-                                      span_start, span_end, created_at,
+                                      span_start, span_end, modified_on,
                                       unigram_count, bigram_count, embedding_version, embedding)
                 SELECT summary_id, text, tags, session_id, model_id,
                        created_at, updated_at, created_at,

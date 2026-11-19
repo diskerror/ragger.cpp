@@ -370,7 +370,7 @@ namespace fs = std::filesystem;
             SELECT episode_id, text, tags, session_id, model_id,
                    datetime(span_start, 'unixepoch', 'localtime') AS span_start,
                    datetime(span_end, 'unixepoch', 'localtime') AS span_end,
-                   datetime(created_at, 'unixepoch', 'localtime') AS created_at,
+                   datetime(modified_on, 'unixepoch', 'localtime') AS modified_on,
                    unigram_count, bigram_count,
                    embedding_version,
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding

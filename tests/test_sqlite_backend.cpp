@@ -448,7 +448,7 @@ void test_timestamp_format(ragger::Embedder& emb) {
     auto all = db.load_all();
     CHECK(all.size() == 1);
 
-    // PHASE8: load_all renders knowledge.created_at as local
+    // PHASE8: load_all renders knowledge's created_at as local
     // "YYYY-MM-DD HH:MM:SS" (same rendering as every other read path).
     auto& ts = all[0].timestamp;
     CHECK(!ts.empty());
@@ -2436,7 +2436,7 @@ void test_migrate_0_16_to_0_17_rejects(ragger::Embedder& emb) {
     expect_refused("2 chunks share (source 1, chunk_index 1)");
 
     make_fixture(/*dup_chunks=*/false, /*dup_episodes=*/true);
-    expect_refused("2 episodes share (session 1, created_at 500)");
+    expect_refused("2 episodes share (session 1, span_start 500)");
 }
 
 // X29: episodes are derived text and are replaced in place — there is no
@@ -3598,7 +3598,7 @@ void test_p2_possible_supersedes(ragger::Embedder& emb) {
     db.close();
     cleanup();
 }
-// Step 1: three sessions with episodes at known created_at -> newest first;
+// Step 1: three sessions with episodes at known span_start -> newest first;
 // paging limit 2 over 5 rows -> 2, 2, 1 with next_cursor null at the end.
 void test_p4_timeline_order_and_paging(ragger::Embedder& emb) {
     cleanup();
@@ -5744,12 +5744,11 @@ void p9b_test_episode_close_unknown_session(ragger::Embedder& emb) {
     std::println(" OK");
 }
 
-// LR S56 (time rule): an episode's created_at is the time of its LAST member
-// turn (= span_end), not the moment it was closed. Pin first: the old INSERT
-// omits created_at, so it falls to DEFAULT unixepoch() (close time, which is
-// "now" in a test run — far from a seeded 2026-05-01 span).
-void lr56_test_episode_created_at_is_span_end(ragger::Embedder& emb) {
-    std::println("  lr56_test_episode_created_at_is_span_end...");
+// X30 (replaces the LR S56 pin): the old rule created_at = span_end is gone.
+// An episode carries modified_on — the time its text was written — so an
+// insert stamps unixepoch(), NOT the (seeded, past) span end.
+void lr56_test_episode_modified_on_at_insert(ragger::Embedder& emb) {
+    std::println("  lr56_test_episode_modified_on_at_insert...");
     cleanup();
     ragger::sqlite::Backend db(emb, TEMP_DB);
 
@@ -5764,12 +5763,16 @@ void lr56_test_episode_created_at_is_span_end(ragger::Embedder& emb) {
     ec.span_start = p5_epoch("2026-05-01 10:00:00");
     ec.span_end   = p5_epoch("2026-05-01 10:10:00");
     ec.member_turn_summary_ids = m;
+    const long long now_before = std::time(nullptr);
     const int ep = db.store_episode_close(ec);
     CHECK(ep > 0);
 
     sqlite3* raw = p1_open_raw();
-    CHECK(p1_scalar_int(raw, "SELECT created_at FROM episodes WHERE episode_id = "
-                             + std::to_string(ep)) == ec.span_end);
+    const long long modified = p1_scalar_int(raw, "SELECT modified_on FROM episodes WHERE episode_id = "
+                             + std::to_string(ep));
+    CHECK(modified >= ec.span_end);          // write time, not span end
+    CHECK(modified >= now_before);           // stamped at insert (unixepoch)
+    CHECK(modified <= std::time(nullptr) + 1);
     // The close must not move a member's turn_datetime (rule 18).
     CHECK(p1_scalar_int(raw, "SELECT turn_datetime FROM turn_summaries WHERE turn_summary_id = "
                              + std::to_string(m[0])) == p5_epoch("2026-05-01 10:00:00"));
@@ -7425,7 +7428,7 @@ void x23_test_episode_members_and_replace(ragger::Embedder& emb) {
         };
         const long long span_s0 = ep_sql("span_start");
         const long long span_e0 = ep_sql("span_end");
-        const long long created0 = ep_sql("created_at");
+        const long long modified0 = ep_sql("modified_on");
         const long long sess0 = ep_sql("session_id");
 
         // episode_members: turn_datetime order, live-turn texts, provenance.
@@ -7467,7 +7470,7 @@ void x23_test_episode_members_and_replace(ragger::Embedder& emb) {
         CHECK(ep_sql("embedding IS NOT NULL") == 1);
         CHECK(ep_sql("span_start") == span_s0);
         CHECK(ep_sql("span_end") == span_e0);
-        CHECK(ep_sql("created_at") == created0);
+        CHECK(ep_sql("modified_on") >= modified0);   // X30: the replace stamps it
         CHECK(ep_sql("session_id") == sess0);
         CHECK(p1_scalar_int(raw, "SELECT episode_id FROM turn_summaries WHERE turn_summary_id = "
                                   + std::to_string(ts3)) == ep);
@@ -7647,8 +7650,8 @@ void lr67_test_backfill_session_names(ragger::Embedder& emb) {
 
 // S68 (rule 18): the time invariants as one scenario — turn_datetime
 // always equals its turn's created_at (before AND after a regenerate
-// back-fill), episodes carry created_at = span_end, and copy rows record
-// the S62 provenance model.
+// back-fill), episodes carry modified_on >= span_end (the text write time,
+// X30), and copy rows record the S62 provenance model.
 void lr68_test_time_invariants(ragger::Embedder& emb) {
     std::println("  lr68_test_time_invariants...");
     cleanup();
@@ -7670,8 +7673,8 @@ void lr68_test_time_invariants(ragger::Embedder& emb) {
     ec.member_turn_summary_ids = m;
     const int ep = db.store_episode_close(ec);
     CHECK(ep > 0);
-    CHECK(p1_scalar_int(raw, "SELECT created_at FROM episodes WHERE episode_id = " + std::to_string(ep))
-          == p5_epoch("2026-06-01 09:10:00"));
+    CHECK(p1_scalar_int(raw, "SELECT modified_on FROM episodes WHERE episode_id = " + std::to_string(ep))
+          >= p5_epoch("2026-06-01 09:10:00"));
 
     // Regenerate both rows: turn_datetime (and episode membership) unchanged.
     {
@@ -9198,7 +9201,7 @@ int main() {
     p4_session_span(emb);
     p5_test_episode_close(emb);
     p9b_test_episode_close_unknown_session(emb);
-    lr56_test_episode_created_at_is_span_end(emb);
+    lr56_test_episode_modified_on_at_insert(emb);
     lr57_test_finalize_turn_merges(emb);
     p9b_test_timestamp_formats(emb);
     p9b_test_checked_writes(emb);

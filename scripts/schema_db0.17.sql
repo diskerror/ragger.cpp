@@ -256,7 +256,7 @@ CREATE TABLE episodes (
                 model_id    INTEGER REFERENCES models(model_id),
                 span_start  INTEGER NOT NULL,
                 span_end    INTEGER NOT NULL,
-                created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                modified_on INTEGER NOT NULL DEFAULT (unixepoch()),
                 unigram_count INTEGER NOT NULL DEFAULT 0,
                 bigram_count  INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER,
@@ -339,7 +339,7 @@ CREATE VIEW episodes_view AS
             SELECT episode_id, text, tags, session_id, model_id,
                    datetime(span_start, 'unixepoch', 'localtime') AS span_start,
                    datetime(span_end, 'unixepoch', 'localtime') AS span_end,
-                   datetime(created_at, 'unixepoch', 'localtime') AS created_at,
+                   datetime(modified_on, 'unixepoch', 'localtime') AS modified_on,
                    unigram_count, bigram_count,
                    embedding_version,
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding

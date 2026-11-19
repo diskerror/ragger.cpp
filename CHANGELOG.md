@@ -30,6 +30,7 @@
 - One `knowledge` table (kind: decision | insight | note) replaces `decisions`, `insights` and note summaries; typed handles are `knowledge:N` — `decision:N` / `insight:N` are rejected with a pointer to the new form
 - `episodes` is a real table; membership is recorded on turn summaries (`episode_id`)
 - `episodes` has no `supersedes`: episode text is derived and replaced in place, so there is no supersede chain. The column, `idx_episodes_supersedes` and the `episodes_view` column are gone; the unique key on `(session_id, span_start)` now covers every episode (it used to exempt superseded copies)
+- `episodes.created_at` is now `modified_on`: the time the episode's text was last written — stamped on insert and on every in-place replace. The old rule `created_at = span_end` is gone (the span already says when the turns happened). The agent API keeps its `created` key for episodes; it now reports that write time. `scripts/rebuild-check.sql` checks `episodes_modified_before_span_end` instead of the old equality check
 - The `summaries` and `projects` tables are removed; sessions group only, and "project" is a tag (`project:<name>`)
 - `sessions` gains `started_on` / `ended_on`, maintained from the session's turns on write
 - Migration is 0.16→0.17 only; databases older than 0.16 are refused untouched — upgrade to v0.16.2.3 first

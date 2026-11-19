@@ -124,9 +124,10 @@ inline std::string knowledge_document_evidence_indexes() {
 
 // episodes (PHASE5) — narrative segments over consecutive turn summaries.
 // Episodes are derived text and are replaced in place (no supersede chain).
-// New at 0.17 (never rebuilt), so no name parameter. span_start/span_end are
-// epoch seconds of first/last member. The unique index allows only ONE episode
-// per (session, span_start).
+// modified_on is the time the text was last written (stamped on insert and
+// on every in-place replace). New at 0.17 (never rebuilt), so no name
+// parameter. span_start/span_end are epoch seconds of first/last member. The
+// unique index allows only ONE episode per (session, span_start).
 inline std::string episodes() {
     return R"(CREATE TABLE episodes (
                 episode_id  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,7 +137,7 @@ inline std::string episodes() {
                 model_id    INTEGER REFERENCES models(model_id),
                 span_start  INTEGER NOT NULL,
                 span_end    INTEGER NOT NULL,
-                created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+                modified_on INTEGER NOT NULL DEFAULT (unixepoch()),
                 unigram_count INTEGER NOT NULL DEFAULT 0,
                 bigram_count  INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER,

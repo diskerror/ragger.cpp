@@ -336,7 +336,9 @@ one mode per call.
 **Response:** `{"items": [...]}` — full row objects per handle (or
 `{"id", "error": "not found"}` entries); mode 2 returns the session's
 turns, each carrying `turn_summary_id` and `episode_id` (`null` when the
-turn has none) so a reader can fill `evidence[]` handles.
+turn has none) so a reader can fill `evidence[]` handles. For episodes the
+`created` field is the time the text was last written (`modified_on`), not
+the time the turns happened — the span fields carry that.
 
 **Status codes:** `400` if both or neither mode is set, or a handle is
 malformed.

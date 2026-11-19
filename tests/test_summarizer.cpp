@@ -1670,7 +1670,9 @@ std::string x23_long_text(const std::string& tag, int n = 25) {
 // tick + drain -> the member text is refreshed AND the episode text equals
 // the fake summary of the member texts in order (the request body carries
 // the refreshed member 1 text before member 2's), the episode embedding is
-// re-computed, stale == 0, span_*/created_at unchanged, and the text index
+// re-computed, stale == 0, span_* unchanged, modified_on >= its value before
+// the regen (X30: the replace stamps it; both can fall in the same second),
+// and the text index
 // finds a word only the new summary has (not one only the old had).
 void x23_test_episode_regen_stale_member(const std::string& base, const std::string& model_dir) {
     std::println("  x23_test_episode_regen_stale_member...");
@@ -1767,7 +1769,7 @@ void x23_test_episode_regen_stale_member(const std::string& base, const std::str
 
     const long long span_s0 = scalar("SELECT span_start FROM episodes WHERE episode_id = " + std::to_string(ep));
     const long long span_e0 = scalar("SELECT span_end FROM episodes WHERE episode_id = " + std::to_string(ep));
-    const long long created0 = scalar("SELECT created_at FROM episodes WHERE episode_id = " + std::to_string(ep));
+    const long long modified0 = scalar("SELECT modified_on FROM episodes WHERE episode_id = " + std::to_string(ep));
     const long long sess0 = scalar("SELECT session_id FROM episodes WHERE episode_id = " + std::to_string(ep));
     const std::vector<char> ep_emb0 = blob("SELECT embedding FROM episodes WHERE episode_id = " + std::to_string(ep));
 
@@ -1803,7 +1805,8 @@ void x23_test_episode_regen_stale_member(const std::string& base, const std::str
     // Identity columns untouched; embedding re-computed.
     CHECK(scalar("SELECT span_start FROM episodes WHERE episode_id = " + std::to_string(ep)) == span_s0);
     CHECK(scalar("SELECT span_end FROM episodes WHERE episode_id = " + std::to_string(ep)) == span_e0);
-    CHECK(scalar("SELECT created_at FROM episodes WHERE episode_id = " + std::to_string(ep)) == created0);
+    CHECK(scalar("SELECT modified_on FROM episodes WHERE episode_id = " + std::to_string(ep))
+          >= modified0);
     CHECK(scalar("SELECT session_id FROM episodes WHERE episode_id = " + std::to_string(ep)) == sess0);
     if (have_model) {
         const std::vector<char> ep_emb1 =
@@ -2112,6 +2115,92 @@ void x23_test_episode_regen_inference_down(const std::string& base) {
     std::println(" ok");
 }
 
+// X30: the in-place text replace stamps modified_on. The episode's
+// modified_on is pushed into the past with SQL (1000), a member is staled,
+// the catch-up regen replaces the text in place — modified_on must come back
+// above 1000 (it is stamped with unixepoch() by the replace).
+void x30_test_episode_regen_stamps_modified_on(const std::string& base) {
+    std::println("  x30_test_episode_regen_stamps_modified_on...");
+
+    namespace fs = std::filesystem;
+    const std::string dir = base + "/x30stamp";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const std::string db_path = dir + "/memories.db";
+
+    ragger::Embedder emb;   // disabled
+    ragger::sqlite::Backend backend(emb, db_path);
+
+    StubChat stub("X30STUBSUMMARY");
+    ragger::SummarizerService svc(backend, [&stub] { return stub.client(); });
+    svc.start();
+
+    sqlite3* db = nullptr;
+    CHECK(sqlite3_open(db_path.c_str(), &db) == SQLITE_OK);
+    auto scalar = [&](const std::string& sql) -> long long {
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        long long v = -999;
+        if (sqlite3_step(st) == SQLITE_ROW) v = sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+        return v;
+    };
+    auto text = [&](const std::string& sql) -> std::string {
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        std::string v;
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const unsigned char* c = sqlite3_column_text(st, 0);
+            v = c ? reinterpret_cast<const char*>(c) : "";
+        }
+        sqlite3_finalize(st);
+        return v;
+    };
+
+    const std::string guid = "x30-stamp-a";
+    // Long assistant side: above the summarizer_min_words floor, so the
+    // stale-member refresh really calls the stub model.
+    const int t1 = backend.store_turn("x30 stamp q one",
+                                      "x30 stamp a one " + x23_long_text("x30ans"),
+                                      "test-model", false, guid, "2026-05-01 09:00:00");
+    CHECK(t1 > 0);
+    CHECK(backend.finalize_turn_summary(t1, x23_long_text("x30t1tok"), "summarizer-model"));
+    const int ts1 = static_cast<int>(scalar(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t1)));
+    ragger::EpisodeClose ec;
+    ec.text = "x30 stamp old episode text";
+    ec.model_name = "summarizer-model";
+    ec.session_guid = guid;
+    ec.span_start = scalar("SELECT turn_datetime FROM turn_summaries WHERE turn_summary_id = "
+                           + std::to_string(ts1)) - 60;
+    ec.span_end   = ec.span_start + 600;
+    ec.member_turn_summary_ids = {ts1};
+    const int ep = backend.store_episode_close(ec);
+    CHECK(ep > 0);
+
+    // Push modified_on into the past; the replace must stamp it again.
+    CHECK(sqlite3_exec(db, ("UPDATE episodes SET modified_on = 1000 WHERE episode_id = " +
+                            std::to_string(ep)).c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+
+    // Stale the member: the catch-up regen replaces the text in place.
+    CHECK(sqlite3_exec(db, ("UPDATE turn_summaries SET stale = 1 WHERE turn_summary_id = " +
+                            std::to_string(ts1)).c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+
+    svc.enqueue_catch_up();
+    for (int i = 0; i < 200 &&
+         text("SELECT text FROM episodes WHERE episode_id = " + std::to_string(ep))
+             != "X30STUBSUMMARY"; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(text("SELECT text FROM episodes WHERE episode_id = " + std::to_string(ep))
+          == "X30STUBSUMMARY");
+    CHECK(scalar("SELECT modified_on FROM episodes WHERE episode_id = " + std::to_string(ep))
+          > 1000);
+    svc.stop();
+    sqlite3_close(db);
+    backend.close();
+    std::println(" ok");
+}
+
 // describe_summarizer: what status reports. No network; strings are empty
 // when nothing is configured, and engine alone is empty when no endpoint
 // serves the named model.
@@ -2217,6 +2306,7 @@ int main() {
     x23_test_episode_regen_late_turn_summary(env.base());
     x23_test_episode_regen_single_to_multi(env.base());
     x23_test_episode_regen_inference_down(env.base());
+    x30_test_episode_regen_stamps_modified_on(env.base());
     x27_test_response_truncated();
     p9b_test_utf8_safe_prefix();
     p9b_test_bad_prompt_no_escape(env.base());
