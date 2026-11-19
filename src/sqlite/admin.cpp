@@ -367,7 +367,7 @@ namespace fs = std::filesystem;
             FROM turn_summaries
         )");
         view("episodes_view", R"(
-            SELECT episode_id, text, tags, session_id, model_id, supersedes,
+            SELECT episode_id, text, tags, session_id, model_id,
                    datetime(span_start, 'unixepoch', 'localtime') AS span_start,
                    datetime(span_end, 'unixepoch', 'localtime') AS span_end,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,

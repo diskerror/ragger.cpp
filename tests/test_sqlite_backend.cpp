@@ -2439,6 +2439,29 @@ void test_migrate_0_16_to_0_17_rejects(ragger::Embedder& emb) {
     expect_refused("2 episodes share (session 1, created_at 500)");
 }
 
+// X29: episodes are derived text and are replaced in place — there is no
+// supersede chain. A fresh DB must have no `supersedes` column on episodes and
+// no index on episodes that names it (the check is by pattern, so it also
+// catches a renamed copy). episodes_view must not select it either. The unique
+// (session_id, span_start) index stays (it is now unconditional).
+void x29_test_episodes_has_no_supersedes(ragger::Embedder& emb) {
+    std::println("  x29_test_episodes_has_no_supersedes...");
+    cleanup();
+    { ragger::sqlite::Backend db(emb, TEMP_DB); db.close(); }
+
+    sqlite3* raw = p1_open_raw();
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM pragma_table_info('episodes') "
+                             "WHERE name = 'supersedes'") == 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE tbl_name = 'episodes' "
+                             "AND sql LIKE '%supersedes%'") == 0);
+    CHECK(p1_scalar_int(raw, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' "
+                             "AND name = 'idx_episodes_session_span_uniq'") == 1);
+    CHECK(p1_scalar_int(raw, "SELECT instr(sql, 'supersedes') FROM sqlite_master "
+                             "WHERE type = 'view' AND name = 'episodes_view'") == 0);
+    sqlite3_close(raw);
+    cleanup();
+}
+
 // PHASE9: final schema assembly — the kLegs predicate drives backup/VACUUM
 // gating; every table has a <table>_view except an explicit allow-list (a
 // future table without a view fails here); users_view never exposes hashes.
@@ -9114,6 +9137,7 @@ int main() {
     x22_test_stale_candidates_and_refresh(emb);
     test_migrate_0_16_to_0_17(emb);
     test_migrate_0_16_to_0_17_rejects(emb);
+    x29_test_episodes_has_no_supersedes(emb);
     test_p9_schema_assembly(emb);
     test_document_path_unique(emb);
     test_document_list_and_delete(emb);

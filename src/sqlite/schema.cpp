@@ -873,9 +873,9 @@ std::string setting_or(Impl& self, const char* key, const char* fallback);
                         d.column_int(2), d.column_int64(0), d.column_int64(1)));
             }
             {
-                // episodes gain UNIQUE (session_id, span_start) WHERE
-                // supersedes IS NULL, and span_start = old created_at — two
-                // episode rows sharing (session, created_at) would collide.
+                // episodes gain UNIQUE (session_id, span_start), and
+                // span_start = old created_at — two episode rows sharing
+                // (session, created_at) would collide.
                 Stmt d(db, "SELECT session_id, created_at, COUNT(*) FROM summaries "
                            "WHERE level = 'episode' AND session_id IS NOT NULL "
                            "GROUP BY 1, 2 HAVING COUNT(*) > 1 LIMIT 1");

@@ -254,7 +254,6 @@ CREATE TABLE episodes (
                 tags        TEXT NOT NULL DEFAULT '',
                 session_id  INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                 model_id    INTEGER REFERENCES models(model_id),
-                supersedes  INTEGER REFERENCES episodes(episode_id),
                 span_start  INTEGER NOT NULL,
                 span_end    INTEGER NOT NULL,
                 created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
@@ -268,12 +267,10 @@ CREATE INDEX idx_episodes_session    ON episodes(session_id);
 
 CREATE INDEX idx_episodes_span_start ON episodes(span_start);
 
-CREATE INDEX idx_episodes_supersedes ON episodes(supersedes);
-
 CREATE INDEX idx_episodes_embedding_version ON episodes(embedding_version);
 
 CREATE UNIQUE INDEX idx_episodes_session_span_uniq
-            ON episodes(session_id, span_start) WHERE supersedes IS NULL;
+            ON episodes(session_id, span_start);
 
 CREATE INDEX idx_turn_summaries_turn_id    ON turn_summaries(turn_id);
 
@@ -339,7 +336,7 @@ CREATE VIEW turn_summaries_view AS
             FROM turn_summaries;
 
 CREATE VIEW episodes_view AS 
-            SELECT episode_id, text, tags, session_id, model_id, supersedes,
+            SELECT episode_id, text, tags, session_id, model_id,
                    datetime(span_start, 'unixepoch', 'localtime') AS span_start,
                    datetime(span_end, 'unixepoch', 'localtime') AS span_end,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,

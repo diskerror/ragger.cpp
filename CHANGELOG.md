@@ -29,6 +29,7 @@
 **Schema**
 - One `knowledge` table (kind: decision | insight | note) replaces `decisions`, `insights` and note summaries; typed handles are `knowledge:N` — `decision:N` / `insight:N` are rejected with a pointer to the new form
 - `episodes` is a real table; membership is recorded on turn summaries (`episode_id`)
+- `episodes` has no `supersedes`: episode text is derived and replaced in place, so there is no supersede chain. The column, `idx_episodes_supersedes` and the `episodes_view` column are gone; the unique key on `(session_id, span_start)` now covers every episode (it used to exempt superseded copies)
 - The `summaries` and `projects` tables are removed; sessions group only, and "project" is a tag (`project:<name>`)
 - `sessions` gains `started_on` / `ended_on`, maintained from the session's turns on write
 - Migration is 0.16→0.17 only; databases older than 0.16 are refused untouched — upgrade to v0.16.2.3 first

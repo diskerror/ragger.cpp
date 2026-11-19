@@ -123,10 +123,10 @@ inline std::string knowledge_document_evidence_indexes() {
 }
 
 // episodes (PHASE5) — narrative segments over consecutive turn summaries.
-// New at 0.17 (never rebuilt), so no name parameter; the supersedes FK is
-// self-referential. span_start/span_end are epoch seconds of first/last
-// member. The unique index allows only ONE open chain head per
-// (session, span_start); superseded copies are exempt.
+// Episodes are derived text and are replaced in place (no supersede chain).
+// New at 0.17 (never rebuilt), so no name parameter. span_start/span_end are
+// epoch seconds of first/last member. The unique index allows only ONE episode
+// per (session, span_start).
 inline std::string episodes() {
     return R"(CREATE TABLE episodes (
                 episode_id  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,7 +134,6 @@ inline std::string episodes() {
                 tags        TEXT NOT NULL DEFAULT '',
                 session_id  INTEGER REFERENCES sessions(session_id) ON DELETE SET NULL,
                 model_id    INTEGER REFERENCES models(model_id),
-                supersedes  INTEGER REFERENCES episodes(episode_id),
                 span_start  INTEGER NOT NULL,
                 span_end    INTEGER NOT NULL,
                 created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
@@ -149,10 +148,9 @@ inline std::string episodes_indexes() {
     return R"(
         CREATE INDEX idx_episodes_session    ON episodes(session_id);
         CREATE INDEX idx_episodes_span_start ON episodes(span_start);
-        CREATE INDEX idx_episodes_supersedes ON episodes(supersedes);
         CREATE INDEX idx_episodes_embedding_version ON episodes(embedding_version);
         CREATE UNIQUE INDEX idx_episodes_session_span_uniq
-            ON episodes(session_id, span_start) WHERE supersedes IS NULL;
+            ON episodes(session_id, span_start);
     )";
 }
 
