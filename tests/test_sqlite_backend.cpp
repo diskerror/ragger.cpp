@@ -7571,6 +7571,84 @@ void x23_test_episode_members_and_replace(ragger::Embedder& emb) {
     std::println(" ok");
 }
 
+// X32: store_turn stores started_on (not given -> NULL); a same-exchange
+// merge keeps the EARLIER of stored and new (NULL loses to any value) — on
+// the merge write and on the dedup-hit path alike.
+void x32_test_store_turn_started_on(ragger::Embedder& emb) {
+    std::println("  x32_test_store_turn_started_on...");
+    cleanup();
+    const std::string S = "x32-started";
+    int t1 = -1, t2 = -1;
+    {
+        ragger::sqlite::Backend db(emb, TEMP_DB);
+        t1 = db.store_turn("x32s q1", "x32s a1.", "test-model", false, S,
+                           "", "", "", 1000);                              // given
+        // Merge with a LATER started_at: the stored (earlier) value wins.
+        CHECK(db.store_turn("x32s q1", "x32s a1. tail.", "test-model", false, S,
+                            "", "", "", 2000) == t1);
+        // Merge with an EARLIER started_at: the new value wins.
+        CHECK(db.store_turn("x32s q1", "x32s a1. tail. more.", "test-model", false, S,
+                            "", "", "", 500) == t1);
+        // Dedup hit (text already held) carrying an even earlier started_at:
+        // still keeps the earlier value.
+        CHECK(db.store_turn("x32s q1", "x32s a1. tail. more.", "test-model", false, S,
+                            "", "", "", 300) == t1);
+        // Merge without started_at: stored value unchanged.
+        CHECK(db.store_turn("x32s q1", "x32s a1. tail. more. end.", "test-model",
+                            false, S, "", "", "", 0) == t1);
+        // A row stored WITHOUT started_at (probe only sees the newest turn,
+        // so this second exchange comes last): started_on starts NULL.
+        t2 = db.store_turn("x32s q2", "x32s a2.", "test-model", false, S); // not given
+        CHECK(t1 > 0 && t2 > 0 && t2 != t1);
+        // Merge into a row whose started_on is NULL: the value lands.
+        CHECK(db.store_turn("x32s q2", "x32s a2. tail.", "test-model", false, S,
+                            "", "", "", 1500) == t2);
+        db.close();
+    }
+    {
+        sqlite3* raw = p1_open_raw();
+        CHECK(p1_scalar_int(raw, "SELECT started_on FROM turns WHERE turn_id = "
+                                  + std::to_string(t1)) == 300);
+        CHECK(p1_scalar_int(raw, "SELECT started_on FROM turns WHERE turn_id = "
+                                  + std::to_string(t2)) == 1500);
+        sqlite3_close(raw);
+    }
+    cleanup();
+    std::println(" ok");
+}
+
+// X32: episode_candidate_turns carries started_epoch — 0 for a turn whose
+// started_on is NULL, the stored value otherwise.
+void x32_test_episode_candidate_started_epoch(ragger::Embedder& emb) {
+    std::println("  x32_test_episode_candidate_started_epoch...");
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+    const std::string g = "x32-cands";
+    auto ts_ids = p5_seed_members(db, g, {"2026-06-01 10:00:00", "2026-06-01 10:05:00"});
+    CHECK(ts_ids.size() == 2);
+    auto cands = db.episode_candidate_turns(g, "");
+    CHECK(cands.size() == 2);
+    CHECK(cands[0].started_epoch == 0);        // never set -> NULL -> ifnull 0
+    CHECK(cands[1].started_epoch == 0);
+    {
+        sqlite3* raw = p1_open_raw();
+        const long long turn_id = p1_scalar_int(raw,
+            "SELECT turn_id FROM turn_summaries WHERE turn_summary_id = "
+            + std::to_string(ts_ids[1]));
+        CHECK(sqlite3_exec(raw, ("UPDATE turns SET started_on = 123456 WHERE turn_id = "
+                                 + std::to_string(turn_id)).c_str(),
+                           nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(raw);
+    }
+    cands = db.episode_candidate_turns(g, "");
+    CHECK(cands.size() == 2);
+    CHECK(cands[0].started_epoch == 0);
+    CHECK(cands[1].started_epoch == 123456);
+    db.close();
+    cleanup();
+    std::println(" ok");
+}
+
 // S67 kind session-names: unnamed sessions with turn summary content get a drafted
 // title with name_source='summarizer'; a named session is never touched;
 // rerun is a no-op.
@@ -9220,6 +9298,8 @@ int main() {
     lr67_test_backfill_stranded(emb);
     x23_test_backfill_stranded_refuses(emb);
     x23_test_episode_members_and_replace(emb);
+    x32_test_store_turn_started_on(emb);
+    x32_test_episode_candidate_started_epoch(emb);
     lr67_test_backfill_session_names(emb);
     lr68_test_time_invariants(emb);
     x12_test_update_turn_meta_turn_summary_invariant(emb);

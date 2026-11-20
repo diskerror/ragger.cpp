@@ -89,7 +89,11 @@ CREATE TABLE turns (
                 unigram_count  INTEGER NOT NULL DEFAULT 0,
                 bigram_count   INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER,
-                embedding      BLOB
+                embedding      BLOB,
+                -- X32: prompt-arrival time (NULL = unknown). LAST column on
+                -- purpose: the live upgrade can only ALTER TABLE ADD COLUMN,
+                -- which appends, so the fresh DDL must match that order.
+                started_on     INTEGER
             );
 
 CREATE TABLE turn_summaries (
@@ -320,6 +324,7 @@ CREATE VIEW sessions_view AS
 CREATE VIEW turns_view AS 
             SELECT turn_id, user_text, assistant_text, model_id, session_id,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
+                   datetime(started_on, 'unixepoch', 'localtime') AS started_on,
                    unigram_count, bigram_count,
                    embedding_version,
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding

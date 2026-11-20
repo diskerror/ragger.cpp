@@ -92,6 +92,9 @@ public:
     /// (turns.session_id) — empty leaves it NULL. Returns the new turn_id.
     /// `source_timestamp` (db format) overrides created_at for historical
     /// imports (also skips the regeneration-dedup window).
+    /// `started_epoch` (X32) stores turns.started_on — the time the user
+    /// prompt arrived (0 = not given -> NULL). On a same-exchange merge the
+    /// EARLIER of stored and new value wins (NULL loses to any value).
     virtual int store_turn(const std::string& user_text,
                            const std::string& assistant_text,
                            const std::string& model_name = "",
@@ -99,7 +102,8 @@ public:
                            const std::string& session_guid = "",
                            const std::string& source_timestamp = "",
                            const std::string& session_name = "",
-                           const std::string& name_source = "") = 0;
+                           const std::string& name_source = "",
+                           int64_t started_epoch = 0) = 0;
 
     /// All raw turns belonging to a session GUID, oldest first. Empty if the
     /// session is unknown. Grouping primitive for context building.

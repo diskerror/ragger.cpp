@@ -12,6 +12,7 @@
 
 #include "mcp.h"
 #include "config_access.h"
+#include "util/time.h"
 #include "nlohmann_json.hpp"
 
 #include <print>
@@ -1096,6 +1097,100 @@ void x22_test_turn_merge_enqueues_whole_reply(HttpFixture& fx) {
     std::println(" ok");
 }
 
+// X32 pin: POST /turn WITHOUT started_at stores turns.started_on NULL (the
+// capture hook sends it only after the plugin update; NULL keeps today's
+// gap behaviour).
+void x32_pin_turn_default_started_on_null(HttpFixture& fx) {
+    std::println("  x32_pin_turn_default_started_on_null...");
+    RawDb db((fx.env.base() + "/http_test.db").c_str());
+    const auto r = post_json(fx, "/turn",
+        {{"user", "x32 pin no started_at"}, {"assistant", "x32 pin reply"},
+         {"session_id", "x32-pin-default-null"}});
+    CHECK(r["_status"] == 200);
+    CHECK(r["status"] == "captured");
+    sqlite3_stmt* st = nullptr;
+    CHECK(sqlite3_prepare_v2(db.h,
+        "SELECT started_on FROM turns WHERE turn_id = ?", -1, &st, nullptr) == SQLITE_OK);
+    sqlite3_bind_int(st, 1, r["turn_id"].get<int>());
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_column_type(st, 0) == SQLITE_NULL);
+    sqlite3_finalize(st);
+    std::println(" ok");
+}
+
+// X32: POST /turn started_at — valid epoch, valid db-format timestamp string,
+// and each validation error (400 + exact message).
+void x32_test_turn_started_at(HttpFixture& fx) {
+    std::println("  x32_test_turn_started_at...");
+    RawDb db((fx.env.base() + "/http_test.db").c_str());
+    auto started_of = [&](int turn_id) -> long long {
+        return db.scalar("SELECT COALESCE(started_on, -1) FROM turns WHERE turn_id = "
+                         + std::to_string(turn_id));
+    };
+
+    // Valid JSON integer epoch (in the past): stored verbatim.
+    const auto now = ragger::db_epoch();
+    const auto r1 = post_json(fx, "/turn",
+        {{"user", "x32 started epoch"}, {"assistant", "reply one"},
+         {"session_id", "x32-started-at"}, {"started_at", now - 60}});
+    CHECK(r1["_status"] == 200);
+    CHECK(started_of(r1["turn_id"].get<int>()) == now - 60);
+
+    // Valid db-format timestamp string (what source_timestamp accepts),
+    // round-tripped through the shared parser.
+    const std::string ts = ragger::db_timestamp(static_cast<std::time_t>(now - 120));
+    const auto r2 = post_json(fx, "/turn",
+        {{"user", "x32 started string"}, {"assistant", "reply two"},
+         {"session_id", "x32-started-at"}, {"started_at", ts}});
+    CHECK(r2["_status"] == 200);
+    CHECK(started_of(r2["turn_id"].get<int>()) == now - 120);
+
+    // null = not given -> NULL (same as absent).
+    const auto r3 = post_json(fx, "/turn",
+        {{"user", "x32 started null"}, {"assistant", "reply three"},
+         {"session_id", "x32-started-at"}, {"started_at", nullptr}});
+    CHECK(r3["_status"] == 200);
+    CHECK(started_of(r3["turn_id"].get<int>()) == -1);   // COALESCE sentinel
+
+    // Wrong JSON type (float) -> the type error.
+    const auto e1 = post_json(fx, "/turn",
+        {{"user", "x32 started bad type"}, {"assistant", "x"},
+         {"session_id", "x32-started-at"}, {"started_at", 12.5}});
+    CHECK(e1["_status"] == 400);
+    CHECK(e1["_raw"] == "ERROR: started_at must be an integer epoch or a timestamp string");
+
+    // Unparseable string -> the same type error.
+    const auto e2 = post_json(fx, "/turn",
+        {{"user", "x32 started bad string"}, {"assistant", "x"},
+         {"session_id", "x32-started-at"}, {"started_at", "yesterday-ish"}});
+    CHECK(e2["_status"] == 400);
+    CHECK(e2["_raw"] == "ERROR: started_at must be an integer epoch or a timestamp string");
+
+    // More than a day ahead -> future error (checked before after-turn-time).
+    const auto e3 = post_json(fx, "/turn",
+        {{"user", "x32 started far future"}, {"assistant", "x"},
+         {"session_id", "x32-started-at"}, {"started_at", now + 2 * 86400}});
+    CHECK(e3["_status"] == 400);
+    CHECK(e3["_raw"] == "ERROR: started_at is in the future");
+
+    // Slightly ahead of now (the turn's created_at) -> after-turn-time error.
+    const auto e4 = post_json(fx, "/turn",
+        {{"user", "x32 started near future"}, {"assistant", "x"},
+         {"session_id", "x32-started-at"}, {"started_at", now + 60}});
+    CHECK(e4["_status"] == 400);
+    CHECK(e4["_raw"] == "ERROR: started_at is after the turn time");
+
+    // MCP parity: same validation through the capture_turn tool.
+    const auto mr = ragger::mcp_tool_call(*fx.mem,
+        {{"name", "capture_turn"},
+         {"arguments", {{"user", "x32 started mcp"}, {"assistant", "x"},
+                        {"session_id", "x32-started-at"},
+                        {"started_at", now + 60}}}});
+    CHECK(mr.value("isError", false));
+    CHECK(mr["content"][0]["text"].get<std::string>() == "started_at is after the turn time");
+    std::println(" ok");
+}
+
 int main() {
     HttpFixture fx("http");
     CHECK(fx.ready);
@@ -1124,6 +1219,8 @@ int main() {
     t_dashboard_maintenance_s92(fx);
     t_tools_parity_s95(fx);
     x22_test_turn_merge_enqueues_whole_reply(fx);
+    x32_pin_turn_default_started_on_null(fx);
+    x32_test_turn_started_at(fx);
 
     std::println("test_http: all passed");
     return 0;

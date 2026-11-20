@@ -202,10 +202,11 @@ int RaggerMemory::store_turn(const std::string& user_text,
                              const std::string& session_guid,
                              const std::string& source_timestamp,
                              const std::string& session_name,
-                             const std::string& name_source) {
+                             const std::string& name_source,
+                             int64_t started_epoch) {
     return backend_->store_turn(user_text, assistant_text, model_name,
                                 defer_embedding, session_guid, source_timestamp,
-                                session_name, name_source);
+                                session_name, name_source, started_epoch);
 }
 
 bool RaggerMemory::finalize_turn(int turn_id, const std::string& assistant_text,
@@ -730,7 +731,8 @@ CaptureResult capture_turn(RaggerMemory& memory,
                            const std::string& model,
                            const std::string& session_id,
                            const std::string& session_name,
-                           const std::string& name_source) {
+                           const std::string& name_source,
+                           int64_t started_at) {
     // Gate: turn capture is opt-in. Agent-driven store/search are unaffected.
     if (!config().capture_turns) return {false, -1, {}};
 
@@ -750,7 +752,7 @@ CaptureResult capture_turn(RaggerMemory& memory,
     int turn_id = memory.store_turn(clean_user, assistant, model,
                                     /*defer_embedding=*/false, session_id,
                                     /*source_timestamp=*/"",
-                                    session_name, name_source);
+                                    session_name, name_source, started_at);
     return {true, turn_id, clean_user};
 }
 

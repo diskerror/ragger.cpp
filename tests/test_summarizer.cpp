@@ -756,6 +756,61 @@ void p6_test_episode_boundaries() {
     std::println(" OK");
 }
 
+// X32 pin (GREEN before AND after): with no started_epoch set the gap rule is
+// exactly the old one — row 1 of the X32 expected-value table (prev 1000,
+// curr 1600, started unknown -> gap 600 s = 10 min -> threshold 0.30 >=
+// avg_sim 0.295 -> boundary).
+void x32_pin_boundary_no_started_matches_old() {
+    std::println("  x32_pin_boundary_no_started_matches_old...");
+    using ragger::EpisodeBoundaryParams;
+    using ragger::EpisodeCandidateTurn;
+    auto cand = [](float cos_val, long long epoch) {
+        EpisodeCandidateTurn c;
+        const float s = std::sqrt(1.0f - cos_val * cos_val);
+        c.turn_embedding    = {cos_val, s};
+        c.summary_embedding = {cos_val, s};
+        c.epoch             = epoch;
+        return c;
+    };
+    const EpisodeBoundaryParams p{0.2f, 0.5f, 0.01f, 1.0f};
+    auto v = ragger::find_episode_boundaries({cand(1.0f, 1000), cand(0.295f, 1600)}, p);
+    CHECK(v.size() == 2 && v[0] == 0 && v[1] == 1);
+    std::println(" OK");
+}
+
+// X32: the five-row expected-value table from the spec. gap =
+// begin(curr) - prev.epoch with begin = started_epoch > 0 ? started_epoch :
+// epoch, clamped at 0; threshold = min(cap 0.5, 0.2 + 0.01 * int(gap_min/1.0)).
+// Both embeddings of the pair are v(0.295) against the previous candidate's
+// (1,0), so avg_sim = 0.295 exactly (not 0.30 — no float-equality cliff).
+void x32_test_episode_boundaries_started_on() {
+    std::println("  x32_test_episode_boundaries_started_on...");
+    using ragger::EpisodeBoundaryParams;
+    using ragger::EpisodeCandidateTurn;
+    const EpisodeBoundaryParams p{0.2f, 0.5f, 0.01f, 1.0f};
+    auto pair_cut = [&](long long prev_epoch, long long curr_epoch, long long started) {
+        EpisodeCandidateTurn a;
+        a.turn_embedding    = {1.0f, 0.0f};
+        a.summary_embedding = {1.0f, 0.0f};
+        a.epoch             = prev_epoch;
+        EpisodeCandidateTurn b;
+        const float c = 0.295f;
+        const float s = std::sqrt(1.0f - c * c);
+        b.turn_embedding    = {c, s};
+        b.summary_embedding = {c, s};
+        b.epoch             = curr_epoch;
+        b.started_epoch     = started;
+        auto v = ragger::find_episode_boundaries({a, b}, p);
+        return v.size() == 2;   // boundary at index 1?
+    };
+    CHECK( pair_cut(1000,  1600,     0));  // unknown -> gap 600 s = 10 min -> 0.30 >= 0.295
+    CHECK(!pair_cut(1000,  1600,  1580));  // gap 580 s = 9 min (int) -> 0.29 < 0.295
+    CHECK(!pair_cut(1000,  1600,  1000));  // gap 0 -> 0.20 < 0.295
+    CHECK(!pair_cut(1000,  1600,   900));  // negative clamped to 0 -> 0.20
+    CHECK( pair_cut(1000, 20000, 19990));  // gap 18990 s = 316 min -> cap 0.50 >= 0.295
+    std::println(" OK");
+}
+
 
 // PHASE9A: chat() must give up on an endpoint that accepts and never answers.
 void p9a_test_chat_times_out() {
@@ -2587,6 +2642,8 @@ int main() {
     test_summarizer_provider_per_job(env.base());
     p6_test_backoff();
     p6_test_episode_boundaries();
+    x32_pin_boundary_no_started_matches_old();
+    x32_test_episode_boundaries_started_on();
     lr63_test_pleasantries_real_rows(env.base(), env.model_dir());
     p10_summarizer_no_endpoint(env.base());
     p10_summarizer_budget_prompt();

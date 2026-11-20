@@ -26,6 +26,13 @@
         "description": "Human-readable session/conversation title. Framework-specific: Hermes passes its session title, others may derive from context.",
         "type": "string"
       },
+      "started_at": {
+        "description": "When the user prompt arrived: epoch seconds or a 'YYYY-MM-DD HH:MM:SS' local timestamp. Optional; omit when unknown. Must not be after the turn's own time.",
+        "type": [
+          "integer",
+          "string"
+        ]
+      },
       "user": {
         "description": "The user message of the turn.",
         "type": "string"

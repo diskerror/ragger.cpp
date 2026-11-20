@@ -41,8 +41,15 @@ std::vector<size_t> find_episode_boundaries(const std::vector<EpisodeCandidateTu
         float summ_sim = cosine_similarity(curr.summary_embedding, prev.summary_embedding);
         float avg_sim  = (turn_sim + summ_sim) / 2.0f;
 
-        // Compute time-scaled threshold.
-        float gap_minutes = static_cast<float>(curr.epoch - prev.epoch) / 60.0f;
+        // Compute time-scaled threshold. X32: the gap runs from the END of
+        // the previous turn to the START of the current one (an assistant
+        // reply can take a long time; the idle time between exchanges is
+        // what matters). begin(curr) falls back to curr.epoch when
+        // started_epoch is unknown (0), and the gap is clamped at 0.
+        const int64_t begin_curr = curr.started_epoch > 0 ? curr.started_epoch : curr.epoch;
+        int64_t gap_seconds = begin_curr - prev.epoch;
+        if (gap_seconds < 0) gap_seconds = 0;
+        float gap_minutes = static_cast<float>(gap_seconds) / 60.0f;
         float threshold   = p.base;
         if (p.step_minutes > 0.0f)
             threshold += p.step * static_cast<float>(

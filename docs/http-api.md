@@ -422,7 +422,12 @@ accepted by the `capture_turn` MCP tool. Requires `[server] capture_turns
 "disabled"`).
 
 **Body fields:** `user` (required), `assistant`, `model`, `session_id`
-(groups turns into a session), `session_name`, `name_source`.
+(groups turns into a session), `session_name`, `name_source`, `started_at`
+(optional: when the user prompt arrived — epoch seconds or a
+`YYYY-MM-DD HH:MM:SS` local timestamp, the same format `source_timestamp`
+accepts; stored as `turns.started_on`, NULL when omitted; episode gap timing
+measures from the end of one turn to this start of the next, falling back to
+the turn time when unknown).
 
 **Response:** `{ "status": "captured" | "disabled", "turn_id": <int> }`
 
@@ -430,7 +435,9 @@ When captured with a non-empty `assistant`, the turn is handed straight
 to the daemon's summarizer queue (the request never waits for inference).
 
 **Status codes:** `400 {"error":"missing required field: user"}` (JSON
-envelope).
+envelope). A bad `started_at` is a 400 too: `started_at must be an integer
+epoch or a timestamp string` (wrong type / unparseable), `started_at is in
+the future` (more than a day ahead), `started_at is after the turn time`.
 
 ```bash
 curl -X POST http://localhost:8432/turn \

@@ -208,6 +208,7 @@ struct EpisodeCandidateTurn {
     std::string        summary_text;     // turn-summary text
     std::string        timestamp;        // "%F %T" local-time string for store_episode
     int64_t            epoch;            // created_at epoch seconds (for gap math)
+    int64_t            started_epoch = 0; // turns.started_on (X32; 0 = unknown)
     std::string        summary_model_name; // turn summary's summary_model_id resolved ("" = NULL)
     std::vector<float> turn_embedding;   // from turns.embedding
     std::vector<float> summary_embedding;// from turn_summaries.embedding

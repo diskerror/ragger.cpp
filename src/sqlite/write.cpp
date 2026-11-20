@@ -556,7 +556,8 @@ static std::string tags_from_metadata(const json& metadata) {
                    const std::string& session_guid,
                    const std::string& source_timestamp,
                    const std::string& session_name,
-                   const std::string& name_source) {
+                   const std::string& name_source,
+                   int64_t started_epoch) {
         std::string u = normalize_path(user_text);
         std::string a = normalize_path(assistant_text);
 
@@ -586,15 +587,17 @@ static std::string tags_from_metadata(const json& metadata) {
         // embed (outside the txn) -> INSERT -> index -> commit).
         int probe_id = -1;
         std::optional<std::string> merged;   // set only when the probe matched
+        std::optional<int64_t> probe_started;  // X32: stored started_on (nullopt = NULL)
         if (!a.empty() && source_timestamp.empty() && !session_guid.empty()) {
             if (const auto sid = find_session(session_guid)) {
                 Stmt p(db,
-                    "SELECT turn_id, user_text, assistant_text, created_at FROM turns "
+                    "SELECT turn_id, user_text, assistant_text, created_at, started_on FROM turns "
                     "WHERE session_id = ? ORDER BY turn_id DESC LIMIT 1");
                 p.bind(1, *sid);
                 if (p.step() && p.column_text(1) == u &&
                     (db_epoch() - p.column_int64(3)) <= 300) {
                     probe_id = p.column_int(0);
+                    if (!p.is_null(4)) probe_started = p.column_int64(4);
                     // LR S57: the rule itself is merge_assistant_text (shared
                     // with finalize_turn); nullopt = already held, nothing to
                     // write (model/session resolution still runs, as before).
@@ -631,10 +634,29 @@ static std::string tags_from_metadata(const json& metadata) {
 
         if (probe_id >= 0) {
             // Already held: nothing to write, but keep the resolution above.
-            if (!merged) { tx.commit(); return probe_id; }
+            // X32: a resend may carry started_at the stored row lacks (or an
+            // earlier one) — keep the EARLIER value (NULL loses to any).
+            if (!merged) {
+                if (started_epoch != 0 &&
+                    (!probe_started || started_epoch < *probe_started)) {
+                    Stmt su(db, "UPDATE turns SET started_on = ? WHERE turn_id = ?");
+                    su.bind(1, started_epoch);
+                    su.bind(2, probe_id);
+                    if (!su.exec())
+                        throw std::runtime_error(std::format(
+                            lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+                }
+                tx.commit(); return probe_id;
+            }
+            // X32: same rule on the merge write: min(stored, new), NULL loses.
+            std::optional<int64_t> keep_started = probe_started;
+            if (started_epoch != 0 &&
+                (!keep_started || started_epoch < *keep_started))
+                keep_started = started_epoch;
             Stmt up(db,
                 "UPDATE turns SET assistant_text = ?, embedding_version = ?, embedding = ?, "
-                "model_id = COALESCE(model_id, ?) WHERE turn_id = ?");
+                "model_id = COALESCE(model_id, ?), started_on = COALESCE(?, started_on) "
+                "WHERE turn_id = ?");
             up.bind(1, *merged);
             if (defer_embedding) {
                 up.bind_null(2);
@@ -644,7 +666,8 @@ static std::string tags_from_metadata(const json& metadata) {
                 bind_embedding(up.raw(), 3, emb);
             }
             if (model_id) up.bind(4, model_id); else up.bind_null(4);
-            up.bind(5, probe_id);
+            if (keep_started) up.bind(5, *keep_started); else up.bind_null(5);
+            up.bind(6, probe_id);
             if (!up.exec())
                 throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
             // X22: the merged text is not reflected in the turn's turn summary
@@ -667,8 +690,8 @@ static std::string tags_from_metadata(const json& metadata) {
         }
 
         Stmt s(db,
-            "INSERT INTO turns (model_id, session_id, user_text, assistant_text, embedding_version, embedding, created_at) "
-            "VALUES (?,?,?,?,?,?,?)");
+            "INSERT INTO turns (model_id, session_id, user_text, assistant_text, embedding_version, embedding, created_at, started_on) "
+            "VALUES (?,?,?,?,?,?,?,?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
         if (session_id) s.bind(2, session_id); else s.bind_null(2);
         s.bind(3, u);
@@ -683,6 +706,7 @@ static std::string tags_from_metadata(const json& metadata) {
         }
         const int64_t ts = resolve_epoch(source_timestamp);
         s.bind(7, ts);
+        if (started_epoch != 0) s.bind(8, started_epoch); else s.bind_null(8);
 
         // row + postings + session span atomic (B §1.3; X4/M6 folds the
         // session/model resolution opened above into the same commit).
@@ -1796,7 +1820,8 @@ static std::string tags_from_metadata(const json& metadata) {
             "       ts.turn_datetime, "
             "       t.embedding,  "  // raw turn embedding
             "       ts.embedding, "  // turn-summary embedding
-            "       m.name "         // turn summary's summarizer model (LR S62 provenance)
+            "       m.name, "        // turn summary's summarizer model (LR S62 provenance)
+            "       ifnull(t.started_on, 0) "  // X32: prompt-arrival epoch (0 = unknown)
             "FROM turn_summaries ts "
             "JOIN turns t ON ts.turn_id = t.turn_id "
             "JOIN sessions ss ON ts.session_id = ss.session_id "
@@ -1827,6 +1852,7 @@ static std::string tags_from_metadata(const json& metadata) {
             ct.summary_text      = s.column_text(1);
             ct.timestamp         = s.column_text(2);
             ct.epoch             = s.column_int64(3);
+            ct.started_epoch     = s.column_int64(7);  // X32 (ifnull -> 0 = unknown)
             ct.summary_model_name = s.column_text(6);
             ct.turn_embedding    = decode_counted(
                 s.column_blob(4), s.column_bytes(4), "turn_summaries", ct.turn_summary_id);

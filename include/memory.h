@@ -48,6 +48,7 @@ public:
     /// Capture a raw conversation turn into the `turns` table. Empty
     /// assistant_text → partial row (finalize later). `session_guid` groups
     /// the turn under a session (empty leaves it NULL). Returns turn_id.
+    /// `started_epoch` (X32; 0 = not given) stores turns.started_on.
     int store_turn(const std::string& user_text,
                    const std::string& assistant_text = "",
                    const std::string& model_name = "",
@@ -55,7 +56,8 @@ public:
                    const std::string& session_guid = "",
                    const std::string& source_timestamp = "",
                    const std::string& session_name = "",
-                   const std::string& name_source = "");
+                   const std::string& name_source = "",
+                   int64_t started_epoch = 0);
     /// Finalize a partial turn (set assistant_text + embed + model).
     bool finalize_turn(int turn_id,
                        const std::string& assistant_text,
@@ -293,13 +295,16 @@ struct CaptureResult {
 /// background summarization. No-op (captured=false) unless config [server]
 /// capture_turns is true. Both transports disassemble their envelope and call
 /// this; the gate and storage policy live here, once.
+/// `started_at` (X32; 0 = not given) is the time the user prompt arrived
+/// (epoch seconds), stored as turns.started_on.
 CaptureResult capture_turn(RaggerMemory& memory,
                            const std::string& user,
                            const std::string& assistant,
                            const std::string& model,
                            const std::string& session_id,
                            const std::string& session_name = "",
-                           const std::string& name_source = "");
+                           const std::string& name_source = "",
+                           int64_t started_at = 0);
 
 /// One assembled chunk in a recipe-built context, ordered oldest-first
 /// (chronological) when emitted so an agent can inject them as-is. `kind`

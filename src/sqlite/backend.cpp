@@ -53,11 +53,12 @@ int Backend::store_turn(const std::string& user_text,
                               const std::string& session_guid,
                               const std::string& source_timestamp,
                               const std::string& session_name,
-                              const std::string& name_source) {
+                              const std::string& name_source,
+                              int64_t started_epoch) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->store_turn(user_text, assistant_text, model_name,
                              defer_embedding, session_guid, source_timestamp,
-                             session_name, name_source);
+                             session_name, name_source, started_epoch);
 }
 
 std::vector<TurnRecord> Backend::turns_by_session(

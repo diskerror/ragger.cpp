@@ -49,6 +49,7 @@ public:
                        bool defer_embedding = false) override;
 
     /// Store / finalize a raw conversation turn (turns table).
+    /// `started_epoch` (X32; 0 = not given) stores turns.started_on.
     int store_turn(const std::string& user_text,
                    const std::string& assistant_text,
                    const std::string& model_name = "",
@@ -56,7 +57,8 @@ public:
                    const std::string& session_guid = "",
                    const std::string& source_timestamp = "",
                    const std::string& session_name = "",
-                   const std::string& name_source = "") override;
+                   const std::string& name_source = "",
+                   int64_t started_epoch = 0) override;
     std::vector<TurnRecord> turns_by_session(
         const std::string& session_guid) override;
     bool finalize_turn(int turn_id,

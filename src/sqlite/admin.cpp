@@ -347,6 +347,7 @@ namespace fs = std::filesystem;
         view("turns_view", R"(
             SELECT turn_id, user_text, assistant_text, model_id, session_id,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
+                   datetime(started_on, 'unixepoch', 'localtime') AS started_on,
                    unigram_count, bigram_count,
                    embedding_version,
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding

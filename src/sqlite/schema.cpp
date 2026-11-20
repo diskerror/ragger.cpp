@@ -304,7 +304,11 @@ std::string setting_or(Impl& self, const char* key, const char* fallback);
                 unigram_count  INTEGER NOT NULL DEFAULT 0,
                 bigram_count   INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER,
-                embedding      BLOB
+                embedding      BLOB,
+                -- X32: prompt-arrival time (NULL = unknown). LAST column on
+                -- purpose: the live upgrade can only ALTER TABLE ADD COLUMN,
+                -- which appends, so the fresh DDL must match that order.
+                started_on     INTEGER
             )
         )");
 
@@ -398,6 +402,11 @@ std::string setting_or(Impl& self, const char* key, const char* fallback);
             exec("ALTER TABLE turns ADD COLUMN unigram_count INTEGER NOT NULL DEFAULT 0");
         if (!column_exists("turns", "bigram_count"))
             exec("ALTER TABLE turns ADD COLUMN bigram_count INTEGER NOT NULL DEFAULT 0");
+        // X32: turns.started_on (prompt-arrival time, NULL = unknown). Same
+        // append-only pattern; the column is nullable with no default, so
+        // existing rows stay unknown. The leg does not rebuild turns.
+        if (!column_exists("turns", "started_on"))
+            exec("ALTER TABLE turns ADD COLUMN started_on INTEGER");
         if (table_exists("summaries") && !column_exists("summaries", "unigram_count"))
             exec("ALTER TABLE summaries ADD COLUMN unigram_count INTEGER NOT NULL DEFAULT 0");
         if (table_exists("summaries") && !column_exists("summaries", "bigram_count"))

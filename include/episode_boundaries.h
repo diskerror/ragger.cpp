@@ -29,7 +29,10 @@ struct EpisodeBoundaryParams {
 /// and summary-embedding cosines vs candidate i-1 is compared against
 /// threshold = min(cap, base + step * int(gap_minutes / step_minutes));
 /// a boundary is recorded when avg <= threshold (note `<=`).
-/// step_minutes <= 0 disables the time scaling.
+/// The gap (X32) is begin(curr) - prev.epoch, where begin(curr) is
+/// curr.started_epoch when known (> 0) and curr.epoch otherwise; the result
+/// is clamped at 0 (a started_on before the previous turn's end adds no idle
+/// time). step_minutes <= 0 disables the time scaling.
 std::vector<size_t> find_episode_boundaries(const std::vector<EpisodeCandidateTurn>& c,
                                             const EpisodeBoundaryParams& p);
 

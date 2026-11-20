@@ -15,6 +15,7 @@
 #include "lang.h"
 #include "Logger.h"
 #include "store_kind.h"
+#include "util/time.h"
 
 #include <algorithm>
 #include <chrono>
@@ -291,12 +292,41 @@ CaptureResult agent_capture_turn(RaggerMemory& mem, const nlohmann::json& args) 
     const std::string user = args.value("user", std::string());
     if (user.empty())
         throw std::invalid_argument("user is required");
+
+    // X32: optional started_at — the time the user prompt arrived. Accepts a
+    // JSON integer (epoch seconds) or a db-format timestamp string (exactly
+    // what source_timestamp accepts: the shared parse_db_timestamp); null or
+    // absent = not given. A capture turn's created_at is "now", so a value
+    // more than a day ahead is a clock/typo error, and any value after "now"
+    // would start the turn after it ended.
+    int64_t started_at = 0;
+    if (args.contains("started_at") && !args["started_at"].is_null()) {
+        const auto& jv = args["started_at"];
+        if (jv.is_number_integer()) {
+            started_at = jv.get<int64_t>();
+        } else if (jv.is_string()) {
+            const auto parsed = parse_db_timestamp(jv.get<std::string>());
+            if (!parsed)
+                throw std::invalid_argument(
+                    "started_at must be an integer epoch or a timestamp string");
+            started_at = db_epoch(*parsed);
+        } else {
+            throw std::invalid_argument(
+                "started_at must be an integer epoch or a timestamp string");
+        }
+        if (started_at > db_epoch() + 86400)
+            throw std::invalid_argument("started_at is in the future");
+        if (started_at > db_epoch())
+            throw std::invalid_argument("started_at is after the turn time");
+    }
+
     return capture_turn(mem, user,
                         args.value("assistant", std::string()),
                         args.value("model", std::string()),
                         args.value("session_id", std::string()),
                         args.value("session_name", std::string()),
-                        args.value("name_source", std::string()));
+                        args.value("name_source", std::string()),
+                        started_at);
 }
 
 nlohmann::json capture_summarizer_flags(const Config& cfg, const InferenceClient& inference) {

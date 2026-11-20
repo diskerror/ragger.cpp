@@ -10,7 +10,13 @@ aspiration.
 
 While the `capture_turns` setting is on, the plugin sends **one record per
 completed turn**: the user text, the final assistant text, the model id and
-the session id (`sync_turn` → `POST /turn`). That is the whole payload.
+the session id (`sync_turn` → `POST /turn`). A hook that knows when the user
+prompt arrived may also send `started_at` (epoch seconds or a
+`YYYY-MM-DD HH:MM:SS` timestamp); it is stored as `turns.started_on` and
+episode timing then measures the idle gap from the end of one turn to the
+start of the next instead of end-to-end (a long reply no longer counts as
+idle time). Without it the column stays NULL and today's end-to-end rule
+applies. That is the whole payload.
 
 Three special cases:
 

@@ -495,7 +495,8 @@ struct Backend::Impl {
                    const std::string& session_guid,
                    const std::string& source_timestamp = "",
                    const std::string& session_name = "",
-                   const std::string& name_source = "");
+                   const std::string& name_source = "",
+                   int64_t started_epoch = 0);
 
     // Shared implementation for turn queries over a session GUID.
     // asc=true → oldest-first (ORDER BY turn_id ASC, no limit).
