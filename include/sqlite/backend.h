@@ -136,6 +136,7 @@ public:
     std::vector<StrandedCandidate> stranded_turn_summary_candidates(int& ties) override;
     bool attach_stranded_turn_summary(int turn_summary_id, int episode_id) override;
     int stranded_open_tail_count() override;
+    bool episode_is_locked(int episode_id) override;
     std::vector<EpisodeMember> episode_members(int episode_id) override;
     std::optional<EpisodeMember> turn_summary_member_by_id(int turn_summary_id) override;
     bool replace_episode_text(int episode_id, const std::string& text,

@@ -257,6 +257,7 @@ CREATE TABLE episodes (
                 span_start  INTEGER NOT NULL,
                 span_end    INTEGER NOT NULL,
                 modified_on INTEGER NOT NULL DEFAULT (unixepoch()),
+                locked      INTEGER NOT NULL DEFAULT 0,
                 unigram_count INTEGER NOT NULL DEFAULT 0,
                 bigram_count  INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER,

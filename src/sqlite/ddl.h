@@ -128,6 +128,10 @@ inline std::string knowledge_document_evidence_indexes() {
 // on every in-place replace). New at 0.17 (never rebuilt), so no name
 // parameter. span_start/span_end are epoch seconds of first/last member. The
 // unique index allows only ONE episode per (session, span_start).
+// locked = 1 means the episode can no longer be rebuilt from its source (its
+// turn summaries were culled): it is never re-summarized and never receives
+// late rows. Nothing sets it yet (the cull feature comes later); the
+// summarizer/selection paths only enforce it.
 inline std::string episodes() {
     return R"(CREATE TABLE episodes (
                 episode_id  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,6 +142,7 @@ inline std::string episodes() {
                 span_start  INTEGER NOT NULL,
                 span_end    INTEGER NOT NULL,
                 modified_on INTEGER NOT NULL DEFAULT (unixepoch()),
+                locked      INTEGER NOT NULL DEFAULT 0,
                 unigram_count INTEGER NOT NULL DEFAULT 0,
                 bigram_count  INTEGER NOT NULL DEFAULT 0,
                 embedding_version INTEGER,

@@ -393,8 +393,16 @@ public:
     virtual std::vector<StrandedCandidate> stranded_turn_summary_candidates(int& ties) = 0;
 
     /// Membership-only attach (no change to the episode's text/span/
-    /// embedding/terms). Guarded on episode_id IS NULL AND text != ''.
+    /// embedding/terms). Guarded on episode_id IS NULL AND text != '', and
+    /// (X31) on the episode not being locked — a locked episode never
+    /// receives late rows.
     virtual bool attach_stranded_turn_summary(int turn_summary_id, int episode_id) = 0;
+
+    /// X31: the episode's `locked` flag (1 = it can no longer be rebuilt from
+    /// its source: never re-summarized, never receives late rows). Read-only
+    /// probe for the summarizer's enforcement; false when no such episode.
+    /// Nothing in the product sets `locked` yet (the cull feature comes later).
+    virtual bool episode_is_locked(int episode_id) = 0;
 
     /// X23: one `turn_summaries` row as the episode-regeneration
     /// pass sees it. user_text/assistant_text/turn_model_name come from the

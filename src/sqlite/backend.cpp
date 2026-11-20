@@ -187,6 +187,12 @@ int Backend::stranded_open_tail_count() {
     return pImpl->stranded_open_tail_count();
 }
 
+// X31: read-only lock probe (see storage_backend.h).
+bool Backend::episode_is_locked(int episode_id) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->episode_is_locked(episode_id);
+}
+
 // X23: episode-regeneration primitives (see storage_backend.h).
 std::vector<StorageBackend::EpisodeMember>
 Backend::episode_members(int episode_id) {

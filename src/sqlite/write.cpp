@@ -1250,6 +1250,10 @@ static std::string tags_from_metadata(const json& metadata) {
     // out from under the row leaves it un-refreshable — its source text is
     // gone). Rows with an episode are returned too (X23's episode-
     // regeneration pass consumes them); X22's service code skips them.
+    // X31: rows of a LOCKED episode are never returned — the only consumer of
+    // an in-episode row is the episode-regeneration pass, and a locked episode
+    // is never rebuilt (its members keep their counters; the cull feature that
+    // locks decides what happens to them).
     std::vector<Backend::Impl::StaleTurnSummaryCandidate>
     Backend::Impl::stale_turn_summary_candidates(int limit) {
         std::vector<StaleTurnSummaryCandidate> out;
@@ -1262,6 +1266,9 @@ static std::string tags_from_metadata(const json& metadata) {
             "LEFT JOIN models tm ON tm.model_id = t.model_id "
             "LEFT JOIN sessions ss ON ss.session_id = ts.session_id "
             "WHERE ts.stale > 0 AND ts.text IS NOT NULL AND ts.text <> '' "
+            "  AND (ts.episode_id IS NULL OR NOT EXISTS "
+            "       (SELECT 1 FROM episodes e "
+            "        WHERE e.episode_id = ts.episode_id AND e.locked)) "
             "ORDER BY ts.turn_summary_id ASC";
         if (limit > 0) sql += " LIMIT ?";
         Stmt s(db, sql);
@@ -1360,16 +1367,22 @@ static std::string tags_from_metadata(const json& metadata) {
         // Best episode per row = the one with the greatest span_start <= t
         // (correlated subselect). HAVING COUNT(*) > 1 flags rows where more
         // than one span covers the time — counted, and the best still wins.
+        // X31: LOCKED episodes are invisible to both subselects — a locked
+        // episode is never chosen as the covering episode, and a row inside
+        // only locked episodes is not a candidate at all (X33 turns such rows
+        // into a new episode; until then they stay unattached).
         Stmt s(db,
             "SELECT ts.turn_summary_id, ("
             "  SELECT e.episode_id FROM episodes e "
             "  WHERE e.session_id = ts.session_id "
             "    AND ts.turn_datetime >= e.span_start AND ts.turn_datetime <= e.span_end "
+            "    AND NOT e.locked "
             "  ORDER BY e.span_start DESC LIMIT 1"
             ") AS best, ("
             "  SELECT COUNT(*) FROM episodes e "
             "  WHERE e.session_id = ts.session_id "
-            "    AND ts.turn_datetime >= e.span_start AND ts.turn_datetime <= e.span_end"
+            "    AND ts.turn_datetime >= e.span_start AND ts.turn_datetime <= e.span_end "
+            "    AND NOT e.locked"
             ") AS covering "
             "FROM turn_summaries ts "
             "WHERE ts.episode_id IS NULL AND ts.text != '' AND ts.turn_datetime IS NOT NULL "
@@ -1383,13 +1396,27 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
     bool Backend::Impl::attach_stranded_turn_summary(int turn_summary_id, int episode_id) {
+        // X31: a locked episode never receives late rows (defence in depth —
+        // the selection above already hides it): the guard rejects the attach.
         Stmt u(db,
-            "UPDATE turn_summaries SET episode_id = ? "
-            "WHERE turn_summary_id = ? AND episode_id IS NULL AND text != ''");
+            "UPDATE turn_summaries SET episode_id = ?1 "
+            "WHERE turn_summary_id = ?2 AND episode_id IS NULL AND text != '' "
+            "  AND NOT EXISTS (SELECT 1 FROM episodes e "
+            "                  WHERE e.episode_id = ?1 AND e.locked)");
         u.bind(1, episode_id).bind(2, turn_summary_id);
         if (!u.exec())
             throw std::runtime_error(std::format("attach_stranded_turn_summary: {}", sqlite3_errmsg(db)));
         return sqlite3_changes(db) > 0;
+    }
+
+    // X31: read-only lock probe for the summarizer's defence-in-depth checks.
+    // false when no such episode (a missing episode is not "locked": the
+    // callers' own guards handle it).
+    bool Backend::Impl::episode_is_locked(int episode_id) {
+        Stmt s(db, "SELECT locked FROM episodes WHERE episode_id = ?");
+        s.bind(1, episode_id);
+        if (!s.step()) return false;
+        return s.column_int(0) != 0;
     }
 
     int Backend::Impl::stranded_open_tail_count() {

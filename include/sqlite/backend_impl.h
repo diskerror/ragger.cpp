@@ -615,6 +615,8 @@ struct Backend::Impl {
     std::vector<StrandedCandidate> stranded_turn_summary_candidates(int& ties);
     bool attach_stranded_turn_summary(int turn_summary_id, int episode_id);
     int stranded_open_tail_count();
+    // X31: read-only lock probe (see storage_backend.h).
+    bool episode_is_locked(int episode_id);
     // X23: episode-regeneration primitives (see storage_backend.h).
     std::vector<EpisodeMember> episode_members(int episode_id);
     std::optional<EpisodeMember> turn_summary_member_by_id(int turn_summary_id);

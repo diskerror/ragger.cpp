@@ -176,6 +176,9 @@ void SummarizerService::enqueue_catch_up() {
     // and fix the episode. Grouping by episode_id IS the pass's dedupe of
     // (episode_id, attach id): a stale member and a late row in the same
     // episode are one job, never two.
+    // X31: neither trigger can name a LOCKED episode — both selections
+    // (stale_turn_summary_candidates, stranded_turn_summary_candidates)
+    // exclude locked episodes, so the scan never queues a regen for one.
     size_t regen_n = 0;
     {
         std::map<int, std::vector<int>> regen_jobs;   // episode_id -> late rows
@@ -702,6 +705,16 @@ void SummarizerService::handle_episode_close(const Job& j) {
 // --------------------------------------------------------------------
 void SummarizerService::handle_episode_regen(const Job& j) {
     if (j.episode_id <= 0) return;
+
+    // X31 (defence in depth): a locked episode is never rebuilt. The catch-up
+    // selections already hide locked episodes, so reaching here means the
+    // episode was locked after this job was queued — drop it without a write;
+    // nothing re-queues it (the selections keep hiding it).
+    if (backend_.episode_is_locked(j.episode_id)) {
+        Diskerror::Logger::debug(std::format(
+            "[summarizer] episode regen skipped for locked episode {}", j.episode_id));
+        return;
+    }
 
     auto inf = inference_provider_ ? inference_provider_() : nullptr;  // once per job
 

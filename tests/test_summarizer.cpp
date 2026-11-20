@@ -2201,6 +2201,304 @@ void x30_test_episode_regen_stamps_modified_on(const std::string& base) {
     std::println(" ok");
 }
 
+// ---------------------------------------------------------------------------
+// X31: locked episodes. A locked episode is never re-summarized and never
+// receives late rows. `locked` is set with raw SQL (nothing sets it in code
+// yet). Pinned RED at HEAD: the column does not exist, so every lock
+// statement fails; with the column present but unenforced, the locked cases
+// behave like the unlocked controls and the CHECKs below fail.
+// ---------------------------------------------------------------------------
+
+// (1) The catch-up scan never queues an EpisodeRegen job for a locked episode
+// (stale-member trigger). The service is never started, so the queue holds
+// exactly what the scan selected. The same episode UNLOCKED is queued — the
+// control proves the test can fail.
+void x31_test_locked_episode_not_queued(const std::string& base) {
+    std::println("  x31_test_locked_episode_not_queued...");
+
+    namespace fs = std::filesystem;
+    const std::string dir = base + "/x31lockqueue";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const std::string db_path = dir + "/memories.db";
+
+    ragger::Embedder emb;   // disabled
+    ragger::sqlite::Backend backend(emb, db_path);
+    ragger::SummarizerService svc(backend,
+                                  [] { return std::shared_ptr<ragger::InferenceClient>{}; });
+    // Deliberately NOT started: enqueue_catch_up() fills the queue and
+    // nothing drains it, so queue_size() is the scan's selection count.
+
+    sqlite3* db = nullptr;
+    CHECK(sqlite3_open(db_path.c_str(), &db) == SQLITE_OK);
+    auto scalar = [&](const std::string& sql) -> long long {
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        long long v = -999;
+        if (sqlite3_step(st) == SQLITE_ROW) v = sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+        return v;
+    };
+    auto exec = [&](const std::string& sql) {
+        CHECK(sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+    };
+
+    const std::string guid = "x31-lockq-a";
+    const int t1 = backend.store_turn("x31 lockq q one", "x31 lockq a one", "test-model",
+                                      false, guid, "2026-05-01 09:00:00");
+    const int t2 = backend.store_turn("x31 lockq q two", "x31 lockq a two", "test-model",
+                                      false, guid, "2026-05-01 09:10:00");
+    CHECK(t1 > 0 && t2 > 0);
+    CHECK(backend.finalize_turn_summary(t1, x23_long_text("x31q1tok"), "summarizer-model"));
+    CHECK(backend.finalize_turn_summary(t2, x23_long_text("x31q2tok"), "summarizer-model"));
+    const int ts1 = static_cast<int>(scalar(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t1)));
+    const int ts2 = static_cast<int>(scalar(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t2)));
+
+    ragger::EpisodeClose ec;
+    ec.text = "x31 lockq episode";
+    ec.model_name = "summarizer-model";
+    ec.session_guid = guid;
+    ec.span_start = scalar("SELECT turn_datetime FROM turn_summaries WHERE turn_summary_id = "
+                           + std::to_string(ts1)) - 60;
+    ec.span_end   = scalar("SELECT turn_datetime FROM turn_summaries WHERE turn_summary_id = "
+                           + std::to_string(ts2)) + 60;
+    ec.member_turn_summary_ids = {ts1, ts2};
+    const int ep = backend.store_episode_close(ec);
+    CHECK(ep > 0);
+
+    // Stale member of the episode: the scan's trigger (a).
+    exec("UPDATE turn_summaries SET stale = 1 WHERE turn_summary_id = " + std::to_string(ts1));
+
+    // Locked: the scan selects nothing.
+    exec("UPDATE episodes SET locked = 1 WHERE episode_id = " + std::to_string(ep));
+    svc.enqueue_catch_up();
+    CHECK(svc.queue_size() == 0);
+
+    // Control: unlocked, the same scan queues exactly one regen job.
+    exec("UPDATE episodes SET locked = 0 WHERE episode_id = " + std::to_string(ep));
+    svc.enqueue_catch_up();
+    CHECK(svc.queue_size() == 1);
+
+    sqlite3_close(db);
+    backend.close();
+    std::println(" ok");
+}
+
+// (2) handle_episode_regen on a locked episode returns without a write:
+// episodes.text and modified_on unchanged, the summarizer stub never called,
+// the member's stale counter untouched. The regen job is queued while the
+// episode is still unlocked (the scan would hide it once locked) and the
+// worker only starts after the lock lands — deterministic, no race.
+void x31_test_locked_episode_regen_handler_skips(const std::string& base) {
+    std::println("  x31_test_locked_episode_regen_handler_skips...");
+
+    namespace fs = std::filesystem;
+    const std::string dir = base + "/x31lockregen";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const std::string db_path = dir + "/memories.db";
+
+    ragger::Embedder emb;   // disabled
+    ragger::sqlite::Backend backend(emb, db_path);
+
+    StubChat stub("X31REGENSTUB");
+    ragger::SummarizerService svc(backend, [&stub] { return stub.client(); });
+
+    sqlite3* db = nullptr;
+    CHECK(sqlite3_open(db_path.c_str(), &db) == SQLITE_OK);
+    auto scalar = [&](const std::string& sql) -> long long {
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        long long v = -999;
+        if (sqlite3_step(st) == SQLITE_ROW) v = sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+        return v;
+    };
+    auto text = [&](const std::string& sql) -> std::string {
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        std::string v;
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const unsigned char* c = sqlite3_column_text(st, 0);
+            v = c ? reinterpret_cast<const char*>(c) : "";
+        }
+        sqlite3_finalize(st);
+        return v;
+    };
+    auto exec = [&](const std::string& sql) {
+        CHECK(sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+    };
+
+    const std::string guid = "x31-lockregen-a";
+    const int t1 = backend.store_turn("x31 lockregen q one",
+                                      "x31 lockregen a one " + x23_long_text("x31rans"),
+                                      "test-model", false, guid, "2026-05-01 09:00:00");
+    CHECK(t1 > 0);
+    CHECK(backend.finalize_turn_summary(t1, x23_long_text("x31rt1tok"), "summarizer-model"));
+    const int ts1 = static_cast<int>(scalar(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t1)));
+
+    ragger::EpisodeClose ec;
+    ec.text = "x31 lockregen old episode text";
+    ec.model_name = "summarizer-model";
+    ec.session_guid = guid;
+    ec.span_start = scalar("SELECT turn_datetime FROM turn_summaries WHERE turn_summary_id = "
+                           + std::to_string(ts1)) - 60;
+    ec.span_end   = ec.span_start + 600;
+    ec.member_turn_summary_ids = {ts1};
+    const int ep = backend.store_episode_close(ec);
+    CHECK(ep > 0);
+
+    exec("UPDATE turn_summaries SET stale = 1 WHERE turn_summary_id = " + std::to_string(ts1));
+    svc.enqueue_catch_up();
+    CHECK(svc.queue_size() == 1);   // the regen job is queued while unlocked
+
+    // Lock the episode and push modified_on into the past: any write by the
+    // handler is then visible.
+    exec("UPDATE episodes SET locked = 1, modified_on = 1000 WHERE episode_id = " +
+         std::to_string(ep));
+    const std::string text0 =
+        text("SELECT text FROM episodes WHERE episode_id = " + std::to_string(ep));
+
+    // The worker starts with the job already in the queue (start()'s own
+    // catch-up sees a non-empty queue and skips), so handle_episode_regen
+    // runs on an episode that is locked before it starts.
+    svc.start();
+    for (int i = 0; i < 200 && svc.queue_size() != 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(svc.queue_size() == 0);
+
+    CHECK(text("SELECT text FROM episodes WHERE episode_id = " + std::to_string(ep)) == text0);
+    CHECK(scalar("SELECT modified_on FROM episodes WHERE episode_id = " + std::to_string(ep))
+          == 1000);
+    CHECK(stub.calls.load() == 0);
+    CHECK(scalar("SELECT stale FROM turn_summaries WHERE turn_summary_id = " +
+                 std::to_string(ts1)) == 1);
+
+    svc.stop();
+    sqlite3_close(db);
+    backend.close();
+    std::println(" ok");
+}
+
+// (3) stranded_turn_summary_candidates never chooses a locked episode as the
+// best covering episode: a row covered ONLY by a locked episode is not a
+// candidate at all; a row covered by a locked episode with the greater
+// span_start AND an unlocked one gets the unlocked one. The unlocked control
+// first proves the old selection (greatest span_start wins) — the locked
+// episode would otherwise be chosen.
+void x31_test_stranded_locked_episode_selection(const std::string& base) {
+    std::println("  x31_test_stranded_locked_episode_selection...");
+
+    namespace fs = std::filesystem;
+    const std::string dir = base + "/x31lockstr";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const std::string db_path = dir + "/memories.db";
+
+    ragger::Embedder emb;   // disabled
+    ragger::sqlite::Backend backend(emb, db_path);
+
+    sqlite3* db = nullptr;
+    CHECK(sqlite3_open(db_path.c_str(), &db) == SQLITE_OK);
+    auto scalar = [&](const std::string& sql) -> long long {
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+        long long v = -999;
+        if (sqlite3_step(st) == SQLITE_ROW) v = sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+        return v;
+    };
+    auto exec = [&](const std::string& sql) {
+        CHECK(sqlite3_exec(db, sql.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+    };
+    auto best_of = [&](int ts_id) -> long long {
+        int ties = 0;
+        for (const auto& c : backend.stranded_turn_summary_candidates(ties))
+            if (c.turn_summary_id == ts_id) return c.episode_id;
+        return -1;   // not a candidate
+    };
+
+    const std::string guid = "x31-lockstr-a";
+    const int t1 = backend.store_turn("x31 lockstr q one", "x31 lockstr a one", "test-model",
+                                      false, guid, "2026-05-01 10:00:00");
+    const int t2 = backend.store_turn("x31 lockstr q two", "x31 lockstr a two", "test-model",
+                                      false, guid, "2026-05-01 10:10:00");
+    CHECK(t1 > 0 && t2 > 0);
+    CHECK(backend.finalize_turn_summary(t1, x23_long_text("x31s1tok"), "summarizer-model"));
+    CHECK(backend.finalize_turn_summary(t2, x23_long_text("x31s2tok"), "summarizer-model"));
+    const int ts1 = static_cast<int>(scalar(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t1)));
+    const int ts2 = static_cast<int>(scalar(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t2)));
+
+    // The unlocked episode over both members.
+    const long long dt1 = scalar("SELECT turn_datetime FROM turn_summaries WHERE turn_summary_id = "
+                                 + std::to_string(ts1));
+    const long long dt2 = scalar("SELECT turn_datetime FROM turn_summaries WHERE turn_summary_id = "
+                                 + std::to_string(ts2));
+    ragger::EpisodeClose ec;
+    ec.text = "x31 lockstr unlocked episode";
+    ec.model_name = "summarizer-model";
+    ec.session_guid = guid;
+    ec.span_start = dt1 - 60;
+    ec.span_end   = dt2 + 60;
+    ec.member_turn_summary_ids = {ts1, ts2};
+    const int ep_open = backend.store_episode_close(ec);
+    CHECK(ep_open > 0);
+    const long long sid = scalar("SELECT session_id FROM episodes WHERE episode_id = "
+                                 + std::to_string(ep_open));
+
+    // Two late rows: r1 (10:05) inside the unlocked span, r2 (10:15) past it.
+    const int t3 = backend.store_turn("x31 lockstr q three", "x31 lockstr a three", "test-model",
+                                      false, guid, "2026-05-01 10:05:00");
+    const int t4 = backend.store_turn("x31 lockstr q four", "x31 lockstr a four", "test-model",
+                                      false, guid, "2026-05-01 10:15:00");
+    CHECK(t3 > 0 && t4 > 0);
+    CHECK(backend.finalize_turn_summary(t3, x23_long_text("x31s3tok"), "summarizer-model"));
+    CHECK(backend.finalize_turn_summary(t4, x23_long_text("x31s4tok"), "summarizer-model"));
+    const int r1 = static_cast<int>(scalar(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t3)));
+    const int r2 = static_cast<int>(scalar(
+        "SELECT turn_summary_id FROM turn_summaries WHERE turn_id = " + std::to_string(t4)));
+
+    // Two extra episodes (raw SQL): A covers only r2; B covers r1 with a
+    // GREATER span_start than the unlocked episode, so the greatest-span_start
+    // rule would pick B whenever B is unlocked.
+    const long long dt3 = scalar("SELECT turn_datetime FROM turn_summaries WHERE turn_summary_id = "
+                                 + std::to_string(r1));
+    const long long dt4 = scalar("SELECT turn_datetime FROM turn_summaries WHERE turn_summary_id = "
+                                 + std::to_string(r2));
+    exec("INSERT INTO episodes (text, session_id, span_start, span_end, modified_on) VALUES "
+         "('x31 lockstr A', " + std::to_string(sid) + ", " + std::to_string(dt4 - 180) + ", " +
+         std::to_string(dt4 + 300) + ", unixepoch())");
+    const int epA = static_cast<int>(scalar(
+        "SELECT episode_id FROM episodes WHERE text = 'x31 lockstr A'"));
+    exec("INSERT INTO episodes (text, session_id, span_start, span_end, modified_on) VALUES "
+         "('x31 lockstr B', " + std::to_string(sid) + ", " + std::to_string(dt3 - 120) + ", " +
+         std::to_string(dt3 + 180) + ", unixepoch())");
+    const int epB = static_cast<int>(scalar(
+        "SELECT episode_id FROM episodes WHERE text = 'x31 lockstr B'"));
+    CHECK(epA > 0 && epB > 0);
+
+    // Control (nothing locked): greatest span_start wins — r1 -> B, r2 -> A.
+    CHECK(best_of(r1) == epB);
+    CHECK(best_of(r2) == epA);
+
+    // Locked: r2 (covered only by A) is no longer a candidate at all; r1
+    // falls back to the unlocked episode.
+    exec("UPDATE episodes SET locked = 1 WHERE episode_id IN (" +
+         std::to_string(epA) + ", " + std::to_string(epB) + ")");
+    CHECK(best_of(r2) == -1);
+    CHECK(best_of(r1) == ep_open);
+
+    sqlite3_close(db);
+    backend.close();
+    std::println(" ok");
+}
+
 // describe_summarizer: what status reports. No network; strings are empty
 // when nothing is configured, and engine alone is empty when no endpoint
 // serves the named model.
@@ -2307,6 +2605,9 @@ int main() {
     x23_test_episode_regen_single_to_multi(env.base());
     x23_test_episode_regen_inference_down(env.base());
     x30_test_episode_regen_stamps_modified_on(env.base());
+    x31_test_locked_episode_not_queued(env.base());
+    x31_test_locked_episode_regen_handler_skips(env.base());
+    x31_test_stranded_locked_episode_selection(env.base());
     x27_test_response_truncated();
     p9b_test_utf8_safe_prefix();
     p9b_test_bad_prompt_no_escape(env.base());
