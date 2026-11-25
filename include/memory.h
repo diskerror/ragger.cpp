@@ -1,11 +1,14 @@
 /**
  * RaggerMemory — high-level facade
  *
- * Mirrors ragger_memory/memory.py from the Python version.
+ * Wraps the storage backend, embedder and user store behind the one API the
+ * CLI, HTTP daemon and MCP surfaces share.
  */
 #pragma once
 
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -42,9 +45,10 @@ public:
     /// (issue #48). Returns the new document id.
     int store_document(const DocumentChunk& chunk, bool defer_embedding = false);
 
-    /// Capture a raw L1 conversation turn into the `turns` table. Empty
+    /// Capture a raw conversation turn into the `turns` table. Empty
     /// assistant_text → partial row (finalize later). `session_guid` groups
     /// the turn under a session (empty leaves it NULL). Returns turn_id.
+    /// `started_epoch` (X32; 0 = not given) stores turns.started_on.
     int store_turn(const std::string& user_text,
                    const std::string& assistant_text = "",
                    const std::string& model_name = "",
@@ -52,66 +56,77 @@ public:
                    const std::string& session_guid = "",
                    const std::string& source_timestamp = "",
                    const std::string& session_name = "",
-                   const std::string& name_source = "");
+                   const std::string& name_source = "",
+                   int64_t started_epoch = 0);
     /// Finalize a partial turn (set assistant_text + embed + model).
     bool finalize_turn(int turn_id,
                        const std::string& assistant_text,
                        const std::string& model_name = "");
 
-    /// Write back a document's embedding (import path).
-    bool update_document_embedding(int document_id, const std::vector<float>& emb);
-
-    /// Store a curated L6 decision/lesson. Embeds text unless deferred.
-    /// `status` defaults to "current" — the only status current_decisions()
-    /// (the recall-pipeline layer) actually surfaces. Other recognized
-    /// values: "roadmap" (planned/future work — deliberately excluded from
-    /// the recall layer so every session isn't cluttered with unfinished
-    /// plans; query it explicitly instead), "superseded", "deprecated".
+    /// Store a curated decision (knowledge kind='decision', no trigger).
+    /// Embeds text unless deferred. `status` defaults to "current" and must
+    /// be creatable (current | provisional | pending) — legacy words such as
+    /// "roadmap"/"deprecated" are rejected on write (TODO Q8).
     int store_decision(const std::string& text,
                        const std::string& status = "current",
                        const std::string& tags = "",
                        const std::string& source_timestamp = "",
                        bool defer_embedding = false);
 
-    /// Per-row embedding write-back for the remaining context tables.
-    bool update_decision_embedding(int decision_id, const std::vector<float>& emb);
-    bool update_summary_embedding(int summary_id, const std::vector<float>& emb);
-    bool update_turn_embedding(int turn_id, const std::vector<float>& emb);
+    /// Store a structured decision (agent API Phase 1). Throws
+    /// std::invalid_argument on validation failure.
+    KnowledgeResult store_knowledge(const KnowledgeInput& in);
 
-    /// Purge conversation turns older than max_age_hours. Returns rows deleted.
-    int cleanup_old_conversations(float max_age_hours);
+    /// Document source for `path`, or null json if that path was never imported.
+    json find_document_source(const std::string& path);
 
-    // --- summaries (L2/L3) pipeline (issue #22) ---
-    /// `source_timestamp` (non-empty) overrides the row's timestamp — L2
-    /// inherits the source turn's timestamp so the (session_id, timestamp)
-    /// pair links a turn to its summary (no FK column). `tags`="draft" marks
-    /// a heuristic-fallback summary that should be re-summarized later.
-    int store_summary(const std::string& text, const std::string& level,
-                      const std::string& model_name = "",
-                      const std::string& session_guid = "",
-                      const std::string& source_timestamp = "",
-                      const std::string& tags = "");
-    bool update_summary_text(int summary_id, const std::string& text,
-                             const std::string& model_name = "");
-    std::vector<std::string> recent_summaries(const std::string& level, int limit);
+    /// Imported documents ({id,title,path,year,tags,imported_at,chunks}), by id.
+    json list_document_sources();
+
+    /// Delete a document (chunks + source row). Throws invalid_argument if absent.
+    json delete_document_source(int document_source_id);
+
+    /// Layered agent search (agent API Phase 2) — handles + snippets only.
+    std::vector<AgentHit> agent_search(const AgentSearchQuery& q);
+
+    /// LR S76: documents are searched through their own verb.
+    std::vector<AgentHit> agent_document_search(const DocumentSearchQuery& q);
+
+    /// Agent row reads (agent API Phase 2) — full rows / expansion / history.
+    json agent_get(const AgentGetQuery& q);
+
+    /// Timeline / curation / review (agent API Phase 4) — see StorageBackend docs.
+    json agent_timeline(const TimelineQuery& q);
+    json agent_update(const UpdateRequest& req);
+    json agent_review(const std::string& action,
+                      const std::vector<std::string>& ids);
+
+    std::vector<std::pair<int,float>> possible_supersedes_for_text(
+        const std::string& text);
+
+    // PHASE8: the old summary-store / text-update / recent-list wrappers are gone
+    // with the `summaries` table. Importers write knowledge notes instead.
+    /// Insert a knowledge note (kind='note'): the importer-facing shorthand
+    /// over store_knowledge. `source_timestamp` (non-empty) sets the row's
+    /// created_at (historical imports); `tags` = caller tags with `imported`
+    /// folded in (TODO Q4); `model_name`/`session_guid` carry provenance when
+    /// the importer has them.
+    int store_note(const std::string& text, const std::string& tags = "",
+                   const std::string& source_timestamp = "",
+                   const std::string& model_name = "",
+                   const std::string& session_guid = "");
     std::vector<std::string> current_decisions(int limit);
 
-    /// Set a decision's status (e.g. promote "roadmap" -> "current" once
-    /// planned work is done, or mark a stale one "superseded"/"deprecated").
-    /// Returns false if no row matched.
-    bool set_decision_status(int decision_id, const std::string& status);
-
-    /// Decisions with the given status, most recent first. Use this for
-    /// anything other than the recall pipeline's "current" default —
-    /// e.g. status="roadmap" to list planned/future work explicitly.
+    /// Decisions with the given status, most recent first. Any stored status
+    /// can be filtered, including legacy words (roadmap, deprecated).
     std::vector<std::string> decisions_by_status(const std::string& status, int limit);
 
-    /// Exact-match idempotency check for bulk importers: does a summaries
-    /// row already exist with this text and created_at timestamp?
-    bool summary_exists_exact(const std::string& text, const std::string& created_at);
+    /// Exact-match idempotency check for bulk importers: does a knowledge
+    /// note already exist with this text and created_at timestamp?
+    bool note_exists_exact(const std::string& text, const std::string& created_at);
 
-    /// Exact-match idempotency check for the decisions table. Mirrors
-    /// summary_exists_exact.
+    /// Exact-match idempotency check for decision rows. Mirrors
+    /// note_exists_exact.
     bool decision_exists_exact(const std::string& text, const std::string& created_at);
 
     /// Fuzzy overlap check for conversation importers: does a live-captured
@@ -129,11 +144,7 @@ public:
                           const std::string& timestamp = "",
                           const std::string& session_guid = "");
 
-    /// Replace text + metadata of an existing memory (re-embeds unless
-    /// `defer_embedding`, FTS5 triggers reindex, preserves id and original
-    /// timestamp). Returns false if the row is missing or has the keep tag.
-    bool update_text(int memory_id, const std::string& text, json metadata = {},
-                     bool defer_embedding = false);
+    // PHASE8: update_text is gone (text is never rewritten in place).
 
     /// Search. Returns results from the single configured DB.
     SearchResponse search(const std::string& query,
@@ -144,8 +155,8 @@ public:
     int  count() const;
 
     /// Total rows across all five embedded tables (turns, turn_summaries,
-    /// summaries, decisions, documents) — the rebuild/backfill scope, and a
-    /// more accurate "how much is in here" figure than count() (summaries only).
+    /// episodes, knowledge, documents) — the rebuild/backfill scope, and a
+    /// more accurate "how much is in here" figure than count() (knowledge rows only).
     int  count_embeddable_rows() const;
 
     /// Load all memories (for export). Optionally filter by collection.
@@ -153,10 +164,12 @@ public:
 
     /// Rebuild embeddings for all documents, or one table when `table` !=
     /// "all". Returns row count.
-    /// `progress` writes a \r-updated counter to stdout — right for the CLI,
-    /// wrong for the daemon (it lands in the activity log as one enormous
-    /// line); daemon callers pass false and get periodic Logger lines instead.
-    int rebuild_embeddings(bool progress = true, const std::string& table = "all");
+    /// `progress` receives (table, done, total) per row and (table, -1, total)
+    /// at each table's end — the CLI passes a stdout printer; daemon callers
+    /// pass nothing and get periodic Logger lines instead.
+    int rebuild_embeddings(const ProgressFn& progress = {},
+                           const std::string& table = "all",
+                           const CancelFlag* cancel = nullptr);
 
     // ---- Embedding identity: current vs desired + re-embed control -------
     struct EmbeddingStatus {
@@ -181,7 +194,7 @@ public:
     bool embeddings_unavailable() const;
 
     /// True when the embedding drift guard failed at startup — vectors are
-    /// unusable but FTS5 text + phonetic search still works. Log the error
+    /// unusable but text-index search still works. Log the error
     /// and keep serving rather than refusing to start.
     bool embeddings_degraded() const { return embeddings_degraded_; }
 
@@ -212,16 +225,10 @@ public:
     int resume_interrupted_reembed();
 
     /// Embed only rows whose embedding column is NULL. Returns count.
-    int backfill_embeddings();
+    int backfill_embeddings(const CancelFlag* cancel = nullptr);
 
     /// Get distinct collection names.
     std::vector<std::string> collections() const;
-
-    /// Delete a memory by ID.
-    bool delete_memory(int memory_id);
-
-    /// Delete multiple memories by ID.
-    int delete_batch(const std::vector<int>& memory_ids);
 
     /// Search by metadata field matching.
     std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit = 0,
@@ -231,6 +238,14 @@ public:
     /// Session turns newest-first (recipe walk-back direction).
     std::vector<TurnRecord> turns_by_session_desc(const std::string& session_guid,
                                                    int limit = 0);
+
+    /// Record in semqlite_config the facts SemanticSQLite needs that Ragger
+    /// derives rather than stores: embedder (onnx, or http://host:port when the
+    /// engine is external), embedding_offset (0) and the API-key variable name.
+    /// The model / vector type / dimensions rows are written by set_setting().
+    /// Called at startup (when not degraded) and wherever the identity is
+    /// promoted.
+    void publish_semqlite_identity();
 
     /// Settings access (user_store).
     std::optional<std::string> get_setting(const std::string& key);
@@ -242,10 +257,22 @@ public:
     void close();
 
 private:
-    std::unique_ptr<Embedder>      embedder_;
+    /// S20 (C M6): the live embedder as a shared_ptr snapshot. POST
+    /// /embedding/update swaps this member while request threads are calling
+    /// through it; every user copies the pointer once per call
+    /// (embedder_snapshot()) and uses only its copy, so the old Embedder
+    /// stays alive until all in-flight calls drop theirs. The mutex guards
+    /// ONLY the pointer copy/assign — never encode().
+    std::shared_ptr<Embedder> embedder_snapshot() const {
+        std::lock_guard<std::mutex> lk(embedder_mu_);
+        return embedder_;
+    }
+
+    std::shared_ptr<Embedder>         embedder_;
+    mutable std::mutex                embedder_mu_;    // guards embedder_ pointer only
     std::unique_ptr<StorageBackend> backend_;
     std::unique_ptr<UserStore>      user_store_;   // settings and user management
-    bool                            embeddings_degraded_ = false;
+    std::atomic<bool>               embeddings_degraded_{false};   // S19 (C M6)
 #ifdef RAGGER_STATS
     std::unique_ptr<class StatsLogger> stats_;      // opt-in retrieval instrumentation
 #endif
@@ -257,6 +284,10 @@ private:
 struct CaptureResult {
     bool captured;
     int  turn_id;
+    /// The system-prefix-stripped user text actually stored (PHASE6 2.1).
+    /// The summarizer's is_system_injected_turn() test must see the text as
+    /// stored, not the raw envelope.
+    std::string clean_user;
 };
 
 /// Shared entry point behind the `capture_turn` MCP tool and HTTP POST /turn:
@@ -264,18 +295,21 @@ struct CaptureResult {
 /// background summarization. No-op (captured=false) unless config [server]
 /// capture_turns is true. Both transports disassemble their envelope and call
 /// this; the gate and storage policy live here, once.
+/// `started_at` (X32; 0 = not given) is the time the user prompt arrived
+/// (epoch seconds), stored as turns.started_on.
 CaptureResult capture_turn(RaggerMemory& memory,
                            const std::string& user,
                            const std::string& assistant,
                            const std::string& model,
                            const std::string& session_id,
                            const std::string& session_name = "",
-                           const std::string& name_source = "");
+                           const std::string& name_source = "",
+                           int64_t started_at = 0);
 
 /// One assembled chunk in a recipe-built context, ordered oldest-first
 /// (chronological) when emitted so an agent can inject them as-is. `kind`
-/// echoes the recipe layer name (raw_turn / turn_summary / session_summary
-/// / project_summary / decision). `timestamp` is the source-turn/source-row
+/// is one of the kinds the builder emits: raw_turn / turn_summary /
+/// episode / decision / general_search. `timestamp` is the source-turn/source-row
 /// timestamp where available (empty for cross-session items).
 struct ContextChunk {
     std::string kind;
@@ -297,8 +331,8 @@ struct SessionContext {
 /// GET /session/<id>: assemble a session's turns + summaries + decisions
 /// into a recipe-shaped payload. Walks back from the latest turn in the
 /// active session; each layer consumes a slice (raw_turn / turn_summary
-/// pop turns chronologically; session/project/decisions pull recent
-/// rows). max_tokens is enforced as a ceiling.
+/// pop turns chronologically; episode / decision / general_search pull
+/// recent rows). max_tokens is enforced as a ceiling.
 ///
 /// No-op (enabled=false) unless BOTH capture_turns and build_context are
 /// on. `recipe_name` empty falls back to `[server] default_recipe`. If

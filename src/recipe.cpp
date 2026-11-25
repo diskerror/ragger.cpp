@@ -19,7 +19,11 @@ const std::unordered_map<std::string, LayerKind>& layer_kind_map() {
     static const std::unordered_map<std::string, LayerKind> m = {
         {"raw_turn",        LayerKind::RawTurn},
         {"turn_summary",    LayerKind::TurnSummary},
-        {"session_summary", LayerKind::SessionSummary},
+        {"episode",         LayerKind::Episode},
+        // "session_summary" is an accepted alias of "episode" (PHASE5 D.3):
+        // user copies in ~/.ragger/recipes/ keep working unchanged.
+        {"session_summary", LayerKind::Episode},
+        // Parses but emits nothing at 0.17 (project rollups removed).
         {"project_summary", LayerKind::ProjectSummary},
         {"decisions",       LayerKind::Decisions},
         {"general_search",  LayerKind::GeneralSearch},
@@ -100,17 +104,15 @@ std::vector<Recipe> builtin_recipes() {
     std::vector<Recipe> out;
 
     // natural_fading — the default. Mimics how memory decays:
-    // freshly-spoken turns stay verbatim, older ones fade to summaries,
-    // then to a session-level digest, then to project context, then to
-    // pertinent decisions.
+    // freshly-spoken turns stay verbatim, older ones fade to turn summaries,
+    // then to episodes, then to pertinent decisions.
     Recipe nf;
     nf.name        = "natural_fading";
-    nf.description = "Recent raw → turn summaries → session → project → decisions";
+    nf.description = "Recent raw → turn summaries → episodes → decisions";
     nf.layers      = {
         {LayerKind::RawTurn,        2},
         {LayerKind::TurnSummary,    5},
-        {LayerKind::SessionSummary, 1},
-        {LayerKind::ProjectSummary, 1},
+        {LayerKind::Episode,        1},
         {LayerKind::Decisions,      3},
         {LayerKind::GeneralSearch,  5},
     };

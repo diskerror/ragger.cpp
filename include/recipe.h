@@ -4,21 +4,27 @@
  * A recipe walks back from the latest prompt in a session, consuming
  * turns/summaries layer by layer to balance recency-of-detail against
  * token cost. The default `natural_fading` recipe gives the agent the
- * last few raw turns verbatim, then earlier turns as L2 summaries, then
- * the session summary, then the project summary, then pertinent
- * decisions — mimicking how a person remembers a conversation.
+ * last few raw turns verbatim, then earlier turns as turn summaries, then
+ * episode digests, then pertinent decisions — mimicking how a person
+ * remembers a conversation.
  *
  * Recipes are JSON files in `~/.ragger/recipes/<name>.json`. The loader
  * scans the directory at server startup; built-in defaults are returned
  * when the directory is missing or empty. Layer kinds:
  *
  *   raw_turn         — N raw turns, newest-first (consumes the walk)
- *   turn_summary     — N L2 summaries, newest-first (consumes the walk)
- *   session_summary  — current session's L3 (latest), up to `limit`
- *   project_summary  — recent L4 project summaries, up to `limit`
- *   decisions        — current L6 decisions, up to `limit`
+ *   turn_summary     — N turn summaries, newest-first (consumes the walk)
+ *   episode          — current session's episodes (newest-first), up to
+ *                      `limit`. The JSON kind "session_summary" is accepted
+ *                      as an alias of "episode" so user copies of old
+ *                      recipes keep working.
+ *   project_summary  — still parses (user recipes keep loading) but emits
+ *                      nothing: the project rollup layer is gone at 0.17.
+ *   decisions        — current knowledge rows (kind='decision'), up to
+ *                      `limit`
  *   general_search   — up to `limit` relevance-ranked results from across
- *                      ALL summaries+documents+decisions (session-agnostic),
+ *                      ALL turn summaries, episodes, knowledge and documents
+ *                      (session-agnostic),
  *                      excluding anything earlier layers already emitted.
  *                      Query = current session's latest user turn + up to 2
  *                      most recent turn summaries.
@@ -38,8 +44,8 @@ namespace ragger {
 enum class LayerKind {
     RawTurn,
     TurnSummary,
-    SessionSummary,
-    ProjectSummary,
+    Episode,         // db 0.17: replaces SessionSummary (episodes table)
+    ProjectSummary,  // parses only; emits nothing (layer removed at 0.17)
     Decisions,
     GeneralSearch,
 };

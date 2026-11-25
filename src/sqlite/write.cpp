@@ -1,40 +1,14 @@
 #include "sqlite/backend_impl.h"
+#include "store_kind.h"
 #include "embedder.h"
 #include "config.h"
 #include "lang.h"
 #include "util/fs.h"
 #include "util/time.h"
-#include "util/sqlite.h"
-#include "double_metaphone.h"
-#include "fts_tokenize.h"
-#include "sqlite/text_index.h"
-#include "vector_codec.h"
 #include "Logger.h"
-#include <format>
-#include "nlohmann_json.hpp"
 
-#include <sqlite3.h>
-#include <Eigen/Dense>
 
-#include <algorithm>
-#include <cctype>
-#include <chrono>
-#include <cstdlib>
-#include <cstring>
-#include <ctime>
-#include <unordered_map>
-#include <unordered_set>
-#include <iomanip>
-#include <iterator>
-#include <filesystem>
-#include <numeric>
-#include <optional>
 #include <regex>
-#include <set>
-#include <mutex>
-#include <iostream>
-#include <sstream>
-#include <stdexcept>
 
 namespace ragger::sqlite {
 
@@ -95,6 +69,29 @@ static std::string tags_from_metadata(const json& metadata) {
     // Markdown emphasis markers ("**"/"*") wrapping the label are also
     // consumed. No-op if the text doesn't start with this pattern.
     std::string Backend::Impl::strip_decision_number_prefix(const std::string& text) {
+        // Fast reject (review 3C): the pattern is anchored, so a match
+        // requires the first non-whitespace token (after at most two '*')
+        // to begin with "Decision" or "Design" (case-insensitive). Most
+        // stored texts don't — skip the regex engine for them.
+        {
+            size_t i = 0;
+            while (i < text.size() && (text[i] == ' ' || text[i] == '\t' ||
+                                       text[i] == '\n' || text[i] == '\r'))
+                ++i;
+            for (size_t stars = 0; i < text.size() && text[i] == '*' && stars < 2;
+                 ++i, ++stars) {}
+            auto ci_at = [&text](size_t at, const char* word) {
+                for (const char* w = word; *w; ++w, ++at) {
+                    if (at >= text.size()) return false;
+                    char c = text[at];
+                    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+                    if (c != *w) return false;
+                }
+                return true;
+            };
+            if (!ci_at(i, "decision") && !ci_at(i, "design"))
+                return text;
+        }
         static const std::regex prefix_re(
             R"(^\s*\*{0,2}(?:Design\s+)?Decision(?:\s+Log)?\s*#\d+\s*)"
             R"((?:Logged)?\s*(?:\([^)]*\))?\s*\*{0,2}\s*:\s*\*{0,2}\s*)",
@@ -125,88 +122,178 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // ---- local timestamp ("%F %T" == "YYYY-MM-DD HH:MM:SS") ----------
-    // Thin aliases over the shared formatter (ragger/util/time.h) so every
-    // DB timestamp uses one local-time format.
-    std::string Backend::Impl::local_timestamp(std::time_t tt) { return db_timestamp(tt); }
-
-    std::string Backend::Impl::local_timestamp() { return db_timestamp(); }
-
-
     // ---- public API ---------------------------------------------------
 
-    // v2: the generic store API writes a summary (L2/L3/L4). A memory-only
-    // install records agent memories here. `level`/`status` come from
-    // metadata when supplied; defaults suit a settled session-level note.
-    // collection/category and the free-form metadata blob are gone in v2 —
-    // metadata fields are either promoted to columns or dropped. FTS5 sync
-    // triggers index the row, so there is no explicit BM25 step.
+    // v2: the generic store API (behind /store, MCP `store`, CLI `ragger
+    // store`). PHASE8: it writes a knowledge row of kind='note' — the
+    // summaries table is gone. Caller fields map onto the note:
+    //   status   <- metadata["status"] (default current; must be creatable)
+    //   tags     <- metadata["tags"] (+ keep/bad flag folding, as ever)
+    //   level    <- metadata["level"]: the column no longer exists, but
+    //               nothing a caller sent is discarded — a level other than
+    //               "note" is appended as a `level:<value>` tag
+    //   created  <- metadata["timestamp"] (historical imports)
+    //   session  <- metadata["session"] GUID, lookup only (unknown -> NULL)
+    //   model    <- metadata["model"]
+    // The returned id is a knowledge_id (string, as before).
+    void Backend::Impl::validate_creatable_status(const std::string& status) {
+        if (!status::is_in(status::kCreatable, status))
+            throw std::invalid_argument(
+                "status must be one of: current, provisional, pending");
+    }
+
+
+    // PHASE9B step 6: store() is the ONE implementation of the `store` verb
+    // for both transports. X19: metadata.category == "decision" (the
+    // single rule, store_kind_for) is now REJECTED — a decision must carry a
+    // trigger and this verb can never supply one, so the trigger-bearing
+    // decision verb (memory_decision / POST /decision) is the only way to
+    // write kind='decision'. The legacy store_decision wrapper stays for the
+    // importers. Everything else (status validation, tags, session lookup,
+    // model, transaction, indexing) is shared.
     std::string Backend::Impl::store(const std::string& raw_text, json metadata, bool defer_embedding) {
         if (metadata.is_null()) metadata = json::object();
 
-        std::string level  = metadata.value("level",  std::string("session"));
+        const std::string kind(store_kind_for(metadata));
+        // Before any embedding, before any write: the request is invalid at
+        // the verb level whatever the other fields say.
+        if (kind == "decision")
+            throw std::invalid_argument(std::string(lang::ERR_STORE_DECISION_REQUIRES_TRIGGER));
+
+        std::string status = metadata.value("status", std::string("current"));
+        validate_creatable_status(status);
+
+        // tags: accept a JSON array or a plain string. `keep`/`bad` are
+        // flag-tags folded into the tags column — the hard-delete paths that
+        // honoured "keep" were removed (LR S58); the tag itself is kept.
+        std::string tags_str = tags_from_metadata(metadata);
+        const std::string level = metadata.value("level", std::string());
+        if (!level.empty() && level != "note") {
+            if (!tags_str.empty()) tags_str += ",";
+            tags_str += "level:" + level;
+        }
 
         // Optional historical timestamp override (imports of past
         // conversations). Must be an ISO-8601 UTC string; else falls to now.
         std::string ts_override;
-        if (metadata.contains("timestamp") && metadata["timestamp"].is_string()) {
+        if (metadata.contains("timestamp") && metadata["timestamp"].is_string())
             ts_override = metadata["timestamp"].get<std::string>();
-        }
 
-        // tags: accept a JSON array or a plain string. `keep`/`bad` are
-        // flag-tags folded into the tags column — a row tagged "keep" is
-        // protected from delete/update (see delete_memory / update_text).
-        std::string tags_str = tags_from_metadata(metadata);
+        // Session provenance by GUID, lookup only — never create a session
+        // from here (same rule as store_knowledge).
+        std::optional<int> session_id;
+        const std::string guid = metadata.value("session", std::string());
+        if (!guid.empty())
+            session_id = find_session(guid);
 
-        std::string text = normalize_path(raw_text);
+        std::string text = (kind == "decision")
+            ? normalize_path(strip_decision_number_prefix(raw_text))
+            : normalize_path(raw_text);
+        if (text.empty())
+            throw std::invalid_argument(std::string(kind) + " text is required");
 
         std::vector<float> emb;
-        if (!defer_embedding) {
-            emb = embedder->encode(text);
-        }
+        if (!defer_embedding)
+            emb = require_embedder().encode(text);   // trigger NULL -> text
 
-        auto ts = resolve_epoch(ts_override);
+        std::optional<int> model_id;
+        const std::string model_name = metadata.value("model", std::string());
+        if (!model_name.empty())
+            model_id = get_or_create_model(model_name);
 
-        // Every summary should record the model that produced it. Callers pass
-        // the live model via metadata["model"]; empty → 0 → NULL (the raw-turn
-        // sentinel), which a non-turn summary should never be. get_or_create_model
-        // interns the name in the models table.
-        std::string model_name = metadata.value("model", std::string(""));
-        int model_id = get_or_create_model(model_name);
-
-        // Custom text index (v0.16): index_record() below tokenizes text and
-        // maintains terms/*_terms/count columns — no FTS5 triggers involved.
-        Stmt s(db,
-            "INSERT INTO summaries (text, embedding_version, embedding, level, tags, created_at, model_id, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?)");
-
-        s.bind(1, text);
-        if (defer_embedding) {
-            s.bind_null(2);
-            s.bind_null(3);
-        } else {
-            bind_embedding_version(s.raw(), 2, emb);
-            bind_embedding(s.raw(), 3, emb);
-        }
-        s.bind(4, level).bind(5, tags_str).bind(6, ts);
-        if (model_id) s.bind(7, model_id); else s.bind_null(7);
-        s.bind(8, ts);  // updated_at == created_at on insert
-
-        if (!s.exec()) {
-            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-        }
-
-        int summary_id = static_cast<int>(sqlite3_last_insert_rowid(db));
-        invalidate_cache();
-        text_index_->index_record("summaries", summary_id, text);
-        return std::to_string(summary_id);
+        Transaction txn(db);
+        const int id = insert_knowledge_row(
+            kind, text, status, tags_str,
+            /*trigger=*/"", /*rationale=*/"", /*scope=*/"",
+            /*supersedes=*/std::nullopt, session_id, model_id,
+            resolve_epoch(ts_override), emb);
+        text_index_->index_record("knowledge", id, text);
+        txn.commit();
+        invalidate_knowledge_cache();
+        return std::to_string(id);
     }
 
 
     // ---- store_document: write Level 5 RAG chunk ----------------------
 
-    // Resolve a (path, title) document to its document_sources row, inserting
-    // one on first sighting. Returns {document_source_id, imported_at_epoch}.
+    // Imported documents with chunk counts, by primary key. Gaps left by
+    // deletions are shown as they are (the key is never renumbered).
+    json Backend::Impl::list_document_sources() {
+        Stmt s(db,
+            "SELECT ds.document_source_id, ds.title, ds.path, ds.year, ds.tags, "
+            "       datetime(ds.imported_at,'unixepoch','localtime'), "
+            "       (SELECT COUNT(*) FROM documents d "
+            "        WHERE d.document_source_id = ds.document_source_id) "
+            "FROM document_sources ds ORDER BY ds.document_source_id");
+        json out = json::array();
+        while (s.step()) {
+            out.push_back({
+                {"id",          s.column_int64(0)},
+                {"title",       s.is_null(1) ? json(nullptr) : json(s.column_text(1))},
+                {"path",        s.is_null(2) ? json(nullptr) : json(s.column_text(2))},
+                {"year",        s.is_null(3) ? json(nullptr) : json(s.column_int(3))},
+                {"tags",        s.column_text(4)},
+                {"imported_at", s.column_text(5)},
+                {"chunks",      s.column_int64(6)},
+            });
+        }
+        return out;
+    }
+
+    // Delete a document: every chunk (documents_terms rows go with them via
+    // ON DELETE CASCADE; shared `terms` entries stay by design) and then the
+    // source row, in ONE transaction so a failure leaves nothing half-removed.
+    json Backend::Impl::delete_document_source(int document_source_id) {
+        json info;
+        {
+            Stmt s(db,
+                "SELECT title, path, "
+                "  (SELECT COUNT(*) FROM documents WHERE document_source_id = ?1) "
+                "FROM document_sources WHERE document_source_id = ?1");
+            s.bind(1, document_source_id);
+            if (!s.step())
+                throw std::invalid_argument(std::format(
+                    "no document with id {}", document_source_id));
+            info = {{"id", document_source_id},
+                    {"title", s.is_null(0) ? json(nullptr) : json(s.column_text(0))},
+                    {"path",  s.is_null(1) ? json(nullptr) : json(s.column_text(1))},
+                    {"chunks", s.column_int64(2)}};
+        }
+        {
+            // PHASE9B step 4d: the hand-rolled BEGIN/COMMIT ignored both
+            // results — a failed COMMIT reported success with the delete
+            // still open (and a failed ROLLBACK compounded it). Transaction
+            // is RAII and throws where it must.
+            Transaction tx(db);
+            Stmt dc(db, "DELETE FROM documents WHERE document_source_id = ?");
+            dc.bind(1, document_source_id);
+            if (!dc.exec())
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            Stmt ds(db, "DELETE FROM document_sources WHERE document_source_id = ?");
+            ds.bind(1, document_source_id);
+            if (!ds.exec())
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            tx.commit();
+        }
+        invalidate_doc_cache();
+        return info;
+    }
+
+    // Document source by its unique path (0.17: path alone identifies a
+    // document; title is label metadata). Null json when absent.
+    json Backend::Impl::find_document_source(const std::string& path) {
+        Stmt s(db,
+            "SELECT document_source_id, ifnull(title,''), "
+            "       datetime(imported_at,'unixepoch','localtime') "
+            "FROM document_sources WHERE path = ?");
+        s.bind(1, path);
+        if (!s.step()) return json(nullptr);
+        return json{{"id", s.column_int64(0)}, {"title", s.column_text(1)},
+                    {"imported_at", s.column_text(2)}};
+    }
+
+    // Resolve a document (by its unique path) to its document_sources row,
+    // inserting one on first sighting. Returns {document_source_id, imported_at_epoch}.
     // imported_at_text is the caller's timestamp (TEXT 'YYYY-MM-DD HH:MM:SS'
     // or 'YYYYMMDD', interpreted LOCAL); empty -> now. On an existing source
     // the stored epoch is returned (the first import's time wins), so every
@@ -218,10 +305,8 @@ static std::string tags_from_metadata(const json& metadata) {
         {
             Stmt s(db,
                 "SELECT document_source_id, imported_at FROM document_sources "
-                "WHERE ifnull(path,'') = ifnull(?,'') "
-                "  AND ifnull(title,'') = ifnull(?,'')");
-            if (path.empty()) s.bind_null(1); else s.bind(1, path);
-            if (title.empty()) s.bind_null(2); else s.bind(2, title);
+                "WHERE path = ?");
+            s.bind(1, path);
             if (s.step())
                 return { s.column_int64(0), s.column_int64(1) };
         }
@@ -237,7 +322,7 @@ static std::string tags_from_metadata(const json& metadata) {
             "INSERT INTO document_sources(title, path, year, tags, imported_at) "
             "VALUES (?,?,?,?,?)");
         if (title.empty()) ins.bind_null(1); else ins.bind(1, title);
-        if (path.empty())  ins.bind_null(2); else ins.bind(2, path);
+        ins.bind(2, path);
         if (year <= 0) ins.bind_null(3); else ins.bind(3, year);
         ins.bind(4, tags);
         ins.bind(5, epoch);
@@ -248,6 +333,10 @@ static std::string tags_from_metadata(const json& metadata) {
 
 
     int Backend::Impl::store_document(const DocumentChunk& chunk, bool defer_embedding) {
+        // documents index real files: path is the unique identity (0.17).
+        if (chunk.path.empty())
+            throw std::invalid_argument("document path is required");
+
         // Path-normalise the body text for consistency with store().
         std::string text = normalize_path(chunk.text);
 
@@ -261,7 +350,7 @@ static std::string tags_from_metadata(const json& metadata) {
 
         std::vector<float> emb;
         if (!defer_embedding) {
-            emb = embedder->encode(signal_text);
+            emb = require_embedder().encode(signal_text);
         }
 
         // Resolve/insert the source; every chunk of a (path,title) doc shares
@@ -271,7 +360,7 @@ static std::string tags_from_metadata(const json& metadata) {
             chunk.path, chunk.title, chunk.year, chunk.tags, chunk.imported_at);
 
         // Slim chunk row: no path/title/year/imported_at (they live on the
-        // source). documents_fts sync triggers index text/tags only.
+        // source). The text index covers text/tags only.
         Stmt s(db,
             "INSERT INTO documents "
             "(text, tags, chunk_index, document_source_id, modified_on, "
@@ -284,26 +373,34 @@ static std::string tags_from_metadata(const json& metadata) {
         else s.bind(3, chunk.chunk_index);
         s.bind(4, source_id);
         s.bind(5, epoch);
-        if (defer_embedding) {
-            s.bind_null(6);
-            s.bind_null(7);
-        } else {
-            bind_embedding_version(s.raw(), 6, emb);
-            bind_embedding(s.raw(), 7, emb);
-        }
+        // Deferred writes arrive with an empty emb: bind_embedding* is the
+        // single NULL choke point (B m10).
+        bind_embedding_version(s.raw(), 6, emb);
+        bind_embedding(s.raw(), 7, emb);
 
-        if (!s.exec()) {
-            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+        int doc_id = -1;
+        {
+            Transaction tx(db);  // row + postings atomic (B §1.3)
+            if (!s.exec()) {
+                // PHASE9: a (source, chunk_index) collision is a caller
+                // error with a pointed message, not an opaque store failure.
+                const int ext = sqlite3_extended_errcode(db);
+                if (ext == SQLITE_CONSTRAINT_UNIQUE || ext == SQLITE_CONSTRAINT_PRIMARYKEY)
+                    throw std::invalid_argument(std::format(
+                        "document chunk already exists: {} chunk {}",
+                        chunk.path, chunk.chunk_index));
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            }
+            doc_id = static_cast<int>(sqlite3_last_insert_rowid(db));
+            text_index_->index_record("documents", doc_id, signal_text);
+            tx.commit();
         }
-
-        invalidate_doc_cache();
-        int doc_id = static_cast<int>(sqlite3_last_insert_rowid(db));
-        text_index_->index_record("documents", doc_id, signal_text);
+        invalidate_doc_cache();  // after commit, not before (B §1.3)
         return doc_id;
     }
 
 
-    // ---- turns (L1) raw exchange capture ------------------------------
+    // ---- turns raw exchange capture ------------------------------
     // Resolve a model name to its models.model_id, creating the row if it
     // doesn't exist. Empty name → 0 (callers bind NULL).
     int Backend::Impl::get_or_create_model(const std::string& name) {
@@ -315,8 +412,21 @@ static std::string tags_from_metadata(const json& metadata) {
         if (id) return id;
         Stmt ins(db, "INSERT INTO models (name) VALUES (?)");
         ins.bind(1, name);
-        ins.step();
-        return static_cast<int>(sqlite3_last_insert_rowid(db));
+        // PHASE9B step 4d: a failed INSERT used to return whatever
+        // sqlite3_last_insert_rowid() happened to hold — an unrelated model's
+        // id, which then landed in turns.model_id. Retry the lookup once (a
+        // concurrent insert by another connection is a benign race); if the
+        // row still is not there, the insert genuinely failed: throw.
+        if (!ins.exec()) {
+            Stmt q(db, "SELECT model_id FROM models WHERE name = ?");
+            q.bind(1, name);
+            if (q.step()) return q.column_int(0);
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+        }
+        const int64_t rowid = sqlite3_last_insert_rowid(db);
+        if (rowid <= 0)
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, "model insert produced no rowid"));
+        return static_cast<int>(rowid);
     }
 
 
@@ -324,6 +434,9 @@ static std::string tags_from_metadata(const json& metadata) {
     /// sighting. Empty guid → 0 (NULL session_id), mirroring get_or_create_model.
     /// If session_name is non-empty, sets sessions.name (and name_source) on
     /// first sighting or updates it if the title has changed since last capture.
+    /// X4 (M6): every write here (INSERT, rename UPDATE, the sessions index
+    /// rows) is part of the caller's transaction — store_turn opens it before
+    /// calling, so a failure anywhere in here rolls the turn back with it.
     int Backend::Impl::get_or_create_session(const std::string& guid,
                               const std::string& session_name,
                               const std::string& name_source) {
@@ -339,8 +452,21 @@ static std::string tags_from_metadata(const json& metadata) {
             else                     ins.bind(2, session_name);
             if (session_name.empty()) ins.bind_null(3);
             else                      ins.bind(3, name_source);
-            ins.step();
-            id = static_cast<int>(sqlite3_last_insert_rowid(db));
+            // PHASE9B step 4d: same stale-rowid hazard as get_or_create_model.
+            if (!ins.exec()) {
+                Stmt q(db, "SELECT session_id FROM sessions WHERE guid = ?");
+                q.bind(1, guid);
+                if (q.step()) id = q.column_int(0);
+                if (!id)
+                    throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            } else {
+                id = static_cast<int>(sqlite3_last_insert_rowid(db));
+                if (!id)
+                    throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, "session insert produced no rowid"));
+            }
+            // LR S81 (D5): session titles join the text index at write time.
+            if (!session_name.empty())
+                text_index_->index_record("sessions", id, session_name);
         } else if (!session_name.empty()) {
             // Update name if changed (retitled session, or first time a name
             // is available for a previously-unnamed session).
@@ -350,9 +476,25 @@ static std::string tags_from_metadata(const json& metadata) {
             u.bind(2, name_source);
             u.bind(3, id);
             u.bind(4, session_name);
-            u.exec();
+            // X4 (M6): a failed rename used to be ignored, so the caller went on
+            // to index the NEW name while sessions.name still held the old one.
+            // Same style as the neighbouring ERR_STORE_FAILED throws; the caller
+            // (store_turn) holds the transaction, so this rolls the whole write
+            // back.
+            if (!u.exec())
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            if (sqlite3_changes(db) > 0)   // LR S81: re-index only on a real rename
+                text_index_->index_record("sessions", id, session_name);
         }
         return id;
+    }
+
+
+    std::optional<int> Backend::Impl::find_session(const std::string& guid) {
+        Stmt s(db, "SELECT session_id FROM sessions WHERE guid = ?");
+        s.bind(1, guid);
+        if (s.step()) return s.column_int(0);
+        return std::nullopt;
     }
 
 
@@ -363,89 +505,193 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // Store a raw L1 turn. An empty assistant_text writes a *partial* row
+    // LR S57: the ONE definition of the same-exchange merge rule for a turn's
+    // assistant text (store_turn's probe and finalize_turn share it). Returns
+    // the text to store, or nullopt for "no change". Order matters:
+    //   prev empty                     -> next (fill a partial turn)
+    //   next identical to / in prev    -> no change (repeat capture)
+    //   next starts with prev          -> next  (cumulative resend, superset)
+    //   anything else                  -> prev + blank line + next (continuation;
+    //                                     a rewritten draft cannot be told apart)
+    std::optional<std::string> merge_assistant_text(const std::string& prev,
+                                                    const std::string& next) {
+        if (prev.empty()) return next;
+        if (next == prev || prev.find(next) != std::string::npos) return std::nullopt;
+        if (next.rfind(prev, 0) == 0) return next;
+        return prev + "\n\n" + next;
+    }
+
+
+    // Store a raw turn. An empty assistant_text writes a *partial* row
     // (assistant + embedding NULL) for the prompt-arrival/finalize flow;
-    // otherwise the exchange is embedded unless defer_embedding. FTS5 sync
-    // triggers index user_text/assistant_text. Returns turn_id.
+    // otherwise the exchange is embedded unless defer_embedding. The text
+    // index covers user_text/assistant_text. Returns turn_id.
     // `source_timestamp` (non-empty, db format) overrides created_at for
     // historical imports; the regeneration-dedup window is skipped in that
     // case (it reasons about "now", which is meaningless for old turns).
+    void Backend::Impl::touch_session_span(int session_id, int64_t epoch) {
+        if (session_id <= 0) return;   // turn has no session
+        // NOTE: two-arg scalar MIN()/MAX() are NOT used — they return NULL
+        // when either side is NULL, which would pin a NULL bound forever.
+        Stmt s(db,
+            "UPDATE sessions SET "
+            "started_on = CASE WHEN started_on IS NULL OR ?1 < started_on THEN ?1 ELSE started_on END, "
+            "ended_on   = CASE WHEN ended_on IS NULL OR ?1 > ended_on   THEN ?1 ELSE ended_on END "
+            "WHERE session_id = ?2");
+        s.bind(1, epoch);
+        s.bind(2, session_id);
+        if (!s.exec())
+            throw std::runtime_error(std::format(
+                "touch_session_span (session {}): {}", session_id, sqlite3_errmsg(db)));
+    }
+
+
+    // ORDER (X4/M6, same contract as store_episode_close): validate -> embed
+    // (outside the txn) -> BEGIN -> resolve model/session -> INSERT -> index ->
+    // commit. Everything from BEGIN on is one unit: a session created or
+    // renamed here, its index rows, the model row and the turn row all roll
+    // back together if any of them fails.
     int Backend::Impl::store_turn(const std::string& user_text, const std::string& assistant_text,
                    const std::string& model_name, bool defer_embedding,
                    const std::string& session_guid,
                    const std::string& source_timestamp,
                    const std::string& session_name,
-                   const std::string& name_source) {
+                   const std::string& name_source,
+                   int64_t started_epoch) {
         std::string u = normalize_path(user_text);
         std::string a = normalize_path(assistant_text);
-        int model_id   = get_or_create_model(model_name);
-        int session_id = get_or_create_session(session_guid, session_name, name_source);
 
-        // Retry/regeneration dedup. When the agent re-answers the *same* user
-        // prompt without an intervening new prompt, we get a second turn whose
-        // user_text duplicates the immediately-preceding turn. In a healthy
-        // agent a regeneration stays in one session; a session change between
-        // two identical prompts is itself a breakage signal (observed when the
-        // TUI crash-restarted and minted a fresh session GUID per turn). So the
-        // match is intentionally cross-session: identical user_text in the most
-        // recent turn, within a short time window. We keep-latest — update that
-        // row's assistant_text (+ re-embed) in place rather than inserting a
-        // duplicate. The FTS au-trigger keeps the index consistent. Empty
-        // assistant_text (partial/prompt-arrival rows) never dedups.
-        // Skipped entirely for historical imports (source_timestamp set).
-        if (!a.empty() && source_timestamp.empty()) {
-            Stmt p(db,
-                "SELECT turn_id, user_text, created_at, session_id FROM turns "
-                "ORDER BY turn_id DESC LIMIT 1");
-            if (p.step()) {
-                const int prev_id          = p.column_int(0);
-                const std::string prev_u   = p.column_text(1);
-                const int64_t prev_ts_ep   = p.column_int64(2);
-                // 5-minute window: wide enough for a slow regeneration, narrow
-                // enough that a genuinely re-typed identical prompt much later
-                // is still recorded as its own turn.
-                bool within_window = false;
-                if (prev_u == u) {
-                    int64_t now_ep = db_epoch();
-                    within_window = (now_ep - prev_ts_ep) <= 300;
-                }
-                if (within_window) {
-                    std::vector<float> emb2 = embedder->encode(turn_embed_text(u, a));
-                    // Single timestamp value shared by the turns UPDATE and the
-                    // placeholder cleanup/insert below — computed once, never
-                    // re-read from the clock, so the two writes can't drift
-                    // apart and strand the old (session_id, prev_ts) slot.
-                    const int64_t new_ts = db_epoch();
-                    Stmt up(db,
-                        "UPDATE turns SET assistant_text = ?, embedding_version = ?, embedding = ?, "
-                        "model_id = COALESCE(?, model_id), "
-                        "session_id = COALESCE(?, session_id), created_at = ? "
-                        "WHERE turn_id = ?");
-                    up.bind(1, a);
-                    bind_embedding_version(up.raw(), 2, emb2);
-                    bind_embedding(up.raw(), 3, emb2);
-                    if (model_id) up.bind(4, model_id); else up.bind_null(4);
-                    if (session_id) up.bind(5, session_id); else up.bind_null(5);
-                    up.bind(6, new_ts);
-                    up.bind(7, prev_id);
-                    if (!up.exec())
-                        if (!up.exec()) throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-                        text_index_->index_record("turns", prev_id, u + "\n" + a);
-                        return prev_id;
+        // Same-exchange handling (PHASE9B step 10). Only the FINAL assistant
+        // text of a turn is kept; a rejected draft is never stored as its own
+        // turn (that would capture the agent's discarded thinking), and no
+        // existing text is ever overwritten with different content.
+        // Probe: the newest turn OF THIS SESSION (an empty/unknown GUID never
+        // probes), same user_text, within 5 minutes. Historical imports
+        // (source_timestamp set) and empty assistant_text never probe.
+        //   * previous row has no assistant text -> fill it in place (finalize
+        //     flow; created_at and session untouched).
+        //   * identical text, or text already contained in what we hold
+        //     (the second capture hook firing) -> no write, return the row.
+        //   * new text starts with the held text (a cumulative resend) -> it
+        //     is a superset: replace with it, nothing is lost.
+        //   * anything else cannot be told apart from a continuation of a
+        //     multi-part reply -> treated as a continuation: appended after a
+        //     blank line to the same row.
+        // The embedding is recomputed from the combined text (NULL when
+        // defer_embedding, so backfill fills it; a stale vector is never kept).
+        // X4 (M6): the probe reads through find_session() instead of the
+        // resolved session id, and runs BEFORE the transaction opens. A session
+        // that does not exist yet cannot hold a previous turn, so the probe
+        // result is identical to probing after resolution — and the embedding
+        // below stays outside the write window (ORDER contract: validate ->
+        // embed (outside the txn) -> INSERT -> index -> commit).
+        int probe_id = -1;
+        std::optional<std::string> merged;   // set only when the probe matched
+        std::optional<int64_t> probe_started;  // X32: stored started_on (nullopt = NULL)
+        if (!a.empty() && source_timestamp.empty() && !session_guid.empty()) {
+            if (const auto sid = find_session(session_guid)) {
+                Stmt p(db,
+                    "SELECT turn_id, user_text, assistant_text, created_at, started_on FROM turns "
+                    "WHERE session_id = ? ORDER BY turn_id DESC LIMIT 1");
+                p.bind(1, *sid);
+                if (p.step() && p.column_text(1) == u &&
+                    (db_epoch() - p.column_int64(3)) <= 300) {
+                    probe_id = p.column_int(0);
+                    if (!p.is_null(4)) probe_started = p.column_int64(4);
+                    // LR S57: the rule itself is merge_assistant_text (shared
+                    // with finalize_turn); nullopt = already held, nothing to
+                    // write (model/session resolution still runs, as before).
+                    merged = merge_assistant_text(p.column_text(2), a);
                 }
             }
         }
 
+        // Embedding computed OUTSIDE the transaction: encoding is slow and
+        // holding the write lock across a model call would block every other
+        // writer (same rule as store_episode_close). Exactly the encode calls
+        // HEAD made: the merged text on a merge, the exchange on a new turn,
+        // nothing when the probe found the text already held (that path writes
+        // no row).
+        const bool write_merge = merged.has_value();             // UPDATE the probed row
+        const bool write_new   = (probe_id < 0) && !a.empty();   // INSERT a new row
         std::vector<float> emb;
         bool have_emb = false;
-        if (!defer_embedding && !a.empty()) {
-            emb = embedder->encode(turn_embed_text(u, a));
+        if (!defer_embedding && (write_merge || write_new)) {
+            emb = require_embedder().encode(write_merge ? turn_embed_text(u, *merged)
+                                                        : turn_embed_text(u, a));
             have_emb = true;
         }
 
+        // X4 (M6): the transaction opens BEFORE session/model resolution, so a
+        // session create/rename, its index rows, the model upsert and the turn
+        // write commit or roll back together (they used to commit one by one in
+        // autocommit, so a later failure left a half-applied session). Callers
+        // that already hold a transaction join this one — Transaction no-ops
+        // when joined, the outer owner decides.
+        Transaction tx(db);
+        int model_id   = get_or_create_model(model_name);
+        int session_id = get_or_create_session(session_guid, session_name, name_source);
+
+        if (probe_id >= 0) {
+            // Already held: nothing to write, but keep the resolution above.
+            // X32: a resend may carry started_at the stored row lacks (or an
+            // earlier one) — keep the EARLIER value (NULL loses to any).
+            if (!merged) {
+                if (started_epoch != 0 &&
+                    (!probe_started || started_epoch < *probe_started)) {
+                    Stmt su(db, "UPDATE turns SET started_on = ? WHERE turn_id = ?");
+                    su.bind(1, started_epoch);
+                    su.bind(2, probe_id);
+                    if (!su.exec())
+                        throw std::runtime_error(std::format(
+                            lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+                }
+                tx.commit(); return probe_id;
+            }
+            // X32: same rule on the merge write: min(stored, new), NULL loses.
+            std::optional<int64_t> keep_started = probe_started;
+            if (started_epoch != 0 &&
+                (!keep_started || started_epoch < *keep_started))
+                keep_started = started_epoch;
+            Stmt up(db,
+                "UPDATE turns SET assistant_text = ?, embedding_version = ?, embedding = ?, "
+                "model_id = COALESCE(model_id, ?), started_on = COALESCE(?, started_on) "
+                "WHERE turn_id = ?");
+            up.bind(1, *merged);
+            if (defer_embedding) {
+                up.bind_null(2);
+                up.bind_null(3);
+            } else {
+                bind_embedding_version(up.raw(), 2, emb);
+                bind_embedding(up.raw(), 3, emb);
+            }
+            if (model_id) up.bind(4, model_id); else up.bind_null(4);
+            if (keep_started) up.bind(5, *keep_started); else up.bind_null(5);
+            up.bind(6, probe_id);
+            if (!up.exec())
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            // X22: the merged text is not reflected in the turn's turn summary
+            // summary yet — bump its stale counter so the periodic catch-up
+            // refreshes it (reliably across restarts; mechanism (b)). Only
+            // content rows: a '' marker is never refreshed, and a turn with
+            // no turn-summary row has nothing to flag. exec() failure throws inside the
+            // transaction, so the whole merge rolls back together.
+            Stmt st(db,
+                "UPDATE turn_summaries SET stale = stale + 1 "
+                "WHERE turn_id = ? AND text IS NOT NULL AND text <> ''");
+            st.bind(1, probe_id);
+            if (!st.exec())
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            text_index_->index_record("turns", probe_id, u + "\n" + *merged);
+            tx.commit();
+            invalidate_raw_turn_cache();  // LR S75
+            invalidate_turn_cache();      // X22: the turn-summary row's shape changed
+            return probe_id;
+        }
+
         Stmt s(db,
-            "INSERT INTO turns (model_id, session_id, user_text, assistant_text, embedding_version, embedding, created_at) "
-            "VALUES (?,?,?,?,?,?,?)");
+            "INSERT INTO turns (model_id, session_id, user_text, assistant_text, embedding_version, embedding, created_at, started_on) "
+            "VALUES (?,?,?,?,?,?,?,?)");
         if (model_id) s.bind(1, model_id); else s.bind_null(1);
         if (session_id) s.bind(2, session_id); else s.bind_null(2);
         s.bind(3, u);
@@ -458,12 +704,19 @@ static std::string tags_from_metadata(const json& metadata) {
             s.bind_null(5);
             s.bind_null(6);
         }
-        s.bind(7, resolve_epoch(source_timestamp));
+        const int64_t ts = resolve_epoch(source_timestamp);
+        s.bind(7, ts);
+        if (started_epoch != 0) s.bind(8, started_epoch); else s.bind_null(8);
 
+        // row + postings + session span atomic (B §1.3; X4/M6 folds the
+        // session/model resolution opened above into the same commit).
         if (!s.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-        int new_id = static_cast<int>(sqlite3_last_insert_rowid(db));
+        const int new_id = static_cast<int>(sqlite3_last_insert_rowid(db));
         text_index_->index_record("turns", new_id, a.empty() ? u : (u + "\n" + a));
+        touch_session_span(session_id, ts);
+        tx.commit();
+        invalidate_raw_turn_cache();  // LR S75
         return new_id;
     }
 
@@ -508,24 +761,31 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // Finalize a partial turn: set assistant_text, (re)embed the exchange,
-    // and record the model. Returns false if the turn doesn't exist.
+    // Finalize a partial turn: merge assistant_text with the shared same-
+    // exchange rule (LR S57 — never overwrite differing content), (re)embed
+    // the exchange, and record the model. Returns false if the turn doesn't
+    // exist. Re-embed/index happen only when the stored text changed.
     bool Backend::Impl::finalize_turn(int turn_id, const std::string& assistant_text,
                        const std::string& model_name) {
-        Stmt g(db, "SELECT user_text FROM turns WHERE turn_id = ?");
+        Stmt g(db, "SELECT user_text, assistant_text FROM turns WHERE turn_id = ?");
         g.bind(1, turn_id);
-        std::string u;
+        std::string u, prev_a;
         bool found = false;
         if (g.step()) {
             found = true;
             u = g.column_text(0);
+            prev_a = g.column_text(1);          // "" when NULL
         }
         if (!found) return false;
 
-        std::string a = normalize_path(assistant_text);
+        const std::optional<std::string> merged =
+            merge_assistant_text(prev_a, normalize_path(assistant_text));
+        if (!merged) return true;               // already held: no write, no re-embed
+        const std::string a = *merged;
         int model_id  = get_or_create_model(model_name);
-        auto emb = embedder->encode(turn_embed_text(u, a));
+        auto emb = require_embedder().encode(turn_embed_text(u, a));
 
+        Transaction tx(db);  // row + postings atomic (B §1.3)
         Stmt s(db,
             "UPDATE turns SET assistant_text = ?, embedding_version = ?, embedding = ?, "
             "model_id = COALESCE(?, model_id) WHERE turn_id = ?");
@@ -534,88 +794,296 @@ static std::string tags_from_metadata(const json& metadata) {
         bind_embedding(s.raw(), 3, emb);
         if (model_id) s.bind(4, model_id); else s.bind_null(4);
         s.bind(5, turn_id);
-        if (!s.exec()) return false;
+        if (!s.exec()) return false;  // tx rolls back on scope exit
         text_index_->index_record("turns", turn_id, u + "\n" + a);
+        tx.commit();
+        invalidate_raw_turn_cache();  // LR S75
         return true;
     }
 
 
-    // ---- summaries (L2/L3) pipeline primitives (issue #22) ------------
-    // Insert a summary row. level: 'turn' (L2) | 'session' (L3) | 'project'.
-    // Embeds text, records model.
-    // source_timestamp (non-empty) overrides the row's timestamp: L2 turn
-    // summaries inherit the source turn's timestamp so the (session_id,
-    // timestamp) pair links a turn to its summary (no FK column needed) and
-    // stays stable across embedding-model changes.
-    int Backend::Impl::store_summary(const std::string& text, const std::string& level,
-                      const std::string& model_name,
-                      const std::string& session_guid,
-                      const std::string& source_timestamp,
-                      const std::string& tags) {
-        std::string t = normalize_path(text);
-        int model_id   = get_or_create_model(model_name);
-        int session_id = get_or_create_session(session_guid);
-        auto emb = embedder->encode(t);
+    // PHASE8: the old summary-store entry point is gone — importers write rows of
+    // kind='note' through store_knowledge (caller tags + `imported`); the
+    // generic store() above covers the free-text path.
 
-        Stmt s(db,
-            "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, level, tags, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)");
-        if (model_id) s.bind(1, model_id); else s.bind_null(1);
-        if (session_id) s.bind(2, session_id); else s.bind_null(2);
-        s.bind(3, t);
-        bind_embedding_version(s.raw(), 4, emb);
-        bind_embedding(s.raw(), 5, emb);
-        s.bind(6, level).bind(7, tags);
-        {
-            const int64_t ts = resolve_epoch(source_timestamp);
-            s.bind(8, ts);
-            s.bind(9, ts);  // updated_at == created_at on insert
-        }
-        if (!s.exec())
+
+    // Shared INSERT for both write paths (PHASE7 B.3): the structured path
+    // (store_knowledge) and the legacy store_decision wrapper. Returns the new
+    // knowledge_id. `trigger` NULL for the legacy path — the trigger-required
+    // rule lives in store_knowledge's validation, NOT here, exactly as the
+    // old store_decision bypassed store_structured_row's checks.
+    int Backend::Impl::insert_knowledge_row(const std::string& kind,
+                                            const std::string& text,
+                                            const std::string& status,
+                                            const std::string& tags,
+                                            const std::string& trigger,
+                                            const std::string& rationale,
+                                            const std::string& scope,
+                                            std::optional<int> supersedes,
+                                            std::optional<int> session_id,
+                                            std::optional<int> model_id,
+                                            int64_t created_at,
+                                            const std::vector<float>& emb) {
+        Stmt ins(db,
+            "INSERT INTO knowledge (kind, text, status, tags, trigger, rationale, scope,"
+            " supersedes, session_id, model_id, created_at, embedding_version, embedding)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?, ?,?)");
+        ins.bind(1, kind);
+        ins.bind(2, text);
+        ins.bind(3, status);
+        ins.bind(4, tags);
+        if (trigger.empty()) ins.bind_null(5); else ins.bind(5, trigger);
+        if (rationale.empty()) ins.bind_null(6); else ins.bind(6, rationale);
+        if (scope.empty())     ins.bind_null(7); else ins.bind(7, scope);
+        if (supersedes)  ins.bind(8, *supersedes); else ins.bind_null(8);
+        if (session_id)  ins.bind(9, *session_id); else ins.bind_null(9);
+        if (model_id)    ins.bind(10, *model_id);  else ins.bind_null(10);
+        ins.bind(11, created_at);
+        // Deferred writes arrive with an empty emb: bind_embedding* is the
+        // single NULL choke point (B m10 — the old defer_embedding branch
+        // here duplicated what the binders already do).
+        bind_embedding_version(ins.raw(), 12, emb);
+        bind_embedding(ins.raw(), 13, emb);
+        if (!ins.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-        invalidate_cache();
-        int sid = static_cast<int>(sqlite3_last_insert_rowid(db));
-        text_index_->index_record("summaries", sid, t);
-        return sid;
+        return static_cast<int>(sqlite3_last_insert_rowid(db));
     }
 
 
-    // ---- store_decision: write Level 6 curated decision/lesson ----------
-    // Mirrors store_summary but the decisions table has no level/model/session
-    // columns — just text/embedding/status/tags/timestamp. defer_embedding
-    // leaves embedding NULL for a later backfill pass.
+    // ---- store_decision: legacy Level 6 curated decision/lesson ----------
+    // Thin wrapper over knowledge(kind='decision') WITHOUT the trigger rule
+    // (used by the importers — none of which ever supplied a trigger; X19 took
+    // /store category=decision and `ragger decision add` off this path).
+    // defer_embedding leaves embedding NULL.
     int Backend::Impl::store_decision(const std::string& text, const std::string& status,
                        const std::string& tags,
                        const std::string& source_timestamp,
                        bool defer_embedding) {
+        // PHASE9B step 6: the same status contract store() enforces (the CLI
+        // used to accept e.g. "roadmap" here; that is Reid's dropped-status
+        // ruling applied consistently). Embed OUTSIDE the transaction; insert
+        // + index INSIDE it, so an indexing failure never leaves a committed,
+        // unindexed row.
+        const std::string eff_status = status.empty() ? "current" : status;
+        validate_creatable_status(eff_status);
         std::string t = normalize_path(strip_decision_number_prefix(text));
-
-        Stmt s(db,
-            "INSERT INTO decisions (text, embedding_version, embedding, status, tags, created_at) "
-            "VALUES (?,?,?,?,?,?)");
-        s.bind(1, t);
-        if (defer_embedding) {
-            s.bind_null(2);
-            s.bind_null(3);
-        } else {
-            auto emb = embedder->encode(t);
-            bind_embedding_version(s.raw(), 2, emb);
-            bind_embedding(s.raw(), 3, emb);
+        std::vector<float> emb;
+        if (!defer_embedding) emb = require_embedder().encode(t);
+        int did = 0;
+        {
+            Transaction txn(db);
+            did = insert_knowledge_row(
+                "decision", t, eff_status, tags,
+                /*trigger=*/"", /*rationale=*/"", /*scope=*/"",
+                /*supersedes=*/std::nullopt, /*session_id=*/std::nullopt,
+                /*model_id=*/std::nullopt, resolve_epoch(source_timestamp),
+                emb);
+            text_index_->index_record("knowledge", did, t);
+            txn.commit();
         }
-        s.bind(4, status.empty() ? "current" : status);
-        s.bind(5, tags);
-        s.bind(6, resolve_epoch(source_timestamp));
-        if (!s.exec())
-            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-        invalidate_dec_cache();
-        int did = static_cast<int>(sqlite3_last_insert_rowid(db));
-        text_index_->index_record("decisions", did, t);
+        invalidate_knowledge_cache();
         return did;
     }
 
 
+    // ---- store_knowledge: the ONE structured write path (PHASE7 B.1) ------
+    // Replaces store_structured_decision + store_insight (and their
+    // StructuredRowSpec): kind selects the rules via status::kKinds —
+    // decision requires a trigger, insight requires evidence, note neither.
+    // supersedes may point at ANY kind (insight -> decision promotion).
+    // Order matters (EXACTLY as the old path):
+    //   1. validate everything that can be checked without writing,
+    //   2. embed OUTSIDE the transaction (the embedder can take 100+ ms and
+    //      we must not hold a write lock across it),
+    //   3. Transaction: INSERT; flip the superseded row; link evidence;
+    //      index; commit().
+    // Any throw inside step 3 rolls back, so a failed evidence link never
+    // leaves a half-written row or an orphaned 'superseded' flip.
+    KnowledgeResult Backend::Impl::store_knowledge(const KnowledgeInput& in) {
+        auto trim = [](const std::string& s) {
+            size_t a = s.find_first_not_of(" \t\r\n");
+            if (a == std::string::npos) return std::string();
+            size_t b = s.find_last_not_of(" \t\r\n");
+            return s.substr(a, b - a + 1);
+        };
+        const std::string text    = normalize_path(strip_decision_number_prefix(trim(in.text)));
+        const std::string trigger = trim(in.trigger);
+        const std::string status  = in.status.empty() ? "current" : in.status;
+
+        // ---- 1. validate ----------------------------------------------
+        const status::KindRule* rule = status::find_kind(in.kind);
+        if (!rule)
+            throw std::invalid_argument("kind must be one of: decision, insight, note");
+        const std::string_view noun = rule->noun;
+        if (text.empty())
+            throw std::invalid_argument(std::format("{} text is required", noun));
+        if (rule->trigger_required && trigger.empty())
+            throw std::invalid_argument(std::format("{} trigger is required", noun));
+        if (rule->evidence_required && in.evidence.empty())
+            throw std::invalid_argument(std::format(
+                "{} requires at least one evidence episode_id", noun));
+        // Statuses a NEW row may start in. 'superseded' and 'retired' are
+        // reached only by curation, never on create.
+        validate_creatable_status(status);
+
+        if (in.supersedes) {
+            Stmt st(db, "SELECT status FROM knowledge WHERE knowledge_id = ?");
+            st.bind(1, *in.supersedes);
+            if (!st.step())
+                throw std::invalid_argument(std::format(
+                    "supersedes: knowledge {} does not exist", *in.supersedes));
+            const std::string old_status = st.column_text(0);
+            if (old_status == "superseded" || old_status == "retired")
+                throw std::invalid_argument(std::format(
+                    "supersedes: knowledge {} is already {}", *in.supersedes, old_status));
+        }
+
+        // LR S80 (D2): evidence references EPISODES (knowledge_episode_evidence).
+        for (int ep_id : in.evidence) {
+            Stmt st(db, "SELECT 1 FROM episodes "
+                        "WHERE episode_id = ? AND text != ''");
+            st.bind(1, ep_id);
+            if (!st.step())
+                throw std::invalid_argument(std::format(
+                    "evidence: episode {} does not exist or is empty", ep_id));
+        }
+
+        std::optional<int> session_id;
+        if (!in.session_guid.empty()) {
+            // Look up only -- never create a session from here. An unknown
+            // GUID just means no provenance link (NULL), not an error.
+            session_id = find_session(in.session_guid);
+        }
+
+        // ---- 2. embed (outside the transaction) ------------------------
+        // MUST equal kKnowledgeEmbedTextSQL's result for this row, so a
+        // housekeeping re-embed produces the same vector. (The SQL CASE
+        // collapses to bare `text` when trigger is NULL/empty — insights
+        // and notes allow that; decisions never reach the empty branch.)
+        const std::string embed_text =
+            trigger.empty() ? text : trigger + "\n" + text;
+        auto emb = require_embedder().encode(embed_text);
+
+        // ---- 3. write ---------------------------------------------------
+        KnowledgeResult out;
+        out.kind = in.kind;
+        {
+            Transaction txn(db);
+            out.id = insert_knowledge_row(
+                in.kind, text, status, in.tags, trigger, trim(in.rationale),
+                trim(in.scope), in.supersedes, session_id,
+                in.model_name.empty() ? std::optional<int>{}
+                                      : std::optional<int>(get_or_create_model(in.model_name)),
+                resolve_epoch(in.source_timestamp), emb);
+
+            if (in.supersedes) {
+                Stmt up(db, "UPDATE knowledge SET status = 'superseded' WHERE knowledge_id = ?");
+                up.bind(1, *in.supersedes);
+                if (!up.exec())
+                    throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+                out.superseded = *in.supersedes;
+            }
+
+            for (int ep_id : in.evidence) {
+                // OR IGNORE: a caller listing the same id twice is harmless.
+                Stmt ev(db, "INSERT OR IGNORE INTO knowledge_episode_evidence "
+                            "(knowledge_id, episode_id) VALUES (?,?)");
+                ev.bind(1, out.id);
+                ev.bind(2, ep_id);
+                if (!ev.exec())
+                    throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            }
+
+            text_index_->index_record("knowledge", out.id, embed_text);
+            txn.commit();
+        }
+        invalidate_knowledge_cache();
+
+        // ---- possible_supersedes hint (Phase 2 step 5) -------------------
+        // Flag only: up to 3 OTHER active rows of kind decision|insight (a
+        // note is never a hint target) whose embedding cosine with the new
+        // row reaches decision_supersede_threshold. The row the call already
+        // superseded is skipped. NO row is ever changed here.
+        if (in.kind != "note") {
+            std::vector<int> exclude{out.id};
+            if (out.superseded) exclude.push_back(*in.supersedes);
+            out.possible_supersedes = supersede_hints(
+                emb, exclude, "kind IN ('decision','insight')");
+        }
+        return out;
+    }
+
+
+    // Cosine near-duplicate scan over active knowledge rows (Phase 2 step 5;
+    // PHASE7: one table, optional kind restriction). Purely
+    // vector-based on purpose: a near-duplicate ruling is exactly what this
+    // looks like in embedding space, and FTS overlap is already guaranteed
+    // by the shared trigger vocabulary. Returns up to 3 (id, cosine) pairs at
+    // or above decision_supersede_threshold, highest first. Never changes a row.
+    std::vector<std::pair<int,float>> Backend::Impl::supersede_hints(
+            const std::vector<float>& emb,
+            const std::vector<int>& exclude_ids,
+            const char* kind_filter) {
+        std::vector<std::pair<int,float>> scored;
+        if (emb.empty()) return scored;
+        Eigen::Map<const Eigen::VectorXf> v(emb.data(), static_cast<int>(emb.size()));
+        float vnorm = v.norm();
+        if (vnorm <= 1e-12f) return scored;
+        const float threshold = config().decision_supersede_threshold;
+        const int expected_dims = config().embedding_dimensions;
+        int blob_bad = 0, bad_first_id = 0, bad_first_bytes = 0;
+        std::string sql =
+            "SELECT knowledge_id, embedding FROM knowledge WHERE status IN (" +
+            status::in_list_sql(status::kSearchActive) + ") ";
+        if (kind_filter) sql += std::format("  AND ({}) ", kind_filter);
+        for (size_t i = 0; i < exclude_ids.size(); ++i)
+            sql += std::format("  AND knowledge_id != ? ");
+        sql += "  AND embedding IS NOT NULL";
+        Stmt s(db, sql);
+        for (size_t i = 0; i < exclude_ids.size(); ++i)
+            s.bind(static_cast<int>(i) + 1, exclude_ids[i]);
+        while (s.step()) {
+            const int bad_before = blob_bad;
+            std::vector<float> other = decode_embedding_blob(
+                s.column_blob(1), s.column_bytes(1), expected_dims,
+                "knowledge", s.column_int(0), blob_bad);
+            if (blob_bad > bad_before && bad_before == 0) {
+                bad_first_id = s.column_int(0);
+                bad_first_bytes = s.column_bytes(1);
+            }
+            if (static_cast<int>(other.size()) != expected_dims) continue;
+            Eigen::Map<Eigen::VectorXf> o(other.data(), expected_dims);
+            float onorm = o.norm();
+            if (onorm <= 1e-12f) continue;   // zero/undecodable vector
+            float cos = (v.dot(o)) / (vnorm * onorm);
+            if (cos >= threshold) scored.emplace_back(s.column_int(0), cos);
+        }
+        // One warn line per scan: first offender's details plus the total (S39).
+        if (blob_bad > 0) {
+            Diskerror::Logger::warn(std::format(
+                "[cache] knowledge row {}: undecodable embedding blob ({} bytes, "
+                "expected {}-dim {}); using zero vector; "
+                "{} undecodable embedding(s) in knowledge",
+                bad_first_id, bad_first_bytes, expected_dims,
+                vector_codec::to_string(vtype_), blob_bad));
+        }
+        std::sort(scored.begin(), scored.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        if (scored.size() > 3) scored.resize(3);
+        return scored;
+    }
+
+
+    std::vector<std::pair<int,float>> Backend::Impl::possible_supersedes_for_text(
+            const std::string& text) {
+        if (!embedder || !embedder->ready() || text.empty())
+            return {};                       // degraded: no hints (per P2 rule)
+        return supersede_hints(require_embedder().encode(text), {});
+    }
+
+
     // ---- catch-up / recipe helpers ------------------------------------
-    // Turns lacking an L2 summary, linked by (session_id, timestamp).
+    // Turns lacking a turn summary, linked by (session_id, timestamp).
     // LEFT JOIN keeps turns whose summary row doesn't exist; ordered
     // newest-first so the summarizer works on the most recently active
     // turns first. This matters most for a manual resummarize (nulling
@@ -654,7 +1122,7 @@ static std::string tags_from_metadata(const json& metadata) {
 
 
     // ---- turn_id-based turn_summaries helpers (v0.12.0) ----------------
-    bool Backend::Impl::turn_summary_exists(int turn_id) {
+    bool Backend::Impl::turn_summary_exists(int turn_id) const {
         Stmt s(db, "SELECT 1 FROM turn_summaries WHERE turn_id = ? LIMIT 1");
         s.bind(1, turn_id);
         return s.step();
@@ -671,9 +1139,17 @@ static std::string tags_from_metadata(const json& metadata) {
     // Deleting the abandoned row here lets the turn fall back into
     // unsummarized_turns()'s normal candidate set on the very next
     // enqueue_catch_up() pass, giving it a fresh set of max_turn_failures
-    // attempts. Trivial-turn skips are NOT touched -- those are tagged with
-    // the real summarizer model name, never "bad", so this only targets
-    // genuine poison-abandon rows.
+    // attempts. LR S63: the trivial-turn skip is gone, so the ONLY writer
+    // of ''-text rows is this poison-abandon path (model "bad"); legacy DBs
+    // may still hold old "(skipped)" markers, which are likewise NOT touched
+    // (never "bad"), so this only targets genuine poison-abandon rows.
+    //
+    // PHASE9A: a row whose text IS NULL is also reset. NULL means "unset" (an
+    // '' row means "known empty"/done), and the 29 legacy rows in this state
+    // carry no summary at all, so deleting the placeholder loses nothing and
+    // lets the turn be summarized for real. Before this, such rows matched
+    // neither the '' predicate here nor unsummarized_turns()'s no-row test and
+    // stayed stuck forever. Only rows whose turn still exists are touched.
     int Backend::Impl::reset_abandoned_turn_summaries(int limit) {
         // SQLite's DELETE doesn't support ORDER BY/LIMIT without a special
         // build flag (SQLITE_ENABLE_UPDATE_DELETE_LIMIT), which we don't
@@ -683,7 +1159,8 @@ static std::string tags_from_metadata(const json& metadata) {
             std::string sel =
                 "SELECT ts.turn_summary_id FROM turn_summaries ts "
                 "JOIN models m ON m.model_id = ts.summary_model_id "
-                "WHERE m.name = 'bad' AND ts.text = '' "
+                "WHERE ts.turn_id IS NOT NULL "
+                "  AND ((m.name = 'bad' AND ts.text = '') OR ts.text IS NULL) "
                 "ORDER BY ts.turn_summary_id ASC";
             if (limit > 0) sel += " LIMIT ?";
             Stmt s(db, sel);
@@ -698,9 +1175,524 @@ static std::string tags_from_metadata(const json& metadata) {
         Stmt d(db, "DELETE FROM turn_summaries WHERE turn_summary_id IN (" + placeholders + ")");
         for (size_t i = 0; i < ids.size(); ++i)
             d.bind(static_cast<int>(i + 1), ids[i]);
-        d.exec();
+        if (!d.exec())
+            throw std::runtime_error(std::format("reset_abandoned_turn_summaries delete: {}",
+                                                 sqlite3_errmsg(db)));
         invalidate_turn_cache();
         return static_cast<int>(ids.size());
+    }
+
+
+    // ---- LR S66/S67 back-fill primitives ---------------------------------
+    // Selection is pure SELECT (a --dry-run pass counts these and stops).
+    // The writers follow the repo's established order: embed OUTSIDE the
+    // transaction, UPDATE + index_record INSIDE it, so a failed index never
+    // leaves a committed row with stale terms (S37 contract).
+    std::vector<Backend::Impl::TurnSummaryBackfillCandidate>
+    Backend::Impl::turn_summary_backfill_candidates(const std::string& kind,
+                                          const std::string& model_name,
+                                          const std::vector<int>& ids) {
+        std::vector<TurnSummaryBackfillCandidate> out;
+        std::string sql =
+            "SELECT ts.turn_summary_id, ts.turn_id, t.user_text, t.assistant_text, "
+            "       ifnull(tm2.name,'') "
+            "FROM turn_summaries ts "
+            "JOIN turns t ON t.turn_id = ts.turn_id "
+            "LEFT JOIN models sm ON sm.model_id = ts.summary_model_id "
+            "LEFT JOIN models tm ON tm.model_id = ts.turn_model_id "
+            "LEFT JOIN models tm2 ON tm2.model_id = t.model_id ";
+        if (kind == "null") {
+            // Legacy NULL-text rows whose turn still exists (the JOIN).
+            sql += "WHERE ts.text IS NULL ORDER BY ts.turn_summary_id ASC";
+        } else if (kind == "empty") {
+            // D6: '' rows that are NOT poison-abandon markers and whose
+            // turn carries real content. A truly-empty turn keeps its ''.
+            sql += "WHERE ts.text = '' "
+                   "  AND ifnull(sm.name,'') != 'bad' "
+                   "  AND (ifnull(t.user_text,'') != '' OR ifnull(t.assistant_text,'') != '') "
+                   "ORDER BY ts.turn_summary_id ASC";
+        } else if (kind == "regenerate") {
+            // Addendum 5: eligible, never selected by default. The caller
+            // (backfill_turn_summary) refuses before reaching here when both filters
+            // are empty; the belt below keeps a direct call honest.
+            if (model_name.empty() && ids.empty()) return out;
+            std::vector<std::string> conds;
+            if (!model_name.empty())
+                conds.push_back("(ifnull(sm.name,'') = ? OR ifnull(tm.name,'') = ?)");
+            if (!ids.empty()) {
+                std::string ph;
+                for (size_t i = 0; i < ids.size(); ++i) ph += (i ? ",?" : "?");
+                conds.push_back("ts.turn_summary_id IN (" + ph + ")");
+            }
+            sql += "WHERE " + conds[0];
+            for (size_t i = 1; i < conds.size(); ++i) sql += " OR " + conds[i];
+            sql += " ORDER BY ts.turn_summary_id ASC";
+        } else {
+            throw std::invalid_argument("turn_summary_backfill_candidates: unknown kind '" + kind + "'");
+        }
+        Stmt s(db, sql);
+        int p = 1;
+        if (!model_name.empty()) { s.bind(p, model_name); ++p; s.bind(p, model_name); ++p; }
+        for (int id : ids) { s.bind(p, id); ++p; }
+        while (s.step())
+            out.push_back({s.column_int(0), s.column_int(1),
+                           s.column_text(2), s.column_text(3), s.column_text(4)});
+        return out;
+    }
+
+    bool Backend::Impl::apply_turn_summary_text(int turn_summary_id, const std::string& text,
+                                      const std::string& summary_model_name,
+                                      bool overwrite) {
+        if (text.empty())
+            throw std::invalid_argument("apply_turn_summary_text: empty text");
+        const std::string t = normalize_path(text);
+        const int model_id = get_or_create_model(summary_model_name);
+        // Encode outside the transaction (model call must not hold the lock).
+        auto emb = require_embedder().encode(t);
+        Stmt u(db,
+            "UPDATE turn_summaries SET text = ?, embedding_version = ?, embedding = ?, "
+            "summary_model_id = ? WHERE turn_summary_id = ? "
+            "AND (? OR text IS NULL OR text = '')");
+        u.bind(1, t);
+        bind_embedding_version(u.raw(), 2, emb);
+        bind_embedding(u.raw(), 3, emb);
+        if (model_id) u.bind(4, model_id); else u.bind_null(4);
+        u.bind(5, turn_summary_id);
+        u.bind(6, overwrite ? 1 : 0);
+        Transaction tx(db);
+        if (!u.exec())
+            throw std::runtime_error(std::format("apply_turn_summary_text UPDATE: {}", sqlite3_errmsg(db)));
+        if (sqlite3_changes(db) == 0) return false;  // guard rejected (or no such row)
+        text_index_->index_record("turn_summaries", turn_summary_id, t);
+        tx.commit();
+        return true;
+    }
+
+    // X22: stale turn-summary selection. A merge bumps `stale` on the turn's
+    // content turn-summary row (store_turn's merge branch); this is the queue read.
+    // The JOIN on turns is the "live turn_id" requirement (a turn deleted
+    // out from under the row leaves it un-refreshable — its source text is
+    // gone). Rows with an episode are returned too (X23's episode-
+    // regeneration pass consumes them); X22's service code skips them.
+    // X31: rows of a LOCKED episode are never returned — the only consumer of
+    // an in-episode row is the episode-regeneration pass, and a locked episode
+    // is never rebuilt (its members keep their counters; the cull feature that
+    // locks decides what happens to them).
+    std::vector<Backend::Impl::StaleTurnSummaryCandidate>
+    Backend::Impl::stale_turn_summary_candidates(int limit) {
+        std::vector<StaleTurnSummaryCandidate> out;
+        std::string sql =
+            "SELECT ts.turn_summary_id, ts.turn_id, ts.stale, "
+            "       ifnull(t.user_text,''), ifnull(t.assistant_text,''), "
+            "       ifnull(tm.name,''), ifnull(ss.guid,''), ifnull(ts.episode_id, 0) "
+            "FROM turn_summaries ts "
+            "JOIN turns t ON t.turn_id = ts.turn_id "
+            "LEFT JOIN models tm ON tm.model_id = t.model_id "
+            "LEFT JOIN sessions ss ON ss.session_id = ts.session_id "
+            "WHERE ts.stale > 0 AND ts.text IS NOT NULL AND ts.text <> '' "
+            "  AND (ts.episode_id IS NULL OR NOT EXISTS "
+            "       (SELECT 1 FROM episodes e "
+            "        WHERE e.episode_id = ts.episode_id AND e.locked)) "
+            "ORDER BY ts.turn_summary_id ASC";
+        if (limit > 0) sql += " LIMIT ?";
+        Stmt s(db, sql);
+        if (limit > 0) s.bind(1, limit);
+        while (s.step())
+            out.push_back({s.column_int(0), s.column_int(1), s.column_int(2),
+                           s.column_text(3), s.column_text(4), s.column_text(5),
+                           s.column_text(6), s.column_int(7)});
+        return out;
+    }
+
+    // X22: refresh a merged turn's turn-summary row in place. Same order and
+    // the same normalizing + model lookup as apply_turn_summary_text (validate -> embed
+    // outside the txn -> BEGIN -> UPDATE -> index -> COMMIT -> invalidate).
+    // `stale` clears to 0 ONLY where it still equals observed_stale: a merge
+    // that landed while the summary was being built keeps the row stale for
+    // the next tick (the text written here may already miss it). episode_id,
+    // turn_id, session_id, turn_datetime and summarized_on are never touched.
+    bool Backend::Impl::refresh_turn_summary(int turn_summary_id, const std::string& text,
+                                             const std::string& summary_model_name,
+                                             int observed_stale, bool clear_stale) {
+        if (text.empty())
+            throw std::invalid_argument("refresh_turn_summary: empty text");
+        const std::string t = normalize_path(text);
+        const int model_id = get_or_create_model(summary_model_name);
+        // Encode outside the transaction (model call must not hold the lock).
+        auto emb = require_embedder().encode(t);
+        Stmt u(db,
+            "UPDATE turn_summaries SET text = ?, embedding_version = ?, embedding = ?, "
+            "summary_model_id = ?, "
+            "stale = CASE WHEN ? AND stale = ? THEN 0 ELSE stale END "
+            "WHERE turn_summary_id = ?");
+        u.bind(1, t);
+        bind_embedding_version(u.raw(), 2, emb);
+        bind_embedding(u.raw(), 3, emb);
+        if (model_id) u.bind(4, model_id); else u.bind_null(4);
+        u.bind(5, clear_stale ? 1 : 0);
+        u.bind(6, observed_stale);
+        u.bind(7, turn_summary_id);
+        Transaction tx(db);
+        if (!u.exec())
+            throw std::runtime_error(std::format("refresh_turn_summary UPDATE: {}",
+                                                 sqlite3_errmsg(db)));
+        const bool existed = sqlite3_changes(db) > 0;
+        if (existed)
+            text_index_->index_record("turn_summaries", turn_summary_id, t);
+        tx.commit();
+        if (existed) invalidate_turn_cache();
+        return existed;
+    }
+
+    std::vector<Backend::Impl::TriggerCandidate>
+    Backend::Impl::trigger_backfill_candidates() {
+        std::vector<TriggerCandidate> out;
+        Stmt s(db,
+            "SELECT knowledge_id, kind, text FROM knowledge "
+            "WHERE kind IN ('decision','insight') "
+            "  AND (trigger IS NULL OR trigger = '') "
+            "ORDER BY knowledge_id ASC");
+        while (s.step())
+            out.push_back({s.column_int(0), s.column_text(1), s.column_text(2)});
+        return out;
+    }
+
+    bool Backend::Impl::apply_trigger(int knowledge_id, const std::string& trigger) {
+        if (trigger.empty())
+            throw std::invalid_argument("apply_trigger: empty trigger");
+        // The row's text is needed to rebuild the embed/index text exactly
+        // as store_knowledge computes it (trigger + '\n' + text).
+        Stmt g(db, "SELECT text FROM knowledge WHERE knowledge_id = ?");
+        g.bind(1, knowledge_id);
+        if (!g.step()) return false;  // no such row
+        const std::string text = g.column_text(0);
+        const std::string embed_text = trigger + "\n" + text;
+        auto emb = require_embedder().encode(embed_text);
+        Stmt u(db,
+            "UPDATE knowledge SET trigger = ?, embedding_version = ?, embedding = ? "
+            "WHERE knowledge_id = ? AND (trigger IS NULL OR trigger = '')");
+        u.bind(1, trigger);
+        bind_embedding_version(u.raw(), 2, emb);
+        bind_embedding(u.raw(), 3, emb);
+        u.bind(4, knowledge_id);
+        Transaction tx(db);
+        if (!u.exec())
+            throw std::runtime_error(std::format("apply_trigger UPDATE: {}", sqlite3_errmsg(db)));
+        if (sqlite3_changes(db) == 0) return false;  // guard rejected
+        text_index_->index_record("knowledge", knowledge_id, embed_text);
+        tx.commit();
+        return true;
+    }
+
+    std::vector<Backend::Impl::StrandedCandidate>
+    Backend::Impl::stranded_turn_summary_candidates(int& ties) {
+        std::vector<StrandedCandidate> out;
+        ties = 0;
+        // Best episode per row = the one with the greatest span_start <= t
+        // (correlated subselect). HAVING COUNT(*) > 1 flags rows where more
+        // than one span covers the time — counted, and the best still wins.
+        // X31: LOCKED episodes are invisible to both subselects — a locked
+        // episode is never chosen as the covering episode, and a row inside
+        // only locked episodes is not a candidate at all (X33 turns such rows
+        // into a new episode; until then they stay unattached).
+        Stmt s(db,
+            "SELECT ts.turn_summary_id, ("
+            "  SELECT e.episode_id FROM episodes e "
+            "  WHERE e.session_id = ts.session_id "
+            "    AND ts.turn_datetime >= e.span_start AND ts.turn_datetime <= e.span_end "
+            "    AND NOT e.locked "
+            "  ORDER BY e.span_start DESC LIMIT 1"
+            ") AS best, ("
+            "  SELECT COUNT(*) FROM episodes e "
+            "  WHERE e.session_id = ts.session_id "
+            "    AND ts.turn_datetime >= e.span_start AND ts.turn_datetime <= e.span_end "
+            "    AND NOT e.locked"
+            ") AS covering "
+            "FROM turn_summaries ts "
+            "WHERE ts.episode_id IS NULL AND ts.text != '' AND ts.turn_datetime IS NOT NULL "
+            "  AND best IS NOT NULL "
+            "ORDER BY ts.turn_summary_id ASC");
+        while (s.step()) {
+            out.push_back({s.column_int(0), s.column_int(1)});
+            if (s.column_int(2) > 1) ++ties;
+        }
+        return out;
+    }
+
+    bool Backend::Impl::attach_stranded_turn_summary(int turn_summary_id, int episode_id) {
+        // X31: a locked episode never receives late rows (defence in depth —
+        // the selection above already hides it): the guard rejects the attach.
+        Stmt u(db,
+            "UPDATE turn_summaries SET episode_id = ?1 "
+            "WHERE turn_summary_id = ?2 AND episode_id IS NULL AND text != '' "
+            "  AND NOT EXISTS (SELECT 1 FROM episodes e "
+            "                  WHERE e.episode_id = ?1 AND e.locked)");
+        u.bind(1, episode_id).bind(2, turn_summary_id);
+        if (!u.exec())
+            throw std::runtime_error(std::format("attach_stranded_turn_summary: {}", sqlite3_errmsg(db)));
+        return sqlite3_changes(db) > 0;
+    }
+
+    // X31: read-only lock probe for the summarizer's defence-in-depth checks.
+    // false when no such episode (a missing episode is not "locked": the
+    // callers' own guards handle it).
+    bool Backend::Impl::episode_is_locked(int episode_id) {
+        Stmt s(db, "SELECT locked FROM episodes WHERE episode_id = ?");
+        s.bind(1, episode_id);
+        if (!s.step()) return false;
+        return s.column_int(0) != 0;
+    }
+
+    int Backend::Impl::stranded_open_tail_count() {
+        Stmt s(db,
+            "SELECT COUNT(*) FROM turn_summaries ts "
+            "WHERE ts.episode_id IS NULL AND ts.text != '' AND ts.turn_datetime IS NOT NULL "
+            "  AND NOT EXISTS (SELECT 1 FROM episodes e "
+            "                  WHERE e.session_id = ts.session_id "
+            "                    AND ts.turn_datetime >= e.span_start "
+            "                    AND ts.turn_datetime <= e.span_end)");
+        if (!s.step()) return 0;
+        return s.column_int(0);
+    }
+
+    // X23: episode-regeneration primitives. The member read joins
+    // the LIVE turn for user/assistant text and the turn's model name, the
+    // same shape stale_turn_summary_candidates selects, so make_turn_summary_text rebuilds a turn summary
+    // identically whether it was selected by the X22 pass or by this one;
+    // rows with empty text (poison markers) are never members. turn_datetime
+    // is NOT NULL on every turn_summaries row, so no ifnull is needed there.
+    namespace {
+        void bind_episode_member_row(Stmt& s, StorageBackend::EpisodeMember& m) {
+            m.turn_summary_id = s.column_int(0);
+            m.text = s.column_text(1);
+            m.turn_id = s.column_int(2);
+            m.stale = s.column_int(3);
+            m.user_text = s.column_text(4);
+            m.assistant_text = s.column_text(5);
+            m.turn_model_name = s.column_text(6);
+            m.model_name = s.column_text(7);
+            m.turn_datetime = s.column_int64(8);
+            m.episode_id = s.column_int(9);
+        }
+        constexpr const char* kEpisodeMemberSelect =
+            "SELECT ts.turn_summary_id, ts.text, ts.turn_id, ts.stale, "
+            "       ifnull(t.user_text,''), ifnull(t.assistant_text,''), "
+            "       ifnull(tm.name,''), ifnull(sm.name,''), "
+            "       ts.turn_datetime, ifnull(ts.episode_id, 0) "
+            "FROM turn_summaries ts "
+            "LEFT JOIN turns t ON t.turn_id = ts.turn_id "
+            "LEFT JOIN models tm ON tm.model_id = t.model_id "
+            "LEFT JOIN models sm ON sm.model_id = ts.summary_model_id ";
+    }
+
+    std::vector<StorageBackend::EpisodeMember>
+    Backend::Impl::episode_members(int episode_id) {
+        std::vector<EpisodeMember> out;
+        Stmt s(db,
+            std::string(kEpisodeMemberSelect) +
+            "WHERE ts.episode_id = ? AND ts.text != '' "
+            "ORDER BY ts.turn_datetime ASC, ts.turn_summary_id ASC");
+        s.bind(1, episode_id);
+        while (s.step()) {
+            EpisodeMember m;
+            bind_episode_member_row(s, m);
+            out.push_back(std::move(m));
+        }
+        return out;
+    }
+
+    std::optional<StorageBackend::EpisodeMember>
+    Backend::Impl::turn_summary_member_by_id(int turn_summary_id) {
+        Stmt s(db,
+            std::string(kEpisodeMemberSelect) +
+            "WHERE ts.turn_summary_id = ?");
+        s.bind(1, turn_summary_id);
+        if (!s.step()) return std::nullopt;
+        EpisodeMember m;
+        bind_episode_member_row(s, m);
+        return m;
+    }
+
+    // X23: replace an episode's DERIVED text in place and, in the
+    // SAME transaction, clear the refreshed members' stale counters and
+    // attach late turn-summary rows. Same order as store_episode_close /
+    // refresh_turn_summary: validate -> embed outside the txn -> BEGIN ->
+    // UPDATE episodes (exactly 1 row, else false) -> index -> per-cleared-
+    // pair stale clear (zero rows is NOT an error: a merge that landed
+    // while the summary was being built keeps the row stale for the next
+    // tick) -> per-attach guarded UPDATE (ZERO rows rolls EVERYTHING back:
+    // someone else attached it) -> COMMIT -> invalidate. span_start,
+    // span_end and session_id are never touched; modified_on is stamped
+    // with unixepoch() on every write (X30).
+    bool Backend::Impl::replace_episode_text(
+            int episode_id, const std::string& text, const std::string& model_name,
+            const std::vector<std::pair<int,int>>& cleared,
+            const std::vector<int>& attach_ids) {
+        if (text.empty())
+            throw std::invalid_argument("replace_episode_text: empty text");
+        const std::string t = normalize_path(text);
+        const int model_id = get_or_create_model(model_name);
+        // Encode outside the transaction (model call must not hold the lock).
+        auto emb = require_embedder().encode(t);
+
+        Transaction tx(db);
+        Stmt u(db,
+            "UPDATE episodes SET text = ?, model_id = ?, embedding_version = ?, "
+            "embedding = ?, modified_on = unixepoch() WHERE episode_id = ?");
+        u.bind(1, t);
+        if (model_id) u.bind(2, model_id); else u.bind_null(2);
+        bind_embedding_version(u.raw(), 3, emb);
+        bind_embedding(u.raw(), 4, emb);
+        u.bind(5, episode_id);
+        if (!u.exec())
+            throw std::runtime_error(std::format("replace_episode_text UPDATE: {}",
+                                                 sqlite3_errmsg(db)));
+        if (sqlite3_changes(db) != 1)   // no such episode: roll back, false
+            return false;
+        text_index_->index_record("episodes", episode_id, t);
+
+        // Clear only where the observed counter still matches (and the row
+        // is still a member of THIS episode).
+        for (const auto& [ts_id, observed] : cleared) {
+            Stmt c(db,
+                "UPDATE turn_summaries SET stale = 0 "
+                "WHERE turn_summary_id = ? AND episode_id = ? AND stale = ?");
+            c.bind(1, ts_id).bind(2, episode_id).bind(3, observed);
+            if (!c.exec())
+                throw std::runtime_error(std::format("replace_episode_text clear: {}",
+                                                     sqlite3_errmsg(db)));
+        }
+
+        // Attach late rows; any row that is no longer attachable aborts the
+        // whole unit (the Transaction destructor rolls back).
+        for (const int ts_id : attach_ids) {
+            Stmt a(db,
+                "UPDATE turn_summaries SET episode_id = ? "
+                "WHERE turn_summary_id = ? AND episode_id IS NULL AND text != ''");
+            a.bind(1, episode_id).bind(2, ts_id);
+            if (!a.exec())
+                throw std::runtime_error(std::format("replace_episode_text attach: {}",
+                                                     sqlite3_errmsg(db)));
+            if (sqlite3_changes(db) == 0)
+                return false;   // already attached elsewhere / marker: nothing lands
+        }
+
+        tx.commit();
+        // The caches store_episode_close invalidates, plus the turn cache
+        // (member stale counters changed).
+        invalidate_episode_cache();
+        invalidate_turn_cache();
+        return true;
+    }
+
+    std::vector<Backend::Impl::SessionNameCandidate>
+    Backend::Impl::unnamed_session_candidates() {
+        std::vector<SessionNameCandidate> out;
+        Stmt s(db,
+            "SELECT ss.session_id, ss.guid FROM sessions ss "
+            "WHERE ss.name IS NULL "
+            "  AND EXISTS (SELECT 1 FROM turn_summaries ts "
+            "              WHERE ts.session_id = ss.session_id AND ts.text != '') "
+            "ORDER BY ss.session_id ASC");
+        while (s.step())
+            out.push_back({s.column_int(0), s.column_text(1), {}});
+        for (auto& c : out) {
+            Stmt t(db,
+                "SELECT text FROM turn_summaries "
+                "WHERE session_id = ? AND text != '' "
+                "ORDER BY turn_datetime ASC, turn_summary_id ASC");
+            t.bind(1, c.session_id);
+            while (t.step()) c.turn_summary_texts.push_back(t.column_text(0));
+        }
+        return out;
+    }
+
+    bool Backend::Impl::apply_session_name(int session_id, const std::string& name,
+                                           const std::string& name_source) {
+        if (name.empty())
+            throw std::invalid_argument("apply_session_name: empty name");
+        Stmt u(db,
+            "UPDATE sessions SET name = ?, name_source = ? "
+            "WHERE session_id = ? AND name IS NULL");
+        u.bind(1, name).bind(2, name_source).bind(3, session_id);
+        if (!u.exec())
+            throw std::runtime_error(std::format("apply_session_name: {}", sqlite3_errmsg(db)));
+        const bool changed = sqlite3_changes(db) > 0;   // read BEFORE index_record runs its own stmts
+        if (changed)   // LR S81: a filled name joins the text index
+            text_index_->index_record("sessions", session_id, name);
+        return changed;
+    }
+
+
+    std::optional<Backend::Impl::TurnMeta> Backend::Impl::turn_meta(int turn_id) {
+        Stmt g(db, "SELECT created_at, model_id, session_id FROM turns WHERE turn_id = ?");
+        g.bind(1, turn_id);
+        if (!g.step()) return std::nullopt;  // turn_id must exist
+        TurnMeta m;
+        m.created_at = g.column_int64(0);
+        if (!g.is_null(1)) m.model_id   = g.column_int(1);
+        if (!g.is_null(2)) m.session_id = g.column_int(2);
+        return m;
+    }
+
+
+    // X22: the turn's current assistant_text (see storage_backend.h).
+    // A partial turn (assistant_text NULL) reads as empty, not nullopt: the
+    // caller's fallback is for "no such turn" or "nothing to enqueue".
+    std::optional<std::string> Backend::Impl::turn_assistant_text(int turn_id) {
+        Stmt g(db, "SELECT assistant_text FROM turns WHERE turn_id = ?");
+        g.bind(1, turn_id);
+        if (!g.step()) return std::nullopt;
+        if (g.is_null(0)) return std::string();
+        return g.column_text(0);
+    }
+
+
+    bool Backend::Impl::insert_turn_summary(const TurnMeta& meta, int turn_id,
+                                            const std::string& text,
+                                            int summary_model_id,
+                                            const std::vector<float>& emb) {
+        // Plain insert — no placeholder row exists to conflict with anymore
+        // (Reid's design decision). The unique partial index
+        // idx_turn_summaries_turn_id_uniq guards against an accidental
+        // duplicate for the same turn_id. S37: ONLY that UNIQUE violation
+        // returns false ("already summarized"); any other INSERT failure
+        // (disk, FK, injected trigger) throws, so the summarizer cannot
+        // mistake a real error for a duplicate and drop the text.
+        // S44: markers pass empty text/emb — bind_embedding* bind NULL for
+        // an empty vector, matching the marker's former column-less INSERT.
+        Stmt s(db,
+            "INSERT INTO turn_summaries "
+            "(turn_id, text, embedding_version, embedding, session_id, turn_model_id, "
+            " summary_model_id, turn_datetime, summarized_on) "
+            "VALUES (?,?,?,?,?,?,?,?,unixepoch())");
+        s.bind(1, turn_id);
+        s.bind(2, text);
+        bind_embedding_version(s.raw(), 3, emb);
+        bind_embedding(s.raw(), 4, emb);
+        if (meta.session_id) s.bind(5, *meta.session_id); else s.bind_null(5);
+        if (meta.model_id)   s.bind(6, *meta.model_id);   else s.bind_null(6);
+        if (summary_model_id) s.bind(7, summary_model_id); else s.bind_null(7);
+        s.bind(8, meta.created_at);
+        // The index addresses turn_summaries by turn_summary_id, NOT turn_id
+        // (they diverge on any real DB). The INSERT+index pair must be atomic:
+        // a failed index rolls the summary row back instead of leaving an
+        // unindexed or mis-indexed row.
+        Transaction tx(db);
+        if (!s.exec()) {
+            if (sqlite3_extended_errcode(db) == SQLITE_CONSTRAINT_UNIQUE)
+                return false;  // already summarized/marked (idx_turn_summaries_turn_id_uniq)
+            throw std::runtime_error(std::format(
+                "turn_summaries INSERT failed: {}", sqlite3_errmsg(db)));
+        }
+        // Read the new rowid BEFORE any other statement runs on db.
+        const int ts_id = static_cast<int>(sqlite3_last_insert_rowid(db));
+        // The empty text indexes to zero terms but set_counts must still
+        // land on THIS row.
+        text_index_->index_record("turn_summaries", ts_id, text);
+        tx.commit();
+        invalidate_turn_cache();
+        return true;
     }
 
 
@@ -708,175 +1700,65 @@ static std::string tags_from_metadata(const json& metadata) {
                                 const std::string& summary_model_name) {
         std::string t = normalize_path(text);
         int model_id = get_or_create_model(summary_model_name);
-        auto emb = embedder->encode(t);
-
-        Stmt g(db, "SELECT created_at, model_id, session_id FROM turns WHERE turn_id = ?");
-        g.bind(1, turn_id);
-        if (!g.step()) return false;  // turn_id must exist
-        int64_t turn_dt = g.column_int64(0);
-        bool turn_model_null = g.is_null(1);
-        int turn_model_id = turn_model_null ? 0 : g.column_int(1);
-        bool session_null = g.is_null(2);
-        int session_id = session_null ? 0 : g.column_int(2);
-
-        // Plain insert — no placeholder row exists to conflict with anymore
-        // (Reid's design decision). The unique partial index
-        // idx_turn_summaries_turn_id_uniq still guards against an accidental
-        // duplicate finalize for the same turn_id: Stmt::exec() just checks
-        // sqlite3_step() == SQLITE_DONE, so a UNIQUE-constraint violation on
-        // a second finalize for the same turn_id naturally falls through to
-        // `return false` below (no exception, no special-case needed) —
-        // matching this file's existing convention of surfacing insert
-        // failures via the bool return rather than throwing.
-        Stmt s(db,
-            "INSERT INTO turn_summaries "
-            "(turn_id, text, embedding_version, embedding, session_id, turn_model_id, "
-            " summary_model_id, turn_datetime, summarized_on) "
-            "VALUES (?,?,?,?,?,?,?,?,unixepoch())");
-        s.bind(1, turn_id);
-        s.bind(2, t);
-        bind_embedding_version(s.raw(), 3, emb);
-        bind_embedding(s.raw(), 4, emb);
-        if (session_null) s.bind_null(5); else s.bind(5, session_id);
-        if (turn_model_null) s.bind_null(6); else s.bind(6, turn_model_id);
-        if (model_id) s.bind(7, model_id); else s.bind_null(7);
-        s.bind(8, turn_dt);
-        bool ok = s.exec();
-        if (ok) {
-            invalidate_turn_cache();
-            text_index_->index_record("turn_summaries", turn_id, t);
-        }
-        return ok;
+        auto emb = require_embedder().encode(t);
+        auto meta = turn_meta(turn_id);
+        if (!meta) return false;  // turn_id must exist
+        return insert_turn_summary(*meta, turn_id, t, model_id, emb);
     }
 
 
     // Create a turn_summaries row marking a turn as "done" with no summary
-    // text (trivial-turn skip, or poison-turn abandonment) — mirrors
+    // text — since LR S63 the ONLY writer of this shape is poison-turn
+    // abandonment (mirrors
     // finalize_turn_summary's turns lookup, just with text left as ''
     // (empty string, not NULL -- an empty string unambiguously means
     // "intentionally blank"; NULL in this column would look like a data
     // integrity error rather than a deliberate skip/abandon marker).
     // Reid's design decision: no placeholder mechanism, so a turn_summaries
-    // row now always represents completed work (real summary, trivial-skip,
-    // or poison-abandon), never an in-progress sentinel.
+    // row now always represents completed work (real summary/copy, or since
+    // LR S63 poison-abandon as the only ''-marker), never an in-progress
+    // sentinel.
+    // S37 contract: false = no such turn, or already marked (UNIQUE);
+    // any other INSERT failure throws; an empty model name is a caller
+    // error (invalid_argument), never a silent false.
     bool Backend::Impl::mark_turn_summarized(int turn_id, const std::string& model_name) {
+        if (model_name.empty())
+            throw std::invalid_argument("model name required");
         int model_id = get_or_create_model(model_name);
-        if (!model_id) return false;
-
-        Stmt g(db, "SELECT created_at, model_id, session_id FROM turns WHERE turn_id = ?");
-        g.bind(1, turn_id);
-        if (!g.step()) return false;  // turn_id must exist
-        int64_t turn_dt = g.column_int64(0);
-        bool turn_model_null = g.is_null(1);
-        int turn_model_id = turn_model_null ? 0 : g.column_int(1);
-        bool session_null = g.is_null(2);
-        int session_id = session_null ? 0 : g.column_int(2);
-
-        Stmt s(db,
-            "INSERT INTO turn_summaries "
-            "(turn_id, text, session_id, turn_model_id, summary_model_id, turn_datetime, summarized_on) "
-            "VALUES (?,'',?,?,?,?,unixepoch())");
-        s.bind(1, turn_id);
-        if (session_null) s.bind_null(2); else s.bind(2, session_id);
-        if (turn_model_null) s.bind_null(3); else s.bind(3, turn_model_id);
-        s.bind(4, model_id);
-        s.bind(5, turn_dt);
-        bool ok = s.exec();
-        if (ok) {
-            invalidate_turn_cache();
-            text_index_->index_record("turn_summaries", turn_id, "");
-        }
-        return ok;
+        auto meta = turn_meta(turn_id);
+        if (!meta) return false;  // turn_id must exist
+        // S44: the marker is the same INSERT with empty text and no embedding.
+        return insert_turn_summary(*meta, turn_id, "", model_id, {});
     }
 
 
-    // Draft-tagged summary rows for re-summarization (housekeeping retry).
-    std::vector<DraftSummary> Backend::Impl::draft_summaries(int limit) {
-        std::vector<DraftSummary> out;
-        std::string sql =
-            "SELECT s.summary_id, s.level, COALESCE(ss.guid, ''), "
-            "       datetime(s.created_at,'unixepoch','localtime') "
-            "FROM summaries s "
-            "LEFT JOIN sessions ss ON s.session_id = ss.session_id "
-            "WHERE s.tags LIKE '%draft%' "
-            "ORDER BY s.created_at ASC, s.summary_id ASC";
-        if (limit > 0) sql += " LIMIT ?";
-        Stmt s(db, sql);
-        if (limit > 0) s.bind(1, limit);
-        while (s.step()) {
-            out.push_back({
-                s.column_int(0),
-                s.column_text(1),
-                s.column_text(2),
-                s.column_text(3)
-            });
-        }
-        return out;
-    }
-
-
-    // Sessions whose newest turn is older than (now - pause_minutes) AND
-    // that have at least one non-draft L2 summary but no complete L3 yet.
-    // The summarizer's pause timer treats this set as "ready to finalize."
-    // Returns session GUIDs; anonymous (session_id NULL) turns are skipped.
-    std::vector<std::string> Backend::Impl::sessions_needing_close(int pause_minutes) {
-        std::vector<std::string> out;
-        if (pause_minutes <= 0) return out;
-        const std::string cutoff =
-            std::format("datetime('now','localtime','-{} minutes')", pause_minutes);
-        std::string sql =
-            "SELECT ss.guid "
-            "FROM sessions ss "
-            // NOTE: sessions_needing_close() has no live callers as of the
-            // Phase-2 episode/session-rollup rework (see summarizer_service.cpp's
-            // "sessions_needing_close() path is retired" comment) -- this query
-            // is dead code today. Redirected to turn_summaries anyway (rather
-            // than left pointing at the now-empty summaries/level='turn' rows)
-            // so the function stays correct if it's ever revived.
-            "WHERE EXISTS (SELECT 1 FROM turn_summaries s2 "
-            "               WHERE s2.session_id = ss.session_id) "
-            "  AND (SELECT MAX(t.created_at) FROM turns t "
-            "        WHERE t.session_id = ss.session_id) < " + cutoff + " "
-            "  AND NOT EXISTS (SELECT 1 FROM summaries s "
-            "                   WHERE s.session_id = ss.session_id "
-            "                     AND s.level = 'session') "
-            "ORDER BY ss.session_id ASC";
-        Stmt s(db, sql);
-        while (s.step()) {
-            const auto g = s.column_text(0);
-            if (!g.empty()) out.push_back(g);
-        }
-        return out;
-    }
-
-
-    // ---- episode layer (EPISODE_PLAN Phase 1) --------------------------
-    // Most recent episode's span-end (stored in updated_at) for a session.
-    // Empty when the session has no episode rows yet.
+    // ---- episode layer (db 0.17) ----------------------------------------
+    // Most recent episode's span_end for a session, rendered "%F %T" local
+    // so callers/tests keep the historic shape. Empty when no episodes.
     std::string Backend::Impl::last_episode_end(const std::string& session_guid) {
         if (session_guid.empty()) return {};
         Stmt s(db,
-            "SELECT datetime(COALESCE(s.updated_at, s.created_at),'unixepoch','localtime') "
-            "FROM summaries s "
-            "JOIN sessions ss ON s.session_id = ss.session_id "
-            "WHERE ss.guid = ? AND s.level = 'episode' "
-            "ORDER BY s.created_at DESC, s.summary_id DESC LIMIT 1");
+            "SELECT datetime(e.span_end,'unixepoch','localtime') "
+            "FROM episodes e "
+            "JOIN sessions ss ON e.session_id = ss.session_id "
+            "WHERE ss.guid = ? "
+            "ORDER BY e.span_start DESC, e.episode_id DESC LIMIT 1");
         s.bind(1, session_guid);
         if (s.step()) return s.column_text(0);
         return {};
     }
 
 
-    // Non-draft L2 turn summaries for a session with timestamp > since_ts
+    // Non-draft turn summaries for a session with timestamp > since_ts
     // (empty since_ts = all), oldest-first. Composes the closing episode.
     // since_ts arrives as a "%F %T" string (from last_episode_end(), which
     // renders the epoch column back to that format) -- parse it back to
     // epoch seconds to compare against the INTEGER created_at column.
-    std::vector<SummaryRecord> Backend::Impl::l2_summaries_since(
+    std::vector<SummaryRecord> Backend::Impl::turn_summary_summaries_since(
             const std::string& session_guid, const std::string& since_ts) {
         std::vector<SummaryRecord> out;
         if (session_guid.empty()) return out;
-        // L2 turn summaries now live entirely in turn_summaries (db_version
+        // Turn summaries now live entirely in turn_summaries (db_version
         // 0.12) -- redirected from the old summaries/level='turn' rows.
         // turn_summaries has no `status`/`tags` columns (no draft state for
         // turn-level rows under the new design), so `status` is left empty
@@ -904,107 +1786,209 @@ static std::string tags_from_metadata(const json& metadata) {
     // turn_summaries against turns to fetch both embeddings (turn + summary)
     // plus the turn-summary text. Rows where EITHER embedding is NULL are
     // skipped (boundary detection requires both signals).
+    // PHASE6 6: ONE predicate for "pending content turn summary of session X after
+    // epoch Y". Both episodes_needing_close() and episode_candidate_turns()
+    // build their WHERE clauses from this, so they cannot drift apart again
+    // (the old disagreement: the scan counted any turn summary past the last episode,
+    // the candidate query additionally required embeddings — a session whose
+    // newest turn summary had no embedding yet was re-queued every tick forever).
+    // Requires `turn_summaries ts JOIN turns t ON t.turn_id = ts.turn_id`.
+    // Rows whose source turn was culled (ts.turn_id NULL) can never be
+    // candidates — the JOIN drops them; they cannot close an episode either.
+    static std::string pending_episode_turn_summary_conditions(const std::string& epoch_expr) {
+        return " AND ts.text != '' "
+               " AND ts.episode_id IS NULL "
+               " AND ts.turn_datetime > " + epoch_expr + " "
+               " AND ts.embedding IS NOT NULL "
+               " AND t.embedding IS NOT NULL ";
+    }
+
     std::vector<EpisodeCandidateTurn> Backend::Impl::episode_candidate_turns(
             const std::string& session_guid, const std::string& since_ts) {
         std::vector<EpisodeCandidateTurn> out;
         if (session_guid.empty()) return out;
         const int dims = config().embedding_dimensions;
 
+        // PHASE6 6: WHERE clause from the shared predicate. episode_id IS
+        // NULL means rows already inside a closed episode are never returned
+        // again, even when their turn_datetime falls after `since` (a late
+        // Turn summary landing inside a span that was closed around it).
+        const std::string epoch_expr = since_ts.empty() ? "0" : "?";
         std::string sql =
             "SELECT ts.turn_summary_id, ts.text, "
             "       datetime(ts.turn_datetime,'unixepoch','localtime'), "
             "       ts.turn_datetime, "
             "       t.embedding,  "  // raw turn embedding
-            "       ts.embedding "   // turn-summary embedding
+            "       ts.embedding, "  // turn-summary embedding
+            "       m.name, "        // turn summary's summarizer model (LR S62 provenance)
+            "       ifnull(t.started_on, 0) "  // X32: prompt-arrival epoch (0 = unknown)
             "FROM turn_summaries ts "
             "JOIN turns t ON ts.turn_id = t.turn_id "
             "JOIN sessions ss ON ts.session_id = ss.session_id "
-            "WHERE ss.guid = ? "
-            "  AND t.embedding IS NOT NULL "
-            "  AND ts.embedding IS NOT NULL ";
-        if (!since_ts.empty()) sql += "AND ts.turn_datetime > ? ";
-        sql += "ORDER BY ts.turn_datetime ASC, ts.turn_summary_id ASC";
+            "LEFT JOIN models m ON m.model_id = ts.summary_model_id "
+            "WHERE ss.guid = ? " +
+            pending_episode_turn_summary_conditions(epoch_expr) +
+            "ORDER BY ts.turn_datetime ASC, ts.turn_summary_id ASC";
 
         Stmt s(db, sql);
         s.bind(1, session_guid);
         if (!since_ts.empty()) s.bind(2, resolve_epoch(since_ts));
 
-        bool warned = false;
+        int bad = 0, bad_first_id = 0, bad_first_bytes = 0;
+        const char* bad_first_table = "";
+        auto decode_counted = [&](const void* blob, int bytes, const char* table, int id) {
+            const int before = bad;
+            auto v = decode_embedding_blob(blob, bytes, dims, table, id, bad);
+            if (before == 0 && bad > 0) {
+                bad_first_id = id;
+                bad_first_bytes = bytes;
+                bad_first_table = table;
+            }
+            return v;
+        };
         while (s.step()) {
             EpisodeCandidateTurn ct;
             ct.turn_summary_id   = s.column_int(0);
             ct.summary_text      = s.column_text(1);
             ct.timestamp         = s.column_text(2);
             ct.epoch             = s.column_int64(3);
-            ct.turn_embedding    = decode_embedding_blob(
-                s.column_blob(4), s.column_bytes(4), dims, "turns", ct.turn_summary_id, warned);
-            ct.summary_embedding = decode_embedding_blob(
-                s.column_blob(5), s.column_bytes(5), dims, "turn_summaries", ct.turn_summary_id, warned);
+            ct.started_epoch     = s.column_int64(7);  // X32 (ifnull -> 0 = unknown)
+            ct.summary_model_name = s.column_text(6);
+            ct.turn_embedding    = decode_counted(
+                s.column_blob(4), s.column_bytes(4), "turn_summaries", ct.turn_summary_id);
+            ct.summary_embedding = decode_counted(
+                s.column_blob(5), s.column_bytes(5), "turn_summaries", ct.turn_summary_id);
             out.push_back(std::move(ct));
+        }
+        // One warn line per scan: first offender's details plus the total (S39).
+        if (bad > 0) {
+            Diskerror::Logger::warn(std::format(
+                "[cache] {} row {}: undecodable embedding blob ({} bytes, "
+                "expected {}-dim {}); using zero vector; "
+                "{} undecodable embedding(s) in episode candidates",
+                bad_first_table, bad_first_id, bad_first_bytes, dims,
+                vector_codec::to_string(vtype_), bad));
         }
         return out;
     }
 
 
-    // Insert one immutable level='episode' row: timestamp=first_ts (span
-    // start), updated_at=last_ts (span end). Mirrors store_summary.
-    int Backend::Impl::store_episode(const std::string& text, const std::string& model_name,
-                      const std::string& session_guid,
-                      const std::string& first_ts, const std::string& last_ts) {
-        std::string t = normalize_path(text);
-        int model_id   = get_or_create_model(model_name);
-        int session_id = get_or_create_session(session_guid);
-        auto emb = embedder->encode(t);
+    // Close an episode (PHASE5 B.1): one atomic episode + membership record.
+    // The contract ORDER is the point: validate -> embed (outside the txn) ->
+    // INSERT -> per-member UPDATE (all-or-nothing) -> index -> commit ->
+    // invalidate. See storage_backend.h for the full contract.
+    int Backend::Impl::store_episode_close(const EpisodeClose& close) {
+        if (close.text.empty())
+            throw std::invalid_argument("store_episode_close: empty text");
+        if (close.member_turn_summary_ids.empty())
+            throw std::invalid_argument("store_episode_close: no members");
+        if (close.span_end < close.span_start)
+            throw std::invalid_argument("store_episode_close: span_end < span_start");
+        // PHASE9B step 1: an unknown GUID must NOT create a session (the old
+        // get_or_create_session call made the !session_id check unreachable).
+        const std::optional<int> found = find_session(close.session_guid);
+        if (!found)
+            throw std::invalid_argument("store_episode_close: unknown session '" +
+                                        close.session_guid + "'");
+        const int session_id = *found;
 
-        Stmt s(db,
-            "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, "
-            "level, tags, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)");
-        if (model_id) s.bind(1, model_id); else s.bind_null(1);
-        if (session_id) s.bind(2, session_id); else s.bind_null(2);
-        s.bind(3, t);
-        bind_embedding_version(s.raw(), 4, emb);
-        bind_embedding(s.raw(), 5, emb);
-        s.bind(6, std::string("episode"))
-         .bind(7, std::string(""));
-        s.bind(8, resolve_epoch(first_ts));
-        s.bind(9, resolve_epoch(last_ts.empty() ? first_ts : last_ts));
-        if (!s.exec())
+        const std::string t = normalize_path(close.text);
+        const int model_id = get_or_create_model(close.model_name);
+
+        // Compute the embedding OUTSIDE the transaction: encoding is slow and
+        // holding the write lock across a model call would block every other
+        // writer.
+        auto emb = require_embedder().encode(t);
+
+        Transaction tx(db);
+        // X30: modified_on is the time the text is written — left to the
+        // column DEFAULT unixepoch(). The old LR S56 rule (created_at =
+        // span_end) is gone: an episode's span says when its turns happened;
+        // modified_on says when its derived text last changed.
+        Stmt ins(db,
+            "INSERT INTO episodes (text, tags, session_id, model_id, "
+            "span_start, span_end, embedding_version, embedding) "
+            "VALUES (?,?,?,?,?,?,?,?)");
+        ins.bind(1, t).bind(2, std::string(""));
+        ins.bind(3, session_id);
+        if (model_id) ins.bind(4, model_id); else ins.bind_null(4);
+        ins.bind(5, close.span_start).bind(6, close.span_end);
+        bind_embedding_version(ins.raw(), 7, emb);
+        bind_embedding(ins.raw(), 8, emb);
+        if (!ins.exec()) {
+            if (sqlite3_extended_errcode(db) == SQLITE_CONSTRAINT_UNIQUE) {
+                // Someone already closed this (session, span_start): not an
+                // error. The Transaction destructor rolls back; the caller
+                // logs "already closed" and does not retry.
+                return 0;
+            }
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-        invalidate_cache();
-        int eid = static_cast<int>(sqlite3_last_insert_rowid(db));
-        text_index_->index_record("summaries", eid, t);
-        return eid;
+        }
+        const int episode_id = static_cast<int>(sqlite3_last_insert_rowid(db));
+
+        // Membership: each member must exist in THIS session, be unassigned,
+        // and not be a marker row. Any straggler (foreign session, already
+        // closed, marker, missing) comes up short on the change count and the
+        // whole close rolls back — nothing half-written survives.
+        int assigned = 0;
+        for (const int ts_id : close.member_turn_summary_ids) {
+            Stmt u(db,
+                "UPDATE turn_summaries SET episode_id = ? "
+                "WHERE turn_summary_id = ? AND session_id = ? "
+                "  AND episode_id IS NULL AND text != ''");
+            u.bind(1, episode_id).bind(2, ts_id).bind(3, session_id);
+            if (!u.exec())
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            assigned += sqlite3_changes(db);
+        }
+        if (assigned != static_cast<int>(close.member_turn_summary_ids.size()))
+            throw std::runtime_error(std::format(
+                "store_episode_close: {} of {} members assignable "
+                "(foreign session / already closed / marker / missing); rolled back",
+                assigned, close.member_turn_summary_ids.size()));
+
+        text_index_->index_record("episodes", episode_id, t);
+        tx.commit();
+        invalidate_episode_cache();
+        return episode_id;
     }
 
 
-    // Sessions whose open episode is ready to close: they have >=1 non-draft
-    // L2 turn summary past the last episode's end, and their newest turn is
-    // older than idle_minutes. Returns session GUIDs.
+    // Sessions whose open episode is ready to close: >=1 non-empty turn
+    // summary past the last episode's span_end (0 when none), and their
+    // newest turn is older than idle_minutes. Returns session GUIDs.
     std::vector<std::string> Backend::Impl::episodes_needing_close(int idle_minutes) {
         std::vector<std::string> out;
         if (idle_minutes <= 0) return out;
-        const std::string cutoff =
-            std::format("(unixepoch('now','-{} minutes'))", idle_minutes);
-        // For each session: last episode end (updated_at of newest episode, or
-        // '' when none). "Turns needing an episode" = L2 turn_summaries rows
-        // with timestamp > that end (turn_summaries has no tags/'draft'
-        // state under the new design, so the old tags != 'draft' filter is
-        // simply dropped here). Idle = MAX(turn.timestamp) < cutoff.
+        // EXISTS(shared predicate): content turn summary past the last episode end,
+        // embeddings present on both sides (verified-bug fix for ''-text
+        // marker rows included in the predicate). PHASE6 6 additionally
+        // requires that NO turn of the session is still unsummarized — an
+        // episode must not close while a late turn summary could still land inside
+        // the span it just wrote. A bad/skip marker row counts as
+        // summarized (its turn_summaries row exists).
         std::string sql =
             "SELECT ss.guid "
             "FROM sessions ss "
             "WHERE EXISTS ("
-            "  SELECT 1 FROM turn_summaries s "
-            "  WHERE s.session_id = ss.session_id "
-            "    AND s.turn_datetime > COALESCE(("
-            "        SELECT COALESCE(e.updated_at, e.created_at) FROM summaries e "
-            "        WHERE e.session_id = ss.session_id AND e.level = 'episode' "
-            "        ORDER BY e.created_at DESC, e.summary_id DESC LIMIT 1), 0)) "
+            "  SELECT 1 FROM turn_summaries ts "
+            "  JOIN turns t ON t.turn_id = ts.turn_id "
+            "  WHERE ts.session_id = ss.session_id " +
+            pending_episode_turn_summary_conditions(
+                "COALESCE((SELECT MAX(e.span_end) FROM episodes e "
+                "WHERE e.session_id = ss.session_id), 0)") +
+            ") "
+            "  AND NOT EXISTS ("
+            "    SELECT 1 FROM turns t2 "
+            "    WHERE t2.session_id = ss.session_id "
+            "      AND t2.assistant_text IS NOT NULL AND t2.assistant_text <> '' "
+            "      AND NOT EXISTS (SELECT 1 FROM turn_summaries x "
+            "                      WHERE x.turn_id = t2.turn_id)) "
             "  AND (SELECT MAX(t.created_at) FROM turns t "
-            "        WHERE t.session_id = ss.session_id) < " + cutoff + " "
+            "        WHERE t.session_id = ss.session_id) < unixepoch('now', ?) "
             "ORDER BY ss.session_id ASC";
         Stmt s(db, sql);
+        s.bind(1, std::format("-{} minutes", idle_minutes));
         while (s.step()) {
             const auto g = s.column_text(0);
             if (!g.empty()) out.push_back(g);
@@ -1013,306 +1997,6 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // ---- Phase 2: boundary-triggered session/project rollups -----------
-    // All episode texts for a session, oldest-first. Corpus for the session
-    // rollup (episodes + any tail L2 turns are combined by the caller).
-    std::vector<std::string> Backend::Impl::episode_texts(const std::string& session_guid) {
-        std::vector<std::string> out;
-        if (session_guid.empty()) return out;
-        Stmt s(db,
-            "SELECT s.text FROM summaries s "
-            "JOIN sessions ss ON s.session_id = ss.session_id "
-            "WHERE ss.guid = ? AND s.level = 'episode' "
-            "ORDER BY s.created_at ASC, s.summary_id ASC");
-        s.bind(1, session_guid);
-        while (s.step()) {
-            auto t = s.column_text(0);
-            if (!t.empty()) out.push_back(std::move(t));
-        }
-        return out;
-    }
-
-
-    // Stamp updated_at = now for a running rollup row.
-    bool Backend::Impl::set_summary_updated_at(int summary_id) {
-        Stmt s(db, "UPDATE summaries SET updated_at = ? WHERE summary_id = ?");
-        s.bind(1, db_epoch()).bind(2, summary_id);
-        return s.exec() && sqlite3_changes(db) > 0;
-    }
-
-
-    // ---- boundary-detection watermark (settings key/value table) --------
-    int64_t Backend::Impl::get_watermark(const std::string& key) {
-        Stmt s(db, "SELECT value FROM settings WHERE key = ?");
-        s.bind(1, key);
-        if (s.step()) {
-            try { return std::stoll(s.column_text(0)); } catch (...) { return 0; }
-        }
-        return 0;
-    }
-
-
-    void Backend::Impl::set_watermark(const std::string& key, int64_t turn_id) {
-        Stmt s(db, "INSERT INTO settings (key, value) VALUES (?, ?) "
-                   "ON CONFLICT(key) DO UPDATE SET value = excluded.value");
-        s.bind(1, key);
-        s.bind(2, std::to_string(turn_id));
-        s.exec();
-    }
-
-
-    // Maximal runs of consecutive (by turn_id) turns sharing the same
-    // non-NULL session_id, edge-detected via a running group id that
-    // increments whenever session_id changes from the previous row. The
-    // final/currently-open group (grp == MAX(grp)) is always excluded —
-    // it's still open because a future turn could extend it.
-    std::vector<ClosedRun> Backend::Impl::sessions_needing_close_boundary() {
-        std::vector<ClosedRun> out;
-        int64_t watermark = get_watermark(std::string(kSessionBoundaryWatermarkKey));
-        // Structural floor (Reid's invariant: "no automatic lookback to do
-        // any session summary before the last session summary"). A run is
-        // eligible only if NO level='session' summary already covers it --
-        // i.e. none exists for this session whose stored span end
-        // (updated_at == the run's last_ts at store time) reaches this run's
-        // last turn timestamp. This makes correctness independent of the
-        // watermark: even with watermark=0 (e.g. a migration that never
-        // stamped the key -> get_watermark() defaults to 0), an
-        // already-summarized run is never re-closed. The watermark remains as
-        // a cheap first-pass filter (`last_turn_id > ?`) so the common
-        // steady-state scan stays bounded, but it is no longer the sole
-        // guard against re-summarizing history.
-        Stmt s(db, R"(
-            WITH lagged AS (
-                SELECT t.turn_id, t.session_id, t.created_at,
-                    LAG(t.session_id) OVER (ORDER BY t.turn_id) AS prev_sid
-                FROM turns t
-            ),
-            numbered AS (
-                SELECT turn_id, session_id, created_at,
-                    SUM(CASE WHEN session_id IS prev_sid THEN 0 ELSE 1 END)
-                        OVER (ORDER BY turn_id) AS grp
-                FROM lagged
-            ),
-            runs AS (
-                SELECT session_id, grp,
-                       MIN(turn_id) AS first_turn_id, MAX(turn_id) AS last_turn_id,
-                       MIN(created_at) AS first_ts, MAX(created_at) AS last_ts
-                FROM numbered
-                GROUP BY grp
-            )
-            SELECT ss.guid, r.first_ts, r.last_ts, r.first_turn_id, r.last_turn_id
-            FROM runs r
-            JOIN sessions ss ON r.session_id = ss.session_id
-            WHERE r.session_id IS NOT NULL
-              AND r.last_turn_id > ?
-              AND r.grp < (SELECT MAX(grp) FROM numbered)
-              AND NOT EXISTS (
-                  SELECT 1 FROM summaries sm
-                  WHERE sm.level = 'session'
-                    AND sm.session_id = r.session_id
-                    AND sm.updated_at >= r.last_ts
-              )
-            ORDER BY r.first_turn_id ASC
-        )");
-        s.bind(1, watermark);
-        while (s.step()) {
-            out.push_back({s.column_text(0), s.column_int64(1), s.column_int64(2),
-                            s.column_int(3), s.column_int(4)});
-        }
-        return out;
-    }
-
-
-    // Same shape as sessions_needing_close_boundary(), but grouped by a
-    // time gap (>= gap_days days) between consecutive turns (by turn_id)
-    // rather than a session_id change, and NOT restricted to non-NULL
-    // session_id (project runs span all turns, anonymous included).
-    std::vector<ClosedRun> Backend::Impl::projects_needing_close_boundary(int gap_days) {
-        std::vector<ClosedRun> out;
-        if (gap_days <= 0) return out;
-        int64_t gap_seconds = static_cast<int64_t>(gap_days) * 86400;
-        int64_t watermark = get_watermark(std::string(kProjectBoundaryWatermarkKey));
-        Stmt s(db, R"(
-            WITH lagged AS (
-                SELECT t.turn_id, t.created_at,
-                    LAG(t.created_at) OVER (ORDER BY t.turn_id) AS prev_ts
-                FROM turns t
-            ),
-            numbered AS (
-                SELECT turn_id, created_at,
-                    SUM(CASE
-                            WHEN prev_ts IS NULL THEN 1
-                            WHEN (created_at - prev_ts) >= ? THEN 1
-                            ELSE 0
-                        END) OVER (ORDER BY turn_id) AS grp
-                FROM lagged
-            ),
-            runs AS (
-                SELECT grp,
-                       MIN(turn_id) AS first_turn_id, MAX(turn_id) AS last_turn_id,
-                       MIN(created_at) AS first_ts, MAX(created_at) AS last_ts
-                FROM numbered
-                GROUP BY grp
-            )
-            SELECT r.first_ts, r.last_ts, r.first_turn_id, r.last_turn_id
-            FROM runs r
-            WHERE r.last_turn_id > ?
-              AND r.grp < (SELECT MAX(grp) FROM numbered)
-            ORDER BY r.first_turn_id ASC
-        )");
-        s.bind(1, gap_seconds);
-        s.bind(2, watermark);
-        while (s.step()) {
-            out.push_back({"", s.column_int64(0), s.column_int64(1),
-                            s.column_int(2), s.column_int(3)});
-        }
-        return out;
-    }
-
-
-    void Backend::Impl::advance_session_boundary_watermark(int turn_id) {
-        set_watermark(std::string(kSessionBoundaryWatermarkKey), turn_id);
-    }
-
-
-    void Backend::Impl::advance_project_boundary_watermark(int turn_id) {
-        set_watermark(std::string(kProjectBoundaryWatermarkKey), turn_id);
-    }
-
-
-    // Bounded text-gathering for a closed session run: episodes whose full
-    // span [created_at, COALESCE(updated_at,created_at)] lies entirely
-    // within [first_ts, last_ts] for this session_guid, plus trailing
-    // turn_summaries after the newest such episode's end (or from
-    // first_ts if there are none) up to last_ts. Unlike episode_texts()/
-    // l2_summaries_since() (unbounded above), this never reaches into a
-    // LATER run of the same session_guid.
-    std::vector<std::string> Backend::Impl::bounded_session_rollup_texts(
-            const std::string& session_guid, int64_t first_ts, int64_t last_ts) {
-        std::vector<std::string> out;
-        if (session_guid.empty()) return out;
-
-        // Episodes whose full span lies within the run, oldest-first.
-        Stmt e(db,
-            "SELECT s.text, COALESCE(s.updated_at, s.created_at) FROM summaries s "
-            "JOIN sessions ss ON s.session_id = ss.session_id "
-            "WHERE ss.guid = ? AND s.level = 'episode' "
-            "  AND s.created_at >= ? AND COALESCE(s.updated_at, s.created_at) <= ? "
-            "ORDER BY s.created_at ASC, s.summary_id ASC");
-        e.bind(1, session_guid);
-        e.bind(2, first_ts);
-        e.bind(3, last_ts);
-        int64_t newest_episode_end = first_ts - 1;  // sentinel: no episodes yet
-        while (e.step()) {
-            auto t = e.column_text(0);
-            int64_t end_ts = e.column_int64(1);
-            if (!t.empty()) out.push_back(std::move(t));
-            if (end_ts > newest_episode_end) newest_episode_end = end_ts;
-        }
-
-        // Trailing turn_summaries strictly after the newest episode's end
-        // (or from first_ts-1 if no episodes), up to and including last_ts.
-        Stmt ts_q(db,
-            "SELECT ts.text FROM turn_summaries ts "
-            "JOIN sessions ss ON ts.session_id = ss.session_id "
-            "WHERE ss.guid = ? AND ts.text != '' "
-            "  AND ts.turn_datetime > ? AND ts.turn_datetime <= ? "
-            "ORDER BY ts.turn_datetime ASC, ts.turn_summary_id ASC");
-        ts_q.bind(1, session_guid);
-        ts_q.bind(2, newest_episode_end);
-        ts_q.bind(3, last_ts);
-        while (ts_q.step()) {
-            auto t = ts_q.column_text(0);
-            if (!t.empty()) out.push_back(std::move(t));
-        }
-        return out;
-    }
-
-
-    // Bounded text-gathering for a closed project run: every level='session'
-    // row whose full span [created_at, COALESCE(updated_at,created_at)]
-    // lies entirely within [first_ts, last_ts], session-unscoped (a project
-    // run spans sessions), oldest-first.
-    std::vector<std::string> Backend::Impl::bounded_project_rollup_texts(
-            int64_t first_ts, int64_t last_ts) {
-        std::vector<std::string> out;
-        Stmt s(db,
-            "SELECT text FROM summaries "
-            "WHERE level = 'session' "
-            "  AND created_at >= ? AND COALESCE(updated_at, created_at) <= ? "
-            "ORDER BY created_at ASC, summary_id ASC");
-        s.bind(1, first_ts);
-        s.bind(2, last_ts);
-        while (s.step()) {
-            auto t = s.column_text(0);
-            if (!t.empty()) out.push_back(std::move(t));
-        }
-        return out;
-    }
-
-
-    // Insert one immutable level='session' row spanning a closed run.
-    // Mirrors store_episode's shape exactly, except created_at/updated_at
-    // are bound directly as epoch ints (ClosedRun already carries real
-    // epoch seconds — no resolve_epoch() round-trip needed).
-    int Backend::Impl::store_session_summary(const std::string& text, const std::string& model_name,
-                              const std::string& session_guid,
-                              int64_t first_ts, int64_t last_ts) {
-        std::string t = normalize_path(text);
-        int model_id   = get_or_create_model(model_name);
-        int session_id = get_or_create_session(session_guid);
-        auto emb = embedder->encode(t);
-
-        Stmt s(db,
-            "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, "
-            "level, tags, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)");
-        if (model_id) s.bind(1, model_id); else s.bind_null(1);
-        if (session_id) s.bind(2, session_id); else s.bind_null(2);
-        s.bind(3, t);
-        bind_embedding_version(s.raw(), 4, emb);
-        bind_embedding(s.raw(), 5, emb);
-        s.bind(6, std::string("session"))
-         .bind(7, std::string(""));
-        s.bind(8, first_ts);
-        s.bind(9, last_ts);
-        if (!s.exec())
-            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-        invalidate_cache();
-        int sid = static_cast<int>(sqlite3_last_insert_rowid(db));
-        text_index_->index_record("summaries", sid, t);
-        return sid;
-    }
-
-
-    // Insert one immutable level='project' row spanning a closed run.
-    // Session-unscoped (session_id NULL). Otherwise mirrors store_episode.
-    int Backend::Impl::store_project_summary(const std::string& text, const std::string& model_name,
-                              int64_t first_ts, int64_t last_ts) {
-        std::string t = normalize_path(text);
-        int model_id   = get_or_create_model(model_name);
-        auto emb = embedder->encode(t);
-
-        Stmt s(db,
-            "INSERT INTO summaries (model_id, session_id, text, embedding_version, embedding, "
-            "level, tags, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)");
-        if (model_id) s.bind(1, model_id); else s.bind_null(1);
-        s.bind_null(2);
-        s.bind(3, t);
-        bind_embedding_version(s.raw(), 4, emb);
-        bind_embedding(s.raw(), 5, emb);
-        s.bind(6, std::string("project"))
-         .bind(7, std::string(""));
-        s.bind(8, first_ts);
-        s.bind(9, last_ts);
-        if (!s.exec())
-            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
-        invalidate_cache();
-        int pid = static_cast<int>(sqlite3_last_insert_rowid(db));
-        text_index_->index_record("summaries", pid, t);
-        return pid;
-    }
 
     std::vector<TurnRecord> Backend::Impl::turns_by_session_desc(
             const std::string& session_guid, int limit) {
@@ -1320,69 +2004,90 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // Shared query: summaries for a session filtered by level, newest-first.
-    std::vector<SummaryRecord> Backend::Impl::summaries_by_level_desc(
-            const std::string& session_guid, const std::string& level, int limit) {
+
+
+    // Turn summaries for a session, newest-first (PHASE5 B.5: reads
+    // turn_summaries directly — the summaries.level='turn' rows this used to
+    // query have been empty since 0.12).
+    std::vector<SummaryRecord> Backend::Impl::turn_summaries_by_session_desc(
+            const std::string& session_guid, int limit) {
         std::vector<SummaryRecord> out;
         if (session_guid.empty()) return out;
         std::string sql =
-            "SELECT s.summary_id, s.text, s.created_at "
-            "FROM summaries s "
-            "JOIN sessions ss ON s.session_id = ss.session_id "
-            "WHERE ss.guid = ? AND s.level = ? "
-            "ORDER BY s.created_at DESC, s.summary_id DESC";
+            "SELECT ts.turn_summary_id, ts.text, '', "
+            "       datetime(ts.turn_datetime,'unixepoch','localtime') "
+            "FROM turn_summaries ts "
+            "JOIN sessions ss ON ts.session_id = ss.session_id "
+            "WHERE ss.guid = ? AND ts.text != '' "
+            "ORDER BY ts.turn_datetime DESC, ts.turn_summary_id DESC";
         if (limit > 0) sql += " LIMIT ?";
         Stmt s(db, sql);
-        s.bind(1, session_guid).bind(2, level);
-        if (limit > 0) s.bind(3, limit);
+        s.bind(1, session_guid);
+        if (limit > 0) s.bind(2, limit);
         while (s.step()) {
             out.push_back({s.column_int(0), s.column_text(1),
-                           std::string(), s.column_text(2)});
+                           s.column_text(2), s.column_text(3)});
         }
         return out;
     }
 
 
-    // L2 (turn) summaries for a session, newest-first.
-    std::vector<SummaryRecord> Backend::Impl::turn_summaries_by_session_desc(
+    // This session's episodes, newest-first (span_start DESC). Timestamp
+    // carries the rendered span_end (the episode's "when it ended").
+    std::vector<SummaryRecord> Backend::Impl::episodes_by_session_desc(
             const std::string& session_guid, int limit) {
-        return summaries_by_level_desc(session_guid, "turn", limit);
+        std::vector<SummaryRecord> out;
+        if (session_guid.empty()) return out;
+        std::string sql =
+            "SELECT e.episode_id, e.text, '', "
+            "       datetime(e.span_end,'unixepoch','localtime') "
+            "FROM episodes e "
+            "JOIN sessions ss ON e.session_id = ss.session_id "
+            "WHERE ss.guid = ? AND e.text != '' "
+            "ORDER BY e.span_start DESC, e.episode_id DESC";
+        if (limit > 0) sql += " LIMIT ?";
+        Stmt s(db, sql);
+        s.bind(1, session_guid);
+        if (limit > 0) s.bind(2, limit);
+        while (s.step()) {
+            out.push_back({s.column_int(0), s.column_text(1),
+                           s.column_text(2), s.column_text(3)});
+        }
+        return out;
     }
 
-
-    // L3 (session) summaries for a session, newest-first.
-    std::vector<SummaryRecord> Backend::Impl::session_summaries_desc(
-            const std::string& session_guid, int limit) {
-        return summaries_by_level_desc(session_guid, "session", limit);
-    }
 
 
     // Exact-match existence check for import idempotency: same text +
-    // same created_at timestamp already present in summaries. Used by
-    // `ragger import conversations`/`import summaries` so re-running an
-    // import (or feeding overlapping exports) doesn't duplicate rows.
-    // Normalizes `text` the same way store_summary() does before storing
-    // (absolute home-dir paths -> "~/") — otherwise a chunk containing
+    // same created_at timestamp already present among knowledge notes.
+    // Used by the importers so re-running an import (or feeding overlapping
+    // exports) doesn't duplicate rows. Normalizes `text` the same way the
+    // note write path does (strip the Decision/Design-number label, trim,
+    // then absolute home-dir paths -> "~/") — otherwise a chunk containing
     // e.g. "/Users/reid/..." never matches what's actually in the table
     // (already normalized to "~/...") and gets re-inserted on every run.
-    bool Backend::Impl::summary_exists_exact(const std::string& text, const std::string& created_at) {
-        std::string t = normalize_path(text);
-        Stmt s(db, "SELECT 1 FROM summaries WHERE text = ? AND created_at = ? LIMIT 1");
+    bool Backend::Impl::note_exists_exact(const std::string& text, const std::string& created_at) {
+        std::string t = normalize_path(strip_decision_number_prefix(text));
+        // created_at is an INTEGER epoch; binding the "%F %T" string never
+        // matched (SQLite does no implicit conversion), so the probe was
+        // always false and every re-import duplicated rows. Use the same
+        // resolve_epoch the store path uses, so probe and insert agree.
+        Stmt s(db, "SELECT 1 FROM knowledge WHERE kind = 'note' AND text = ? AND created_at = ? LIMIT 1");
         s.bind(1, t);
-        s.bind(2, created_at);
+        s.bind(2, resolve_epoch(created_at));
         return s.step();
     }
 
 
-    // Mirrors summary_exists_exact for the decisions table (same
+    // Mirrors note_exists_exact for the decisions table (same
     // normalize-before-compare fix applies here too — plus the
     // decision-number-prefix strip, since store_decision() strips that
     // before storing too).
     bool Backend::Impl::decision_exists_exact(const std::string& text, const std::string& created_at) {
         std::string t = normalize_path(strip_decision_number_prefix(text));
-        Stmt s(db, "SELECT 1 FROM decisions WHERE text = ? AND created_at = ? LIMIT 1");
+        Stmt s(db, "SELECT 1 FROM knowledge WHERE kind = 'decision' AND text = ? AND created_at = ? LIMIT 1");
         s.bind(1, t);
-        s.bind(2, created_at);
+        s.bind(2, resolve_epoch(created_at));  // INTEGER epoch, see note_exists_exact
         return s.step();
     }
 
@@ -1393,14 +2098,16 @@ static std::string tags_from_metadata(const json& metadata) {
     // message send time vs. capture time, plus any tz-conversion rounding).
     bool Backend::Impl::turn_exists_fuzzy(const std::string& user_text, const std::string& ts,
                            int window_seconds) {
+        // created_at is an INTEGER epoch — compare against resolved integer
+        // bounds (the old datetime(?,?) form compared TEXT to INTEGER and
+        // never matched).
+        const int64_t ep = resolve_epoch(ts);
         Stmt s(db,
             "SELECT 1 FROM turns WHERE user_text = ? "
-            "AND created_at BETWEEN datetime(?, ?) AND datetime(?, ?) LIMIT 1");
-        std::string neg = "-" + std::to_string(window_seconds) + " seconds";
-        std::string pos = "+" + std::to_string(window_seconds) + " seconds";
+            "AND created_at BETWEEN ? AND ? LIMIT 1");
         s.bind(1, user_text);
-        s.bind(2, ts).bind(3, neg);
-        s.bind(4, ts).bind(5, pos);
+        s.bind(2, ep - window_seconds);
+        s.bind(3, ep + window_seconds);
         return s.step();
     }
 
@@ -1440,7 +2147,7 @@ static std::string tags_from_metadata(const json& metadata) {
         if (target.empty()) return std::nullopt;
         Stmt s(db,
             "SELECT t.turn_id, t.user_text, t.assistant_text, m.name, "
-            "t.created_at, ss.guid "
+            "datetime(t.created_at,'unixepoch','localtime'), ss.guid "
             "FROM turns t "
             "LEFT JOIN models m ON t.model_id = m.model_id "
             "LEFT JOIN sessions ss ON t.session_id = ss.session_id "
@@ -1468,48 +2175,109 @@ static std::string tags_from_metadata(const json& metadata) {
     bool Backend::Impl::update_turn_meta(int turn_id, const std::string& timestamp,
                           const std::string& session_guid) {
         if (timestamp.empty() && session_guid.empty()) return true;
+
+        // Bounds are DERIVED here, not touched: a timestamp move can leave
+        // the old span stale in either direction, so both affected sessions
+        // get a full MIN/MAX recompute from their remaining turns. A session
+        // left with no turns goes back to NULL/NULL.
+        auto recompute_span = [&](int sid) {
+            if (sid <= 0) return;
+            Stmt q(db, "SELECT MIN(created_at), MAX(created_at) FROM turns WHERE session_id = ?");
+            q.bind(1, sid);
+            Stmt u(db, "UPDATE sessions SET started_on = ?, ended_on = ? WHERE session_id = ?");
+            if (q.step() && !q.is_null(0)) {
+                u.bind(1, q.column_int64(0));
+                u.bind(2, q.column_int64(1));
+            } else {
+                u.bind_null(1);
+                u.bind_null(2);
+            }
+            u.bind(3, sid);
+            if (!u.exec())
+                throw std::runtime_error(std::format(
+                    "update_turn_meta recompute (session {}): {}", sid, sqlite3_errmsg(db)));
+        };
+
+        int old_session_id = 0;
+        {
+            Stmt f(db, "SELECT session_id FROM turns WHERE turn_id = ?");
+            f.bind(1, turn_id);
+            if (f.step() && !f.is_null(0)) old_session_id = f.column_int(0);
+        }
+
         std::string sql = "UPDATE turns SET ";
         bool first = true;
+        int new_session_id = 0;
         if (!timestamp.empty()) { sql += "created_at = ?"; first = false; }
         if (!session_guid.empty()) {
             if (!first) sql += ", ";
             sql += "session_id = ?";
         }
         sql += " WHERE turn_id = ?";
+        Transaction tx(db);
         Stmt s(db, sql);
         int idx = 1;
-        if (!timestamp.empty()) s.bind(idx++, timestamp);
-        if (!session_guid.empty())
-            s.bind(idx++, get_or_create_session(session_guid));
-        s.bind(idx, turn_id);
-        return s.exec() && sqlite3_changes(db) > 0;
-    }
-
-
-    // Recipe ingredients (issue #23): recent summaries of a given level, and
-    // current decisions — fetched by recency (not semantic search) for the
-    // default tiered payload. Returned newest-first.
-    std::vector<std::string> Backend::Impl::recent_summaries(const std::string& level, int limit) {
-        std::vector<std::string> out;
-        if (limit <= 0) return out;
-        Stmt s(db,
-            "SELECT text FROM summaries WHERE level = ? "
-            "ORDER BY created_at DESC, summary_id DESC LIMIT ?");
-        s.bind(1, level).bind(2, limit);
-        while (s.step()) {
-            auto text = s.column_text(0);
-            if (!text.empty()) out.push_back(std::move(text));
+        int64_t new_created_at = 0;   // epoch; only meaningful when !timestamp.empty()
+        if (!timestamp.empty()) {
+            new_created_at = resolve_epoch(timestamp);
+            s.bind(idx++, new_created_at);  // INTEGER epoch
         }
-        return out;
+        if (!session_guid.empty()) {
+            new_session_id = get_or_create_session(session_guid);
+            s.bind(idx++, new_session_id);
+        }
+        s.bind(idx, turn_id);
+        // X12 (M5): a failed turns UPDATE used to be swallowed (changed=false,
+        // silent return false). Check it and throw, same style as recompute_span
+        // below; the RAII Transaction rolls the whole thing back.
+        if (!s.exec())
+            throw std::runtime_error(std::format(
+                "update_turn_meta (turn {}): {}", turn_id, sqlite3_errmsg(db)));
+        const bool changed = sqlite3_changes(db) > 0;
+        if (changed) {
+            // Keep the turn-summary invariant (rule 18): turn_summaries.turn_datetime
+            // always equals its turn's created_at, and its session_id follows
+            // the turn. Propagate ONLY the columns that moved, in the SAME
+            // transaction, so a failed turn-summary write rolls the turns UPDATE (and
+            // any new session) back too. A turn with no turn-summary row matches 0 rows
+            // here — not an error, unchanged behavior.
+            std::string ts_update = "UPDATE turn_summaries SET ";
+            bool turn_summary_first = true;
+            if (!timestamp.empty()) { ts_update += "turn_datetime = ?"; turn_summary_first = false; }
+            if (!session_guid.empty()) {
+                if (!turn_summary_first) ts_update += ", ";
+                ts_update += "session_id = ?";
+            }
+            ts_update += " WHERE turn_id = ?";
+            Stmt ls(db, ts_update);
+            int lidx = 1;
+            if (!timestamp.empty()) ls.bind(lidx++, new_created_at);
+            if (!session_guid.empty()) ls.bind(lidx++, new_session_id);
+            ls.bind(lidx, turn_id);
+            if (!ls.exec())
+                throw std::runtime_error(std::format(
+                    "update_turn_meta turn summary (turn {}): {}", turn_id, sqlite3_errmsg(db)));
+
+            recompute_span(old_session_id);
+            if (new_session_id && new_session_id != old_session_id)
+                recompute_span(new_session_id);
+        }
+        tx.commit();
+        if (changed) invalidate_raw_turn_cache();  // LR S75: time/session moved
+        return changed;
     }
 
 
+    // Recipe ingredients (issue #23): current decisions — fetched by recency
+    // (not semantic search) for the default tiered payload. Returned
+    // newest-first. (PHASE8: the old recent-summary fetch is gone with its
+    // table; recipes read episodes since PHASE5.)
     std::vector<std::string> Backend::Impl::current_decisions(int limit) {
         std::vector<std::string> out;
         if (limit <= 0) return out;
         Stmt s(db,
-            "SELECT text FROM decisions WHERE status = 'current' "
-            "ORDER BY created_at DESC, decision_id DESC LIMIT ?");
+            "SELECT text FROM knowledge WHERE kind = 'decision' AND status = 'current' "
+            "ORDER BY created_at DESC, knowledge_id DESC LIMIT ?");
         s.bind(1, limit);
         while (s.step()) {
             auto text = s.column_text(0);
@@ -1519,15 +2287,9 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // Set a decision's status (e.g. "roadmap" -> "current" once planned
-    // work is done, or -> "superseded"/"deprecated" once stale).
-    bool Backend::Impl::set_decision_status(int decision_id, const std::string& status) {
-        Stmt s(db, "UPDATE decisions SET status = ? WHERE decision_id = ?");
-        s.bind(1, status).bind(2, decision_id);
-        bool ok = s.exec() && sqlite3_changes(db) > 0;
-        if (ok) invalidate_dec_cache();
-        return ok;
-    }
+    // LR S60: the old CLI-only status setter is gone — `decision
+    // set-status` now goes through agent_update on knowledge:<id>, like
+    // every other status change. One write path, one status discipline.
 
 
     // Decisions with an arbitrary status, most recent first — e.g.
@@ -1539,8 +2301,8 @@ static std::string tags_from_metadata(const json& metadata) {
         std::vector<std::string> out;
         if (limit <= 0) return out;
         Stmt s(db,
-            "SELECT text FROM decisions WHERE status = ? "
-            "ORDER BY created_at DESC, decision_id DESC LIMIT ?");
+            "SELECT text FROM knowledge WHERE kind = 'decision' AND status = ? "
+            "ORDER BY created_at DESC, knowledge_id DESC LIMIT ?");
         s.bind(1, status);
         s.bind(2, limit);
         while (s.step()) {
@@ -1551,81 +2313,10 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
-    // Replace a summary's text + embedding, update its model. False if absent.
-    bool Backend::Impl::update_summary_text(int summary_id, const std::string& text,
-                             const std::string& model_name) {
-        std::string t = normalize_path(text);
-        int model_id  = get_or_create_model(model_name);
-        auto emb = embedder->encode(t);
-
-        Stmt s(db,
-            "UPDATE summaries SET text = ?, embedding_version = ?, embedding = ?, "
-            "model_id = COALESCE(?, model_id) WHERE summary_id = ?");
-        s.bind(1, t);
-        bind_embedding_version(s.raw(), 2, emb);
-        bind_embedding(s.raw(), 3, emb);
-        if (model_id) s.bind(4, model_id); else s.bind_null(4);
-        s.bind(5, summary_id);
-        bool ok = s.exec() && sqlite3_changes(db) > 0;
-        if (ok) {
-            invalidate_cache();
-            text_index_->index_record("summaries", summary_id, t);
-        }
-        return ok;
-    }
-
-
-    // Replace a summary's tags column. Used by the summarizer to clear
-    // "draft" once a row has been rewritten with a real summary.
-    bool Backend::Impl::set_summary_tags(int summary_id, const std::string& tags) {
-        Stmt s(db,
-            "UPDATE summaries SET tags = ? WHERE summary_id = ?");
-        s.bind(1, tags).bind(2, summary_id);
-        return s.exec() && sqlite3_changes(db) > 0;
-    }
-
-
-    bool Backend::Impl::update_text(int memory_id, const std::string& raw_text, json metadata, bool defer_embedding) {
-        if (metadata.is_null()) metadata = json::object();
-
-        // Refuse to mutate protected rows for parity with delete_memory.
-        Stmt check_stmt(db, "SELECT tags FROM summaries WHERE summary_id = ?");
-        check_stmt.bind(1, memory_id);
-        if (!check_stmt.step()) return false;  // row not found
-        if (check_stmt.column_text(0).find("keep") != std::string::npos) return false;
-
-        // Lean v2 summaries: only text/embedding/tags are mutable here.
-        // keep/bad flags fold into tags (parity with store()).
-        std::string tags_str = tags_from_metadata(metadata);
-
-        std::string text = normalize_path(raw_text);
-        std::vector<float> emb;
-        if (!defer_embedding) {
-            emb = embedder->encode(text);
-        }
-
-        // Custom index: re-tokenize the record on the new text (v0.16).
-        Stmt stmt(db,
-            "UPDATE summaries SET text = ?, embedding_version = ?, embedding = ?, tags = ? "
-            "WHERE summary_id = ?");
-
-        stmt.bind(1, text);
-        if (defer_embedding) {
-            stmt.bind_null(2);
-            stmt.bind_null(3);
-        } else {
-            bind_embedding_version(stmt.raw(), 2, emb);
-            bind_embedding(stmt.raw(), 3, emb);
-        }
-        stmt.bind(4, tags_str);
-        stmt.bind(5, memory_id);
-
-        if (!stmt.exec()) return false;
-
-        invalidate_cache();
-        text_index_->index_record("summaries", memory_id, text);
-        return true;
-    }
-
+    // PHASE8: the old summary text/tag update paths are gone.
+    // Their only live callers were the draft path (removed in PHASE5) and the
+    // public facade; honest history wins — text is never rewritten in place
+    // (store a new row with supersedes), and tags/status change through
+    // agent_update on knowledge:<id>.
 
 } // namespace ragger::sqlite

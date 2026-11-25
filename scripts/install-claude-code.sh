@@ -143,7 +143,12 @@ mkdir -p "$HOME/.ragger"
 if [ ! -f "$INSTR_SRC" ]; then
     warn "Instructions source missing at $INSTR_SRC — skipping."
 elif [ -f "$INSTR_DST" ]; then
-    info "  kept existing $INSTR_DST"
+    if cmp -s "$INSTR_SRC" "$INSTR_DST"; then
+        info "  $INSTR_DST is up to date"
+    else
+        cp "$INSTR_SRC" "$INSTR_DST.new"
+        warn "  kept your $INSTR_DST (differs from the shipped version); shipped copy at $INSTR_DST.new"
+    fi
 else
     cp "$INSTR_SRC" "$INSTR_DST"
     info "  installed $INSTR_DST"
@@ -260,7 +265,7 @@ PYEOF
 curl -sS --max-time 5 \
      --unix-socket "$SOCKET" \
      -H "Content-Type: application/json" \
-     ${TOKEN:+-H "Authorization: Bearer *** \
+     ${TOKEN:+-H "Authorization: Bearer $TOKEN"} \
      -X POST "http://localhost/turn" \
      -d "$PAYLOAD" >/dev/null 2>&1 || true
 HOOKEOF

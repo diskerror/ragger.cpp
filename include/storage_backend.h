@@ -26,6 +26,8 @@
 #include <vector>
 
 #include "storage_types.h"
+#include "text_index.h"
+#include "vector_codec.h"
 #include "nlohmann_json.hpp"
 
 namespace ragger {
@@ -34,7 +36,7 @@ using json = nlohmann::json;
 
 class Embedder;
 
-/// One raw L1 turn as read back from the `turns` table. `model_name` is
+/// One raw turn as read back from the `turns` table. `model_name` is
 /// empty when the turn recorded no model; `session_guid` is empty when the
 /// turn was captured outside a session (turns.session_id IS NULL).
 struct TurnRecord {
@@ -46,43 +48,20 @@ struct TurnRecord {
     std::string session_guid;
 };
 
-/// One row of the v0.12.0 `turn_summaries` table (turn_id-FK based, epoch
-/// timestamps). Replaces the old (session_guid, source_timestamp)-keyed
-/// linkage. `*_null` flags distinguish "0/absent" from a real 0 value for
-/// nullable FK/int columns (turn_id is 0/absent if NULL — pruned turn).
-struct TurnSummaryRecord {
-    int turn_summary_id;
-    std::string text;
-    int turn_id;           // 0/absent if NULL (pruned)
-    bool turn_id_null;
-    int session_id;
-    bool session_id_null;
-    int turn_model_id;
-    bool turn_model_id_null;
-    int summary_model_id;
-    bool summary_model_id_null;
-    int64_t turn_datetime;   // epoch seconds
-    int64_t summarized_on;   // epoch seconds
-};
-
-/// One maximal run of turns closed by boundary-detection (session_id
-/// change for session runs, time-gap for project runs). first_ts/last_ts
-/// are epoch seconds (turns.created_at of the run's first/last turn).
-/// session_guid is empty for project-boundary runs (session-unscoped).
-struct ClosedRun {
-    std::string session_guid;
-    int64_t first_ts;
-    int64_t last_ts;
-    int first_turn_id;
-    int last_turn_id;
-};
-
 /**
  * Abstract base class for storage backends.
  *
  * This interface defines all methods that client code expects from a backend.
  * Concrete implementations (like sqlite::Backend) inherit from this and
  * implement the actual storage logic.
+ *
+ * One interface, deliberately (review 5B): splitting into narrower interfaces
+ * (UserBackend / SchemaIntrospectable / EmbeddingManageable + multiple
+ * inheritance) is deferred until a second implementation or a test-only
+ * consumer actually needs a narrower type. Today every consumer talks to
+ * RaggerMemory or the concrete sqlite::Backend, so a split would be pure
+ * ceremony across ~80 methods. The section banners below are the navigability
+ * aid; add new methods under the matching section, not at the end.
  */
 class StorageBackend {
 public:
@@ -91,26 +70,31 @@ public:
     /// Path to the database file.
     virtual std::string db_path() const = 0;
 
+    // --- Core writes & document-source management -----------------------
+
     /// Store text with metadata. Returns memory ID.
     /// `defer_embedding`: write the row with embedding=NULL, skipping the
     /// embedder call. Caller is responsible for triggering a backfill.
     virtual std::string store(const std::string& text, json metadata = {},
                               bool defer_embedding = false) = 0;
 
-    /// Store a Level 5 RAG document chunk into the `documents` table.
-    /// FTS5 sync triggers index the row's text. Returns the new row id.
+    /// Store a RAG document chunk into the `documents` table. The row's text
+    /// goes into the custom text index. Returns the new row id.
     /// `chunk.imported_at` is honoured when non-empty so every chunk of one
     /// import shares a single timestamp (issue #48).
     virtual int store_document(const DocumentChunk& chunk,
                                bool defer_embedding = false) = 0;
 
-    /// Store a raw L1 conversation turn into the `turns` table. An empty
+    /// Store a raw conversation turn into the `turns` table. An empty
     /// `assistant_text` writes a partial row (embedding NULL) for the
     /// prompt-arrival/finalize flow. `model_name` resolves/creates a models
     /// row (turns.model_id). `session_guid` resolves/creates a sessions row
     /// (turns.session_id) — empty leaves it NULL. Returns the new turn_id.
     /// `source_timestamp` (db format) overrides created_at for historical
     /// imports (also skips the regeneration-dedup window).
+    /// `started_epoch` (X32) stores turns.started_on — the time the user
+    /// prompt arrived (0 = not given -> NULL). On a same-exchange merge the
+    /// EARLIER of stored and new value wins (NULL loses to any value).
     virtual int store_turn(const std::string& user_text,
                            const std::string& assistant_text,
                            const std::string& model_name = "",
@@ -118,10 +102,11 @@ public:
                            const std::string& session_guid = "",
                            const std::string& source_timestamp = "",
                            const std::string& session_name = "",
-                           const std::string& name_source = "") = 0;
+                           const std::string& name_source = "",
+                           int64_t started_epoch = 0) = 0;
 
     /// All raw turns belonging to a session GUID, oldest first. Empty if the
-    /// session is unknown. Grouping primitive for session summaries/recipes.
+    /// session is unknown. Grouping primitive for context building.
     virtual std::vector<TurnRecord> turns_by_session(
         const std::string& session_guid) = 0;
 
@@ -131,61 +116,117 @@ public:
                                const std::string& assistant_text,
                                const std::string& model_name = "") = 0;
 
-    /// Set a document's embedding (import path: embed chunks out-of-process,
-    /// then write the vectors back). Returns true if a row was updated.
-    virtual bool update_document_embedding(int document_id,
-                                           const std::vector<float>& emb) = 0;
-
-    /// Store a curated L6 decision/lesson (decisions table). `status` defaults
-    /// to "current" — the only status current_decisions() (the recall-
-    /// pipeline layer) actually surfaces. Other recognized values:
-    /// "roadmap" (planned/future work — deliberately excluded from the
-    /// recall layer so every session isn't cluttered with unfinished plans;
-    /// query it via decisions_by_status instead), "superseded", "deprecated".
+    /// Store a curated decision (knowledge kind='decision', trigger NULL).
+    /// `status` defaults to "current" and must be creatable
+    /// (current | provisional | pending) — legacy words such as
+    /// "roadmap"/"deprecated" are rejected on write (TODO Q8).
     /// `tags` stored verbatim; `source_timestamp` overrides the row
-    /// timestamp when non-empty. Returns the new decision_id.
+    /// timestamp when non-empty. Returns the new knowledge_id.
     virtual int store_decision(const std::string& text,
                                const std::string& status = "current",
                                const std::string& tags = "",
                                const std::string& source_timestamp = "",
                                bool defer_embedding = false) = 0;
 
-    /// Write back a single row's embedding for the remaining context tables
-    /// (documents already covered above). Returns true if a row was updated.
-    virtual bool update_decision_embedding(int decision_id,
+    /// Store a structured decision (agent API Phase 1, db 0.17). Throws
+    /// std::invalid_argument on validation failure (empty text/trigger,
+    /// bad status, unknown or inactive supersedes target, unknown evidence id).
+    virtual KnowledgeResult store_knowledge(const KnowledgeInput& in) = 0;
+
+    /// Look up a document source by its (unique) path. Returns null when no
+    /// document has that path, else {"id","title","imported_at"}. Used by the
+    /// importer to refuse importing the same file twice.
+    virtual json find_document_source(const std::string& path) = 0;
+
+    /// Drop every in-memory search cache (documents, knowledge,
+    /// turn_summaries, episodes). They are rebuilt lazily from the DB on the
+    /// next lookup. Called when something outside this process may have changed
+    /// the DB file (CLI import/delete, hand edits).
+    virtual void invalidate_all_caches() = 0;
+
+    /// All imported documents, ordered by document_source_id (gaps from
+    /// deletions are shown as-is). Each item: {id, title, path, year, tags,
+    /// imported_at, chunks}. title/path/year may be null.
+    virtual json list_document_sources() = 0;
+
+    /// Delete one imported document: all its chunks (and their term-index
+    /// rows) and its document_sources row, in one transaction. Returns
+    /// {id, title, path, chunks}. std::invalid_argument if no such id.
+    virtual json delete_document_source(int document_source_id) = 0;
+
+    // --- Agent API (typed handles; see PHASE2/3/4/5-STEPS.md) -----------
+
+    /// Layered agent search (agent API Phase 2). Returns handles + snippets
+    /// only (full text via agent_get). Throws std::invalid_argument on an
+    /// unknown layer name or a malformed since/until bound.
+    virtual std::vector<AgentHit> agent_search(const AgentSearchQuery& q) = 0;
+
+    /// LR S76 (D-7): documents are searched through their own verb, never
+    /// through agent_search's layer list.
+    virtual std::vector<AgentHit> agent_document_search(const DocumentSearchQuery& q) = 0;
+
+    /// Agent row reads (agent API Phase 2): full rows by typed handle with
+    /// optional hierarchy expansion (mode 1), or paged conversation history
+    /// for one session (mode 2). Exactly one mode per call; both or neither
+    /// throws std::invalid_argument.
+    virtual json agent_get(const AgentGetQuery& q) = 0;
+
+    /// Near-duplicate decision hints for free text: embeds the text and runs
+    /// the same cosine scan as possible_supersedes (compares against current
+    /// decisions). Empty when the embedder is degraded. Used by the Phase 3
+    /// note surface so a note can flag a ruling it may contradict.
+    virtual std::vector<std::pair<int,float>> possible_supersedes_for_text(
+        const std::string& text) = 0;
+
+    /// Timeline (agent API Phase 4): deterministic range scan, newest first,
+    /// key-paginated by "<created_epoch>:<rowid>" cursors. No embeddings.
+    /// Returns {"items":[{id,created,session,text}...], "next_cursor":...|null}.
+    /// Bad granularity or malformed cursor -> std::invalid_argument.
+    virtual json agent_timeline(const TimelineQuery& q) = 0;
+
+    /// Curation (agent API Phase 4): metadata-only update of one typed
+    /// handle. Text present -> always rejected (a text change is a new row
+    /// with supersedes). turn/turn_summary/document rows are not agent-
+    /// editable; episodes are immutable. knowledge (any kind): status must
+    /// be a legal transition (see the table in sqlite/status.h;
+    /// 'superseded' is reached only via supersedes); tags free.
+    /// Returns the updated row as agent_get would. std::invalid_argument on
+    /// any rule violation.
+    virtual json agent_update(const UpdateRequest& req) = 0;
+
+    /// Review queue (agent API Phase 4): action "list" returns pending
+    /// knowledge rows of any kind oldest first; "approve"/"reject" move each
+    /// id pending->current / pending->retired through the agent_update
+    /// transition code. ids are knowledge handles (bare integers also
+    /// accepted). A non-pending id fails only that id.
+    /// Returns {"done":[ids],"failed":[{"id":...,"error":...}]}.
+    virtual json agent_review(const std::string& action,
+                              const std::vector<std::string>& ids) = 0;
+
+    // --- Embedding write-back (deferred-embedding path) ------------------
+
+    /// Write back a single row's embedding for an embedded context table.
+    /// Returns true if a row was updated. (S47: the document/turn twins of
+    /// this entry point were deleted — no callers remained.)
+    virtual bool update_decision_embedding(int knowledge_id,
                                            const std::vector<float>& emb) = 0;
-    virtual bool update_summary_embedding(int summary_id,
-                                          const std::vector<float>& emb) = 0;
-    virtual bool update_turn_embedding(int turn_id,
-                                       const std::vector<float>& emb) = 0;
 
-    // --- summaries (L2/L3) pipeline (issue #22) ---
-    /// Insert a summary (level 'turn'|'session'|'project'); embeds text,
-    /// records model. Returns summary_id.
-    /// `source_timestamp` (when non-empty) overrides the row's timestamp —
-    /// L2 turn summaries inherit the source turn's timestamp so chronology
-    /// is the linkage between turn and its summary (no FK column needed) and
-    /// remains stable across embedding-model changes. `tags` is stored verbatim
-    /// on the row (used to mark drafts: "draft" → housekeeping re-summarizes
-    /// it when inference becomes available again).
-    virtual int store_summary(const std::string& text, const std::string& level,
-                              const std::string& model_name = "",
-                              const std::string& session_guid = "",
-                              const std::string& source_timestamp = "",
-                              const std::string& tags = "") = 0;
+    // PHASE8: the old summary-store and summary embedding write-back are gone
+    // with the `summaries` table. Importers write knowledge rows of kind='note' via
+    // store_knowledge; re-embedding goes through update_embedding(knowledge).
 
-    /// Exact-match existence check on the `summaries` table: does a row
-    /// already exist with this text and created_at timestamp? Used by
-    /// bulk importers (conversation/summary import) to make re-running an
-    /// import idempotent — safe to feed the same export file (or an
-    /// overlapping one) twice without duplicating rows.
-    virtual bool summary_exists_exact(const std::string& text,
-                                      const std::string& created_at) = 0;
+    /// Exact-match existence check among knowledge notes (kind='note'):
+    /// does a row already exist with this text and created_at timestamp?
+    /// Used by bulk importers (conversation/summary import) to make
+    /// re-running an import idempotent — safe to feed the same export file
+    /// (or an overlapping one) twice without duplicating rows.
+    virtual bool note_exists_exact(const std::string& text,
+                                   const std::string& created_at) = 0;
 
-    /// Exact-match existence check on the `decisions` table: same text +
-    /// same created_at already present? Mirrors summary_exists_exact —
-    /// used by importers (e.g. memories.json → decisions) to stay
-    /// idempotent across re-runs.
+    /// Exact-match existence check on decision rows (kind='decision'):
+    /// same text + same created_at already present? Mirrors
+    /// note_exists_exact — used by importers (e.g. memories.json →
+    /// decisions) to stay idempotent across re-runs.
     virtual bool decision_exists_exact(const std::string& text,
                                        const std::string& created_at) = 0;
 
@@ -220,172 +261,254 @@ public:
                                   const std::string& timestamp = "",
                                   const std::string& session_guid = "") = 0;
 
-    /// Replace a summary's text + embedding (and model). False if absent.
-    virtual bool update_summary_text(int summary_id, const std::string& text,
-                                     const std::string& model_name = "") = 0;
-    /// Replace a summary's `tags` column (used to clear "draft" once the
-    /// row has been rewritten with a real summary).
-    virtual bool set_summary_tags(int summary_id, const std::string& tags) = 0;
-    /// Recent summaries of a given level ('turn'|'session'|'project'), newest
-    /// first — recipe ingredients for tiered payload assembly (issue #23).
-    virtual std::vector<std::string> recent_summaries(const std::string& level,
-                                                      int limit) = 0;
+    /// X22: the turn's CURRENT assistant_text (a NULL column reads
+    /// as empty), nullopt when no such turn exists. `/turn` after a merge
+    /// must enqueue the whole reply for summarization, not just the fragment
+    /// of the request that merged it.
+    virtual std::optional<std::string> turn_assistant_text(int turn_id) = 0;
+
+    // PHASE8: the old summary text-update / tag-setter / recent-list are gone
+    // with the `summaries` table (text is never rewritten in place;
+    // recipes read episodes since PHASE5).
     /// Current (active) decisions, newest first.
     virtual std::vector<std::string> current_decisions(int limit) = 0;
 
-    /// Set a decision's status (e.g. promote "roadmap" -> "current" once
-    /// planned work is done, or mark a stale one "superseded"/"deprecated").
-    /// Returns false if no row matched.
-    virtual bool set_decision_status(int decision_id, const std::string& status) = 0;
-
-    /// Decisions with the given status, most recent first. Use this for
-    /// anything other than the recall pipeline's "current" default —
-    /// e.g. status="roadmap" to list planned/future work explicitly.
+    /// Decisions with the given status, most recent first. Any stored status
+    /// can be filtered, including legacy words (roadmap, deprecated).
     virtual std::vector<std::string> decisions_by_status(const std::string& status,
                                                          int limit) = 0;
 
-    /// Turns that don't yet have a matching L2 ('turn') summary —
-    /// LEFT JOIN summaries ON (session_id, timestamp) WHERE summary_id IS NULL.
+    /// Turns that don't yet have a `turn_summaries` row — LEFT JOIN
+    /// turn_summaries ON turn_id WHERE none exists; partial turns
+    /// (assistant_text NULL) are excluded.
     /// Returned newest-first, capped at `limit` (0 = unbounded). Powers the
     /// summarizer's startup catch-up and housekeeping retry pass.
     virtual std::vector<TurnRecord> unsummarized_turns(int limit = 0) = 0;
 
-    // --- v0.12.0 turn_id-based turn-summary methods (schema migration) ---
-    // NOTE: unsummarized_turns(int) is intentionally NOT a new overload here.
-    // Per the migration plan, unsummarized_turns() keeps its EXISTING
-    // signature/return type (std::vector<TurnRecord>) unchanged — only its
-    // SQL body changes (JOIN against turn_summaries instead of summaries,
-    // implemented in sqlite_backend.cpp). No interface change needed for it.
+    // --- turn_id-based turn-summary methods ---
     virtual bool turn_summary_exists(int turn_id) = 0;
     virtual bool finalize_turn_summary(int turn_id, const std::string& text,
                                         const std::string& summary_model_name) = 0;
     virtual bool mark_turn_summarized(int turn_id, const std::string& model_name) = 0;
 
-    /// Delete poison-abandoned turn_summaries rows (summary_model_id ->
-    /// model "bad", text NULL) so the underlying turn falls back into
-    /// unsummarized_turns()'s candidate set on the next catch-up pass.
+    /// Delete poison-abandoned turn_summaries rows (model "bad" with the
+    /// known-empty marker text '', plus legacy NULL-text rows) so the
+    /// underlying turn falls back into unsummarized_turns()'s candidate set
+    /// on the next catch-up pass.
     /// Housekeeping retry for turns that hit max_turn_failures before
     /// whatever caused the failures was fixed. Returns rows deleted.
-    /// Does NOT touch legitimate trivial-turn skips (tagged with the real
-    /// summarizer model name, never "bad").
+    /// Only touches poison-abandon rows (model "bad"); LR S63 removed the
+    /// trivial-turn skip, so no other marker exists on new writes.
     virtual int reset_abandoned_turn_summaries(int limit = 0) = 0;
 
-    /// Summary rows tagged 'draft' (heuristic fallback writes that the
-    /// summarizer should rewrite when inference is back). Returned
-    /// oldest-first, capped at `limit` (0 = unbounded).
-    virtual std::vector<DraftSummary> draft_summaries(int limit = 0) = 0;
+    // --- LR S66/S67 back-fill candidates + in-place writers -------------
+    // Reid runs every data operation (rule 17); these are the primitives
+    // ragger::backfill_* (src/backfill.cpp) drives from `ragger backfill`.
+    // Selection is pure SELECT; the writers touch ONLY the columns the
+    // step's in-place rules allow (turn_datetime/turn_id/session_id/
+    // episode_id/summarized_on never change; knowledge: trigger only).
 
-    /// Sessions whose most recent turn is older than `pause_minutes` AND
-    /// that have a `level='session' status='current'` running summary,
-    /// returned as session GUIDs. The summarizer's pause-timer uses this to
-    /// pick sessions whose L3 running summary should be finalized.
-    virtual std::vector<std::string> sessions_needing_close(
-        int pause_minutes) = 0;
+    /// One `turn_summaries` row selected for a turn summary back-fill kind, joined
+    /// against its turn (the raw texts the summarizer consumes).
+    struct TurnSummaryBackfillCandidate {
+        int         turn_summary_id;
+        int         turn_id;
+        std::string user_text;
+        std::string assistant_text;
+        std::string turn_model_name;  // provenance for a floor/shorter copy
+    };
+    /// kind 'null': text IS NULL whose turn still exists.
+    /// kind 'empty': text = '' AND model not 'bad' AND the turn has real
+    ///   content (D6: a truly-empty turn keeps its '').
+    /// kind 'regenerate': rows picked by an explicit filter — model name
+    ///   (matches turn_model OR summary_model) and/or explicit
+    ///   turn_summary_ids. NO filter = empty result (the verb refuses;
+    ///   addendum 5: regeneration is eligible, not run by default).
+    virtual std::vector<TurnSummaryBackfillCandidate> turn_summary_backfill_candidates(
+        const std::string& kind, const std::string& model_name,
+        const std::vector<int>& ids) = 0;
 
-    // --- episode layer (EPISODE_PLAN Phase 1) ---
-    /// The end timestamp (last turn) of the most recent `level='episode'` row
-    /// for this session, or empty if the session has no episodes yet. Stored
-    /// in the episode row's `updated_at` (timestamp=first turn, updated_at=last
-    /// turn). Marks where the next open episode begins.
+    /// Rewrite one turn-summary row in place: text, embedding, embedding_version,
+    /// summary_model_id, terms. `overwrite=false` (kinds null/empty) guards
+    /// `text IS NULL OR text = ''` so a concurrent real write is never
+    /// clobbered; returns false when the guard rejects the row.
+    /// `overwrite=true` (kind regenerate) replaces derived text by design.
+    /// Embeds OUTSIDE the transaction; UPDATE + index inside (S37 order).
+    virtual bool apply_turn_summary_text(int turn_summary_id, const std::string& text,
+                               const std::string& summary_model_name,
+                               bool overwrite) = 0;
+
+    /// X22: one `turn_summaries` row whose source turn has been
+    /// merged since its text was written (`stale > 0`, non-empty text, a
+    /// live `turn_id`), ordered by turn_summary_id. `stale` is the counter
+    /// observed at selection time — the refresher passes it back to
+    /// refresh_turn_summary so a merge landing meanwhile keeps the row stale.
+    /// `episode_id` is 0 when the row belongs to no episode (X22 refreshes
+    /// only those; in-episode rows are for the episode-regeneration pass).
+    struct StaleTurnSummaryCandidate {
+        int         turn_summary_id;
+        int         turn_id;
+        int         stale;
+        std::string user_text;
+        std::string assistant_text;
+        std::string turn_model_name;  // provenance for a floor/shorter copy
+        std::string session_guid;     // "" when the row has no session
+        int         episode_id;       // 0 when episode_id IS NULL
+    };
+    virtual std::vector<StaleTurnSummaryCandidate> stale_turn_summary_candidates(int limit) = 0;
+
+    /// X22: rewrite a merged turn's turn-summary row in place with its refreshed
+    /// summary — text, embedding, embedding_version, summary_model_id, terms
+    /// (same normalizing + model lookup as apply_turn_summary_text). Order: validate ->
+    /// embed outside the txn -> BEGIN -> UPDATE -> index -> COMMIT ->
+    /// invalidate. Empty text -> std::invalid_argument. When `clear_stale`,
+    /// `stale` resets to 0 ONLY where it still equals `observed_stale`: a
+    /// merge that arrived while summarizing keeps the row stale for the next
+    /// tick. episode_id, turn_id, session_id, turn_datetime and summarized_on
+    /// are never touched. Returns true when the row existed.
+    virtual bool refresh_turn_summary(int turn_summary_id, const std::string& text,
+                                      const std::string& summary_model_name,
+                                      int observed_stale, bool clear_stale) = 0;
+
+    /// `knowledge` rows of kind decision|insight with no trigger yet.
+    struct TriggerCandidate {
+        int         knowledge_id;
+        std::string kind;
+        std::string text;
+    };
+    virtual std::vector<TriggerCandidate> trigger_backfill_candidates() = 0;
+
+    /// Fill a NULL/empty trigger in place and re-embed + re-index the row:
+    /// knowledge embeds trigger + '\n' + text (kKnowledgeEmbedTextSQL), so
+    /// adding a trigger CHANGES the vector and the terms — both must be
+    /// rewritten in the same call or the row's search identity drifts.
+    /// Guarded on (trigger IS NULL OR trigger = '') — text, status,
+    /// supersedes never change. Returns false when the guard rejects.
+    virtual bool apply_trigger(int knowledge_id, const std::string& trigger) = 0;
+
+    /// Stranded turn-summary rows (R12/#7): episode_id IS NULL, text != '', whose
+    /// turn_datetime lies INSIDE a closed episode span of the SAME session.
+    /// Where two spans cover the time, the episode with the greatest
+    /// span_start <= t wins; `ties` counts the ambiguous rows.
+    struct StrandedCandidate {
+        int turn_summary_id;
+        int episode_id;
+    };
+    virtual std::vector<StrandedCandidate> stranded_turn_summary_candidates(int& ties) = 0;
+
+    /// Membership-only attach (no change to the episode's text/span/
+    /// embedding/terms). Guarded on episode_id IS NULL AND text != '', and
+    /// (X31) on the episode not being locked — a locked episode never
+    /// receives late rows.
+    virtual bool attach_stranded_turn_summary(int turn_summary_id, int episode_id) = 0;
+
+    /// X31: the episode's `locked` flag (1 = it can no longer be rebuilt from
+    /// its source: never re-summarized, never receives late rows). Read-only
+    /// probe for the summarizer's enforcement; false when no such episode.
+    /// Nothing in the product sets `locked` yet (the cull feature comes later).
+    virtual bool episode_is_locked(int episode_id) = 0;
+
+    /// X23: one `turn_summaries` row as the episode-regeneration
+    /// pass sees it. user_text/assistant_text/turn_model_name come from the
+    /// LIVE turn when turn_id is set (empty otherwise); model_name is the
+    /// summary's provenance model. turn_datetime orders members; episode_id
+    /// is 0 when the row belongs to no episode.
+    struct EpisodeMember {
+        int         turn_summary_id;
+        std::string text;
+        int         turn_id;          // 0 when turn_id IS NULL
+        int         stale;
+        std::string user_text;
+        std::string assistant_text;
+        std::string turn_model_name;
+        std::string model_name;
+        int64_t     turn_datetime;
+        int         episode_id;       // 0 when episode_id IS NULL
+    };
+
+    /// X23: the episode's content members (non-empty text), ordered
+    /// turn_datetime ASC, turn_summary_id ASC.
+    virtual std::vector<EpisodeMember> episode_members(int episode_id) = 0;
+
+    /// X23: read one turn_summaries row by id (the late turn-summary read of
+    /// the episode-regeneration pass). nullopt when no such row.
+    virtual std::optional<EpisodeMember> turn_summary_member_by_id(int turn_summary_id) = 0;
+
+    /// X23: replace an episode's DERIVED text in place (no history)
+    /// and, in the SAME transaction, clear the refreshed members' stale
+    /// counters and attach late turn-summary rows. Order: validate -> embed outside
+    /// the txn -> BEGIN -> UPDATE episodes (must change exactly 1 row, else
+    /// roll back, return false) -> index -> per-cleared-pair
+    /// `stale = 0 WHERE ... AND stale = observed` (zero rows changed is NOT
+    /// an error: a newer merge keeps the row stale for the next tick) -> per
+    /// attach `episode_id = ? WHERE ... episode_id IS NULL AND text != ''`
+    /// (ZERO rows changed rolls EVERYTHING back and returns false — someone
+    /// else attached it) -> COMMIT -> invalidate. Empty text ->
+    /// std::invalid_argument. span_start, span_end and session_id are never
+    /// touched; `modified_on` is stamped with unixepoch() on every write.
+    virtual bool replace_episode_text(int episode_id, const std::string& text,
+                                      const std::string& model_name,
+                                      const std::vector<std::pair<int,int>>& cleared,
+                                      const std::vector<int>& attach_ids) = 0;
+
+    /// Content turn-summary rows left alone by the stranded pass: no episode, and no
+    /// closed span of their session covers their time (the open tail after
+    /// the last span, rows in a gap between spans, and sessions with no
+    /// episodes at all). Counted for the report, never touched.
+    virtual int stranded_open_tail_count() = 0;
+
+    /// Sessions with name IS NULL that have at least one content turn-summary row
+    /// (D5: the turn-summary texts are the title corpus).
+    struct SessionNameCandidate {
+        int         session_id;
+        std::string guid;
+        std::vector<std::string> turn_summary_texts;  // oldest-first
+    };
+    virtual std::vector<SessionNameCandidate> unnamed_session_candidates() = 0;
+
+    /// Fill a NULL session name in place (a user/agent name always wins:
+    /// guarded on name IS NULL).
+    virtual bool apply_session_name(int session_id, const std::string& name,
+                                    const std::string& name_source) = 0;
+
+    // --- episode layer (db 0.17) ---
+    /// The span end of the most recent episode for this session (rendered
+    /// "%F %T" local time), or empty if the session has no episodes yet.
+    /// Marks where the next open episode begins.
     virtual std::string last_episode_end(const std::string& session_guid) = 0;
 
-    /// L2 ('turn') summaries for a session with timestamp strictly greater than
-    /// `since_ts` (pass the previous episode's end; empty = all), oldest-first,
-    /// excluding drafts. These compose the closing episode. Returned as
-    /// SummaryRecords so the caller can read each row's timestamp to derive the
-    /// episode span (first/last turn).
-    virtual std::vector<SummaryRecord> l2_summaries_since(
+    /// Turn summaries for a session with timestamp strictly greater than
+    /// `since_ts` (pass the previous episode's end; empty = all), oldest-first.
+    /// These compose the closing episode. Returned as SummaryRecords so the
+    /// caller can read each row's timestamp to derive the episode span.
+    virtual std::vector<SummaryRecord> turn_summary_summaries_since(
         const std::string& session_guid, const std::string& since_ts) = 0;
 
     /// Candidate turns for similarity-based episode detection: joins
     /// turn_summaries against turns to fetch both embeddings plus the
-    /// turn-summary text, for all turns after the last episode's end.
+    /// Turn-summary text, for all turns after the last episode's end.
     /// Oldest-first, skipping rows where either embedding is NULL.
     virtual std::vector<EpisodeCandidateTurn> episode_candidate_turns(
         const std::string& session_guid, const std::string& since_ts) = 0;
 
-    /// Insert one immutable `level='episode'` row for a session. `first_ts`
-    /// becomes the row `timestamp`; `last_ts` is stored in `updated_at` (the
-    /// span end). Mirrors store_summary (embed, phon, cache invalidation).
-    /// Returns the new summary_id.
-    virtual int store_episode(const std::string& text,
-                              const std::string& model_name,
-                              const std::string& session_guid,
-                              const std::string& first_ts,
-                              const std::string& last_ts) = 0;
+    /// Close an episode: insert one immutable `episodes` row and record its
+    /// membership by setting `episode_id` on each member turn_summary in the
+    /// same transaction. Contract (the order is the point): validate ->
+    /// embed outside the transaction -> INSERT -> per-member UPDATE requiring
+    /// total changes == members.size() (any member from another session,
+    /// already in an episode, a marker row, or missing fails the whole close
+    /// and rolls back) -> index -> commit -> invalidate the episode cache.
+    /// A unique-key collision on (session, span_start) — someone already
+    /// closed this span — returns 0 (nothing written; caller must not retry).
+    /// Returns the new episode_id.
+    virtual int store_episode_close(const EpisodeClose& close) = 0;
 
-    /// Sessions with at least one non-draft L2 turn summary past their last
+    /// Sessions with at least one non-empty turn summary past their last
     /// episode's end AND whose most recent turn is older than `idle_minutes`
     /// (idle) — i.e. ready to have their open episode closed. Returns session
     /// GUIDs. Anonymous (session_id NULL) turns are skipped.
     virtual std::vector<std::string> episodes_needing_close(
         int idle_minutes) = 0;
-
-    /// All `level='episode'` summary texts for a session, oldest-first. The
-    /// ordered episode corpus a session rollup is rebuilt from (Phase 2).
-    virtual std::vector<std::string> episode_texts(
-        const std::string& session_guid) = 0;
-
-    /// Stamp a summary row's `updated_at` = now (last-regenerate time for a
-    /// running rollup row). Returns false if the row is absent.
-    virtual bool set_summary_updated_at(int summary_id) = 0;
-
-    // --- boundary-detection scans (new session/project rollup design) ---
-
-    /// Maximal runs of consecutive (by turn_id) turns sharing the same
-    /// non-NULL session_id that have already been superseded by a later,
-    /// different-session run (edge detection) and not yet reported past
-    /// the persisted watermark. The most recent run is never included —
-    /// it's still open. Ordered oldest-first.
-    virtual std::vector<ClosedRun> sessions_needing_close_boundary() = 0;
-
-    /// Maximal runs of turns (any session, including anonymous) separated
-    /// by a time gap of >= gap_days days between consecutive turns (by
-    /// turn_id), already superseded by a later run, not yet reported past
-    /// the persisted watermark. The most recent run is never included.
-    /// Returned ClosedRun.session_guid is always empty (project runs are
-    /// session-unscoped). Ordered oldest-first.
-    virtual std::vector<ClosedRun> projects_needing_close_boundary(
-        int gap_days) = 0;
-
-    /// Advance the persisted session-boundary watermark to turn_id (task D
-    /// calls this only after a successful level='session' rollup insert).
-    virtual void advance_session_boundary_watermark(int turn_id) = 0;
-
-    /// Advance the persisted project-boundary watermark to turn_id (task D
-    /// calls this only after a successful level='project' rollup insert).
-    virtual void advance_project_boundary_watermark(int turn_id) = 0;
-
-    /// Bounded text-gathering for a closed session run: episodes fully
-    /// spanned by [first_ts, last_ts] plus trailing turn_summaries after
-    /// the newest such episode (or from first_ts if none) up to last_ts,
-    /// oldest-first. Unlike episode_texts()/l2_summaries_since(), this
-    /// never reaches into a LATER run of the same session_guid.
-    virtual std::vector<std::string> bounded_session_rollup_texts(
-        const std::string& session_guid, int64_t first_ts,
-        int64_t last_ts) = 0;
-
-    /// Bounded text-gathering for a closed project run: every level='session'
-    /// row (produced by store_session_summary) whose full span
-    /// [created_at, COALESCE(updated_at,created_at)] falls entirely within
-    /// [first_ts, last_ts], session-unscoped (project runs span sessions),
-    /// oldest-first.
-    virtual std::vector<std::string> bounded_project_rollup_texts(
-        int64_t first_ts, int64_t last_ts) = 0;
-
-    /// Insert one immutable level='session' row spanning a closed run.
-    /// Mirrors store_episode's shape exactly (created_at=first_ts,
-    /// updated_at=last_ts). Returns the new summary_id.
-    virtual int store_session_summary(const std::string& text,
-                                      const std::string& model_name,
-                                      const std::string& session_guid,
-                                      int64_t first_ts, int64_t last_ts) = 0;
-
-    /// Insert one immutable level='project' row spanning a closed run.
-    /// Session-unscoped (session_id NULL). Returns the new summary_id.
-    virtual int store_project_summary(const std::string& text,
-                                      const std::string& model_name,
-                                      int64_t first_ts, int64_t last_ts) = 0;
 
     /// All turns belonging to a session GUID, newest-first up to `limit`
     /// (0 = unbounded). Mirrors `turns_by_session` but in reverse order and
@@ -393,44 +516,42 @@ public:
     virtual std::vector<TurnRecord> turns_by_session_desc(
         const std::string& session_guid, int limit = 0) = 0;
 
-    /// Turn-level (L2) summaries for a session, newest-first up to `limit`.
-    /// Returned with the summary row's timestamp (= the source turn's
-    /// timestamp) so recipes can align them against raw turns.
+    /// Turn-level summaries for a session, newest-first up to `limit`
+    /// (PHASE5 B.5: reads `turn_summaries` directly — the old
+    /// summaries.level='turn' rows have been gone since 0.12). Empty-text
+    /// marker rows are excluded.
     virtual std::vector<SummaryRecord> turn_summaries_by_session_desc(
         const std::string& session_guid, int limit = 0) = 0;
 
-    /// The session's (level='session') summary rows, newest-first up to
-    /// `limit`. Recipe's session-summary layer pulls from here.
-    virtual std::vector<SummaryRecord> session_summaries_desc(
+    /// This session's episodes, newest-first (span_start DESC) up to `limit`
+    /// (0 = unbounded). `timestamp` carries the rendered span_end. Recipe
+    /// episode layer (PHASE5 D.3).
+    virtual std::vector<SummaryRecord> episodes_by_session_desc(
         const std::string& session_guid, int limit = 0) = 0;
 
-    /// Replace text + metadata of an existing row. Re-embeds (or NULLs the
-    /// embedding when `defer_embedding`); FTS5 sync triggers reindex the row.
-    /// Preserves id and original timestamp. Returns false if the row
-    /// doesn't exist or is protected (keep tag).
-    virtual bool update_text(int memory_id,
-                             const std::string& text,
-                             json metadata = {},
-                             bool defer_embedding = false) = 0;
+    // PHASE8: update_text is gone — text is never rewritten in place;
+    // corrections go through store_knowledge with supersedes, or
+    // agent_update for status/tag changes.
 
-    /// Hybrid search over summaries: vector cosine blended with FTS5 keyword
-    /// relevance. (Lean v2 summaries has no collection column, so the
-    /// `collections` filter is currently a no-op; kept for API compat.)
+    /// Hybrid search across the four corpora: vector cosine blended with the
+    /// custom terms-index keyword relevance. (The `collections` filter is
+    /// currently a no-op; kept for API compat.)
     virtual SearchResponse search(const std::string& query,
                                   int limit = 5,
                                   float min_score = 0.0f,
                                   std::vector<std::string> collections = {}) = 0;
 
-    /// Text-only search using FTS5 keyword + phonetic scoring only (no
-    /// embeddings). Used when embeddings are degraded (drift mismatch).
+    /// Text-only search using the custom text index (keyword + phonetic
+    /// scoring, no embeddings). Used when embeddings are degraded (drift
+    /// mismatch).
     virtual SearchResponse search_text_only(const std::string& query,
                                             int limit = 5) = 0;
 
     /// Number of stored memories.
     virtual int count() const = 0;
 
-    /// Row counts for the user-facing tables (turns, summaries,
-    /// turn_summaries, sessions, documents, decisions, statements, models),
+    /// Row counts for the user-facing tables (turns, turn_summaries,
+    /// episodes, knowledge, sessions, documents, models),
     /// for the dashboard status pane. Ordered, name -> count. Missing tables
     /// are simply omitted rather than erroring.
     virtual std::vector<std::pair<std::string, int64_t>> table_row_counts() const = 0;
@@ -450,15 +571,32 @@ public:
 
     /// Rebuild embeddings for all stored documents, or for one table when
     /// `table` != "all" (turns, turn_summaries, summaries, decisions,
-    /// documents). Returns row count (re-)encoded.
-    virtual int rebuild_embeddings(Embedder& embedder, bool progress = true,
-                                    const std::string& table = "all") = 0;
+    /// documents). Returns row count (re-)encoded. `progress` receives
+    /// (table, done, total) per row and (table, -1, total) at each table's end.
+    /// `cancel` (LR S90) is checked before each encode: when set, rows
+    /// already written stay (autocommit), and cancelled_error is thrown.
+    virtual int rebuild_embeddings(Embedder& embedder,
+                                    const ProgressFn& progress = {},
+                                    const std::string& table = "all",
+                                    const CancelFlag* cancel = nullptr) = 0;
+
+    /// Rebind the backend's embedder. RaggerMemory replaces its Embedder
+    /// object (recovery, model update); the backend keeps a raw pointer, so
+    /// every reassignment MUST be followed by this or the next store/search
+    /// dereferences freed memory.
+    virtual void set_embedder(Embedder& embedder) = 0;
+
+    /// Set the dtype used to encode embedding blobs. Must be updated in
+    /// lockstep with config().embedding_vector_type, BEFORE a rebuild —
+    /// otherwise rebuild writes blobs in the old dtype under the new name.
+    virtual void set_vector_type(vector_codec::VectorType t) = 0;
 
     /// Embed only rows whose embedding is NULL or has a stale version byte,
     /// scoped to one table when `table` != "all". Cheap; intended to run on
     /// startup and after deferred-embedding writes. Returns rows updated.
     virtual int backfill_embeddings(Embedder& embedder,
-                                     const std::string& table = "all") = 0;
+                                     const std::string& table = "all",
+                                     const CancelFlag* cancel = nullptr) = 0;
 
     /// Get the current embedding version from the settings table.
     virtual uint8_t embedding_version() const = 0;
@@ -471,15 +609,20 @@ public:
     /// Tokenizes every record's text, extracts/inserts terms, populates the
     /// <table>_terms junction table, and updates unigram_count/bigram_count.
     /// Idempotent: call multiple times with the same result.
-    /// table: one of "turns", "turn_summaries", "summaries", "documents", "decisions"
-    /// progress: if true, log progress (e.g., every 100 records)
+    /// table: one of the registry's text tables (see sqlite/tables.h)
+    /// progress: called (table, done, total) per record and (table, -1, total)
+    ///           at the end (see ragger::ProgressFn)
+    /// cancel:   LR S90 — checked between batches and between records; when
+    ///           set, committed batches stay and cancelled_error is thrown.
     /// Returns: number of records reindexed.
-    virtual int reindex_table(const std::string& table, bool progress = false) = 0;
+    virtual int reindex_table(const std::string& table,
+                              const ProgressFn& progress = {},
+                              const CancelFlag* cancel = nullptr) = 0;
 
     /// Truncate the shared cross-table `terms` list and reset its
     /// AUTOINCREMENT counter (starts term_ids fresh from 1). ON DELETE
     /// CASCADE empties every <table>_terms junction row too. Only safe
-    /// immediately before reindexing ALL five text tables in the same run --
+    /// immediately before reindexing ALL six text tables in the same run --
     /// reindexing a subset afterward would leave the other tables' junction
     /// rows referencing term_ids that no longer exist.
     virtual void reset_terms_table() = 0;
@@ -489,11 +632,30 @@ public:
 
     // --- Memory operations ---
 
-    /// Delete a memory by ID. Returns true if deleted.
-    virtual bool delete_memory(int memory_id) = 0;
+    /// PHASE9B step 5 / X16: full text-index rebuild in per-batch commits —
+    /// no outer transaction (SQLite cannot checkpoint inside one). Returns
+    /// {table, rows}. cancel (LR S90): checked between batches and records; a
+    /// cancel throws cancelled_error and the batches already committed STAY
+    /// committed; `settings.reindexing` keeps its 'all' value as the signal
+    /// that the index is incomplete, and a rerun finishes the rest.
+    virtual std::vector<std::pair<std::string, int>> reindex_all(
+        const ProgressFn& progress = {},
+        const CancelFlag* cancel = nullptr) = 0;
 
-    /// Delete multiple memories by ID. Returns count deleted.
-    virtual int delete_batch(const std::vector<int>& memory_ids) = 0;
+    /// LR S90: what one housekeeping pass WOULD do, computed with SELECTs
+    /// only — the dry-run behind `ragger housekeeping --dry-run`. The
+    /// predicates are shared with the real pass (no drift).
+    struct HousekeepingPlan {
+        int unsummarized = 0;    // turns awaiting turn-summary catch-up
+        int embed_missing = 0;   // embeddable rows with no embedding
+        int embed_stale = 0;     // embeddable rows at an old embedding_version
+    };
+    virtual HousekeepingPlan housekeeping_plan() const = 0;
+
+    /// LR S90: what `reindex <table|all>` WOULD walk — row count per text
+    /// table (reindex indexes every row; SELECT only).
+    virtual std::vector<std::pair<std::string, int>> reindex_plan(
+        const std::string& table = "all") const = 0;
 
     /// Search by metadata field matching with optional temporal filtering.
     virtual std::vector<SearchResult> search_by_metadata(const json& metadata_filter,
@@ -503,9 +665,6 @@ public:
 
     /// Close the backend and release resources.
     virtual void close() = 0;
-
-    /// Delete old conversation entries older than specified hours. Returns count deleted.
-    virtual int cleanup_old_conversations(float max_age_hours) = 0;
 
     // --- Users / settings table CRUD (gap closure: replaces UserStore's own sqlite3* connection) ---
 
@@ -536,11 +695,19 @@ public:
     /// Set or replace a settings value.
     virtual void set_setting(const std::string& key, const std::string& value) = 0;
 
+    /// Read a row of `semqlite_config` (the facts-about-the-file table shared
+    /// with SemanticSQLite, keyed by SemanticSQLite's own names). nullopt if
+    /// the key (or the table) is absent.
+    virtual std::optional<std::string> get_semqlite_config(const std::string& key) = 0;
+
+    /// Set or replace a `semqlite_config` row.
+    virtual void set_semqlite_config(const std::string& key, const std::string& value) = 0;
+
     // --- Schema introspection (gap closure: replaces export.cpp's raw sqlite_master / PRAGMA calls) ---
 
-    /// All schema objects (tables, indexes, triggers) from sqlite_master, ordered
-    /// tables-first. FTS5 shadow tables are NOT filtered — callers filter via
-    /// is_internal_table() if needed.
+    /// All schema objects (tables, indexes, triggers) from sqlite_master,
+    /// ordered tables-first. Names containing "_fts" (legacy FTS5 shadow
+    /// tables that can survive in migrated databases) are excluded.
     virtual std::vector<SchemaObject> list_schema_objects() = 0;
 
     /// Column names for a table, in schema order (PRAGMA table_info).

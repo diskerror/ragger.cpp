@@ -1,0 +1,39 @@
+{
+  "description": "What happened recently, as a deterministic newest-first list (no search ranking). granularity 'turn' = per-exchange summaries (falling back to raw user text), 'episode' = episode summaries (default), 'session' = one row per session (guid, name, turn span, episode count, newest episode text), 'knowledge' = stored knowledge rows newest first (id, kind, status). Filters: session GUID, since/until ('YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or relative '30d'/'12h'). Page through with the returned next_cursor; null means the end.",
+  "inputSchema": {
+    "properties": {
+      "cursor": {
+        "description": "Opaque next_cursor from the previous page.",
+        "type": "string"
+      },
+      "granularity": {
+        "description": "turn | episode | session | knowledge (default episode).",
+        "enum": [
+          "turn",
+          "episode",
+          "session",
+          "knowledge"
+        ],
+        "type": "string"
+      },
+      "limit": {
+        "description": "Page size (default 20, max 100).",
+        "type": "integer"
+      },
+      "session": {
+        "description": "Only this session GUID.",
+        "type": "string"
+      },
+      "since": {
+        "description": "Lower time bound.",
+        "type": "string"
+      },
+      "until": {
+        "description": "Upper time bound (bare date = end of day).",
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "name": "memory_timeline"
+}

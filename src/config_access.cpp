@@ -12,6 +12,7 @@
 #include "util/fs.h"
 
 #include <charconv>
+#include <format>
 #include <cstdlib>
 #include <cerrno>
 #include <algorithm>
@@ -41,7 +42,8 @@ const std::unordered_map<std::string_view, bool Config::*>& bool_fields() {
         {"capture_turns",  &Config::capture_turns},
         {"build_context",  &Config::build_context},
         {"auto_recall",    &Config::auto_recall},
-        {"bm25_enabled",   &Config::bm25_enabled},
+        {"fts_enabled",   &Config::fts_enabled},
+        {"bm25_enabled",  &Config::fts_enabled},   // legacy key (pre-0.17 name), same field
         {"fts_literal_enabled", &Config::fts_literal_enabled},
         {"normalize_home", &Config::normalize_home_path},
     };
@@ -55,18 +57,15 @@ const std::unordered_map<std::string_view, int Config::*>& int_fields() {
         {"embedding_dimensions",  &Config::embedding_dimensions},
         {"desired_embedding_dimensions", &Config::desired_embedding_dimensions},
         {"embedding_external_port",     &Config::embedding_external_port},
-        {"embed_timeout_ms",      &Config::embed_timeout_ms},
-        {"embed_retries",         &Config::embed_retries},
-        {"embed_max_workers",     &Config::embed_max_workers},
         {"default_limit",         &Config::default_search_limit},
         {"summarizer_max_tokens", &Config::summarizer_max_tokens},
         {"summarizer_target_pct", &Config::summarizer_target_pct},
         {"summarizer_max_pct",    &Config::summarizer_max_pct},
+        {"summarizer_min_words",  &Config::summarizer_min_words},
         {"log_max_age_days",      &Config::log_max_age_days},
         {"housekeeping_interval", &Config::housekeeping_interval},
         {"episode_idle_minutes",  &Config::episode_idle_minutes},
         {"catch_up_batch_size",   &Config::catch_up_batch_size},
-        {"project_gap_days",      &Config::project_gap_days},
         {"max_turn_failures",     &Config::max_turn_failures},
         {"minimum_chunk_size",    &Config::minimum_chunk_size},
     };
@@ -76,12 +75,14 @@ const std::unordered_map<std::string_view, int Config::*>& int_fields() {
 const std::unordered_map<std::string_view, float Config::*>& float_fields() {
     static const std::unordered_map<std::string_view, float Config::*> m = {
         {"default_min_score",       &Config::default_min_score},
-        {"bm25_weight",             &Config::bm25_weight},
+        {"auto_recall_min_similarity", &Config::auto_recall_min_similarity},
+        {"decision_supersede_threshold", &Config::decision_supersede_threshold},
+        {"fts_weight",             &Config::fts_weight},
+        {"bm25_weight",            &Config::fts_weight},   // legacy key (pre-0.17 name), same field
         {"vector_weight",           &Config::vector_weight},
         {"fts_w_unigram",           &Config::fts_w_unigram},
         {"fts_w_bigram",            &Config::fts_w_bigram},
         {"fts_w_metaphone",         &Config::fts_w_metaphone},
-        {"cleanup_max_age_hours",   &Config::cleanup_max_age_hours},
         {"episode_threshold_base",  &Config::episode_threshold_base},
         {"episode_threshold_cap",   &Config::episode_threshold_cap},
         {"episode_threshold_step",  &Config::episode_threshold_step},
@@ -103,14 +104,18 @@ const std::unordered_map<std::string_view, std::string Config::*>& string_fields
         {"desired_embedding_engine",      &Config::desired_embedding_engine},
         {"embedding_engine",              &Config::embedding_engine},
         {"embedding_external_host",       &Config::embedding_external_host},
-        {"embedding_external_api_key",    &Config::embedding_external_api_key},
+        {"embedding_api_key_env",         &Config::embedding_api_key_env},
         {"embedding_external_model",      &Config::embedding_external_model},
         {"summarizer_model",      &Config::summarizer_model},
         {"summarizer_api_url",    &Config::summarizer_api_url},
-        {"summarizer_api_key",    &Config::summarizer_api_key},
+        {"summarizer_api_key_env", &Config::summarizer_api_key_env},
         {"summarizer_prompt",     &Config::summarizer_prompt},
+        {"summarizer_episode_prompt", &Config::summarizer_episode_prompt},
+        {"summarizer_title_prompt",   &Config::summarizer_title_prompt},
+        {"summarizer_trigger_prompt", &Config::summarizer_trigger_prompt},
         {"log_level",             &Config::log_level},
         {"default_recipe",        &Config::default_recipe},
+        {"auto_recall_mode",      &Config::auto_recall_mode},
     };
     return m;
 }
@@ -210,6 +215,17 @@ nlohmann::json config_entry_json(const lang::ConfigMeta& m,
         {"help",    std::string(m.help)},
         {"value",   value},
     };
+    if (m.secret) {
+        // Secret-masking mechanism (kept for any future credential entry):
+        // never echo a credential through the read surfaces; a non-empty
+        // secret shows as the "<set>" marker (writing "<set>" back is a
+        // no-op, so a dashboard that round-trips the mask cannot clobber
+        // the real key). Empty stays "". No kConfigSchema entry currently
+        // sets secret=true — API keys are env-var NAMES, not values — so
+        // today this branch never fires.
+        j["secret"] = true;
+        if (!value.empty()) j["value"] = "<set>";
+    }
     if (m.type == CfgType::Enum) {
         nlohmann::json opts = nlohmann::json::array();
         std::string_view o = m.options;
@@ -254,6 +270,12 @@ std::expected<void, ConfigSetError> validate_config_value(std::string_view key,
             long n;
             if (!parse_int_strict(value, n))
                 return std::unexpected(ConfigSetError::InvalidValue);
+            // S26 (C m12): the two percent knobs are documented 1-100;
+            // reject anything else at the door (no max>=target rule — not
+            // asked for).
+            if ((key == "summarizer_target_pct" || key == "summarizer_max_pct") &&
+                (n < 1 || n > 100))
+                return std::unexpected(ConfigSetError::InvalidValue);
             return {};
         }
         case CfgType::Float: {
@@ -284,8 +306,40 @@ std::expected<void, ConfigSetError> validate_config_value(std::string_view key,
             return std::unexpected(ConfigSetError::InvalidValue);
         }
         case CfgType::String:
+            // A credential must never be typed here: these keys name an
+            // environment variable. Accept only a valid identifier, so a
+            // pasted key (dashes, dots, long mixed text) is rejected.
+            if (key == "embedding_api_key_env" || key == "summarizer_api_key_env") {
+                const bool ident = !value.empty()
+                    && !std::isdigit(static_cast<unsigned char>(value[0]))
+                    && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+                           return std::isalnum(c) || c == '_'; });
+                if (!ident) return std::unexpected(ConfigSetError::InvalidValue);
+            }
+            return {};
         case CfgType::Path:
         case CfgType::Text:
+            // PHASE9B step 3b: the summarizer prompt goes through std::vformat
+            // with two size_t arguments at every summary. Reject a value that
+            // would throw there (stray brace, out-of-range index, malformed
+            // spec) at the door instead of poisoning the summarizer loop.
+            if (key == "summarizer_prompt" || key == "summarizer_episode_prompt") {
+                std::size_t t = 1, c = 2;   // lvalues: libc++ make_format_args rejects rvalues
+                std::string probe(value);
+                if (key == "summarizer_episode_prompt") {
+                    // {N} is substituted before vformat (see build_episode_prompt).
+                    const auto pos = probe.find("{N}");
+                    if (pos != std::string::npos) probe.replace(pos, 3, "1");
+                }
+                try {
+                    // Validation only: vformat throws on a bad spec; the
+                    // formatted string itself is unused.
+                    (void)std::vformat(std::string_view(probe),
+                                       std::make_format_args(t, c));
+                } catch (const std::format_error&) {
+                    return std::unexpected(ConfigSetError::InvalidValue);
+                }
+            }
             return {};
     }
     return {};
@@ -324,6 +378,8 @@ std::expected<ConfigSetResult, ConfigSetError> apply_config_value(
         return std::unexpected(ConfigSetError::UnknownKey);
     }
 
+    resolve_api_keys(cfg);   // a changed *_api_key_env name takes effect now
+
     ConfigSetResult r;
     r.restart_required = (meta->edit == CfgEdit::RestartRequired);
     r.rebuild_required = (meta->edit == CfgEdit::RebuildRequired);
@@ -356,6 +412,16 @@ bool set_config_field_raw(Config& cfg, std::string_view key, const std::string& 
         return true;
     }
     return false;
+}
+
+void resolve_api_keys(Config& cfg) {
+    auto from_env = [](const std::string& name) -> std::string {
+        if (name.empty()) return {};
+        const char* v = std::getenv(name.c_str());
+        return v ? std::string(v) : std::string();
+    };
+    cfg.embedding_external_api_key = from_env(cfg.embedding_api_key_env);
+    cfg.summarizer_api_key         = from_env(cfg.summarizer_api_key_env);
 }
 
 void overlay_settings_from_db(Config& cfg, const std::string& db_path) {
@@ -398,6 +464,8 @@ void overlay_settings_from_db(Config& cfg, const std::string& db_path) {
     if (cfg.desired_embedding_engine.empty())
         cfg.desired_embedding_engine = cfg.embedding_engine;
 
+    resolve_api_keys(cfg);
+
     // Seed desired_port from the committed port when unset, so the dashboard
     // shows the live port as the starting target. The startup rectify (see
     // main serve) then adopts any UI change into `port` on the next restart.
@@ -420,17 +488,28 @@ std::expected<ConfigSetResult, ConfigSetError> set_config_persisted(
     if (meta->edit == CfgEdit::Locked && !allow_locked)
         return std::unexpected(ConfigSetError::Locked);
 
+    // A secret key written back as the "<set>" mask is a no-op: the read
+    // surfaces only ever show "<set>", so a client that echoes the field
+    // unchanged must never overwrite the real credential (C §1.7). Shared
+    // path — covers both PUT /config/:key and `ragger config set`.
+    if (meta->secret && value == "<set>")
+        return ConfigSetResult{};
+
     // Update the live config first (also validates). On failure, nothing is
     // persisted.
-    Config& cfg = mutable_config();
-    auto applied = apply_config_value(cfg, key, value, allow_locked);
+    std::expected<ConfigSetResult, ConfigSetError> applied =
+        std::unexpected(ConfigSetError::UnknownKey);
+    update_config([&](Config& cfg) {
+        applied = apply_config_value(cfg, key, value, allow_locked);
+        return applied.has_value();   // a rejected value publishes nothing
+    });
     if (!applied.has_value()) return std::unexpected(applied.error());
 
     // Persist to the DB settings table. Empty value stores an empty row,
     // which overlay_settings_from_db() re-interprets as "use default" — so
     // the round-trip stays consistent. Best-effort: if the DB isn't there
     // yet, the live change still stands.
-    const std::string db_path = cfg.resolved_db_path();
+    const std::string db_path = config().resolved_db_path();
     if (std::filesystem::exists(db_path)) {
         UserStore store(db_path);
         store.set_setting(std::string(key), std::string(value));

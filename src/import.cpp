@@ -4,7 +4,6 @@
  */
 #include "import.h"
 #include "nlohmann_json.hpp"
-#include "embed_executor.h"
 #include "lang.h"
 #include "memory.h"
 #include "storage_types.h"
@@ -42,19 +41,26 @@ std::vector<ImportChunk> chunk_markdown(const std::string& raw_text, int min_chu
     // Clean the text
     std::string text = raw_text;
 
+    // S29 (C m20): patterns hoisted to function-local statics (compiled
+    // once); the pattern strings are copied verbatim — none "improved".
+    static const std::regex base64_md_re(R"(!\[[^\]]*\]\(data:[^)]+\))");
+    static const std::regex base64_raw_re(R"(data:image/[^;]+;base64,[A-Za-z0-9+/=]+)");
+    static const std::regex multi_space_re(R"(  +)");
+    static const std::regex blank_runs_re(R"(\n{3,})");
+
     // Strip base64 image data
-    text = std::regex_replace(text, std::regex(R"(!\[[^\]]*\]\(data:[^)]+\))"), "");
-    text = std::regex_replace(text, std::regex(R"(data:image/[^;]+;base64,[A-Za-z0-9+/=]+)"), "");
+    text = std::regex_replace(text, base64_md_re, "");
+    text = std::regex_replace(text, base64_raw_re, "");
 
     // Collapse multi-space artifacts per line
     std::istringstream lines_stream(text);
     std::string line;
     std::string cleaned;
     while (std::getline(lines_stream, line)) {
-        line = std::regex_replace(line, std::regex(R"(  +)"), " ");
+        line = std::regex_replace(line, multi_space_re, " ");
         cleaned += line + "\n";
     }
-    text = std::regex_replace(cleaned, std::regex(R"(\n{3,})"), "\n\n");
+    text = std::regex_replace(cleaned, blank_runs_re, "\n\n");
 
     // Split on paragraph boundaries
     std::vector<std::string> paragraphs;
@@ -145,14 +151,12 @@ std::vector<ImportChunk> chunk_markdown(const std::string& raw_text, int min_chu
     return chunks;
 }
 
-/// Replace horizontal whitespace runs (including tabs, NBSP, other Unicode
-/// spaces) with a single regular space. Also removes zero-width and invisible
-/// characters that don't contribute to content. Works on multi-byte UTF-8 by
-/// treating any byte >= 128 as part of a non-whitespace character unless it's
-/// explicitly one of the known whitespace sequences.
+/// Replace runs of ASCII whitespace (spaces, tabs, newlines) with a single
+/// space. NOTE: std::regex's default ECMAScript \s matches ASCII whitespace
+/// only — a UTF-8 NBSP (U+00A0) and zero-width characters are NOT matched
+/// and survive this pass (verified against the toolchain's std::regex).
 static std::string normalize_whitespace(const std::string& s) {
-    // Use Unicode property class [:space:] to match all space-like characters,
-    // including tabs, newlines, NBSP, etc. This is portable and handles multi-byte UTF-8.
+    // ASCII-only: see above. NBSP/zero-width chars pass through untouched.
     static const std::regex hspace_re(R"(\s+)");
 
     return std::regex_replace(s.c_str(), hspace_re, " ");
@@ -173,7 +177,7 @@ std::string clean_document_text(const std::string& text) {
     std::string line;
     std::vector<std::string> cleaned_lines;
     while (std::getline(lines, line)) {
-        // Normalize horizontal whitespace on the line (handles tabs, NBSP, etc.).
+        // Normalize ASCII whitespace runs on the line (tabs, spaces).
         line = normalize_whitespace(line);
 
         // Cap long runs of dashes for MD table safety.
@@ -457,8 +461,9 @@ std::vector<FlatMemoryChunk> parse_flat_markdown_memory(const std::string& path,
             }
         }
         // Collapse any now-consecutive blank lines left behind by removed
-        // headings, and trim.
-        body = std::regex_replace(body, std::regex(R"(\n{3,})"), "\n\n");
+        // headings, and trim. (S29: pattern hoisted, copied verbatim.)
+        static const std::regex blank_runs_re(R"(\n{3,})");
+        body = std::regex_replace(body, blank_runs_re, "\n\n");
         while (!body.empty() && (body.front() == '\n' || body.front() == ' '))
             body.erase(body.begin());
         while (!body.empty() && (body.back() == '\n' || body.back() == ' '))
@@ -884,7 +889,7 @@ bool is_synthetic_session_guid(const std::string& guid) {
 }
 
 // =========================================================================
-// L4 summary import
+// Hand-authored note import (knowledge kind='note')
 // =========================================================================
 
 std::vector<SummaryImport> load_summary_files(const std::vector<std::string>& paths) {
@@ -925,7 +930,7 @@ std::vector<SummaryImport> load_summary_jsonl(const std::string& path) {
     return out;
 }
 
-void do_import(RaggerMemory &memory,
+bool do_import(RaggerMemory &memory,
                const std::string &filepath,
                int min_chunk_size,
                const std::string &title,
@@ -933,6 +938,18 @@ void do_import(RaggerMemory &memory,
                const std::string &tags) {
     if (!fs::exists(filepath)) {
         throw std::runtime_error(std::format(ragger::lang::ERR_FILE_NOT_FOUND, filepath));
+    }
+
+    // A document is identified by its path: refuse the same file twice,
+    // before reading or chunking anything. Re-importing means deleting the
+    // old document first.
+    const std::string doc_path = ragger::collapse_home(filepath);
+    if (auto existing = memory.find_document_source(doc_path); !existing.is_null()) {
+        std::println(ragger::lang::MSG_DOC_ALREADY_IMPORTED, doc_path,
+                     existing["id"].get<long long>(),
+                     existing["title"].get<std::string>(),
+                     existing["imported_at"].get<std::string>());
+        return false;
     }
 
     std::string text = ragger::read_file_to_string(filepath);
@@ -954,41 +971,40 @@ void do_import(RaggerMemory &memory,
                                       ? fs::path(filepath).stem().string()
                                       : title;
 
-    // Store every chunk first WITHOUT embedding (fast), then embed the bodies
-    // out-of-process with bounded concurrency + per-call timeout (issue #41).
-    // This keeps a large import from saturating the box: at most
-    // embed_max_workers `ragger embed` subprocesses run at once.
-    std::vector<int>         ids;
-    std::vector<std::string> texts;
-    ids.reserve(total);
-    texts.reserve(total);
+    // Store every chunk first WITHOUT embedding (fast), then embed the whole
+    // set in-process below (PHASE9B step 8 — no more one-subprocess-per-chunk).
     for (int i = 0; i < total; ++i) {
         ragger::DocumentChunk doc;
         doc.text        = ragger::clean_document_text(chunks[i].text);
         doc.title       = doc_title;
         doc.tags        = tags;
         doc.year        = year;
-        doc.path        = ragger::collapse_home(filepath);
+        doc.path        = doc_path;
         doc.chunk_index = i + 1;
         doc.imported_at = import_ts;
 
-        int id = memory.store_document(doc, /*defer_embedding=*/true);
-        ids.push_back(id);
-        texts.push_back(doc.text);
+        const int id = memory.store_document(doc, /*defer_embedding=*/true);
         std::println(ragger::lang::MSG_IMPORT_CHUNK, (i + 1), total, std::to_string(id));
     }
 
-    ragger::EmbedExecutor embed_exec;  // timeout / retries / workers from config
-    auto vecs = embed_exec.batch(texts);
-    int skipped = 0;
-    for (size_t i = 0; i < ids.size(); ++i) {
-        if (vecs[i]) memory.update_document_embedding(ids[i], *vecs[i]);
-        else ++skipped;   // left NULL — `ragger re-embed` can retry
-    }
+    // PHASE9B step 8: embed IN-PROCESS with the embedder this process already
+    // holds. This used to hand the bodies to EmbedExecutor, which spawned one
+    // `ragger embed` subprocess per chunk and re-loaded the ONNX model every
+    // time — a large import spent more time loading the model than embedding.
+    // backfill_embeddings() embeds every row whose embedding is NULL, so the
+    // scope is this import's chunks PLUS anything else still pending (an
+    // earlier import with the model down, a crashed re-embed). That wider
+    // scope is accepted: it is the same work `ragger re-embed` would do, just
+    // done opportunistically here, and it is idempotent.
+    const bool no_embeddings = memory.embeddings_unavailable();
+    if (!no_embeddings)
+        memory.backfill_embeddings();
+
     std::println(ragger::lang::MSG_IMPORT_DONE, chunks.size());
-    if (skipped > 0)
+    if (no_embeddings)
         Diskerror::Logger::warn(std::format(ragger::lang::WARN_IMPORT_EMBED_SKIPPED,
-                                            skipped, total));
+                                            total, total));
+    return true;
 }
 
 } // namespace ragger

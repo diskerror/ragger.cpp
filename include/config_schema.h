@@ -44,14 +44,21 @@ enum class CfgEdit {
 };
 
 struct ConfigMeta {
-    std::string_view key;          // DB row key, e.g. "bm25_weight"
+    std::string_view key;          // DB row key, e.g. "fts_weight"
     std::string_view section;      // dashboard tab, e.g. "server"
-    std::string_view pretty;       // UI label, e.g. "BM25 Weight"
+    std::string_view pretty;       // UI label, e.g. "FTS Weight"
     CfgType          type;
     CfgEdit          edit;
     std::string_view default_value; // canonical default as TEXT
     std::string_view options;       // Enum only: comma-separated choices
     std::string_view help;          // explanation (CLI help + dashboard tooltip)
+    bool secret = false;            // value is a credential: never expose it
+                                    // through GET /config / MCP get_config —
+                                    // emit "<set>" instead. No entry in
+                                    // kConfigSchema currently sets it (API
+                                    // keys are env-var names, not values);
+                                    // the mechanism is kept for a future
+                                    // credential entry.
 };
 
 // Defined in include/ragger/lang/en.h (kConfigSchema[]).

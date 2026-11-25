@@ -1,6 +1,6 @@
 /**
  * Conversation summarization — used by the HTTP server's daemon-resident
- * summarizer (L2 turn / L3 session, idle-triggered housekeeping).
+ * summarizer (turn / episode close, idle-triggered housekeeping).
  */
 #pragma once
 
@@ -21,21 +21,60 @@ std::string summarize_transcript(
     InferenceClient& inference,
     const std::vector<std::pair<std::string, std::string>>& turns);
 
-/// Summarize a flat list of text blobs (e.g. L2 summaries → L3, or L3
-/// summaries → L4). Each entry is treated as an equal-weight fragment;
-/// the same percentage-based size contract as summarize_transcript applies,
+/// Summarize a flat list of text blobs (e.g. turn summaries → episode text at
+/// close). Each entry is treated as an equal-weight fragment; the same
+/// percentage-based size contract as summarize_transcript applies,
 /// measured against the total character count of all input texts.
 /// Returns "" for empty input or on error.
 std::string summarize_texts(
     InferenceClient& inference,
     const std::vector<std::string>& texts);
 
+/// X23: build an EPISODE summary from a segment's member texts with
+/// the rules `handle_episode_close` has always used, moved VERBATIM into one
+/// place so the live close, the episode-regeneration job and the
+/// `ragger backfill stranded` sweep produce byte-identical text:
+///  - ONE member: copy that member's text, provenance = `single_model`
+///    (the member's own summary model) — no model call at all;
+///  - joined text at/below the LR S62 `summarizer_min_words` floor: copy the
+///    joined text, provenance = the summarizer's model — no model call;
+///  - otherwise `summarize_texts` + the strictly-shorter `choose_summary`
+///    rule, provenance = the summarizer's model.
+/// An empty `text` means inference FAILED (the caller retries); it is never a
+/// legitimate summary. Empty `texts` returns empty too (nothing to build).
+struct MemberSummary {
+    std::string text;
+    std::string model;
+};
+MemberSummary summarize_member_texts(
+    InferenceClient& inference,
+    const std::vector<std::string>& texts,
+    const std::string& single_model);
+
+/// LR S62 (shorter-text rule): whitespace-token count of the trimmed
+/// string. A single-token source measures 1.
+size_t count_words(const std::string& s);
+
+/// LR S62 (shorter-text rule, addenda 2/3): decide between the source text
+/// and the model's summary. Measurement is the whitespace-token count of the
+/// trimmed strings; when the source has no whitespace at all (one token —
+/// words are meaningless there) both sides are compared by Unicode code
+/// points instead. The summary wins only when it measures STRICTLY less:
+/// longer summaries and ties keep the source (a copy). An empty summary is
+/// not a valid summary — it is returned with copied=false so the caller
+/// treats it as a failure, exactly as today.
+struct SummaryChoice {
+    std::string text;
+    bool        copied;   // true = the source was kept, not the model's text
+};
+SummaryChoice choose_summary(const std::string& source, const std::string& summary);
+
 /// True when the user side of a turn is *entirely* a Hermes system-injected
 /// annotation rather than something the human typed — model-switch notes,
 /// context-compaction handoffs, interruption notices, background-process
 /// completion reports. These carry no conversational content worth indexing,
-/// so the summarizer skips them deterministically (no inference call, no L2
-/// summary row). The raw turn is still persisted upstream by capture_turn, so
+/// so the summarizer skips them deterministically (no inference call, no turn summary
+/// row). The raw turn is still persisted upstream by capture_turn, so
 /// the system event remains auditable; only the searchable summary is omitted.
 /// Detection is prefix-based on the stable bracketed markers Hermes emits.
 bool is_system_injected_turn(const std::string& user_text);

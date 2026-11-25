@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -25,6 +26,51 @@
 namespace fs = std::filesystem;
 
 namespace ragger {
+
+// S21 (C m18): the sweep predicate, public for testing. Verb equality on a
+// whole token — see the declaration in daemon_control.h.
+bool is_sweepable_cmdline(const std::vector<std::string>& argv) {
+    for (const auto& a : argv)
+        if (a == "serve" || a == "mcp") return true;
+    return false;
+}
+
+// S22 (C m8): the one PID-file scanner (was a static in main.cpp; the
+// housekeeping/reload/MCP copies of this loop now call it).
+pid_t find_live_daemon_pid() {
+    namespace fs = std::filesystem;
+    try {
+        for (const auto &entry: fs::directory_iterator("/tmp/ragger")) {
+            auto name = entry.path().filename().string();
+            if (name.rfind("server-", 0) == 0 &&
+                name.size() > 4 && name.substr(name.size() - 4) == ".pid") {
+                std::ifstream pf(entry.path());
+                pid_t pid = 0;
+                if (pf >> pid && pid > 0 && kill(pid, 0) == 0) return pid;
+            }
+        }
+    } catch (...) {}
+    return 0;
+}
+
+// S23 (C m9): extracted from the re-exec block in main.cpp, same behavior
+// plus the -H / -H<value> forms the old inline loop missed.
+std::vector<std::string> filter_restart_argv(const std::vector<std::string>& argv) {
+    std::vector<std::string> filtered;
+    for (size_t i = 0; i < argv.size(); ++i) {
+        const std::string& a = argv[i];
+        if (a == "-p" || a == "--port" || a == "--host" || a == "-H") {
+            ++i;  // also skip the following value token
+            continue;
+        }
+        if (a.rfind("--port=", 0) == 0 || a.rfind("--host=", 0) == 0 ||
+            (a.rfind("-p", 0) == 0 && a.size() > 2) ||   // -p18435
+            (a.rfind("-H", 0) == 0 && a.size() > 2))     // -H0.0.0.0
+            continue;
+        filtered.push_back(a);
+    }
+    return filtered;
+}
 
 // Wrappers around launchctl (macOS) or systemctl --user (Linux) that
 // operate on the user-level service installed by install-bin.sh.
@@ -55,12 +101,13 @@ bool run_quiet(const std::string &cmd) {
     return WIFEXITED(rc) && WEXITSTATUS(rc) == 0;
 }
 
-/// Kill every `ragger` process owned by the current user except this one.
-/// Used by `stop` and `restart` to sweep MCP servers and stray CLI
-/// invocations — MCP is typically launched by a client (OpenClaw, Claude
-/// Desktop) and has no service manager of its own, so we have to reap it here.
-/// Sends SIGTERM, waits briefly, then SIGKILL to any survivors.
-/// Returns the number of processes signaled.
+/// Kill every sweepable `ragger` process owned by the current user except
+/// this one (S21, C m18): only daemons (`ragger serve`) and MCP servers
+/// (`ragger mcp`) are signaled — an unrelated `ragger re-embed` or
+/// `import-docs` in another terminal must survive (killing one mid-run left
+/// `reembedding=true` behind). MCP servers have no service manager of their
+/// own, so we have to reap them here. Sends SIGTERM, waits briefly, then
+/// SIGKILL to any survivors. Returns the number of processes signaled.
 int kill_other_ragger_instances() {
     pid_t self = getpid();
     auto out = capture_output(
@@ -79,12 +126,29 @@ int kill_other_ragger_instances() {
     }
     if (pids.empty()) return 0;
 
-    for (pid_t p: pids) ::kill(p, SIGTERM);
+    // Keep only processes whose command line names the serve/mcp verb.
+    // NOTE: `ps -o args=` collapses the real argv into one whitespace
+    // string, so an argument containing a bare "serve" token could in
+    // principle look sweepable; the verb-equality rule is the contract
+    // (see is_sweepable_cmdline). If ps fails or the line is empty, skip —
+    // never kill on doubt.
+    std::vector<pid_t> doomed;
+    for (pid_t p : pids) {
+        auto cmdline = capture_output("ps -o args= -p " + std::to_string(p));
+        std::istringstream cs(cmdline);
+        std::vector<std::string> tokens;
+        for (std::string t; cs >> t;) tokens.push_back(t);
+        if (tokens.empty()) continue;
+        if (is_sweepable_cmdline(tokens)) doomed.push_back(p);
+    }
+    if (doomed.empty()) return 0;
+
+    for (pid_t p: doomed) ::kill(p, SIGTERM);
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
-    for (pid_t p: pids) {
+    for (pid_t p: doomed) {
         if (::kill(p, 0) == 0) ::kill(p, SIGKILL); // still alive → force
     }
-    return static_cast<int>(pids.size());
+    return static_cast<int>(doomed.size());
 }
 
 } // anonymous namespace

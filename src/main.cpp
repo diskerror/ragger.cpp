@@ -5,6 +5,7 @@
  * No verb or 'help' prints usage.
  */
 #include "build_info.h"
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <format>
@@ -27,7 +28,9 @@
 #include <print>
 
 #include "ProgramOptions.h"
+#include "agent_api.h"
 #include "auth.h"
+#include "backfill.h"
 #include "client.h"
 #include "config.h"
 #include "config_access.h"
@@ -41,14 +44,13 @@
 #include "memory.h"
 #include "vector_codec.h"
 #include "recipe_cli.h"
-#include "embed_executor.h"
 #include "sqlite/backend.h"
+#include "sqlite/tables.h"
 #include "user_store.h"
 #include "util/fs.h"
 #include "server.h"
 #include "embedder.h"
 #include "daemon_control.h"
-#include "util/fs.h"
 #include "util/time.h"
 #include "storage_types.h"
 #include "nlohmann_json.hpp"
@@ -65,6 +67,105 @@ namespace fs = std::filesystem;
 // -----------------------------------------------------------------------
 // Main
 // -----------------------------------------------------------------------
+// (The live-daemon PID lookup moved to ragger::find_live_daemon_pid in
+// daemon_control.cpp — S22, the one PID-file scanner.)
+
+// Tell the running daemon (if any) to drop its in-memory search caches:
+// the DB file may have just been changed by this process. Silent when no
+// daemon is running -- there is nothing stale to refresh. Uses SIGHUP (reload:
+// config + caches), which every daemon version already handles.
+static void notify_daemon_db_changed() noexcept {
+    if (pid_t pid = ragger::find_live_daemon_pid(); pid > 0) kill(pid, SIGHUP);
+}
+
+// Runs notify_daemon_db_changed() when the command scope ends, on every
+// path (success, error return, exception): a command that MIGHT have
+// changed the DB may have done so before it failed.
+struct DbChangeNotifier {
+    bool armed;
+    explicit DbChangeNotifier(const std::string& command) {
+        static const char* const kMayWrite[] = {
+            "store", "decision", "import-docs", "delete-doc",
+            "import-conversations", "import", "re-embed", "reindex", "backfill"};
+        armed = false;
+        for (auto c : kMayWrite) if (command == c) armed = true;
+    }
+    // PHASE9B step 7: `config set` and `recipe` also change the DB, but only
+    // on some paths (`config get`, a no-change picker run). Those branches
+    // call arm() when a write actually happens, so a read-only invocation
+    // never signals the daemon.
+    void arm() { armed = true; }
+    ~DbChangeNotifier() { if (armed) notify_daemon_db_changed(); }
+};
+
+// PHASE9B step 7: every CLI verb that changes the DB logs what it did. The
+// daemon's log is the only record of out-of-band writes; before this only
+// `re-embed` logged. Values are never logged — config logs the KEY only, so a
+// token or password set from the CLI can't land in the log file.
+static void cli_audit(const std::string& verb, const std::string& detail) {
+    Diskerror::Logger::info(verb + " started: " + detail);
+}
+static void cli_audit_done(const std::string& verb, const std::string& detail) {
+    Diskerror::Logger::info(verb + " finished: " + detail);
+}
+static void cli_audit_failed(const std::string& verb, const std::string& detail) {
+    Diskerror::Logger::warn(verb + " failed: " + detail);
+}
+
+// S11 (C m9): the CLI joins trailing positional args with single spaces in
+// four verbs; one helper replaces the hand-rolled loops (byte-identical).
+static std::string join_args(const std::vector<std::string>& args, size_t from) {
+    std::string out;
+    for (size_t i = from; i < args.size(); ++i) {
+        if (i > from) out += " ";
+        out += args[i];
+    }
+    return out;
+}
+
+// S11 (C m9): `re-embed` and `reindex` both back the DB up before touching
+// it, with the same messages; failure warns and proceeds (as before).
+// X16 clause 9: both CLI call sites go through this ONE function, so the same
+// two settings rows the pre-migration backup writes are recorded here too —
+// basename plus local RFC 3339 timestamp with offset. UserStore::set_setting
+// throws on a failed write (rule 9), and a failed record lands in the same
+// catch as a failed archive: the backup itself already succeeded, so it warns
+// rather than aborting the verb.
+static void backup_db_or_warn(const std::string& path) {
+    std::println("{}", ragger::lang::MSG_DB_BACKING_UP);
+    try {
+        std::string archive = ragger::archive_db_files(path);
+        std::println(ragger::lang::MSG_DB_BACKED_UP, archive);
+        ragger::UserStore store(path);
+        store.set_setting("backup_file_name", fs::path(archive).filename().string());
+        store.set_setting("backup_timestamp", ragger::local_time_string());
+    }
+    catch (const std::exception &e) {
+        Diskerror::Logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
+    }
+}
+
+// For verbs with many early returns: logs `started` on construction and, unless
+// done() was called, `failed` on destruction — so every `return 1` and every
+// exception leaves a closing line instead of an orphan `started`. The reason
+// is in the error the verb logged just before returning.
+struct AuditScope {
+    std::string verb;
+    bool closed = false;
+    AuditScope(std::string v, const std::string& detail) : verb(std::move(v)) {
+        cli_audit(verb, detail);
+    }
+    void done(const std::string& detail) { cli_audit_done(verb, detail); closed = true; }
+    ~AuditScope() {
+        if (closed) return;
+        cli_audit_failed(verb, std::uncaught_exceptions() > 0
+            ? "aborted by an exception"
+            : "exited with an error (see the error logged just before this line)");
+    }
+    AuditScope(const AuditScope&) = delete;
+    AuditScope& operator=(const AuditScope&) = delete;
+};
+
 int main(int argc, char **argv) {
     // Record our own path so embedding can be spawned as `ragger embed`.
     if (argc > 0) ragger::set_executable_path(argv[0]);
@@ -79,19 +180,23 @@ int main(int argc, char **argv) {
             ("port,p", Diskerror::po::value<int>(), CLI_PORT)
             ("min-chunk-size", Diskerror::po::value<int>(), CLI_MIN_CHUNK_SIZE)
             ("num,n", Diskerror::po::value<int>(),
-                "search: number of results to return (default: 3)")
+                "search: number of results to return (default: 3; "
+                "decision list: default 20)")
             ("title", Diskerror::po::value<std::string>()->default_value(""), CLI_TITLE)
             ("year", Diskerror::po::value<int>()->default_value(0), CLI_YEAR)
             ("tags", Diskerror::po::value<std::string>()->default_value(""), CLI_TAGS)
+            ("trigger", Diskerror::po::value<std::string>()->default_value(""), CLI_TRIGGER)
             ("status", Diskerror::po::value<std::string>()->default_value(""),
-                "decision: status to store/filter by (current|roadmap|superseded|deprecated)")
+                "decision: status to store (current|provisional|pending) or "
+                "filter list by (any stored status)")
             // `import conversations` filters & inputs
             ("format", Diskerror::po::value<std::string>()->default_value(""),
                 "Conversation source format: code | web | telegram")
             ("self", Diskerror::po::value<std::string>()->default_value(""),
                 "Telegram format only: your display name, to split user/assistant turns")
-            ("all", "import-conversations: treat a directory, or a file with sibling export "
-                "files (memories.json, projects/), as one multi-file import unit")
+            ("all,a", "import-conversations: treat a directory, or a file with sibling export "
+                "files (memories.json, projects/), as one multi-file import unit; "
+                "config get: show all settings")
             ("fdate", "import-conversations: use each input file's mtime as the timestamp "
                 "for rows with no derivable date (e.g. memories.json)")
             ("date", Diskerror::po::value<std::string>()->default_value(""),
@@ -108,8 +213,12 @@ int main(int argc, char **argv) {
                 "JSONL file ({text, tags?, timestamp?} per line)")
             // admin flags removed — sudo is the admin gate
             ("yes,y", CLI_YES)
-            ("all,a", "config get: show all settings")
             ("json,j", "config get: format output as JSON")
+            ("dry-run", "reindex/re-embed/housekeeping/backfill: report what the run would do, write nothing")
+            ("model", Diskerror::po::value<std::string>(),
+                "backfill turn-summary-regenerate: only rows whose turn or summary model has this name")
+            ("ids", Diskerror::po::value<std::string>(),
+                "backfill turn-summary-regenerate: comma-separated turn_summary_ids to regenerate")
             ("browser,b", "dashboard: open the URL in the default browser")
             ("embeddings,e", CLI_EMBEDDINGS)
             ("output,o", Diskerror::po::value<std::string>(), "Output file");
@@ -130,7 +239,7 @@ int main(int argc, char **argv) {
         opts.run(argc, argv);
     }
     catch (const std::exception &e) {
-        std::cerr << std::format(ragger::lang::ERR_INFERENCE, e.what()) << "\n";
+        std::cerr << std::format(ragger::lang::ERR_CLI, e.what()) << "\n";
         return 1;
     }
 
@@ -160,7 +269,7 @@ int main(int argc, char **argv) {
         ragger::init_config();
     }
     catch (const std::exception &e) {
-        std::cerr << std::format(ragger::lang::ERR_INFERENCE, e.what()) << "\n";
+        std::cerr << std::format(ragger::lang::ERR_CLI, e.what()) << "\n";
         return 1;
     }
 
@@ -179,6 +288,8 @@ int main(int argc, char **argv) {
                              ? opts["min-chunk-size"].as<int>()
                              : cfg.minimum_chunk_size;
 
+    DbChangeNotifier db_change_notifier(command);
+
     try {
         if (command == "start" || command == "stop" ||
             command == "restart" || command == "status") {
@@ -186,7 +297,7 @@ int main(int argc, char **argv) {
 
         }
         else if (command == "serve") {
-            const auto &cfg = ragger::config();
+            const auto &serve_cfg = ragger::config();
 
             // Create the memory store first so the DB + schema exist. The
             // port rectify below needs it in place.
@@ -202,12 +313,12 @@ int main(int argc, char **argv) {
             // just the dashboard's Restart button. A --port override is
             // transient: it binds the given port but leaves desired_port
             // untouched, so the next plain restart falls back to desired.
-            if (!port_overridden && cfg.desired_port != 0 &&
-                cfg.desired_port != cfg.port) {
-                int adopted = cfg.desired_port;
+            if (!port_overridden && serve_cfg.desired_port != 0 &&
+                serve_cfg.desired_port != serve_cfg.port) {
+                int adopted = serve_cfg.desired_port;
                 Diskerror::Logger::info(std::format(
                     "Startup port rectify: adopting desired_port {} (was {})",
-                    adopted, cfg.port));
+                    adopted, serve_cfg.port));
                 auto r = ragger::set_config_persisted("port", std::to_string(adopted),
                                                       /*allow_locked=*/true);
                 if (r.has_value()) {
@@ -225,10 +336,16 @@ int main(int argc, char **argv) {
             // dashboard's read-only "TCP Port" field reads this, so without
             // this a --port override would show the stale DB value. desired_port
             // is a separate field and is left untouched.
-            ragger::mutable_config().port = port;
+            ragger::update_config([&](ragger::Config& c) { c.port = port; return true; });
 
             ragger::Server server(memory, host, port);
-            bool restart = server.run();
+            if (!server.run()) {
+                // S18 (C M6): could not start (port busy). run() logged the
+                // critical ERR_PORT_IN_USE; return 1 through normal cleanup
+                // so destructors release the open DB connections.
+                return 1;
+            }
+            bool restart = ragger::Server::restart_requested();
 
             if (restart) {
                 // In-place re-exec: rebind listeners with the current config
@@ -241,18 +358,10 @@ int main(int argc, char **argv) {
                     // argv so the restarted daemon takes host/port from config
                     // (the DB, which now holds the new port the dashboard set).
                     // Without this, a CLI -p would pin the OLD port on re-exec.
-                    std::vector<std::string> filtered;
-                    for (size_t i = 0; i < saved_argv.size(); ++i) {
-                        const std::string& a = saved_argv[i];
-                        if (a == "-p" || a == "--port" || a == "--host") {
-                            ++i;  // also skip the following value token
-                            continue;
-                        }
-                        if (a.rfind("--port=", 0) == 0 || a.rfind("--host=", 0) == 0 ||
-                            (a.rfind("-p", 0) == 0 && a.size() > 2))  // -p18435
-                            continue;
-                        filtered.push_back(a);
-                    }
+                    // S23: extracted to ragger::filter_restart_argv (also
+                    // covers -H and the attached-value forms).
+                    std::vector<std::string> filtered =
+                        ragger::filter_restart_argv(saved_argv);
                     std::vector<char*> cargv;
                     cargv.reserve(filtered.size() + 1);
                     for (const auto& a : filtered)
@@ -274,11 +383,7 @@ int main(int argc, char **argv) {
                 Diskerror::Logger::error(CLI_USAGE_SEARCH);
                 return 1;
             }
-            std::string query;
-            for (size_t i = 0; i < args.size(); ++i) {
-                if (i > 0) query += " ";
-                query += args[i];
-            }
+            std::string query = join_args(args, 0);
 
             std::vector<std::string> colls;
 
@@ -288,30 +393,32 @@ int main(int argc, char **argv) {
             int limit = opts.count("num") ? opts["num"].as<int>() : 3;
             if (limit < 1) limit = 1;
 
-            // Try daemon first (thin client — no model loading)
+            // Try daemon first (thin client — no model loading). The daemon
+            // runs the same agent_search body as this direct path
+            // (LR S72, R4).
             auto token = ragger::load_token();
             ragger::RaggerClient client(host, port, token);
-            ragger::SearchResponse response;
 
+            nlohmann::json results;
             if (client.is_available()) {
-                response = client.search(query, limit,
-                                         cfg.default_min_score, colls);
+                const auto response = client.search(query, limit,
+                                                    cfg.default_min_score, colls);
+                for (const auto& r : response.results)
+                    results.push_back({{"id", r.id}, {"score", r.score},
+                                       {"text", r.text}, {"metadata", r.metadata}});
             }
             else {
-                // Fall back to direct DB access
+                // Fall back to direct DB access — same shared verb body.
                 ragger::RaggerMemory memory(db_path);
-                response = memory.search(query, limit,
-                                         cfg.default_min_score, colls);
+                const auto payload = ragger::agent_search(
+                    memory, nlohmann::json{{"query", query},
+                                           {"limit", limit},
+                                           {"min_score", cfg.default_min_score}});
+                for (const auto& r : payload["results"])
+                    results.push_back({{"id", r["id"]}, {"score", r["score"]},
+                                       {"text", r["text"]}, {"metadata", r["metadata"]}});
             }
-
-            nlohmann::json output = nlohmann::json::array();
-            for (const auto &r: response.results) {
-                output.push_back({
-                    {"id", r.id}, {"score", r.score},
-                    {"text", r.text}, {"metadata", r.metadata}
-                });
-            }
-            std::cout << output.dump(2) << "\n";
+            std::cout << results.dump(2) << "\n";
 
         }
         else if (command == "store") {
@@ -320,28 +427,25 @@ int main(int argc, char **argv) {
                 Diskerror::Logger::error(CLI_USAGE_STORE);
                 return 1;
             }
-            std::string text;
-            for (size_t i = 0; i < args.size(); ++i) {
-                if (i > 0) text += " ";
-                text += args[i];
-            }
+            std::string text = join_args(args, 0);
 
-            nlohmann::json meta = {};
-
-            // Try daemon first (thin client — no model loading)
+            // Try daemon first (thin client — no model loading). The daemon
+            // runs the same agent_store body as MCP and this direct path
+            // (LR S70, R4); metadata stays empty from the CLI.
             auto token = ragger::load_token();
             ragger::RaggerClient client(host, port, token);
-            std::string id;
 
             if (client.is_available()) {
-                id = client.store(text, meta);
+                const std::string id = client.store(text, nlohmann::json{});
+                std::cout << std::format(ragger::lang::MSG_STORED_WITH_ID, id) << "\n";
             }
             else {
-                // Fall back to direct DB access
+                // Fall back to direct DB access — same shared verb body.
                 ragger::RaggerMemory memory(db_path);
-                id = memory.store(text, meta);
+                const auto stored = ragger::agent_store(memory, nlohmann::json{{"text", text}}, "cli");
+                std::cout << std::format(ragger::lang::MSG_STORED_WITH_ID,
+                                         stored["id"].get<std::string>()) << "\n";
             }
-            std::cout << std::format(ragger::lang::MSG_STORED_WITH_ID, id) << "\n";
 
         }
         else if (command == "decision") {
@@ -358,16 +462,35 @@ int main(int argc, char **argv) {
                     Diskerror::Logger::error(ragger::lang::CLI_USAGE_DECISION);
                     return 1;
                 }
-                std::string text;
-                for (size_t i = 1; i < args.size(); ++i) {
-                    if (i > 1) text += " ";
-                    text += args[i];
+                // X19: a decision must have a trigger, so this goes
+                // through the decision verb (the same body as MCP
+                // memory_decision / POST /decision). The generic store verb
+                // now rejects category=decision, so `--trigger` is required
+                // here; --rationale/--scope are verb fields the CLI declares
+                // no option for, so they stay unset.
+                const std::string trigger = opts["trigger"].as<std::string>();
+                if (trigger.empty()) {
+                    Diskerror::Logger::error(ragger::lang::CLI_USAGE_DECISION);
+                    return 1;
                 }
+                std::string text = join_args(args, 1);
                 std::string status = opts["status"].as<std::string>();
                 if (status.empty()) status = "current";
                 std::string tags = opts["tags"].as<std::string>();
-                int id = memory.store_decision(text, status, tags);
-                std::println("Stored decision {} (status: {}).", id, status);
+                nlohmann::json dargs{{"text", text},
+                                     {"trigger", trigger},
+                                     {"status", status}};
+                if (!tags.empty()) dargs["tags"] = tags;
+                try {
+                    const auto stored = ragger::agent_memory_decision(memory, dargs);
+                    std::println("Stored decision {} (status: {}).",
+                                 stored["id"].is_string() ? stored["id"].get<std::string>()
+                                                          : stored["id"].dump(),
+                                 status);
+                } catch (const std::invalid_argument& e) {
+                    Diskerror::Logger::error(e.what());
+                    return 1;
+                }
                 return 0;
             }
             if (sub == "list") {
@@ -395,10 +518,29 @@ int main(int argc, char **argv) {
                     Diskerror::Logger::error("decision set-status: <decision_id> must be a number");
                     return 1;
                 }
-                std::string status = args[2];
-                if (!memory.set_decision_status(decision_id, status)) {
+                const std::string status = args[2];
+                // LR S60: one write path — agent_update on knowledge:<id>.
+                // The verb is decision-scoped while agent_update accepts any
+                // knowledge row, so confirm the kind first (same "no
+                // decision" message as before).
+                const std::string handle = "knowledge:" + std::to_string(decision_id);
+                ragger::AgentGetQuery probe;
+                probe.ids = {handle};
+                const auto found = memory.agent_get(probe);
+                const auto items = found.value("items", nlohmann::json::array());
+                if (items.empty() || items[0].contains("error") ||
+                    items[0].value("kind", "") != "decision") {
                     Diskerror::Logger::error(
                         "decision set-status: no decision with id " + args[1]);
+                    return 1;
+                }
+                ragger::UpdateRequest req;
+                req.id = handle;
+                req.status = status;
+                try {
+                    memory.agent_update(req);
+                } catch (const std::invalid_argument& e) {
+                    Diskerror::Logger::error(e.what());
                     return 1;
                 }
                 std::println("Decision {} set to status \"{}\".", decision_id, status);
@@ -516,13 +658,15 @@ int main(int argc, char **argv) {
                 }
                 const std::string name = args[1];
                 // Value may be empty (reset to default) or contain spaces.
-                std::string value;
-                for (size_t i = 2; i < args.size(); ++i) {
-                    if (i > 2) value += " ";
-                    value += args[i];
-                }
+                std::string value = join_args(args, 2);
+                // PHASE9B step 7: arm BEFORE the write — a crash part-way
+                // still refreshes the daemon. Log the KEY only, never the
+                // value: tokens and passwords are settable here.
+                cli_audit("config set", name);
+                db_change_notifier.arm();
                 auto r = ragger::set_config_persisted(name, value);
                 if (!r) {
+                    cli_audit_failed("config set", name);
                     switch (r.error()) {
                         case ragger::ConfigSetError::UnknownKey:
                             std::cerr << "Unknown config key: " << name << "\n"; break;
@@ -537,6 +681,8 @@ int main(int argc, char **argv) {
                 }
                 auto v = ragger::get_config_value(ragger::config(), name);
                 std::cout << name << " = " << (v ? *v : value) << "\n";
+                cli_audit_done("config set",
+                               name + (r->restart_required ? " (restart required)" : ""));
                 if (r->restart_required)
                     std::cout << "(change saved — restart the daemon to apply)\n";
                 if (r->rebuild_required)
@@ -591,17 +737,77 @@ int main(int argc, char **argv) {
                 Diskerror::Logger::error(ragger::lang::CLI_USAGE_IMPORT);
                 return 1;
             }
-            // Markdown/text (and now JSON, auto-extracted to prose) → L5
+            // Markdown/text (and now JSON, auto-extracted to prose) →
             // documents. This is the old bare `ragger import <file>` path,
             // given its own verb name so it's no longer an implicit
             // fallthrough default.
             std::string imp_title = opts["title"].as<std::string>();
             int         imp_year  = opts["year"].as<int>();
             std::string imp_tags  = opts["tags"].as<std::string>();
+            cli_audit("import-docs", std::format("{} file(s)", args.size()));
             ragger::RaggerMemory memory(db_path);
-            for (auto &filepath: args) {
-                do_import(memory, filepath, min_chunk_size,
-                          imp_title, imp_year, imp_tags);
+            int n_imported = 0, n_refused = 0;
+            try {
+                for (auto &filepath: args) {
+                    if (do_import(memory, filepath, min_chunk_size,
+                                  imp_title, imp_year, imp_tags))
+                        ++n_imported;
+                    else
+                        ++n_refused;
+                }
+            } catch (const std::exception& e) {
+                cli_audit_failed("import-docs",
+                                 std::format("{} imported, {} refused before the failure: {}",
+                                             n_imported, n_refused, e.what()));
+                throw;
+            }
+            cli_audit_done("import-docs",
+                           std::format("{} imported, {} refused (already imported)",
+                                       n_imported, n_refused));
+        }
+        else if (command == "list-docs") {
+            ragger::RaggerMemory memory(db_path);
+            auto docs = memory.list_document_sources();
+            if (docs.empty()) {
+                std::println("No documents imported.");
+            } else {
+                std::println("{:>5}  {:>6}  {:>4}  {}", "id", "chunks", "year", "title  <path>");
+                for (const auto& d : docs) {
+                    std::println("{:>5}  {:>6}  {:>4}  {}  <{}>",
+                        d["id"].get<long long>(), d["chunks"].get<long long>(),
+                        d["year"].is_null() ? std::string("-") : std::to_string(d["year"].get<int>()),
+                        d["title"].is_null() ? std::string("(untitled)") : d["title"].get<std::string>(),
+                        d["path"].is_null() ? std::string("") : d["path"].get<std::string>());
+                }
+            }
+        }
+        else if (command == "delete-doc") {
+            auto args = opts.getParams("args");
+            // Exactly one argument, and it must be all digits: the document's
+            // primary key (document_source_id) as shown by `ragger list-docs`.
+            int id = 0;
+            if (args.size() == 1 && !args[0].empty() && args[0].size() <= 9 &&
+                std::all_of(args[0].begin(), args[0].end(),
+                            [](unsigned char c) { return std::isdigit(c); }))
+                id = std::stoi(args[0]);
+            if (id <= 0) {
+                Diskerror::Logger::error(ragger::lang::CLI_USAGE_DELETE_DOC);
+                return 1;
+            }
+            ragger::RaggerMemory memory(db_path);
+            cli_audit("delete-doc", "id " + args[0]);
+            try {
+                auto info = memory.delete_document_source(id);
+                std::println("Deleted document {} ({}): {} chunk(s) removed.",
+                    id,
+                    info["title"].is_null() ? std::string("(untitled)") : info["title"].get<std::string>(),
+                    info["chunks"].get<long long>());
+                cli_audit_done("delete-doc",
+                               std::format("{} chunk(s) removed", info["chunks"].get<long long>()));
+            } catch (const std::invalid_argument& e) {
+                Diskerror::Logger::error(e.what());
+                cli_audit_failed("delete-doc", e.what());
+                return 1;
             }
         }
         else if (command == "import-conversations") {
@@ -610,6 +816,7 @@ int main(int argc, char **argv) {
                 Diskerror::Logger::error(ragger::lang::CLI_USAGE_IMPORT_CONVERSATIONS);
                 return 1;
             }
+            AuditScope audit("import-conversations", args[0]);
 
             // ISO-8601 (or already-db) timestamp → "YYYY-MM-DD HH:MM:SS".
             auto to_db_ts = [](std::string s) -> std::string {
@@ -622,7 +829,8 @@ int main(int argc, char **argv) {
             };
 
             // `summaries` sub-verb unchanged, just reachable from the new
-            // top-level name (hand-authored L4 project summaries).
+            // top-level name (hand-authored notes, stored as knowledge
+            // kind='note').
             if (args[0] == "summaries") {
                 std::vector<ragger::SummaryImport> items;
                 const std::string jsonl = opts["jsonl"].as<std::string>();
@@ -639,24 +847,24 @@ int main(int argc, char **argv) {
                 }
                 if (items.empty()) {
                     std::println("Nothing to import.");
+                    audit.done( "summaries: nothing to import");
                     return 0;
                 }
                 ragger::RaggerMemory memory(db_path);
                 int n = 0, n_skip = 0;
                 for (const auto& s : items) {
                     std::string ts = to_db_ts(s.timestamp);
-                    if (!ts.empty() && memory.summary_exists_exact(s.text, ts)) {
+                    if (!ts.empty() && memory.note_exists_exact(s.text, ts)) {
                         ++n_skip;
                         continue;
                     }
-                    memory.store_summary(s.text, "project",
-                                         /*model_name=*/"",
-                                         /*session_guid=*/"",
-                                         /*source_timestamp=*/ts,
-                                         /*tags=*/s.tags);
+                    memory.store_note(s.text, s.tags, ts);
                     ++n;
                 }
-                std::println("Imported {} L4 summaries ({} duplicates skipped).", n, n_skip);
+                std::println("Imported {} notes ({} duplicates skipped).", n, n_skip);
+                audit.done(
+                               std::format("summaries: {} notes imported, {} duplicates skipped",
+                                           n, n_skip));
                 return 0;
             }
 
@@ -699,19 +907,20 @@ int main(int argc, char **argv) {
                                 memory.store_decision(c.text, "current", "flat-memory-import", ts);
                                 ++n_dec;
                             } else {
-                                if (memory.summary_exists_exact(c.text, ts)) { ++n_sum_skip; continue; }
-                                memory.store_summary(c.text, "session",
-                                                     /*model_name=*/"", /*session_guid=*/"",
-                                                     /*source_timestamp=*/ts,
-                                                     /*tags=*/"flat-memory-import");
+                                if (memory.note_exists_exact(c.text, ts)) { ++n_sum_skip; continue; }
+                                memory.store_note(c.text, "flat-memory-import", ts);
                                 ++n_sum;
                             }
                         }
                     }
                     std::println(
-                        "Imported {} Markdown memory files: {} session summaries ({} duplicates "
+                        "Imported {} Markdown memory files: {} notes ({} duplicates "
                         "skipped), {} decisions ({} duplicates skipped).",
                         n_files, n_sum, n_sum_skip, n_dec, n_dec_skip);
+                    audit.done(
+                                   std::format("flat-md dir: {} files, {} notes, {} decisions "
+                                               "imported ({} + {} duplicates skipped)",
+                                               n_files, n_sum, n_dec, n_sum_skip, n_dec_skip));
                     return 0;
                 }
                 // Directory has neither conversations.json nor any .md
@@ -723,6 +932,7 @@ int main(int argc, char **argv) {
                 auto chunks = ragger::parse_flat_markdown_memory(raw_src);
                 if (chunks.empty()) {
                     std::println("Nothing to import (empty file or recognized as agent scaffolding).");
+                    audit.done( "flat-md: no importable chunks");
                     return 0;
                 }
                 ragger::RaggerMemory memory(db_path);
@@ -734,18 +944,19 @@ int main(int argc, char **argv) {
                         memory.store_decision(c.text, "current", "flat-memory-import", ts);
                         ++n_dec;
                     } else {
-                        if (memory.summary_exists_exact(c.text, ts)) { ++n_sum_skip; continue; }
-                        memory.store_summary(c.text, "session",
-                                             /*model_name=*/"", /*session_guid=*/"",
-                                             /*source_timestamp=*/ts,
-                                             /*tags=*/"flat-memory-import");
+                        if (memory.note_exists_exact(c.text, ts)) { ++n_sum_skip; continue; }
+                        memory.store_note(c.text, "flat-memory-import", ts);
                         ++n_sum;
                     }
                 }
                 std::println(
-                    "Imported {} session summaries ({} duplicates skipped), "
+                    "Imported {} notes ({} duplicates skipped), "
                     "{} decisions ({} duplicates skipped).",
                     n_sum, n_sum_skip, n_dec, n_dec_skip);
+                audit.done(
+                               std::format("flat-md: {} notes, {} decisions imported "
+                                           "({} + {} duplicates skipped)",
+                                           n_sum, n_dec, n_sum_skip, n_dec_skip));
                 return 0;
             }
 
@@ -782,17 +993,20 @@ int main(int argc, char **argv) {
                 std::string text = ragger::extract_text_from_json(raw);
                 if (text.empty()) {
                     std::println("Nothing to import.");
+                    audit.done( "nothing to import");
                     return 0;
                 }
                 ragger::RaggerMemory memory(db_path);
                 if (memory.decision_exists_exact(text, mem_ts)) {
                     std::println("memories.json already imported (dated {}) — skipped.", mem_ts);
+                    audit.done( "memories.json already imported, skipped");
                     return 0;
                 }
                 // TODO: LLM-driven split into discrete claims. For now,
                 // store the narrative as one decision row.
                 memory.store_decision(text, "current", "claude-memory", mem_ts);
                 std::println("Imported memories.json as 1 decision (dated {}).", mem_ts);
+                audit.done( "1 decision imported");
                 return 0;
             }
 
@@ -909,6 +1123,7 @@ int main(int argc, char **argv) {
             turns = ragger::filter_turns(turns, f);
             if (turns.empty() && memories_path.empty() && project_paths.empty()) {
                 std::println("No turns matched.");
+                audit.done( "no turns matched");
                 return 0;
             }
 
@@ -964,10 +1179,13 @@ int main(int argc, char **argv) {
             }
             std::println("Imported {} conversation turns ({} duplicates skipped, {} session ids merged, {} backfilled).",
                          n, n_skip, n_merged, n_backfilled);
+            const std::string turns_detail = std::format(
+                "{} turns imported, {} duplicates skipped, {} session ids merged, {} backfilled",
+                n, n_skip, n_merged, n_backfilled);
 
-            // Per-conversation `summary` field (claude-web only) → one L3
-            // session-summary row each, dated by that conversation's own
-            // created_at (already real, no --fdate/--date needed).
+            // Per-conversation `summary` field (claude-web only) → one
+            // knowledge note row each (tag "session"), dated by that
+            // conversation's own created_at (already real, no --fdate/--date needed).
             if (fmt == "web") {
                 std::ifstream in(conv_path);
                 nlohmann::json doc;
@@ -982,21 +1200,18 @@ int main(int argc, char **argv) {
                     std::string sid = conv.value("uuid", "");
                     std::string ts = to_db_ts(conv.value("created_at", ""));
                     if (summary.empty() || ts.empty()) continue;
-                    if (memory.summary_exists_exact(summary, ts)) { ++n_sessions_skip; continue; }
-                    memory.store_summary(summary, "session",
-                                         /*model_name=*/"claude",
-                                         /*session_guid=*/sid,
-                                         /*source_timestamp=*/ts,
-                                         /*tags=*/"session");
+                    if (memory.note_exists_exact(summary, ts)) { ++n_sessions_skip; continue; }
+                    memory.store_note(summary, "session", ts,
+                                      /*model_name=*/"claude", /*session_guid=*/sid);
                     ++n_sessions;
                 }
                 if (n_sessions || n_sessions_skip) {
-                    std::println("Imported {} session summaries ({} duplicates skipped).",
+                    std::println("Imported {} notes ({} duplicates skipped).",
                                  n_sessions, n_sessions_skip);
                 }
             }
 
-            // memories.json → L5/decisions. No derivable per-claim date —
+            // memories.json → knowledge decisions. No derivable per-claim date —
             // requires --fdate (file mtime) or --date=DATE.
             if (!memories_path.empty()) {
                 bool fdate = opts.count("fdate") > 0;
@@ -1036,7 +1251,7 @@ int main(int argc, char **argv) {
                 }
             }
 
-            // Project files (L4): name + description → one summary row,
+            // Project files: name + description → one knowledge note row,
             // dated by the project's own created_at (real, no flag needed).
             if (!project_paths.empty()) {
                 int n_proj = 0, n_proj_skip = 0;
@@ -1050,20 +1265,18 @@ int main(int argc, char **argv) {
                     std::string ts = to_db_ts(pdoc.value("created_at", ""));
                     if (name.empty() || ts.empty()) continue;
                     std::string text = desc.empty() ? name : (name + "\n\n" + desc);
-                    if (memory.summary_exists_exact(text, ts)) { ++n_proj_skip; continue; }
-                    memory.store_summary(text, "project",
-                                         /*model_name=*/"claude",
-                                         /*session_guid=*/"",
-                                         /*source_timestamp=*/ts,
-                                         /*tags=*/"claude-project");
+                    if (memory.note_exists_exact(text, ts)) { ++n_proj_skip; continue; }
+                    memory.store_note(text, "claude-project", ts,
+                                      /*model_name=*/"claude");
                     ++n_proj;
                 }
                 if (n_proj || n_proj_skip) {
-                    std::println("Imported {} project summaries ({} duplicates skipped).",
+                    std::println("Imported {} notes ({} duplicates skipped).",
                                  n_proj, n_proj_skip);
                 }
             }
 
+            audit.done(turns_detail);
             return 0;
         }
         else if (command == "import") {
@@ -1080,11 +1293,26 @@ int main(int argc, char **argv) {
             std::string imp_title = opts["title"].as<std::string>();
             int         imp_year  = opts["year"].as<int>();
             std::string imp_tags  = opts["tags"].as<std::string>();
+            cli_audit("import", std::format("{} file(s)", args.size()));
             ragger::RaggerMemory memory(db_path);
-            for (auto &filepath: args) {
-                do_import(memory, filepath, min_chunk_size,
-                          imp_title, imp_year, imp_tags);
+            int n_imported = 0, n_refused = 0;
+            try {
+                for (auto &filepath: args) {
+                    if (do_import(memory, filepath, min_chunk_size,
+                                  imp_title, imp_year, imp_tags))
+                        ++n_imported;
+                    else
+                        ++n_refused;
+                }
+            } catch (const std::exception& e) {
+                cli_audit_failed("import",
+                                 std::format("{} imported, {} refused before the failure: {}",
+                                             n_imported, n_refused, e.what()));
+                throw;
             }
+            cli_audit_done("import",
+                           std::format("{} imported, {} refused (already imported)",
+                                       n_imported, n_refused));
         }
         else if (command == "export") {
             auto args = opts.getParams("args");
@@ -1094,9 +1322,8 @@ int main(int argc, char **argv) {
             }
             std::string target = args[0];
 
-            // Resolve DB path (same logic as other commands that don't need embedder)
-            std::string resolved_db = db_path.empty()
-                ? ragger::config().resolved_db_path() : ragger::expand_path(db_path);
+            // DB path is always resolved (S11: the empty branch was dead).
+            std::string resolved_db = ragger::expand_path(db_path);
 
             ragger::ExportOptions export_opts;
             export_opts.include_embeddings = opts.count("embeddings") > 0;
@@ -1142,23 +1369,31 @@ int main(int argc, char **argv) {
             // `ragger recipe [name]` — pick / inspect; writes the choice
             // to DB `settings.recipe`. Sentinel "default" tracks the INI.
             auto recipe_args = opts.getParams("args");
-            return ragger::run_recipe_cli(recipe_args, db_path);
+            bool recipe_persisted = false;
+            int recipe_rc = ragger::run_recipe_cli(recipe_args, db_path, &recipe_persisted);
+            if (recipe_persisted)
+                db_change_notifier.arm();
+            return recipe_rc;
         }
         else if (command == "re-embed") {
-            // Re-encode embeddings for one table, or all five (default).
-            // Mirrors `reindex`'s <table|all> argument handling.
-            static constexpr std::array<const char*, 5> kAllTables = {
-                "turns", "turn_summaries", "summaries", "decisions", "documents"
-            };
+            // Re-encode embeddings for one table, or all (default).
+            // Mirrors `reindex`'s <table|all> argument handling. Table set
+            // from the registry (PHASE3 Step 3).
             auto args = opts.getParams("args");
             std::string target = args.empty() ? "all" : args[0];
             if (target != "all") {
-                bool found = false;
-                for (auto* t : kAllTables) if (target == t) { found = true; break; }
-                if (!found) {
+                const ragger::sqlite::TextTable* row = nullptr;
+                for (const auto& t : ragger::sqlite::kTextTables)
+                    if (target == t.table) { row = &t; break; }
+                if (!row) {
                     Diskerror::Logger::error(std::format(
-                        "Unknown table '{}'. Expected one of: turns, turn_summaries, "
-                        "summaries, decisions, documents, or \"all\"", target));
+                        "Unknown table '{}'. Expected one of: {}, or \"all\"",
+                        target, ragger::sqlite::text_table_names()));
+                    return 1;
+                }
+                if (row->fts_only) {   // LR S81: nothing to embed
+                    Diskerror::Logger::error(std::format(
+                        "Table '{}' is FTS-only (no embeddings).", target));
                     return 1;
                 }
             }
@@ -1170,6 +1405,21 @@ int main(int argc, char **argv) {
             ragger::RaggerMemory memory_temp(db_path,
                                              /*skip_embedding_guard=*/true);
             int total_count = memory_temp.backend()->count_embeddable_rows(target);
+
+            // LR S90: --dry-run reports the selection and stops. SELECT-only
+            // path (count_embeddable_rows is the exact predicate the real
+            // pass uses), so the DB is untouched — pinned by test.
+            if (opts.count("dry-run")) {
+                if (target == "all")
+                    for (const auto& tbl : ragger::sqlite::kTextTables) {
+                        if (tbl.fts_only) continue;   // LR S81
+                        std::println("{}: {} embeddable row(s)", tbl.table,
+                                     memory_temp.backend()->count_embeddable_rows(tbl.table));
+                    }
+                std::println("re-embed {}: {} embeddable row(s) (dry run, nothing written).",
+                             target, total_count);
+                return 0;
+            }
             memory_temp.close();
 
             // Warning + confirmation prompt
@@ -1194,15 +1444,7 @@ int main(int argc, char **argv) {
             // Backup the database file(s) — tar.gz (falls back to zip, then
             // plain copy) via archive_db_files(), same naming convention as
             // migration snapshots: <name>_BACKUP_<timestamp>.tar.gz.
-            std::string actual_db_path = db_path.empty() ? cfg.resolved_db_path() : db_path;
-            std::println("{}", ragger::lang::MSG_DB_BACKING_UP);
-            try {
-                std::string archive = ragger::archive_db_files(actual_db_path);
-                std::println(ragger::lang::MSG_DB_BACKED_UP, archive);
-            }
-            catch (const std::exception &e) {
-                Diskerror::Logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
-            }
+            backup_db_or_warn(db_path);
 
             // Re-embed. Skip the drift guard -- re-encoding at the
             // new config is exactly the point -- then rewrite the settings
@@ -1219,7 +1461,18 @@ int main(int argc, char **argv) {
                 cfg.embedding_dimensions));
             ragger::RaggerMemory memory(db_path,
                                         /*skip_embedding_guard=*/true);
-            int count = memory.rebuild_embeddings(/*progress=*/true, target);
+            // CLI owns the stdout progress line (library code never prints).
+            int count = memory.rebuild_embeddings(
+                [](const char* table, int done, int total) {
+                    if (done >= 0) {
+                        std::cout << std::format(
+                            ragger::lang::MSG_REBUILD_EMBEDDINGS_PROGRESS,
+                            table, done, total);
+                        std::cout.flush();
+                    } else {
+                        std::cout << "\n";
+                    }
+                }, target);
             // The settings identity records what model/dtype/dims the WHOLE
             // DB's vectors are in -- only promote it on a full "all" run.
             // Re-embedding a single table doesn't change that for the rest
@@ -1227,11 +1480,12 @@ int main(int argc, char **argv) {
             if (target == "all") {
                 ragger::UserStore settings_store(db_path);
                 settings_store.set_setting(
-                    "embedding_model", cfg.embedding_model);
+                    "embedding_model", cfg.embedding_identity_model());
                 settings_store.set_setting(
                     "vector_type", ragger::vector_codec::canonical(cfg.embedding_vector_type));
                 settings_store.set_setting(
                     "dimensions", std::to_string(cfg.embedding_dimensions));
+                memory.publish_semqlite_identity();
             }
             Diskerror::Logger::info(std::format(
                 "re-embed finished: {} row(s) re-encoded (table '{}'){}",
@@ -1242,65 +1496,87 @@ int main(int argc, char **argv) {
         }
         else if (command == "reindex") {
             // Manually (re)build the custom terms/TF-IDF text index for one
-            // table, or all five. Idempotent (delete-then-insert per record),
+            // table, or all six. Idempotent (delete-then-insert per record),
             // so safe to re-run any time — e.g. after a tokenizer/stopword
             // change, or to recover from a suspected inconsistency. Backs up
-            // the DB first — cheap rollback, no drift guard needed.
-            static constexpr std::array<const char*, 5> kAllTables = {
-                "turns", "turn_summaries", "summaries", "decisions", "documents"
-            };
-
+            // the DB first — cheap rollback, no drift guard needed. Table
+            // set from the registry (PHASE3 Step 3).
             auto args = opts.getParams("args");
             if (args.empty()) {
-                Diskerror::Logger::error(
-                    "Usage: ragger reindex <table|all>  "
-                    "(tables: turns, turn_summaries, summaries, decisions, documents)");
+                Diskerror::Logger::error(std::format(
+                    "Usage: ragger reindex <table|all>  (tables: {})",
+                    ragger::sqlite::text_table_names()));
                 return 1;
             }
             std::string target = args[0];
             if (target != "all") {
                 bool found = false;
-                for (auto* t : kAllTables) if (target == t) { found = true; break; }
+                for (const auto& t : ragger::sqlite::kTextTables)
+                    if (target == t.table) { found = true; break; }
                 if (!found) {
                     Diskerror::Logger::error(std::format(
-                        "Unknown table '{}'. Expected one of: turns, turn_summaries, "
-                        "summaries, decisions, documents, or \"all\"", target));
+                        "Unknown table '{}'. Expected one of: {}, or \"all\"",
+                        target, ragger::sqlite::text_table_names()));
                     return 1;
                 }
             }
+            // LR S90: --dry-run reports the selection (every row of each
+            // selected table is walked by the real pass) and stops.
+            if (opts.count("dry-run")) {
+                ragger::RaggerMemory memory_temp(db_path,
+                                                 /*skip_embedding_guard=*/true);
+                int planned = 0;
+                for (const auto& [tbl, rows] : memory_temp.backend()->reindex_plan(target)) {
+                    std::println("{}: {} row(s)", tbl, rows);
+                    planned += rows;
+                }
+                std::println("reindex {}: {} row(s) (dry run, nothing written).",
+                             target, planned);
+                return 0;
+            }
 
-            std::string actual_db_path = db_path.empty() ? cfg.resolved_db_path() : db_path;
-            std::println("{}", ragger::lang::MSG_DB_BACKING_UP);
-            try {
-                std::string archive = ragger::archive_db_files(actual_db_path);
-                std::println(ragger::lang::MSG_DB_BACKED_UP, archive);
-            }
-            catch (const std::exception &e) {
-                Diskerror::Logger::critical(std::format(ragger::lang::WARN_BACKUP_FAILED, e.what()));
-            }
+            cli_audit("reindex", target);
+
+            backup_db_or_warn(db_path);
+
+            // X16: the reindex now commits per batch, so the write lock is
+            // held per batch rather than for the whole run. Warn before
+            // starting, do not refuse (the run is still the right call for a
+            // stopped daemon).
+            if (target == "all" && ragger::find_live_daemon_pid() > 0)
+                std::println(
+                    "note: a daemon is running; its writes may wait briefly "
+                    "between batches.");
 
             ragger::RaggerMemory memory(db_path,
                                         /*skip_embedding_guard=*/true);
-            int total = 0;
-            if (target == "all") {
-                // Wipe the shared `terms` table + reset its AUTOINCREMENT
-                // counter before rebuilding every table in the same pass --
-                // safe only because every table gets reindexed right after,
-                // so no junction row is left pointing at a deleted term_id.
-                // Clears out any orphaned/legacy terms accumulated before a
-                // tokenizer fix (e.g. digit/stopword rules changing) and
-                // stops term_id from climbing forever on a DB that's never
-                // fully reindexed.
-                memory.backend()->reset_terms_table();
-                for (auto* t : kAllTables) {
-                    int count = memory.backend()->reindex_table(t, /*progress=*/true);
-                    std::println("Reindexed {}: {} row(s).", t, count);
-                    total += count;
+            // CLI owns the stdout progress line (library code never prints).
+            auto print_reindex_progress = [](const char* table, int done, int total) {
+                if (done >= 0) {
+                    std::cout << std::format("\rReindexing {}: {}/{}", table, done, total);
+                    std::cout.flush();
+                } else {
+                    std::cout << "\n";
                 }
-                std::println("Reindexed all tables: {} row(s) total.", total);
-            } else {
-                total = memory.backend()->reindex_table(target, /*progress=*/true);
-                std::println("Reindexed {}: {} row(s).", target, total);
+            };
+            int total = 0;
+            try {
+                if (target == "all") {
+                    // X16: reset + rebuild of every table in PER-BATCH COMMITS
+                    // (see Backend::reindex_all) — no outer transaction, so
+                    // SQLite can checkpoint and the -wal stays bounded. An
+                    // interrupted run leaves a partial index and the
+                    // `reindexing` flag set; re-running repairs it.
+                    for (const auto& [table, count] : memory.backend()->reindex_all(print_reindex_progress)) {
+                        total += count;
+                    }
+                } else {
+                    total = memory.backend()->reindex_table(target, print_reindex_progress);
+                }
+                cli_audit_done("reindex", std::format("{} row(s) reindexed", total));
+            } catch (const std::exception& e) {
+                cli_audit_failed("reindex", std::format("{}: {}", target, e.what()));
+                throw;
             }
         }
         else if (command == "show-embedding-model") {
@@ -1320,17 +1596,7 @@ int main(int argc, char **argv) {
                 return 1;
             }
             try {
-                std::unique_ptr<ragger::Embedder> embedder;
-                if (cfg.embedding_engine == "external") {
-                    embedder = std::make_unique<ragger::Embedder>(
-                        cfg.embedding_external_host,
-                        cfg.embedding_external_port,
-                        cfg.embedding_external_model,
-                        cfg.embedding_external_api_key,
-                        cfg.embedding_dimensions);
-                } else {
-                    embedder = std::make_unique<ragger::Embedder>(cfg.resolved_model_dir());
-                }
+                auto embedder = ragger::make_embedder_from_config(cfg);
                 std::vector<float> vec = embedder->encode(text);
                 nlohmann::json arr = vec;
                 std::cout << arr.dump() << "\n";
@@ -1354,29 +1620,120 @@ int main(int argc, char **argv) {
         else if (command == "passwd") {
             return ragger::cmd_passwd(opts, cfg.resolved_db_path());
         }
-        else if (command == "housekeeping") {
-            // Send SIGUSR1 to the running daemon via server PID file
-            namespace fs = std::filesystem;
-            pid_t daemon_pid = 0;
-            try {
-                for (const auto &entry: fs::directory_iterator("/tmp/ragger")) {
-                    auto name = entry.path().filename().string();
-                    if (name.rfind("server-", 0) == 0 &&
-                        name.size() > 4 && name.substr(name.size() - 4) == ".pid") {
-                        std::ifstream pf(entry.path());
-                        if (pf) pf >> daemon_pid;
-                        break;
-                    }
-                }
-            }
-            catch (...) {
-            }
-            if (daemon_pid <= 0) {
-                Diskerror::Logger::error(ragger::lang::ERR_DAEMON_NOT_FOUND);
+        else if (command == "backfill") {
+            // LR S66/S67: Reid-run data back-fill (rule 17). Every kind has
+            // --dry-run (counts only, writes nothing). Progress goes to
+            // stdout (the library never prints); any failed row makes the
+            // pass exit non-zero after reporting the counts.
+            auto args = opts.getParams("args");
+            static const std::vector<std::string> kKinds = {
+                "turn-summary-null", "turn-summary-empty", "turn-summary-regenerate",
+                "triggers", "stranded", "session-names"};
+            if (args.size() != 1 ||
+                std::find(kKinds.begin(), kKinds.end(), args[0]) == kKinds.end()) {
+                std::string names;
+                for (const auto& k : kKinds) names += (names.empty() ? "" : ", ") + k;
+                Diskerror::Logger::error(std::format(
+                    "Usage: ragger backfill <kind> [--dry-run]  (kinds: {})", names));
                 return 1;
             }
-            if (kill(daemon_pid, 0) != 0) {
-                Diskerror::Logger::error(std::format(ragger::lang::ERR_DAEMON_PID_NOT_RUNNING, daemon_pid));
+            const std::string kind = args[0];
+            const bool dry_run = opts.count("dry-run") > 0;
+            const std::string model =
+                opts.count("model") ? opts["model"].as<std::string>() : "";
+            std::vector<int> ids;
+            if (opts.count("ids")) {
+                // Strict parse: comma-separated positive integers, nothing else.
+                const std::string raw = opts["ids"].as<std::string>();
+                size_t pos = 0;
+                while (pos < raw.size()) {
+                    auto comma = raw.find(',', pos);
+                    const auto part = raw.substr(
+                        pos, comma == std::string::npos ? std::string::npos : comma - pos);
+                    if (part.empty() ||
+                        !std::all_of(part.begin(), part.end(), ::isdigit)) {
+                        Diskerror::Logger::error(std::format(
+                            "--ids must be comma-separated positive integers (bad part '{}')", part));
+                        return 1;
+                    }
+                    ids.push_back(std::stoi(part));
+                    if (comma == std::string::npos) break;
+                    pos = comma + 1;
+                }
+            }
+
+            AuditScope audit("backfill", std::format("{}{}", kind, dry_run ? " (dry-run)" : ""));
+            ragger::RaggerMemory memory(db_path, /*skip_embedding_guard=*/true);
+            auto backend = memory.backend();
+            auto inference = ragger::InferenceClient::from_config(cfg);
+
+            // One progress line per row, newline at the pass end (re-embed style).
+            auto progress = [](const char* name, int done, int total) {
+                if (done >= 0) {
+                    std::cout << std::format("\rBackfilling {}: {}/{}", name, done, total);
+                    std::cout.flush();
+                } else {
+                    std::cout << "\n";
+                }
+            };
+
+            ragger::BackfillResult res;
+            try {
+                if (kind == "turn-summary-null" || kind == "turn-summary-empty" || kind == "turn-summary-regenerate")
+                    res = ragger::backfill_turn_summary(*backend, inference, kind.substr(std::string("turn-summary-").size()),
+                                              dry_run, model, ids, progress);
+                else if (kind == "triggers")
+                    res = ragger::backfill_triggers(*backend, inference, dry_run, progress);
+                else if (kind == "stranded")
+                    res = ragger::backfill_stranded(*backend, inference, dry_run, progress);
+                else
+                    res = ragger::backfill_session_names(*backend, inference, dry_run, progress);
+            } catch (const std::invalid_argument& e) {
+                // Unfiltered regenerate / inference not configured: a refusal,
+                // not a partial run. The DB is untouched.
+                Diskerror::Logger::error(e.what());
+                return 1;
+            }
+
+            if (dry_run) {
+                std::println("{}: {} candidate(s){}{}{}",
+                             kind, res.candidates,
+                             res.episodes ? std::format(", {} episode(s) to regenerate", res.episodes) : "",
+                             res.ties ? std::format(", {} tie(s)", res.ties) : "",
+                             res.open_tail ? std::format(", {} left alone (open tail)", res.open_tail) : "");
+                audit.done(std::format("{} dry-run: {} candidate(s)", kind, res.candidates));
+                return res.failed > 0 ? 1 : 0;
+            }
+            std::println("{}: {} candidate(s), {} applied, {} skipped, {} failed{}{}{}",
+                         kind, res.candidates, res.applied, res.skipped, res.failed,
+                         res.episodes ? std::format(", {} episode(s)", res.episodes) : "",
+                         res.ties ? std::format(", {} tie(s)", res.ties) : "",
+                         res.open_tail ? std::format(", {} left alone (open tail)", res.open_tail) : "");
+            audit.done(std::format("{}: {} applied, {} failed", kind, res.applied, res.failed));
+            return res.failed > 0 ? 1 : 0;
+        }
+        else if (command == "housekeeping") {
+            // LR S90: --dry-run reports what one pass WOULD do (shared
+            // predicates with the real pass) and writes nothing. Works
+            // without a running daemon.
+            if (opts.count("dry-run")) {
+                ragger::RaggerMemory memory(db_path, /*skip_embedding_guard=*/true);
+                const auto plan = memory.backend()->housekeeping_plan();
+                std::println("housekeeping (dry run, nothing written):");
+                std::println("  unsummarized turns (catch-up would enqueue): {}",
+                             plan.unsummarized);
+                std::println("  embeddable rows without an embedding: {}", plan.embed_missing);
+                std::println("  embeddable rows at an old embedding version: {}",
+                             plan.embed_stale);
+                return 0;
+            }
+            // Send SIGUSR1 to the running daemon via the shared PID-file
+            // scanner (S22). A stale pid file whose process is gone reads as
+            // "no daemon" here — the old separate not-running message went
+            // with the liveness check that was missing.
+            pid_t daemon_pid = ragger::find_live_daemon_pid();
+            if (daemon_pid <= 0) {
+                Diskerror::Logger::error(ragger::lang::ERR_DAEMON_NOT_FOUND);
                 return 1;
             }
             if (kill(daemon_pid, SIGUSR1) != 0) {
@@ -1391,25 +1748,22 @@ int main(int argc, char **argv) {
             Diskerror::Logger::info(std::format(ragger::lang::MSG_HOUSEKEEPING_TRIGGERED, daemon_pid));
 
         }
+        else if (command == "reload-cache") {
+            pid_t daemon_pid = ragger::find_live_daemon_pid();
+            if (daemon_pid <= 0) {
+                Diskerror::Logger::error(ragger::lang::ERR_DAEMON_NOT_FOUND);
+                return 1;
+            }
+            if (kill(daemon_pid, SIGHUP) != 0) {
+                std::cerr << std::format(ragger::lang::ERR_SIGNAL_FAILED, strerror(errno)) << "\n";
+                return 1;
+            }
+            std::println(ragger::lang::MSG_CACHE_RELOAD_OK, daemon_pid);
+        }
         else if (command == "reload") {
-            // Send SIGHUP to running daemon to reload config
-            namespace fs = std::filesystem;
-            pid_t daemon_pid = 0;
-            try {
-                for (const auto &entry: fs::directory_iterator("/tmp/ragger")) {
-                    auto name = entry.path().filename().string();
-                    if (name.rfind("server-", 0) == 0 &&
-                        name.size() > 4 && name.substr(name.size() - 4) == ".pid") {
-                        std::ifstream pf(entry.path());
-                        if (pf >> daemon_pid && daemon_pid > 0 && kill(daemon_pid, 0) == 0) {
-                            break;
-                        }
-                        daemon_pid = 0;
-                    }
-                }
-            }
-            catch (...) {
-            }
+            // Send SIGHUP to running daemon to reload config (shared
+            // PID-file scanner, S22).
+            pid_t daemon_pid = ragger::find_live_daemon_pid();
 
             if (daemon_pid <= 0) {
                 Diskerror::Logger::error(ragger::lang::ERR_DAEMON_NOT_FOUND);
@@ -1419,7 +1773,7 @@ int main(int argc, char **argv) {
                 std::cerr << std::format(ragger::lang::ERR_SIGNAL_FAILED, strerror(errno)) << "\n";
                 return 1;
             }
-            Diskerror::Logger::error(std::format(ragger::lang::MSG_CONFIG_RELOAD_OK, daemon_pid));
+            Diskerror::Logger::info(std::format(ragger::lang::MSG_CONFIG_RELOAD_OK, daemon_pid));
 
         }
         else {

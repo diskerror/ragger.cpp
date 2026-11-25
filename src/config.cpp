@@ -2,6 +2,10 @@
  * Configuration loader — INI file parser
  */
 #include "config.h"
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include "Logger.h"
 #include "config_access.h"
 #include "lang.h"
 #include "util/fs.h"
@@ -86,7 +90,8 @@ std::string Config::resolved_socket_path() const {
 #include "default_config.inc"
 
 // Defined below, after the Config struct's field table.
-static std::expected<Config, ConfigError> parse_config(std::istream& file);
+static std::expected<Config, ConfigError> parse_config(std::istream& file,
+                                                       std::vector<std::string>* unknown_out = nullptr);
 
 // Parse an INI file from disk. No production path reads a config file at
 // runtime — Ragger's settings live in the DB `settings` table. This remains
@@ -110,6 +115,19 @@ static Config load_default_config() {
     // code that produced them, so a failure here is a build error, not a
     // runtime condition — fall back to the struct's own initialisers.
     return parsed.has_value() ? *parsed : Config{};
+}
+
+// The compiled-in defaults with no settings-table overlay (tests use this so
+// they do not depend on whatever init_config() overlaid).
+Config default_config() { return load_default_config(); }
+
+// "section.key" for every live key in the embedded defaults that the schema
+// tables did not accept. Must be empty; a test enforces it.
+std::vector<std::string> default_config_unknown_keys() {
+    std::istringstream in{std::string(DEFAULT_CONFIG)};
+    std::vector<std::string> unknown;
+    parse_config(in, &unknown);
+    return unknown;
 }
 
 // NOTE: the SERVER_LOCKED key table and clamp_to_ceiling() lived here to
@@ -168,7 +186,8 @@ static bool parse_bool(const std::string& val) {
 // Parse INI text from any stream. Split out from load_config() so the
 // compiled-in defaults can be parsed straight from memory — Ragger does not
 // write or read a config file on disk; the DB settings table is the store.
-static std::expected<Config, ConfigError> parse_config(std::istream& file) {
+static std::expected<Config, ConfigError> parse_config(std::istream& file,
+                                                       std::vector<std::string>* unknown_out) {
     Config cfg;
     std::string section;
     std::string line;
@@ -221,6 +240,18 @@ static std::expected<Config, ConfigError> parse_config(std::istream& file) {
             return s;
         };
 
+        // Apply a key through the shared schema tables. A key the tables do not
+        // know is dropped silently (that is how the section-local names in
+        // default-settings.txt were lost); record it so a test can fail on it.
+        auto set_raw = [&](const std::string& schema_key, const std::string& v) {
+            if (!set_config_field_raw(cfg, schema_key, v) && unknown_out)
+                unknown_out->push_back(section + "." + key);
+        };
+        // Section-local names ("model") -> schema names ("summarizer_model").
+        auto prefixed = [&](const char* prefix) {
+            return key.rfind(prefix, 0) == 0 ? key : std::string(prefix) + key;
+        };
+
         // Map to config fields. Most keys are plain schema fields (bool/int/
         // float/string) applied via set_config_field_raw(), which shares the
         // key -> Config-member-pointer tables in config_access.cpp with the
@@ -243,15 +274,14 @@ static std::expected<Config, ConfigError> parse_config(std::istream& file) {
             } else if (key == "tls_key") {
                 cfg.tls_key = val;      // alias for key
             } else {
-                set_config_field_raw(cfg, key, val);
+                set_raw(key, val);
             }
         }
         else if (section == "embedding") {
-            set_config_field_raw(cfg, key, val);
+            set_raw(prefixed("embedding_"), val);
         }
         else if (section == "search") {
-            if (key == "inject_data") cfg.inject_data = parse_bool(val);  // not a schema key
-            else set_config_field_raw(cfg, key, val);
+            set_raw(key, val);
         }
         else if (section == "inference") {
             // Not schema keys (no CLI/dashboard-editable equivalent yet).
@@ -266,7 +296,7 @@ static std::expected<Config, ConfigError> parse_config(std::istream& file) {
                 int v = std::stoi(val);
                 if (v > 0) { cfg.episode_idle_minutes = v; episode_idle_set = true; }
             } else {
-                set_config_field_raw(cfg, key, val);
+                set_raw(prefixed("summarizer_"), val);
             }
         }
         else if (section.substr(0, 10) == "inference.") {
@@ -291,29 +321,25 @@ static std::expected<Config, ConfigError> parse_config(std::istream& file) {
                 int v = std::stoi(val);
                 if (v >= 0) cfg.log_max_age_days = v;
             }
-            else set_config_field_raw(cfg, key, val);  // log_level
+            else set_raw(key, val);  // log_level
         }
         else if (section == "paths") {
-            set_config_field_raw(cfg, key, val);  // normalize_home
+            set_raw(key, val);  // normalize_home
         }
         else if (section == "tls" || section == "ssl") {
             // Legacy standalone section — kept silently for back-compat.
             // TLS now lives under [server] (cert=/key=); see above.
             if (key == "tls_cert") cfg.tls_cert = val;
             else if (key == "tls_key") cfg.tls_key = val;
-            else set_config_field_raw(cfg, key, val);  // cert / key
+            else set_raw(key, val);  // cert / key
         }
         else if (section == "import") {
-            set_config_field_raw(cfg, key, val);  // minimum_chunk_size
+            set_raw(key, val);  // minimum_chunk_size
         }
         else if (section == "embed") {
-            // Section-local key names (timeout_ms, retries, max_workers)
-            // differ from their schema keys (embed_timeout_ms, ...), so
-            // route through the schema key explicitly rather than passing
-            // the raw INI key.
-            if (key == "timeout_ms") set_config_field_raw(cfg, "embed_timeout_ms", val);
-            else if (key == "retries") set_config_field_raw(cfg, "embed_retries", val);
-            else if (key == "max_workers") set_config_field_raw(cfg, "embed_max_workers", val);
+            // Retired in 0.17 with EmbedExecutor (nothing spawned the
+            // `ragger embed` pool any more). Old INI files may still carry
+            // timeout_ms / retries / max_workers: accepted and ignored.
         }
         else if (section == "housekeeping") {
             if (key == "housekeeping_interval") {
@@ -332,15 +358,11 @@ static std::expected<Config, ConfigError> parse_config(std::istream& file) {
                 int v = std::stoi(val);
                 if (v > 0) cfg.catch_up_batch_size = v;
             }
-            else if (key == "project_gap_days") {
-                int v = std::stoi(val);
-                if (v > 0) cfg.project_gap_days = v;
-            }
             else if (key == "max_turn_failures") {
                 int v = std::stoi(val);
                 if (v >= 0) cfg.max_turn_failures = v;
             }
-            else set_config_field_raw(cfg, key, val);  // cleanup_max_age_hours, episode_threshold_*, episode_step_minutes
+            else set_raw(key, val);  // episode_threshold_*, episode_step_minutes
         }
         else if (section == "llama") {
             // [llama] section removed — use external inference providers
@@ -387,31 +409,55 @@ static std::expected<Config, ConfigError> parse_config(std::istream& file) {
 // -----------------------------------------------------------------------
 // Global singleton
 // -----------------------------------------------------------------------
-static Config* g_config = nullptr;
+namespace {
+// Published snapshots. g_current always points at the newest element of
+// g_all. Elements are never erased or modified after publication, so any
+// reference handed out by config() stays valid until process exit.
+std::mutex                                 g_write_mutex;   // serialises writers
+std::vector<std::unique_ptr<const Config>> g_all;
+std::atomic<const Config*>                 g_current{nullptr};
+
+// Caller holds g_write_mutex.
+void publish_locked(Config&& next) {
+    g_all.push_back(std::make_unique<const Config>(std::move(next)));
+    g_current.store(g_all.back().get(), std::memory_order_release);
+}
+} // namespace
 
 const Config& config() {
-    if (!g_config) {
+    const Config* p = g_current.load(std::memory_order_acquire);
+    if (!p) {
         throw std::runtime_error(lang::ERR_CONFIG_NOT_INIT);
     }
-    return *g_config;
+    return *p;
 }
 
-Config& mutable_config() {
-    if (!g_config) {
+bool update_config(const std::function<bool(Config&)>& fn) {
+    std::lock_guard<std::mutex> lock(g_write_mutex);
+    const Config* cur = g_current.load(std::memory_order_acquire);
+    if (!cur) {
         throw std::runtime_error(lang::ERR_CONFIG_NOT_INIT);
     }
-    return *g_config;
+    Config next = *cur;
+    if (!fn(next)) return false;
+    publish_locked(std::move(next));
+    return true;
 }
 
 void init_config() {
-    // Base layer: the compiled-in defaults. Ragger used to bootstrap a
-    // config file into ~/.ragger and read it back as the base layer, with the
-    // DB overlaid on top. That left the file half-live — stale for every key
-    // the dashboard had written a row for, still authoritative for every key
-    // it had not — and it was regenerated from defaults whenever it was
+    std::lock_guard<std::mutex> lock(g_write_mutex);
+
+    // Base layer: the compiled-in defaults, or -- on a repeated call -- the
+    // current snapshot, so a second init_config() keeps the first call's
+    // overlay exactly as the old function-static did. Ragger used to bootstrap
+    // a config file into ~/.ragger and read it back as the base layer, with
+    // the DB overlaid on top. That left the file half-live -- stale for every
+    // key the dashboard had written a row for, still authoritative for every
+    // key it had not -- and it was regenerated from defaults whenever it was
     // deleted, so it silently reappeared as a stale layer. The settings table
     // is now the only store; defaults live in the binary.
-    static Config cfg = load_default_config();
+    const Config* cur = g_current.load(std::memory_order_acquire);
+    Config cfg = cur ? *cur : load_default_config();
 
     cfg.log_file = cfg.resolved_log_file_path();
 
@@ -420,11 +466,11 @@ void init_config() {
     // yet (first run before serve creates it).
     overlay_settings_from_db(cfg, cfg.resolved_db_path());
 
-    g_config = &cfg;
+    publish_locked(std::move(cfg));
 }
 
 int reload_config() {
-    if (!g_config) return 0;
+    if (!g_current.load(std::memory_order_acquire)) return 0;
 
     // Re-read the defaults and re-overlay the settings table — same two layers
     // init_config() uses, so a SIGHUP reload and a fresh start agree.
@@ -432,13 +478,18 @@ int reload_config() {
     fresh.log_file = fresh.resolved_log_file_path();
     overlay_settings_from_db(fresh, fresh.resolved_db_path());
 
-    Config& cfg = *g_config;
+    // All edits go to a copy that is published only if something changed
+    // (see update_config). `changes` is read after the call.
     int changes = 0;
+    update_config([&](Config& cfg) {
 
-    // Keys that require restart (log but don't apply)
+    // Keys that require restart (log but don't apply). PHASE9B step 7: log
+    // through the Logger, not stderr — for the daemon, stderr is not the
+    // activity log, so a SIGHUP reload that found restart-only changes was
+    // previously invisible.
     auto warn_restart = [&](const std::string& name, bool changed) {
         if (changed) {
-            std::cerr << std::format(ragger::lang::WARN_CONFIG_RESTART, name) << "\n";
+            Diskerror::Logger::warn(std::format(ragger::lang::WARN_CONFIG_RESTART, name));
         }
     };
     warn_restart("port", fresh.port != cfg.port);
@@ -463,10 +514,10 @@ int reload_config() {
     // Search
     RELOAD(default_search_limit);
     RELOAD(default_min_score);
-    RELOAD(bm25_enabled);
-    RELOAD(bm25_weight);
+    RELOAD(decision_supersede_threshold);
+    RELOAD(fts_enabled);
+    RELOAD(fts_weight);
     RELOAD(vector_weight);
-    RELOAD(inject_data);
     RELOAD(fts_w_unigram);
     RELOAD(fts_w_bigram);
     RELOAD(fts_w_metaphone);
@@ -480,11 +531,16 @@ int reload_config() {
     RELOAD(inference_max_tokens);
     RELOAD(summarizer_model);
     RELOAD(summarizer_api_url);
+    RELOAD(summarizer_api_key_env);
     RELOAD(summarizer_api_key);
     RELOAD(summarizer_max_tokens);
     RELOAD(summarizer_target_pct);
     RELOAD(summarizer_max_pct);
+    RELOAD(summarizer_min_words);
     RELOAD(summarizer_prompt);
+    RELOAD(summarizer_episode_prompt);
+    RELOAD(summarizer_title_prompt);
+    RELOAD(summarizer_trigger_prompt);
     // Endpoints: replace entirely if different
     if (cfg.inference_endpoints.size() != fresh.inference_endpoints.size()) {
         cfg.inference_endpoints = fresh.inference_endpoints;
@@ -503,8 +559,10 @@ int reload_config() {
     }
 
     // Logging
-    // (log_level itself is not hot-reloadable — Diskerror::Logger is
-    // constructed once at startup with the level fixed.)
+    // log_level, log_max_size_mb and log_max_age_days are applied once at
+    // Logger construction (main.cpp), so reloading them would be cosmetic —
+    // they are deliberately absent here, and the schema marks them
+    // RestartRequired.
 
     // Paths
     RELOAD(normalize_home_path);
@@ -513,26 +571,36 @@ int reload_config() {
     RELOAD(minimum_chunk_size);
 
     // Embed (subprocess settings)
-    RELOAD(embed_timeout_ms);
-    RELOAD(embed_retries);
-    RELOAD(embed_max_workers);
 
     // Housekeeping / retention
-    RELOAD(cleanup_max_age_hours);
     RELOAD(housekeeping_interval);
     RELOAD(summary_pause_minutes);
     RELOAD(episode_idle_minutes);
     RELOAD(catch_up_batch_size);
-    RELOAD(project_gap_days);
     RELOAD(max_turn_failures);
     RELOAD(capture_turns);
     RELOAD(build_context);
     RELOAD(auto_recall);
+    RELOAD(auto_recall_mode);
+    RELOAD(auto_recall_min_similarity);
     RELOAD(default_recipe);
+
+    // Episode detection (PHASE9B step 7): summarizer_service reads these on
+    // every pass, so they take effect on reload like the rest of the section.
+    RELOAD(episode_threshold_base);
+    RELOAD(episode_threshold_cap);
+    RELOAD(episode_threshold_step);
+    RELOAD(episode_step_minutes);
+
+    // Sent per response by the HTTP server (read from config() per request).
+    RELOAD(server_name);
 
     // System ceilings
 
     #undef RELOAD
+
+    return changes > 0;
+    });
 
     return changes;
 }

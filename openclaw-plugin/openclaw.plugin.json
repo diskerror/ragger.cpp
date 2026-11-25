@@ -13,6 +13,17 @@
         "type": "boolean",
         "default": true
       },
+      "autoRecallMode": {
+        "type": "string",
+        "enum": ["decisions", "flat"],
+        "default": "decisions"
+      },
+      "autoRecallMinSimilarity": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1,
+        "default": 0.3
+      },
       "autoCapture": {
         "type": "boolean",
         "default": true
@@ -43,6 +54,14 @@
     "autoRecall": {
       "label": "Auto-Recall",
       "help": "Automatically inject relevant memories into context before agent runs"
+    },
+    "autoRecallMode": {
+      "label": "Auto-Recall Mode",
+      "help": "decisions: inject only active decisions matched to the prompt (default). flat: the legacy search over all memories."
+    },
+    "autoRecallMinSimilarity": {
+      "label": "Auto-Recall Min Similarity",
+      "help": "Minimum raw vector similarity (0-1) for a decision to be injected. Calibrated for the current embedding model; re-measure after changing it. Mirrors the daemon setting auto_recall_min_similarity."
     },
     "autoCapture": {
       "label": "Auto-Capture",

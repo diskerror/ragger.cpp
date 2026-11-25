@@ -39,9 +39,8 @@ symlink `~/.ragger` there instead.
 |------------------|-----------------------------------------------------------------|
 | `[server]`       | Socket/bind/port, TLS cert/key, turn-capture/build-context toggles, recipes |
 | `[embedding]`    | Model, vector dimensions, on-disk precision                    |
-| `[search]`       | Default limit, score floor, BM25/vector/phonetic blend, `inject_data` |
-| `[summarizer]`   | Inference endpoint used by the L2/L3 background worker         |
-| `[embed]`        | Embedding subprocess pool — timeouts, retries, concurrency     |
+| `[search]`       | Default limit, score floor, BM25/vector/phonetic blend |
+| `[summarizer]`   | Inference endpoint used by the turn and episode background worker     |
 | `[logging]`      | Log level (one unified log file — see below)                  |
 | `[housekeeping]` | Retention, pass cadence, episode-idle minutes                  |
 | `[import]`       | Minimum chunk size for markdown imports                        |
@@ -62,6 +61,7 @@ The tables below cover every key currently recognized by the parser.
 | `capture_turns`  | `true`          | **Write side.** When `true`, `capture_turn` (MCP) / `POST /turn` ingests agent-pushed turns into the `turns` table. Set `false` to make the call a no-op. |
 | `build_context`  | `false`         | **Read side.** When `true`, `build_context` / `GET /session/<id>` assembles a recipe-shaped payload. Only meaningful when `capture_turns` is also on. Agent-driven `search`/`store` work either way. Not currently documented in `default-settings.txt` — code and default (`false`) remain intact if you want to opt back in by hand. |
 | `default_recipe` | `natural_fading` | Recipe used when the caller doesn't name one. See [Recipes](#recipes) below. Also undocumented in the shipped template for the same reason as `build_context`; both keys are still parsed. |
+| `auto_recall_min_similarity` | `0.30` | Minimum vector similarity (raw cosine, 0-1) for a memory to be injected by auto-recall. Per embedder: calibrated for the current embedding model, re-measure after changing it. `0` injects the top results regardless. Served to plugins via `GET /config`; the daemon does no injection itself. |
 
 Both listeners can run at the same time. If `socket_enable` is false and
 `bind` is empty, the daemon falls back to `bind = 127.0.0.1` so there's
@@ -75,16 +75,16 @@ new configs should set `cert`/`key` under `[server]` instead.
 
 `model + dimensions + vector_type` define the DB's vector identity and
 are recorded in the `settings` table. Changing any of them once the DB
-holds data requires `ragger rebuild-embeddings` to re-encode everything;
+holds data requires `ragger re-embed` to re-encode everything;
 mismatches abort startup with a clear error.
 
 | Key          | Default            | Description                                                  |
 |--------------|--------------------|--------------------------------------------------------------|
-| `model`      | `all-MiniLM-L6-v2` | Sentence-transformer model name; resolved under `~/.ragger/models/<model-name>/`. |
+| `model`      | `sentence-transformers/all-MiniLM-L12-v2` | Sentence-transformer model name (the `provider/model` form is what the code resolves); looked up under `~/.ragger/models/<provider>/<model-name>/`. |
 | `dimensions` | `384`              | Vector size; must match the model.                           |
 | `vector_type`| `f16`              | On-disk precision. `f16` halves blob size; `f32` is full precision. In-memory math is always f32. |
 
-Model files always live at `~/.ragger/models/<model-name>/` — not
+Model files always live at `~/.ragger/models/<provider>/<model-name>/` — not
 independently configurable; hardcoded like every other Ragger path.
 
 ## `[search]`
@@ -93,14 +93,13 @@ independently configurable; hardcoded like every other Ragger path.
 |---------------------|---------|-----------------------------------------------------------------------------|
 | `default_limit`     | `5`     | Default result count.                                                       |
 | `default_min_score` | `0.4`   | Cosine floor for returned results.                                          |
-| `bm25_enabled`      | `true`  | Blend the custom text-index score into the rank.                           |
-| `bm25_weight`       | `4`     | Weight for the text-index signal (ratio, not percentage; integers preferred). |
+| `fts_enabled`      | `true`  | Blend the custom text-index score into the rank.                           |
+| `fts_weight`       | `4`     | Weight for the text-index signal (ratio, not percentage; integers preferred). |
 | `vector_weight`     | `8`     | Weight for the cosine signal.                                               |
 | `fts_w_unigram`     | `0.3`   | Text index's internal weight for single-word (unigram) term matches.        |
 | `fts_w_bigram`      | `0.7`   | Text index's internal weight for adjacent-word-pair (bigram) term matches.   |
 | `fts_w_metaphone`   | `1.0`   | Weight for phonetic (Double Metaphone) term matches relative to exact stemmed-literal matches. `0` disables phonetic matching; `1` treats it as equal to literal. |
 | `fts_literal_enabled` | `true` | Enable exact stemmed-literal term matching. Disable for DMP-only (phonetic-only) scoring — no reindex needed, it's a scoring-time flag. |
-| `inject_data`       | `false` | Reserved — parsed and hot-reloadable, not yet wired to any search behavior. |
 | `max_search_limit`  | `0`     | Ceiling on client-requested `limit` for sub-users. `0` disables the cap.    |
 
 Weights are ratios; they're normalized internally. The default blend is
@@ -109,12 +108,12 @@ close behind. As of v0.16, keyword/BM25 scoring is done by Ragger's own
 custom TF-IDF text index (unigrams + bigrams + Double Metaphone phonetic
 tokens, all in one flat term table) rather than SQLite FTS5 — see
 `fts_w_unigram`/`fts_w_bigram`/`fts_w_metaphone` above to tune the index's
-own internal blend. `bm25_weight` is still the name of the *overall*
+own internal blend. `fts_weight` is still the name of the *overall*
 text-index-vs-vector weight for backward compatibility.
 
 ## `[summarizer]` — the only inference endpoint
 
-Ragger only calls inference for L2/L3 summarization. There is no chat
+Ragger only calls inference for turn and episode summarization. There is no chat
 surface. (Older versions had a separate `[inference]` block for a
 general-purpose endpoint plus `[inference.<name>]` multi-endpoint
 routing — both are gone from the documented config; `[summarizer]` is
@@ -129,6 +128,11 @@ the sole inference section going forward.)
 | `target_pct` | `40`                           | Target summary length as % of the raw turn. `0` = built-in default of 30%. |
 | `max_pct`    | `60`                           | Hard cap as % of the raw turn. `0` = built-in default of 60%. |
 | `prompt`     | *(built-in default)*           | System prompt sent to the summarizer. Quote it to protect `#` from being read as a comment. Two `{}` placeholders (target chars, hard cap) are required if you override it. Set to a single space `" "` to suppress the system prompt entirely. |
+| `episode_prompt` | *(built-in default)* | System prompt for summarizing an episode from its turn summaries. `{N}` is replaced by the number of summaries; two `{}` (target chars, hard cap) are then required. |
+| `title_prompt` | *(built-in default)* | System prompt for naming a session (Name sessions job). No placeholders; state the wanted title length in the text (the built-in default asks for 3 to 8 words). |
+| `trigger_prompt` | *(built-in default)* | System prompt for drafting a decision's or insight's trigger (Back-fill triggers job). No placeholders. |
+
+**About the built-in prompts.** The turn, episode, session-title and trigger prompts were written by a frontier model (Claude) and have **not** been tuned against any particular local model. Only the turn prompt's attribution rule ("a proposal is not a decision unless the user accepted it") answers a failure seen in real summaries; the episode, title and trigger prompts are first drafts (the episode prompt is the older LR S64 text). Small models differ in how closely they follow format instructions (title length, "output the line only", the trigger example). Test them on your own model before back-filling a whole database: run the job on a handful of rows, read the results, then adjust the prompt setting. The prompts are settings so you can change them without a rebuild. Existing summaries are never rewritten automatically. The default texts live in `include/lang/en.h` (`PROMPT_TURN_SUMMARY`, `PROMPT_EPISODE_SUMMARY`, `PROMPT_SESSION_TITLE`, `PROMPT_KNOWLEDGE_TRIGGER`).
 
 **Choosing a model.** Summarization is a short, low-complexity task —
 model quality matters far less than model speed.
@@ -151,39 +155,29 @@ model quality matters far less than model speed.
   summarizer never runs concurrent requests, so there is no benefit to
   parallel slots — and each slot you add divides the KV budget.
 
-**Fallback behaviour.** When the endpoint is unreachable, the worker
-writes a heuristic *draft* L2 (a trimmed `User: … | Assistant: …`
-concatenation, tagged `draft`) so the chronology stays intact. A
-housekeeping pass re-summarizes drafts the next time inference is
-available — no manual catch-up needed.
+**Fallback behaviour.** When the endpoint is unreachable, the turn
+simply stays unsummarized. The worker retries with exponential backoff
+(5 min base, doubling, capped at 6 h) and the housekeeping catch-up
+pass resumes the backlog automatically once inference is available —
+no manual catch-up needed. Trivial turns are marked even while
+inference is down, so they never enter the backlog.
 
 ## `[housekeeping]`
 
 | Key                     | Default | Description                                                                        |
 |-------------------------|---------|------------------------------------------------------------------------------------|
-| `cleanup_max_age_hours` | `0`     | Raw-turn lifetime. `0` = keep forever (default). Set to hours (e.g. `336` = 2 weeks) to auto-purge old turns. |
 | `housekeeping_interval` | `60`    | Seconds between background passes. `0` disables; values under 10 are clamped to 10.|
 | `episode_idle_minutes`  | `15`    | Idle gap (minutes) that closes an episode of work within a session, and drives session/project rollups. Any positive integer. |
 | `summary_pause_minutes` | `20`    | Deprecated alias for `episode_idle_minutes` — honored only when `episode_idle_minutes` is unset. |
-| `catch_up_batch_size`   | `10`    | Per-tick cap on unsummarized turns (and, separately, draft-tagged retries) enqueued at once. Keeps a manual resummarize (nulling `model_id` on a batch of `summaries` rows via direct SQL) to a small, deliberate slice per housekeeping tick instead of redoing hundreds of inference calls at once. Any positive integer. |
-| `project_gap_days`      | `7`     | Minimum time-gap (days) between two consecutive turns that triggers a project-boundary close. Any positive integer. |
+| `catch_up_batch_size`   | `10`    | Per-tick cap on unsummarized turns enqueued at once. Keeps a manual resummarize (nulling `summary_model_id` on a batch of `turn_summaries` rows via direct SQL) to a small, deliberate slice per housekeeping tick instead of redoing hundreds of inference calls at once. Any positive integer. |
 
 The same housekeeping loop catches turns that landed without a
-summary (e.g. captured via MCP while the daemon was down) and rewrites
-draft L2 rows when inference comes back.
-
-## `[embed]`
-
-The `ragger embed` subprocess pool that actually invokes the embedding
-model.
-
-| Key           | Default | Description                                |
-|---------------|---------|--------------------------------------------|
-| `timeout_ms`  | `10000` | Per-subprocess timeout.                    |
-| `retries`     | `1`     | Retries on a failed or timed-out subprocess. |
-| `max_workers` | `8`     | Cap on concurrent embed subprocesses.      |
+summary (e.g. captured via MCP while the daemon was down) and resumes
+the summarizer's backoff-deferred retries when inference comes back.
 
 ## `[logging]`
+
+All three take effect only after a daemon restart: the logger is set up once at startup. The dashboard marks them "restart required".
 
 | Key                | Default | Description                                                              |
 |--------------------|---------|----------------------------------------------------------------------------|
@@ -337,16 +331,16 @@ LIMIT 30;
 
 Each `hits` row records not just the final rank but **how each search signal
 contributed**, so you can judge whether a weight (`vector_weight`,
-`bm25_weight`) needs tuning — or whether a signal earns its keep
+`fts_weight`) needs tuning — or whether a signal earns its keep
 at all:
 
 | column | meaning |
 |--------|---------|
 | `score` | Raw vector cosine similarity — the absolute "how close in meaning" number, also what the API reports. |
 | `vec_score` | The **min-max-normalized** cosine that actually fed the blend (how it competed *within this result set*). |
-| `bm25_score` | Normalized custom-text-index contribution (TF-IDF over stemmed unigrams/bigrams, blended with Double Metaphone phonetic matches internally — see `fts_w_metaphone`), or **NULL** when `bm25_enabled = false`. |
+| `bm25_score` | Normalized custom-text-index contribution (TF-IDF over stemmed unigrams/bigrams, blended with Double Metaphone phonetic matches internally — see `fts_w_metaphone`), or **NULL** when `fts_enabled = false`. |
 | `phon_score` | **Retired as an independent signal in v0.16** — always `NULL`/`-1`, kept only for schema/API compatibility with older `stats.db` rows. The phonetic contribution now lives *inside* `bm25_score` (see `fts_w_metaphone`). |
-| `blended` | The final weighted ranking value: `vector_weight·vec + bm25_weight·bm25`. This is what actually ordered the results. |
+| `blended` | The final weighted ranking value: `vector_weight·vec + fts_weight·bm25`. This is what actually ordered the results. |
 
 A **NULL** in `bm25_score` means that signal was switched off for
 the search (so you can `AVG()`/filter without a sentinel skewing the numbers); a

@@ -24,8 +24,15 @@ std::vector<std::string> split_sentences(std::string_view text) {
         current += c;
 
         // Sentence terminators: . ! ? : ;
-        // Bigrams do not cross these boundaries.
-        if (c == '.' || c == '!' || c == '?' || c == ':' || c == ';') {
+        // Bigrams do not cross these boundaries. '!' and '?' always split;
+        // '.' ':' ';' split only before whitespace or end of text, so
+        // code-ish tokens ("v0.17", "schema.cpp", "std::string", "3.14")
+        // stay intact.
+        bool is_ws_next = i + 1 >= text.size() || text[i + 1] == ' ' ||
+                          text[i + 1] == '\t' || text[i + 1] == '\r' ||
+                          text[i + 1] == '\n';
+        if (c == '!' || c == '?' ||
+            ((c == '.' || c == ':' || c == ';') && is_ws_next)) {
             // Trim and add if non-empty
             std::string trimmed = current;
             trimmed.erase(0, trimmed.find_first_not_of(" \t\r\n"));
@@ -63,7 +70,7 @@ std::vector<std::string> normalize_words(std::string_view sentence) {
         char c = lower_sent[i];
         unsigned char uc = static_cast<unsigned char>(c);
         
-        if (std::isalnum(c)) {
+        if (std::isalnum(uc)) {
             current_word += c;
         } else if (c == '+' || c == '=' || c == '-') {
             // Preserve +, =, - as potential operator symbols
@@ -100,14 +107,6 @@ std::vector<std::string> normalize_words(std::string_view sentence) {
                 }
                 result.push_back(std::string("\xE2\x89\x88"));
                 i += 2;
-            } else if (byte3 == 0x92) {
-                // − (U+2212: E2 88 92) — UTF-8 minus
-                if (!current_word.empty()) {
-                    result.push_back(current_word);
-                    current_word.clear();
-                }
-                result.push_back(std::string("\xE2\x88\x92"));
-                i += 2;
             } else {
                 // Not a recognized operator, drop it
                 if (!current_word.empty()) {
@@ -115,7 +114,17 @@ std::vector<std::string> normalize_words(std::string_view sentence) {
                     current_word.clear();
                 }
             }
-        } else if (c == '\'' && i > 0 && i < lower_sent.size() - 1 && std::isalpha(lower_sent[i + 1])) {
+        } else if (uc == 0xE2 && i + 2 < lower_sent.size() &&
+                   (unsigned char)lower_sent[i + 1] == 0x88 &&
+                   (unsigned char)lower_sent[i + 2] == 0x92) {
+            // − (U+2212: E2 88 92) — UTF-8 minus
+            if (!current_word.empty()) {
+                result.push_back(current_word);
+                current_word.clear();
+            }
+            result.push_back(std::string("\xE2\x88\x92"));
+            i += 2;
+        } else if (c == '\'' && i > 0 && i < lower_sent.size() - 1 && std::isalpha(static_cast<unsigned char>(lower_sent[i + 1]))) {
             // Preserve apostrophe in contractions (e.g., "isn't", "don't")
             current_word += c;
         } else {

@@ -12,6 +12,7 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <cctype>
 #include <filesystem>
 #include <random>
 #include <cstdio>
@@ -250,6 +251,88 @@ AuthResult verify_token(UserStore& db, const std::string& token) {
     auto user_info = db.get_user_by_token_hash(token_hash);
     if (!user_info) return {};
     return {true, user_info->username};
+}
+
+bool request_origin_allowed(std::string_view method,
+                            std::string_view origin,
+                            std::string_view host) {
+    // Safe methods never mutate state — CORS preflight (OPTIONS) included.
+    if (method == "GET" || method == "HEAD" || method == "OPTIONS")
+        return true;
+    // No Origin header: curl, the CLI, the Hermes plugin, MCP — none send
+    // one, and none are browser cross-site contexts.
+    if (origin.empty())
+        return true;
+    // Strip the scheme ("http://" / "https://") to get the authority.
+    std::string_view authority = origin;
+    if (auto sep = origin.find("://"); sep != std::string_view::npos)
+        authority = origin.substr(sep + 3);
+    if (authority.empty())
+        return false;
+    // Case-insensitive exact match against Host (scheme-less). Hosts are
+    // case-insensitive per RFC; ports must match too.
+    auto ieq = [](std::string_view a, std::string_view b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            unsigned char ca = static_cast<unsigned char>(a[i]);
+            unsigned char cb = static_cast<unsigned char>(b[i]);
+            if (std::tolower(ca) != std::tolower(cb)) return false;
+        }
+        return true;
+    };
+    return ieq(authority, host);
+}
+
+bool host_is_loopback(std::string_view host_header) {
+    if (host_header.empty()) return false;
+
+    // Case-insensitive exact compare (hosts are case-insensitive per RFC).
+    auto ieq = [](std::string_view a, std::string_view b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            unsigned char ca = static_cast<unsigned char>(a[i]);
+            unsigned char cb = static_cast<unsigned char>(b[i]);
+            if (std::tolower(ca) != std::tolower(cb)) return false;
+        }
+        return true;
+    };
+    // A port, when present, must be all digits and non-empty; an empty or
+    // non-numeric port ("localhost:", "[::1]:x") is malformed → not loopback.
+    auto port_valid = [](std::string_view port) {
+        if (port.empty()) return false;
+        for (char c : port) {
+            if (c < '0' || c > '9') return false;
+        }
+        return true;
+    };
+
+    std::string_view host;
+    if (host_header.front() == '[') {
+        // Bracketed IPv6: "[addr]" or "[addr]:port".
+        auto close = host_header.find(']');
+        if (close == std::string_view::npos) return false;   // no closing ]
+        host = host_header.substr(1, close - 1);
+        auto rest = host_header.substr(close + 1);
+        if (!rest.empty()) {
+            if (rest.front() != ':') return false;           // junk after ]
+            if (!port_valid(rest.substr(1))) return false;
+        }
+    } else {
+        // Unbracketed. More than one colon ⇒ a bare IPv6 literal (no port);
+        // exactly one colon ⇒ "host:port"; none ⇒ host only.
+        auto first = host_header.find(':');
+        if (first == std::string_view::npos) {
+            host = host_header;
+        } else if (host_header.find(':', first + 1) == std::string_view::npos) {
+            host = host_header.substr(0, first);
+            if (!port_valid(host_header.substr(first + 1))) return false;
+        } else {
+            host = host_header;                              // e.g. "::1"
+        }
+    }
+
+    if (host.empty()) return false;
+    return ieq(host, "localhost") || ieq(host, "127.0.0.1") || ieq(host, "::1");
 }
 
 } // namespace ragger

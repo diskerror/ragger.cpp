@@ -12,13 +12,15 @@ namespace ragger {
 
 class RaggerMemory;
 
-/// Import one Markdown/text/JSON file as L5 document chunks: chunk via
+/// Import one Markdown/text/JSON file as document chunks: chunk via
 /// chunk_markdown, store every chunk without embedding (fast), then embed
-/// the bodies out-of-process with bounded concurrency (see EmbedExecutor).
+/// every pending row in-process (RaggerMemory::backfill_embeddings).
 /// `title` overrides the default (filename stem) when non-empty; `year`/
 /// `tags` are applied to every chunk of this file. Used by both the
 /// `import-docs` verb and the deprecated bare `import` verb in main.cpp.
-void do_import(RaggerMemory &memory,
+/// Returns true if the file was imported, false if it was refused (already
+/// imported). Throws if the file cannot be read or embedded.
+bool do_import(RaggerMemory &memory,
                const std::string &filepath,
                int min_chunk_size,
                const std::string &title,
@@ -42,7 +44,7 @@ std::vector<ImportChunk> chunk_markdown(const std::string& text, int min_chunk_s
 
 /// Final line-level cleanup applied to a chunk's text right before it's
 /// stored in the `documents` table (issue: Markdown heading/list noise
-/// bloating L5 rows). For every line: strip leading spaces and '#'
+/// bloating `documents` rows). For every line: strip leading spaces and '#'
 /// characters (in any mix — "  ## Heading" -> "Heading", "### " ->
 /// "", a bare "#" -> ""), and strip trailing spaces. Newlines and blank
 /// lines are preserved as structure; this only touches the run of
@@ -85,9 +87,9 @@ struct MemoryChunk {
 std::vector<MemoryChunk> split_memory_narrative(const std::string& text);
 
 /// Heuristic classification of a memory chunk: true if it reads as a
-/// standing fact/preference (decision-like — L5/L6 `decisions`), false if
+/// standing fact/preference (decision-like — stored as knowledge), false if
 /// it reads as episodic narrative of a specific work session (session-like
-/// — L3 `summaries`). Checks `heading_path` first (headings containing
+/// — stored as a note). Checks `heading_path` first (headings containing
 /// "history"/"recent"/"earlier"/"background"/"timeline" → session-like;
 /// "context"/"top of mind"/"preference" → decision-like), then falls back
 /// to a verb/keyword scan of `text` (stative "prefers"/"is a"/"uses X as"
@@ -233,10 +235,10 @@ std::vector<ImportTurn> filter_turns(const std::vector<ImportTurn>& turns,
 bool is_synthetic_session_guid(const std::string& guid);
 
 // -------------------------------------------------------------------------
-// L4 summaries import.
+// Hand-authored notes import (stored as knowledge notes).
 // -------------------------------------------------------------------------
 
-/// One hand-authored project-level summary to ingest as an L4 row.
+/// One hand-authored note to ingest as a knowledge note (`store_note`).
 struct SummaryImport {
     std::string text;
     std::string tags;        // comma-separated (empty allowed)

@@ -3,13 +3,13 @@
  *
  * Holds a NON-OWNING sqlite3* (the sqlite::Backend owns the handle). Implements
  * the TextIndex storage hooks with ragger::Stmt, and provides create_schema()
- * (terms + 5 junction tables) and a batched full-table reindex_table().
+ * (terms + 6 junction tables) and a batched full-table reindex_table().
  *
  * Hot-path statement caching: the handful of queries hit per-term/per-record
  * during indexing and search are cached as std::optional<Stmt> instance
  * members (lazy: prepared on first use, sqlite3_reset+clear_bindings on
  * reuse), one accessor per table since the 5 text tables are a small fixed
- * set (turns, turn_summaries, summaries, documents, decisions) — no map, no
+ * set (turns, turn_summaries, episodes, knowledge, documents) — no map, no
  * runtime SQL-string formatting for these. A small if/else dispatch
  * (doc_freq_stmt/count_stmt/postings_stmt/delete_terms_stmt/
  * insert_terms_stmt/update_counts_stmt) picks the right per-table accessor
@@ -20,15 +20,22 @@
 
 #include <sqlite3.h>
 
+#include <array>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "../text_index.h"
+#include "sqlite/tables.h"
 #include "util/sqlite.h"
 
 namespace ragger::sqlite {
+
+// The shared embed/index text formulas (kDecisionEmbedTextSQL /
+// kDocEmbedTextSQL) now live in sqlite/tables.h next to the registry rows
+// that reference them (PHASE3 Step 1). tables.h is included here, so every
+// existing `#include "sqlite/text_index.h"` user still sees them.
 
 class TextIndex final : public ragger::TextIndex {
 public:
@@ -37,13 +44,21 @@ public:
     // CREATE terms + <t>_terms junction tables + term_id indexes (idempotent).
     void create_schema();
 
+    // Junction DDL in ONE place (PHASE3 Step 2): emits the current 0.16
+    // junction shape (rowid table, PRIMARY KEY (<pk>, term_id), term_id
+    // index). Phase 9 changes the shape here and nowhere else.
+    static std::string junction_ddl(const TextTable& t);
+    static std::string junction_index_ddl(const TextTable& t);
+
     // Full rebuild of one text table's index. Key-paginated read (batch 200),
     // then per-record index_record(). Idempotent (delete-then-insert). Returns
-    // the number of records reindexed. `progress` prints a counter to stdout.
-    int reindex_table(const std::string& table, bool progress = false);
+    // the number of records reindexed. `progress` receives (table, done, total)
+    // per record and (table, -1, total) at the end (see ragger::ProgressFn).
+    int reindex_table(const std::string& table, const ProgressFn& progress = {},
+                  const CancelFlag* cancel = nullptr);
 
     // Truncate the shared `terms` table and reset its AUTOINCREMENT counter,
-    // starting term_ids fresh from 1. Only safe when reindexing ALL five
+    // starting term_ids fresh from 1. Only safe when reindexing ALL six
     // text tables in the same run: every junction table's term_id column is
     // `REFERENCES terms(term_id) ON DELETE CASCADE`, so this one DELETE
     // cascades and empties every junction table too (foreign_keys must be ON,
@@ -84,49 +99,18 @@ private:
     Stmt& select_term_id();
     Stmt& insert_term();
 
-    // Per-table accessors (fixed 5-table set: turns, turn_summaries,
-    // summaries, documents, decisions). Named verb_noun_table so related
-    // statements alphabetize/group together.
-    Stmt& doc_freq_turns();
-    Stmt& doc_freq_turn_summaries();
-    Stmt& doc_freq_summaries();
-    Stmt& doc_freq_documents();
-    Stmt& doc_freq_decisions();
+    // Registry-driven statement cache (PHASE3 Step 2, B §2.2): one set of
+    // six cached statements per registry row (sqlite/tables.h), generated
+    // from ONE std::format template per verb. The SQL text is byte-identical
+    // (whitespace-normalized) to the old 36 hand-written accessors — pinned
+    // by the Step 2 identity probe (REPORT-P3).
+    struct TableStmts {
+        std::optional<Stmt> doc_freq, count, postings,
+                            delete_terms, insert_terms, update_counts;
+    };
 
-    Stmt& count_turns();
-    Stmt& count_turn_summaries();
-    Stmt& count_summaries();
-    Stmt& count_documents();
-    Stmt& count_decisions();
-
-    Stmt& postings_turns();
-    Stmt& postings_turn_summaries();
-    Stmt& postings_summaries();
-    Stmt& postings_documents();
-    Stmt& postings_decisions();
-
-    Stmt& delete_terms_turns();
-    Stmt& delete_terms_turn_summaries();
-    Stmt& delete_terms_summaries();
-    Stmt& delete_terms_documents();
-    Stmt& delete_terms_decisions();
-
-    Stmt& insert_terms_turns();
-    Stmt& insert_terms_turn_summaries();
-    Stmt& insert_terms_summaries();
-    Stmt& insert_terms_documents();
-    Stmt& insert_terms_decisions();
-
-    Stmt& update_counts_turns();
-    Stmt& update_counts_turn_summaries();
-    Stmt& update_counts_summaries();
-    Stmt& update_counts_documents();
-    Stmt& update_counts_decisions();
-
-    // Runtime dispatch to the per-table accessor above, for the callers
-    // (corpus_size/doc_freq/postings/replace_record_terms/set_counts) that
-    // only know `table` as a validated string at call time. Plain if/else
-    // over the fixed 5-table set -- no map, no format-string SQL.
+    // Runtime dispatch (table name -> registry row -> cached statement).
+    // Throws std::runtime_error("Invalid table name: ...") for unknowns.
     Stmt& doc_freq_stmt(const std::string& table);
     Stmt& count_stmt(const std::string& table);
     Stmt& postings_stmt(const std::string& table);
@@ -143,28 +127,7 @@ private:
     std::optional<Stmt> select_term_id_;
     std::optional<Stmt> insert_term_;
 
-    std::optional<Stmt> doc_freq_turns_, doc_freq_turn_summaries_,
-                         doc_freq_summaries_, doc_freq_documents_,
-                         doc_freq_decisions_;
-
-    std::optional<Stmt> count_turns_, count_turn_summaries_, count_summaries_,
-                         count_documents_, count_decisions_;
-
-    std::optional<Stmt> postings_turns_, postings_turn_summaries_,
-                         postings_summaries_, postings_documents_,
-                         postings_decisions_;
-
-    std::optional<Stmt> delete_terms_turns_, delete_terms_turn_summaries_,
-                         delete_terms_summaries_, delete_terms_documents_,
-                         delete_terms_decisions_;
-
-    std::optional<Stmt> insert_terms_turns_, insert_terms_turn_summaries_,
-                         insert_terms_summaries_, insert_terms_documents_,
-                         insert_terms_decisions_;
-
-    std::optional<Stmt> update_counts_turns_, update_counts_turn_summaries_,
-                         update_counts_summaries_, update_counts_documents_,
-                         update_counts_decisions_;
+    std::array<TableStmts, kTextTableCount> stmts_;
 };
 
 }  // namespace ragger::sqlite

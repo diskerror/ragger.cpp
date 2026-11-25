@@ -1,5 +1,96 @@
 # Changelog
 
+## v0.17.0
+- `memory_search` gains opt-in **split mode** (`split: true`, with optional `min_vector_score` / `min_fts_score`): two separate runs (vector, FTS), each its top `limit` above a per-type minimum, returned as three disjoint lists `groups.both` / `groups.vector_only` / `groups.fts_only` with native scores only (`vector_score` = raw cosine, `fts_score` = raw keyword score, absent = `null`) — no blended `score`, no `matched_by`. The blended default is unchanged; `vector_available: false` when no embedder is ready. The blended number is min-max normalized per pool and cannot separate on-topic from off-topic hits (measured 2026-11-16); raw cosine can (0.38+ vs 0.20-).
+- Auto-recall now defaults to **decisions only**: new setting `auto_recall_mode` (`decisions` | `flat`, dashboard Server section, live). Plugins inject active decisions matched to the prompt as `[knowledge:5] <trigger> → <ruling>` (status appended when not `current`); short prompts borrow the previous user messages. `flat` keeps the old behavior; `auto_recall = false` still turns recall off. The Hermes plugin reads the setting from the daemon; the OpenClaw plugin has `autoRecallMode` in its own config.
+- New setting `auto_recall_min_similarity` (float, dashboard Server section, live, default `0.30`): the minimum raw-cosine vector similarity for a memory to be injected by auto-recall; `0` injects the top results regardless. The default sits inside the gap measured 2026-11-16 across 10 prompts — best off-topic hit 0.20, weakest on-topic top hit 0.38 — so it drops weaker secondary hits (0.27 seen) without cutting on-topic ones. It is a per-embedder calibration, not a tuned optimum: re-measure after changing the embedding model. Hal wires the Hermes and OpenClaw plugins to read it.
+- Hermes and OpenClaw auto-recall (`decisions` mode) now query `memory_search` with `split: true` and `min_vector_score` = the similarity setting (OpenClaw: `autoRecallMinSimilarity`), injecting `both` then `vector_only`; the blended score is no longer used for the gate. Older daemons fall back to ungated results.
+- A model reply cut off at the token limit (`finish_reason` `length`, Anthropic `stop_reason` `max_tokens`) is now a failed call, not a stored summary: the row is retried like any other failure. The check is per format (`response_finish_reason` / `finish_truncated` in `formats/*.json`); a format file without them gets the OpenAI shape, and an older installed `anthropic.json` is not checked until `formats/` is refreshed by the installer.
+- New settings on the Summarizer page: `summarizer_title_prompt` (session titles, the Name sessions job; no placeholders, the title length is stated in the text, default 3 to 8 words) and `summarizer_trigger_prompt` (the Back-fill triggers job; no placeholders). Empty prompt uses the built-in default.
+- `log_level`, `log_max_size_mb` and `log_max_age_days` are now marked restart-required (they always were: the logger is built once at startup; the dashboard said Live).
+- Removed the `embed_timeout_ms`, `embed_retries` and `embed_max_workers` settings and the `[embed]` INI section, with `EmbedExecutor` and its test: nothing had created an EmbedExecutor since the import path stopped using it, so the settings had no effect. Old INI `[embed]` keys and saved setting rows are ignored.
+- Fix: saving `summarizer_model`, `summarizer_api_url`, `summarizer_api_key`, `summarizer_max_tokens` or an `inference_*` setting on the dashboard (or `PUT /config`) now rebuilds the inference client at once. Before, the daemon kept calling the old model and endpoint until a restart or SIGHUP, although the settings are marked Live.
+- New setting `summarizer_episode_prompt` (Episode Prompt): `{N}` is the member count, then two `{}` for target and cap. The Summarizer page lists the prompts in the order turn, episode, session title, knowledge trigger. All four built-in defaults moved to `lang/en.h` (`PROMPT_*`), out of `config.h` and `summarizer.cpp`.
+- New built-in prompts. Turn summary: keeps who said what and says a proposal is not a decision unless the user accepted it in that exchange. Session title: 3 to 8 words, title only. Trigger: phrased as the future question, must not state the answer, one example included. Existing summaries are not rewritten; use the Regenerate back-fill on a sample to compare first.
+- **FTS naming.** The keyword/text-index signal is now called FTS everywhere it is named: config keys `fts_enabled` / `fts_weight` (the old `bm25_enabled` / `bm25_weight` are still read), `matched_by` value `"fts"` (was `"lexical"`), `SearchResult::fts_score`. The scoring is TF-IDF, not BM25. The `stats.db` column `bm25_score` keeps its name (existing files).
+- **Layer numbers retired.** The early L1–L6 labels are gone from the code, docs and messages: they said "turn summary" (L2), "episode" (L3), "documents" (L5) and "knowledge" (L6), and the project layer (L4) no longer exists. The back-fill kinds are now `turn-summary-null`, `turn-summary-empty` and `turn-summary-regenerate` (were `l2-null`, `l2-empty`, `l2-regenerate`); internal names followed (`backfill_turn_summary`, `stale_turn_summary_candidates`, `TurnSummaryRefresh`, ...). Older changelog entries keep their original wording.
+- `GET /health` and the MCP `status` tool report `capture_turns` (bool), `summarizer_model` / `summarizer_engine` (strings; empty = not configured) and `summarizer_reachable` (bool: the summarizer endpoint answers `GET /v1/models`; 1 s timeout, cached 15 s). The Hermes and OpenClaw plugins log a warning once when capture is off or no summarizer is configured.
+- OpenClaw plugin ported to the 0.17 agent API: `memory_search` (layered), `memory_get` (typed handles), `memory_timeline`, `memory_note`, `memory_decision`, `memory_update`, `document_search`, plus `memory_store` and `memory_status`. The old count tool (`memory_get` returning a number) is gone. Tool definitions are generated from `tools/*.json` by `scripts/gen-openclaw-tools.py` (`--check` in `scripts/test.sh`). **Untested against a live OpenClaw** (stub-server run only); README and `docs/openclaw.md` say so.
+- `store` (HTTP, MCP, CLI) rejects `category: "decision"`: a decision needs a trigger, so every decision goes through `memory_decision` / `POST /decision`; `ragger decision add` requires `--trigger`. The Hermes plugin rejects it locally with a pointer to `memory_decision`, and the OpenClaw plugin gains a `memory_decision` tool (HTTP `/decision`, MCP `memory_decision`). `docs/agent-memory-instructions.md` no longer suggests `store` for decisions; re-run `install-bin.sh` and the plugin installers to pick up the new files (an edited instructions copy is kept, the shipped one is written beside it as `.new`).
+- removed: `cleanup_max_age_hours` and the retention purge of raw turns. Honest history has no opt-out; turns are never auto-deleted. A `cleanup_max_age_hours` row left in the `settings` table by an older release is an unknown key and is silently dropped. The MCP-mode housekeeping thread (whose only job was the purge) is gone; the housekeeping pass keeps the summarizer catch-up and the embedding backfill
+- `semqlite_config` moves into Ragger's database as the shared facts-about-the-file table SemanticSQLite reads. The embedding identity stamps (`embedding_model`, `vector_type`, `dimensions`) now live there under SemanticSQLite's names (`embedding_model`, `embedding_vector_type`, `embedding_dims`); Ragger also publishes `embedding_embedder` (`onnx`, or `http://host:port` for an external engine), `embedding_offset` (0: 0.17 stores bare vectors, the version is a column) and `embedding_api_key_env`. `semqlite memories.db` then runs `EMBED()` with no setup. Ragger's change-management state (`desired_*`, `embedding_version`, `reembedding*`) stays in `settings`
+- The legacy `settings` stamp rows move over once, idempotently, whenever the user schema is created (not tied to `db_version`, so an already-stamped 0.17 file is fixed on next open). A stamp already present in `semqlite_config` wins. Nothing is published while embeddings are degraded
+- With an external engine the recorded identity model is the endpoint's own model name (`embedding_external_model`), so `semqlite_config.embedding_model` is usable by the http embedder
+- API keys are environment variables. `embedding_external_api_key` and `summarizer_api_key` settings are replaced by `embedding_api_key_env` and `summarizer_api_key_env`, which hold only the variable NAME (validated as an identifier, so a pasted key is rejected). The dashboard no longer sends a key, the daemon reads its own. A launchd daemon does not inherit the shell environment: set the variables in the plist. Import scripts read the same variable
+- Views: only the date-conversion views remain (9). Dropped the two `knowledge_*_evidence_view` passthroughs and the five `<table>_terms_view` junction views; they are dropped by name from existing files on open. The view-coverage test now checks every remaining view converts a date
+- Agent instructions rewritten for the full tool set (quick vs layered tools, which tool for decisions vs notes, `trigger` phrasing, supersede/evidence, curation, per-host tool names, when to write an insight). The Hermes plugin now puts the whole file in the system prompt (static fallback if missing). Every frontend installer (Hermes, OpenClaw, Claude Code, Claude Desktop, install-bin) installs it if absent and, when your copy differs from the shipped one, keeps yours and writes `.new` beside it
+- Docs/tests: `semqlite_config` migration test (model-free), API-key environment test
+
+**Schema**
+- One `knowledge` table (kind: decision | insight | note) replaces `decisions`, `insights` and note summaries; typed handles are `knowledge:N` — `decision:N` / `insight:N` are rejected with a pointer to the new form
+- `episodes` is a real table; membership is recorded on turn summaries (`episode_id`)
+- `episodes` has no `supersedes`: episode text is derived and replaced in place, so there is no supersede chain. The column, `idx_episodes_supersedes` and the `episodes_view` column are gone; the unique key on `(session_id, span_start)` now covers every episode (it used to exempt superseded copies)
+- `episodes.created_at` is now `modified_on`: the time the episode's text was last written — stamped on insert and on every in-place replace. The old rule `created_at = span_end` is gone (the span already says when the turns happened). The agent API keeps its `created` key for episodes; it now reports that write time. `scripts/rebuild-check.sql` checks `episodes_modified_before_span_end` instead of the old equality check
+- `episodes` gains `locked` (INTEGER NOT NULL DEFAULT 0): 1 means the episode can no longer be rebuilt from its source (its turn summaries were culled). A locked episode is never re-summarized and never receives late turn summaries — the catch-up scan skips it, the regeneration handler returns without a write, and a late row covered only by locked episodes stays unattached (until the late-turn rule turns it into a new episode). Nothing sets the flag yet; the cull feature that does comes later. No API field, no dashboard control
+- `turns` gains `started_on` (nullable INTEGER, last column): the time the user prompt arrived, sent by the capture hook as `started_at` on `POST /turn` / `capture_turn` (epoch seconds or a `YYYY-MM-DD HH:MM:SS` timestamp; rejected if malformed, more than a day in the future, or after the turn's own time). NULL = unknown, which keeps today's behaviour. Episode boundary timing now measures the gap from the END of one turn to the START of the next (a long reply is no longer idle time); on a same-exchange merge the earlier of stored and new value wins. The idle-close timer is unchanged (it still measures from the newest stored turn). The Hermes and OpenClaw plugins send `started_at` after this release; until then every turn stores NULL
+- The `summaries` and `projects` tables are removed; sessions group only, and "project" is a tag (`project:<name>`)
+- `sessions` gains `started_on` / `ended_on`, maintained from the session's turns on write
+- Migration is 0.16→0.17 only; databases older than 0.16 are refused untouched — upgrade to v0.16.2.3 first
+
+**Summarizer / episodes**
+- Every new turn captured via `/turn` is enqueued to the summarizer immediately instead of waiting for the next catch-up tick
+- No-daemon rule (accepted behavior, not a bug): an install that runs only `ragger mcp` — without a daemon — stores turns and knowledge but builds no summaries — turn summaries and episodes are created when a daemon with a configured summarizer endpoint next runs its catch-up; writes from the `ragger mcp` process do not invalidate a running daemon's caches, and the MCP process does not signal the daemon
+- A turn that merges additional data after it was summarized carries a `stale` counter (merges not yet reflected in its summary text); the periodic catch-up refreshes the summary in place — text, embedding and index — and clears the counter only when no newer merge landed meanwhile
+- Failing turns back off (5 min, doubling to 6 h) instead of retrying every tick
+- Episodes close when a session has been idle past `episode_idle_minutes`, split on embedding-similarity boundaries (the existing rule), with membership recorded
+
+**API**
+- `store` with `metadata.category=decision` goes through one validated path on every transport (HTTP, MCP, CLI); decision-path responses carry `kind` instead of `table`, and `/memory/search` accepts `kinds`
+- `chat()` requests carry a whole-request timeout, so a stalled endpoint can no longer freeze the summarizer worker
+
+**Fixes**
+- Embedder padding fix: short texts are no longer pooled over `[PAD]` positions — all stored embeddings must be rebuilt (see Upgrade notes)
+- Shipped default settings actually apply on fresh installs
+- Config is now an immutable snapshot; reloads publish a new snapshot instead of mutating strings under readers
+- Turn summaries with NULL text are normalized and re-queued
+- Write paths check statement results; failures throw instead of silently dropping writes or reporting wrong counts
+- `ragger reindex` runs in one transaction — a mid-run failure leaves the old index intact
+- CLI verbs (`import-docs`, `delete-doc`, `reindex`, `config set`, `recipe`) write audit lines to `activity.log`; `config set` signals the daemon to reload
+- `import-docs` embeds in-process instead of spawning one model-loading subprocess per chunk
+
+**Logic review 0.17 (capture quality, search, surfaces)**
+- Episodes are stamped with their last member's time (`created_at` = span end); turn summaries keep their turn's time
+- An interrupted turn merges into the stored turn instead of overwriting it
+- Short exchanges are stored as real turn summaries (the source text copied, no model call at or under `summarizer_min_words`, default 20) — the empty `(skipped)` marker rows are gone; a poison-abandoned turn is the only empty row (model `bad`)
+- A summary longer than its source is replaced by the source (a tie keeps the source); a copied summary records the original's model
+- Episode summaries get their own prompt: the model is told the input is N consecutive summaries of one conversation span and must write standalone text without headers or wrapping quotes
+- New back-fill verbs: `ragger backfill <kind>` (`turn-summary-null`, `turn-summary-empty`, `turn-summary-regenerate`, `triggers`, `stranded`, `session-names`) with `--dry-run`; they repair pre-rule rows, draft missing decision triggers, re-attach stranded summaries, and name untitled sessions
+- `DELETE /memory/<id>` and `POST /delete_batch` left the HTTP surface (now 404); rows are retired by status (`memory_update`), not deleted
+- `memory_note` accepts `trigger` (insights only — a plain note with a trigger is rejected) and `session` provenance
+- `ragger decision set-status` goes through the same update path and validation as `memory_update`
+- `memory_search` defaults to turn summaries, episodes and knowledge; documents have their own verb `document_search` (the `document` layer is rejected); raw `turn` text and session titles are searched only when named
+- Sessions are searchable by title (lexical-only corpus)
+- `memory_search` scores each requested corpus against its own candidate pool, so a weak corpus can no longer crowd another one's hits out of the results
+- Both search verbs take `mode` (`hybrid` | `semantic` | `keyword`) and a `tags` filter (AND rule; arrays accepted everywhere, not just comma strings)
+- Episode hits carry their session and span, and episodes satisfy the session filters
+- History paging carries each turn's `turn_summary_id` and `episode_id`; `expand=context` returns neighbouring turns in session order; `expand=sources` walks knowledge → episodes → summaries → turn; `memory_timeline` gained `granularity=knowledge`
+- Evidence points at episodes (`episode:<id>` or bare ids) on every transport; turn-summary handles are rejected with a pointer to the right form
+- `memory_review` left the agent tool lists (MCP and plugin): there is no CLI `memory_review` verb; curation stays user-driven — the HTTP route `POST /memory/review` remains, and from the CLI the pending queue is reached with `ragger decision list --status pending` + `ragger decision set-status`
+- Tool definitions live in `tools/*.json` — one source of truth compiled into the binary; new `GET /tools` serves the same gated array as MCP `tools/list`
+- Every maintenance verb is dry-runnable (`--dry-run`), reports progress, is cancellable between batches, and resumable; `ragger reindex all` stays atomic
+- The daemon gained a single-flight maintenance job runner (`POST /jobs/<name>`, `POST /jobs/cancel`, `GET /jobs`, progress as SSE `job` events) and the dashboard a Maintenance card; re-embedding stays a CLI operation the user runs
+
+**Upgrade notes**
+- Back up the database before upgrading (the migration leg makes its own pre-migration backup too — take one anyway)
+- Run `ragger reindex all` — the tokenizer changes land in this cycle; stored term rows are stale
+- Run `ragger re-embed all` — embeddings stored before the padding fix are degraded, and some rows' embed text changed
+- Import your conversation history (e.g. Telegram) so the back-fill below runs against realistic data
+- Repair episode times once through `semqlite`: `UPDATE episodes SET created_at = span_end WHERE created_at <> span_end;`, then `ragger reload-cache`
+- Run `ragger backfill <kind> --dry-run` for each kind, then for real
+- `ragger housekeeping` (or the daemon's normal pass) closes new episodes with the corrected time
+- Run `scripts/rebuild-check.sql` and read the counts
+- If your stored `summarizer_prompt` is wrapped in double quotes (older installs), fix it with `ragger config set`
+
 ## v0.16.2.6
 - Follow c_lib's new library layout: `diskerror_double_metaphone` and `diskerror_stemmer_snowball` were merged into one `diskerror_search` target, so `ragger_core` links that instead. Pinned fallback c_lib bumped to `76eada1` (sources in `src/`, SQLite 3.54.1, merged search library)
 - No behavior change; the DB schema stays 0.16

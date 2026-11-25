@@ -30,21 +30,22 @@ C++ port of the original Python [Ragger Memory](https://github.com/diskerror/rag
 ## What you get
 
 - **Captured turns, summarized live.** Turns land in the DB as they happen; an in-daemon worker
-  writes per-turn summaries immediately and closes session summaries on idle, all without blocking
-  the agent. If the summarizer model is unreachable, a draft is stored and rewritten later — the
-  agent never waits on inference it didn't ask for.
+  writes per-turn summaries immediately and closes episodes on idle, all without blocking the
+  agent. The agent never waits on inference it didn't ask for.
 - **Hybrid search.** A custom TF-IDF inverted index (stemmed unigrams + bigrams and
   DoubleMetaphone "sounds-like" codes sharing one flat term table) blended with dense vector
   cosine via Eigen3. Configurable weights; all signals normalized before blending.
-- **Local or external embeddings.** Internal engine runs an ONNX model on disk (`all-MiniLM-L6-v2`,
-  `all-MiniLM-L12-v2`, etc., 384-dim by default); external engine calls any OpenAI-compatible
+- **Local or external embeddings.** Internal engine runs an ONNX model on disk (default
+  `all-MiniLM-L12-v2`, 384-dim); external engine calls any OpenAI-compatible
   `/v1/embeddings` endpoint (llama.cpp, llama-swap, LM Studio, OpenAI). Stored as IEEE half (f16) by
   default; in-memory math stays f32. Storage type can be `f32`, `f16`, `bf16`, and `int8`. Re-encode
   any time with
-  `ragger rebuild-embeddings` or the dashboard's "Update now".
+  `ragger re-embed` or the dashboard's "Update now".
 - **HTTP and MCP, same data.** Daemon serves a REST API; `ragger mcp`
   speaks JSON-RPC over stdio. Bearer-token auth on remote requests; unix-socket and loopback are
-  pre-authenticated.
+  pre-authenticated. Running MCP-only (no daemon) stores turns and knowledge but builds no
+  summaries — the daemon's catch-up fills them in later; see
+  [Agent integration](docs/agent-integration.md).
 - **Markdown-aware import.** Heading-aware chunking; Claude Code and claude.ai conversation archives
   import with original timestamps.
 
@@ -64,8 +65,8 @@ Three seams are built to be replaced without touching the rest of the code:
   include that instead in `lang.h`. Caveat: the browser dashboard carries its own inline English
   (`web/dashboard.html`) and isn't covered by this, so a full translation is currently two files.
 - **Context recipes (fading memory).** How a session's past is rebuilt into a context payload is not
-  hardcoded — it's a JSON recipe that layers raw turns → turn summaries → session/project
-  summaries → decisions, walking the latest prompt backward so recent detail stays sharp while older
+  hardcoded — it's a JSON recipe that layers raw turns → turn summaries → episodes
+  → decisions, walking the latest prompt backward so recent detail stays sharp while older
   context fades to summary. `build_context` reads it; five recipes ship (`natural_fading`,
   `reconnect`, `deep_recall`, `tldr`, `raw_only`) and you can drop your own in `~/.ragger/recipes/`
   to tune the fade curve without recompiling.
@@ -224,19 +225,25 @@ macOS (arm64 and x86_64) and Linux (x86_64 and aarch64) are supported. Windows n
 | [Getting started](docs/getting-started.md)                     | Setup and first run                                            |
 | [Configuration](docs/configuration.md)                         | Config keys reference (DB-backed)                              |
 | [Search & RAG](docs/search-and-rag.md)                         | How hybrid search works                                        |
+| [What capture records](docs/capture.md)                        | What the plugin sends and merges; what never enters           |
 | [HTTP API](docs/http-api.md)                                   | REST endpoints, MCP, auth, `/turn` and `/session/<id>?recipe=` |
 | [Importing conversations](docs/importing-conversations.md)     | Claude Code / claude.ai history                                |
 | [Deployment](docs/deployment.md)                               | Daemon lifecycle, sub-users, reverse proxy                     |
 | [TLS setup](docs/tls-setup.md)                                 | HTTPS via reverse proxy or native cert/key                     |
 | [Agent integration](docs/agent-integration.md)                 | MCP and Claude Desktop                                         |
 | [Agent memory instructions](docs/agent-memory-instructions.md) | Guidance served to agents over MCP                             |
-| [OpenClaw](docs/openclaw.md)                                   | OpenClaw plugin setup                                          |
+| [OpenClaw](docs/openclaw.md)                                   | OpenClaw plugin setup (**untested**, see caveat in the doc)    |
 | [Testing your install](docs/testing-your-install.md)           | End-to-end smoke check                                         |
+
+> **OpenClaw caveat:** the OpenClaw plugin (`openclaw-plugin/`) was ported to
+> the 0.17 agent API without a live OpenClaw to test against. It has only been
+> exercised against a stub HTTP server, not a real OpenClaw host or daemon.
+> The Hermes, Claude Code and Claude Desktop integrations are the tested ones.
 
 ## Tests
 
 ```bash
-cd build && ctest --output-on-failure   # 14 suites
+cd build && ctest --output-on-failure   # 22 suites (23 with stats)
 ```
 
 ## License

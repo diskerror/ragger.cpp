@@ -2,7 +2,13 @@
  * Import chunking tests
  */
 #include "import.h"
+#include "check.h"
+#include "memory.h"
+#include "test_env.h"
+#include <sqlite3.h>
 #include <cassert>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <print>
 
@@ -146,6 +152,17 @@ void test_whitespace_collapsing() {
     }
 }
 
+// S29: exact cleaning output of chunk_markdown (recorded from the pre-fix
+// code; hoisting the regexes to static const must not change a byte).
+void p10_chunk_markdown_exact() {
+    std::println("  p10_chunk_markdown_exact...");
+    const std::string in = "a b\n\n\n\n c ![x](data:image/png;base64,AAAA) d";
+    auto chunks = chunk_markdown(in, 300);
+    CHECK(chunks.size() == 1);
+    CHECK(chunks[0].text == "a b\n\n c d");   // recorded pre-fix
+    CHECK(chunks[0].section == "");
+}
+
 void test_tiny_file() {
     std::string text = "Hi.";
     auto chunks = chunk_markdown(text, 300);
@@ -177,7 +194,46 @@ void test_clean_document_text() {
 // Main
 // -----------------------------------------------------------------------
 
+// PHASE9B step 8: do_import embeds in-process. The test binary is never
+// given RAGGER_BIN, so any attempt to spawn `ragger embed` fails outright;
+// passing therefore proves no subprocess was needed.
+void p9b_test_do_import_embeds_in_process() {
+    std::print("  p9b_test_do_import_embeds_in_process...\n");
+    const std::string db = ragger::config().resolved_db_path();
+
+    const std::string md = "/tmp/p9b_import_doc.md";
+    {
+        std::ofstream f(md);
+        f << "# Tuning\n\n" << std::string(300, 'a')
+          << "\n\n## Equal temperament\n\n" << std::string(300, 'b') << "\n";
+    }
+
+    ragger::RaggerMemory memory(db);
+    CHECK(!memory.embeddings_unavailable());
+    CHECK(ragger::do_import(memory, md, 100, "", 0, ""));
+
+    sqlite3* raw = nullptr;
+    CHECK(sqlite3_open(db.c_str(), &raw) == SQLITE_OK);
+    auto scalar = [&](const char* sql) {
+        sqlite3_stmt* st = nullptr;
+        CHECK(sqlite3_prepare_v2(raw, sql, -1, &st, nullptr) == SQLITE_OK);
+        CHECK(sqlite3_step(st) == SQLITE_ROW);
+        const long long v = sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+        return v;
+    };
+    CHECK(scalar("SELECT COUNT(*) FROM documents") >= 2);
+    CHECK(scalar("SELECT COUNT(*) FROM documents WHERE embedding IS NULL") == 0);
+    sqlite3_close(raw);
+
+    // Re-importing the same path is refused (and reported as such).
+    CHECK(!ragger::do_import(memory, md, 100, "", 0, ""));
+    memory.close();
+    std::println(" OK");
+}
+
 int main() {
+    TestEnv env("import");   // must be first: isolates from ~/.ragger
     test_heading_levels();
     test_heading_text_extraction();
     test_empty_input();
@@ -190,8 +246,19 @@ int main() {
     test_minimum_chunk_size_splitting();
     test_base64_stripping();
     test_whitespace_collapsing();
+    p10_chunk_markdown_exact();
     test_tiny_file();
     test_clean_document_text();
+
+    const std::string model_dir = env.model_dir();
+    if (!std::filesystem::exists(model_dir + "/model.onnx") &&
+        !std::filesystem::exists(model_dir + "/onnx/model.onnx")) {
+        std::cerr << "Skipping import integration test: model not found at "
+                  << model_dir << "\n";
+        std::println("test_import: SKIPPED integration (no model)");
+    } else {
+        p9b_test_do_import_embeds_in_process();
+    }
 
     std::println("test_import: all passed");
     return 0;

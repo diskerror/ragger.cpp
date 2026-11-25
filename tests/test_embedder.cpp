@@ -7,7 +7,8 @@
  */
 #include "config.h"
 #include "embedder.h"
-#include <cassert>
+#include "test_env.h"
+#include "check.h"
 #include <cmath>
 #include <filesystem>
 #include <iostream>
@@ -17,8 +18,8 @@
 void test_output_shape(ragger::Embedder& emb) {
     std::println("  test_output_shape...");
     auto vec = emb.encode("test text");
-    assert(vec.size() == 384);
-    assert(emb.dimensions() == 384);
+    CHECK(vec.size() == 384);
+    CHECK(emb.dimensions() == 384);
     std::println(" OK");
 }
 
@@ -26,9 +27,9 @@ void test_deterministic(ragger::Embedder& emb) {
     std::println("  test_deterministic...");
     auto v1 = emb.encode("hello world");
     auto v2 = emb.encode("hello world");
-    assert(v1.size() == v2.size());
+    CHECK(v1.size() == v2.size());
     for (size_t i = 0; i < v1.size(); ++i) {
-        assert(v1[i] == v2[i]);
+        CHECK(v1[i] == v2[i]);
     }
     std::println(" OK");
 }
@@ -45,7 +46,7 @@ void test_different_texts_different_vectors(ragger::Embedder& emb) {
             break;
         }
     }
-    assert(any_different);
+    CHECK(any_different);
     std::println(" OK");
 }
 
@@ -55,18 +56,18 @@ void test_unit_normalized(ragger::Embedder& emb) {
     float sum_sq = 0.0f;
     for (float v : vec) sum_sq += v * v;
     float norm = std::sqrt(sum_sq);
-    assert(std::fabs(norm - 1.0f) < 1e-4f);
+    CHECK(std::fabs(norm - 1.0f) < 1e-4f);
     std::println(" OK");
 }
 
 void test_empty_string(ragger::Embedder& emb) {
     std::println("  test_empty_string...");
     auto vec = emb.encode("");
-    assert(vec.size() == 384);
+    CHECK(vec.size() == 384);
     // Should still produce a valid vector (not NaN/inf)
     for (float v : vec) {
-        assert(!std::isnan(v));
-        assert(!std::isinf(v));
+        CHECK(!std::isnan(v));
+        CHECK(!std::isinf(v));
     }
     std::println(" OK");
 }
@@ -77,11 +78,11 @@ void test_long_text(ragger::Embedder& emb) {
     std::string long_text;
     for (int i = 0; i < 1000; ++i) long_text += "word ";
     auto vec = emb.encode(long_text);
-    assert(vec.size() == 384);
+    CHECK(vec.size() == 384);
     float sum_sq = 0.0f;
     for (float v : vec) sum_sq += v * v;
     float norm = std::sqrt(sum_sq);
-    assert(std::fabs(norm - 1.0f) < 1e-4f);
+    CHECK(std::fabs(norm - 1.0f) < 1e-4f);
     std::println(" OK");
 }
 
@@ -102,16 +103,102 @@ void test_semantic_similarity(ragger::Embedder& emb) {
     float sim_unrelated = dot(v_cat, v_sql);
 
     // Related sentences should be more similar than unrelated ones
-    assert(sim_related > sim_unrelated);
+    CHECK(sim_related > sim_unrelated);
+    std::println(" OK");
+}
+
+// PHASE9A: padding must not leak into the embedding. Every shipped
+// tokenizer.json pads to a fixed 128 tokens; with an all-ones attention mask
+// the model pooled over ~115 [PAD] positions and unrelated texts scored ~0.9.
+// Values below were measured with all-MiniLM-L12-v2 after the mask fix; before
+// it: hello/zzqxv 0.9681, FTS5/cat 0.8612, FTS5/paraphrase 0.8638, cat/SQL 0.8104.
+void p9a_test_padding_is_masked(ragger::Embedder& emb) {
+    std::println("  p9a_test_padding_is_masked...");
+    auto cos = [&](const std::string& a, const std::string& b) {
+        auto x = emb.encode(a);
+        auto y = emb.encode(b);
+        float d = 0.0f;
+        for (size_t i = 0; i < x.size(); ++i) d += x[i] * y[i];
+        return d;   // vectors are unit-normalized
+    };
+
+    CHECK(cos("hello world", "zzqxv plork") < 0.5f);            // measured 0.1719
+    const float para = cos("custom inverted index instead of FTS5",
+        "We decided to build our own inverted-index search layer rather than use SQLite FTS5");
+    const float unrel = cos("custom inverted index instead of FTS5", "The cat sat on the mat.");
+    CHECK(para > 0.6f);                                          // measured 0.7280
+    CHECK(unrel < 0.3f);                                         // measured 0.0253
+    CHECK(para - unrel > 0.4f);                                  // the gap the bug collapsed to 0.002
+    CHECK(cos("The cat sat on the mat", "A kitten rested on the rug") > 0.4f);       // 0.6073
+    CHECK(cos("The cat sat on the mat", "SELECT * FROM users WHERE id = 1") < 0.2f); // -0.0551
+
+    // Reference vector, so a future change to tokenization or pooling is noticed.
+    // Only meaningful for the model the numbers were taken from.
+    if (ragger::Config{}.embedding_model == "sentence-transformers/all-MiniLM-L12-v2") {
+        const float ref[8] = {-0.04617f, 0.02210f, 0.00533f, -0.04767f,
+                              0.04166f, -0.09757f, 0.07874f, 0.06726f};
+        auto v = emb.encode("hello world");
+        for (int i = 0; i < 8; ++i) CHECK(std::fabs(v[i] - ref[i]) < 1e-3f);
+    }
+    std::println(" OK");
+}
+
+// S48: the four hand-assembled Embedder construction sites (RaggerMemory ctor,
+// the degraded-recovery path, the model switch, `ragger embed`) are now one
+// helper. Pin the argument mapping each site performed:
+//   startup / recovery / embed -> configured engine, model and dimensions
+//   model switch               -> desired_* engine + model, dims passed verbatim
+//                                 (0 = probe later, never inherit the old value)
+// External construction only stores its fields (no network), so the mapping is
+// observable through is_external()/dimensions() without an endpoint.
+void p10_test_make_embedder_from_config(ragger::Embedder& onnx_emb) {
+    std::println("  p10_test_make_embedder_from_config...");
+
+    // Internal, no overrides: resolves to the same model directory this suite
+    // built by hand -> same dimensions, bit-identical vectors.
+    ragger::Config internal{};
+    auto a = ragger::make_embedder_from_config(internal);
+    CHECK(a->ready());
+    CHECK(!a->is_external());
+    CHECK(a->dimensions() == onnx_emb.dimensions());
+    CHECK(a->encode("hello world") == onnx_emb.encode("hello world"));
+
+    // model_override naming the configured model resolves to that same dir.
+    auto b = ragger::make_embedder_from_config(internal, "", internal.embedding_model);
+    CHECK(b->dimensions() == onnx_emb.dimensions());
+
+    // External: configured fields pass through, dims default to the config.
+    ragger::Config ext{};
+    ext.embedding_engine = "external";
+    ext.embedding_external_host = "127.0.0.1";
+    ext.embedding_external_port = 59999;
+    ext.embedding_external_model = "some/embedder";
+    ext.embedding_external_api_key = "k";
+    ext.embedding_dimensions = 42;
+    auto c = ragger::make_embedder_from_config(ext);
+    CHECK(c->is_external());
+    CHECK(c->ready());
+    CHECK(c->dimensions() == 42);
+
+    // dims_override wins over the configured value...
+    CHECK(ragger::make_embedder_from_config(ext, "", "", 7)->dimensions() == 7);
+    // ...including an explicit 0 (the model-switch shape).
+    CHECK(ragger::make_embedder_from_config(ext, "", "", 0)->dimensions() == 0);
+
+    // engine_override routes an internal-default config to the external ctor.
+    auto f = ragger::make_embedder_from_config(internal, "external", "", 3);
+    CHECK(f->is_external());
+    CHECK(f->dimensions() == 3);
+
     std::println(" OK");
 }
 
 int main() {
+    TestEnv env("embedder");  // must be first: isolates from ~/.ragger
     std::println("Running embedder tests:");
 
-    ragger::init_config();
     auto cfg = ragger::config();
-    auto model_dir = cfg.resolved_model_dir();
+    auto model_dir = env.model_dir();
     if (!std::filesystem::exists(model_dir + "/model.onnx") && !std::filesystem::exists(model_dir + "/onnx/model.onnx")) {
         std::cerr << "Skipping embedder tests: model not found at " << model_dir << "\n";
         return 0;
@@ -125,6 +212,8 @@ int main() {
     test_empty_string(emb);
     test_long_text(emb);
     test_semantic_similarity(emb);
+    p9a_test_padding_is_masked(emb);
+    p10_test_make_embedder_from_config(emb);
 
     std::println("test_embedder: all passed");
     return 0;

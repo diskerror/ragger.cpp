@@ -6,6 +6,7 @@
 #include "config.h"
 #include "inference.h"
 #include "lang.h"
+#include "util/utf8.h"
 #include "Logger.h"
 
 #include <format>
@@ -14,6 +15,91 @@
 namespace ragger {
 
 namespace {
+
+// Resolve the system prompt: INI/config `summarizer_prompt` overrides the
+// built-in default. Empty (or missing) uses the default; any non-empty value
+// is passed to the model as-is, including a single space to suppress it.
+// PHASE9B step 3a: vformat throws std::format_error on a malformed prompt;
+// that must not escape (an escaping exception skips the caller's failure
+// bookkeeping, so the same turn would re-queue every tick forever). On a bad
+// prompt behave exactly like an inference failure: warn, return "".
+// X10 (M13): '' is the failure sentinel — a caller that receives it must
+// return its own failure value WITHOUT issuing the request (never drop the
+// system message and send the call anyway). A prompt that formats to
+// something non-empty is passed through as-is, including the single space
+// that suppresses the system prompt.
+std::string build_system_prompt(const std::string& raw_prompt,
+                                std::size_t target_chars, std::size_t hard_cap) {
+    try {
+        return std::vformat(
+            raw_prompt.empty()
+                ? lang::PROMPT_TURN_SUMMARY
+                : std::string_view(raw_prompt),
+            std::make_format_args(target_chars, hard_cap));
+    } catch (const std::exception& e) {
+        Diskerror::Logger::warn(std::format(lang::WARN_SUMMARY, e.what()));
+        return "";
+    }
+}
+
+// S26 (C m12): the summary size contract in ONE place (it used to be copied
+// verbatim into summarize_transcript and summarize_texts). The arithmetic is
+// the original, copied — no number changed.
+struct SummaryBudget {
+    std::size_t target_chars;
+    std::size_t hard_cap;
+};
+
+SummaryBudget make_budget(std::size_t source_chars) {
+    // Defaults: target = 30%, hard cap = 60%.  Both are floored at 40 chars
+    // so trivially short exchanges are never squeezed to nothing.
+    // hard_cap is clamped to >= target_chars so the constraint is never
+    // impossible (e.g. if the user sets target_pct > max_pct by accident).
+    constexpr int kDefaultTargetPct = 30;
+    constexpr int kDefaultMaxPct    = 60;
+    constexpr std::size_t kMinChars = 40;
+
+    const int tpct = (config().summarizer_target_pct > 0)
+                         ? config().summarizer_target_pct : kDefaultTargetPct;
+    const int mpct = (config().summarizer_max_pct > 0)
+                         ? config().summarizer_max_pct    : kDefaultMaxPct;
+
+    SummaryBudget b;
+    b.target_chars =
+        std::max(kMinChars, source_chars * static_cast<std::size_t>(tpct) / 100);
+    b.hard_cap =
+        std::max(b.target_chars, source_chars * static_cast<std::size_t>(mpct) / 100);
+    return b;
+}
+
+std::string system_prompt(const SummaryBudget& b) {
+    return build_system_prompt(config().summarizer_prompt, b.target_chars, b.hard_cap);
+}
+
+// LR S64: summarize_texts gets its OWN template (R9 / new gap 8). The turn summary
+// prompt reused verbatim over concatenated turn-summary texts produced narrative
+// junk ("The assistant confirmed...", wrapping quotes, wrong pronouns)
+// because it never said the input is a SPAN OF SUMMARIES. {N} is
+// substituted with the member count before vformat; the two remaining {}
+// slots are the same target/cap pair as the turn-summary prompt, filled the same
+// way, under the same vformat-in-try rule (PHASE9B 3a: a format error must
+// not escape — behave like an inference failure).
+// The default template is lang::PROMPT_EPISODE_SUMMARY; summarizer_episode_prompt
+// overrides it (empty = default).
+std::string build_episode_prompt(std::size_t n, const SummaryBudget& b) {
+    try {
+        const std::string& raw = config().summarizer_episode_prompt;
+        std::string t(raw.empty() ? lang::PROMPT_EPISODE_SUMMARY
+                                  : std::string_view(raw));
+        const auto pos = t.find("{N}");
+        if (pos != std::string::npos)
+            t.replace(pos, 3, std::to_string(n));
+        return std::vformat(t, std::make_format_args(b.target_chars, b.hard_cap));
+    } catch (const std::exception& e) {
+        Diskerror::Logger::warn(std::format(lang::WARN_SUMMARY, e.what()));
+        return "";
+    }
+}
 
 // Stable bracketed markers Hermes prepends to system-injected user turns.
 // Matched case-sensitively against the trimmed start of the user text. Kept
@@ -78,6 +164,50 @@ std::string strip_thinking(const std::string& s) {
         out.clear();
 
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// LR S62: shorter-text rule (see include/summarizer.h).
+// ---------------------------------------------------------------------------
+
+size_t count_words(const std::string& s) {
+    size_t n = 0;
+    bool in_token = false;
+    for (const char c : s) {
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v')
+            in_token = false;
+        else if (!in_token) { in_token = true; ++n; }
+    }
+    return n;
+}
+
+namespace {
+// Unicode code-point count (UTF-8 lead bytes; continuation bytes skipped).
+size_t count_codepoints(const std::string& s) {
+    size_t n = 0;
+    for (const unsigned char c : s)
+        if ((c & 0xC0) != 0x80) ++n;
+    return n;
+}
+} // namespace
+
+SummaryChoice choose_summary(const std::string& source, const std::string& summary) {
+    // An empty summary is not a valid summary: hand it back untouched so the
+    // caller's existing empty-check treats it as a failure (as today).
+    if (summary.empty()) return {summary, false};
+
+    const size_t src_words = count_words(source);
+    if (src_words <= 1) {
+        // One-token source (e.g. CJK text without spaces): words are
+        // meaningless, compare code points instead.
+        if (count_codepoints(summary) >= count_codepoints(source))
+            return {source, true};
+        return {summary, false};
+    }
+    // Summary wins only when STRICTLY shorter; ties keep the source.
+    if (count_words(summary) >= src_words)
+        return {source, true};
+    return {summary, false};
 }
 
 bool is_system_injected_turn(const std::string& user_text) {
@@ -159,7 +289,8 @@ std::string summarize_transcript(
     const std::vector<std::pair<std::string, std::string>>& turns) {
     if (turns.empty()) return "";
 
-    // Summary contract: never longer than the source, target ~1/4 of it.
+    // Summary contract: never longer than the source, target ~30% of it
+    // (make_budget's kDefaultTargetPct).
     // Short exchanges (slash commands like /exit, single-line greetings)
     // can't be compressed — return them verbatim and skip inference.
     std::string conversation;
@@ -184,38 +315,21 @@ std::string summarize_transcript(
         return u + " | " + a;
     }
 
-    // Summary size contract: percentages of the raw-turn character count.
-    // Defaults: target = 30%, hard cap = 60%.  Both are floored at 40 chars
-    // so trivially short exchanges are never squeezed to nothing.
-    // hard_cap is clamped to >= target_chars so the constraint is never
-    // impossible (e.g. if the user sets target_pct > max_pct by accident).
-    constexpr int kDefaultTargetPct = 30;
-    constexpr int kDefaultMaxPct    = 60;
-    constexpr std::size_t kMinChars = 40;
+    // Summary size contract (S26: one implementation, see make_budget).
+    const SummaryBudget budget = make_budget(source_chars);
+    const std::size_t hard_cap = budget.hard_cap;
 
-    const int tpct = (config().summarizer_target_pct > 0)
-                         ? config().summarizer_target_pct : kDefaultTargetPct;
-    const int mpct = (config().summarizer_max_pct > 0)
-                         ? config().summarizer_max_pct    : kDefaultMaxPct;
-
-    const std::size_t target_chars =
-        std::max(kMinChars, source_chars * static_cast<std::size_t>(tpct) / 100);
-    const std::size_t hard_cap =
-        std::max(target_chars, source_chars * static_cast<std::size_t>(mpct) / 100);
-
-    // Resolve the system prompt: INI `prompt` key overrides the built-in
-    // default. Empty (or missing) uses the default; any non-empty value is
-    // passed to the model as-is, including a single space to suppress it.
-    const std::string& raw_prompt = config().summarizer_prompt;
-    const std::string system_text = std::vformat(
-        raw_prompt.empty()
-            ? Config::kDefaultSummarizerPrompt
-            : std::string_view(raw_prompt),
-        std::make_format_args(target_chars, hard_cap));
+    const std::string system_text = system_prompt(budget);
+    // X10 (M13): build_system_prompt's promise is "on a bad prompt behave
+    // exactly like an inference failure" — so the caller must NOT send the
+    // request. Dropping the empty system message instead let the call go out
+    // with no system prompt, and its result was accepted (and stored) as a
+    // good summary while the caller's failure bookkeeping never ran. Return
+    // the same failure value an inference failure returns, before any I/O.
+    if (system_text.empty()) return "";
 
     std::vector<Message> messages;
-    if (!system_text.empty())
-        messages.push_back({"system", system_text});
+    messages.push_back({"system", system_text});
     messages.push_back({"user", conversation});
 
     std::string result;
@@ -236,14 +350,16 @@ std::string summarize_transcript(
             fallback += u;
             if (!a.empty()) fallback += " → " + a;
         }
-        return (fallback.size() <= hard_cap) ? fallback : result.substr(0, hard_cap);
+        // PHASE9B step 3c: cut on a character boundary, never mid-sequence.
+        return (fallback.size() <= hard_cap) ? fallback
+                                             : utf8_safe_prefix(result, hard_cap);
     }
     return result;
 }
 
 // ---------------------------------------------------------------------------
 // summarize_texts — same contract as summarize_transcript but for a flat list
-// of pre-existing summary blobs (L2→L3, L3→L4).
+// of pre-existing summary blobs (turn summaries → episode text at close).
 // ---------------------------------------------------------------------------
 std::string summarize_texts(
     InferenceClient& inference,
@@ -261,31 +377,21 @@ std::string summarize_texts(
 
     if (source_chars == 0) return "";
 
-    // Same size contract as summarize_transcript.
-    constexpr int kDefaultTargetPct = 30;
-    constexpr int kDefaultMaxPct    = 60;
-    constexpr std::size_t kMinChars = 40;
+    // Same size contract as summarize_transcript (S26: one implementation),
+    // but its OWN episode prompt (LR S64): the input is a span of N
+    // summaries, not a conversation.
+    const SummaryBudget budget = make_budget(source_chars);
+    const std::size_t hard_cap = budget.hard_cap;
 
-    const int tpct = (config().summarizer_target_pct > 0)
-                         ? config().summarizer_target_pct : kDefaultTargetPct;
-    const int mpct = (config().summarizer_max_pct > 0)
-                         ? config().summarizer_max_pct    : kDefaultMaxPct;
-
-    const std::size_t target_chars =
-        std::max(kMinChars, source_chars * static_cast<std::size_t>(tpct) / 100);
-    const std::size_t hard_cap =
-        std::max(target_chars, source_chars * static_cast<std::size_t>(mpct) / 100);
-
-    const std::string& raw_prompt = config().summarizer_prompt;
-    const std::string system_text = std::vformat(
-        raw_prompt.empty()
-            ? Config::kDefaultSummarizerPrompt
-            : std::string_view(raw_prompt),
-        std::make_format_args(target_chars, hard_cap));
+    const std::string system_text = build_episode_prompt(texts.size(), budget);
+    // X10 (M13): same rule as summarize_transcript — an episode prompt that
+    // cannot be built is an inference failure, not a prompt-less request. The
+    // built-in template is always well-formed, so this guard is unreachable
+    // from config; it is here so the promise holds for both entry points.
+    if (system_text.empty()) return "";
 
     std::vector<Message> messages;
-    if (!system_text.empty())
-        messages.push_back({"system", system_text});
+    messages.push_back({"system", system_text});
     messages.push_back({"user", combined});
 
     std::string result;
@@ -297,8 +403,47 @@ std::string summarize_texts(
     }
 
     if (result.size() > hard_cap)
-        return result.substr(0, hard_cap);
+        return utf8_safe_prefix(result, hard_cap);
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// summarize_member_texts — the episode-segment rules moved
+// VERBATIM out of SummarizerService::handle_episode_close (one member copies
+// that member's summary model with no model call; the LR S62 floor copies the
+// joined text with no model call; otherwise summarize_texts + choose_summary,
+// provenance the summarizer's model). handle_episode_close now calls this and
+// is bit-for-bit unchanged; the episode-regeneration job and the
+// `ragger backfill stranded` sweep call the same code, so an episode rebuilt
+// later reads exactly like one written at close.
+// ---------------------------------------------------------------------------
+MemberSummary summarize_member_texts(
+    InferenceClient& inference,
+    const std::vector<std::string>& texts,
+    const std::string& single_model)
+{
+    if (texts.empty()) return {};
+
+    // A ONE-member segment copies that turn summary's summary_model_id (no model call
+    // at all — summarizing a single summary is waste).
+    if (texts.size() == 1)
+        return {texts.front(), single_model};
+
+    std::string joined;
+    for (const auto& t : texts) {
+        if (!joined.empty()) joined += "\n\n";
+        joined += t;
+    }
+    if (count_words(joined) <=
+            static_cast<size_t>(std::max(0, config().summarizer_min_words))) {
+        return {joined, inference.memory_model};   // floor: no model call
+    }
+
+    std::string summary = summarize_texts(inference, texts);
+    if (summary.empty()) return {};   // inference failed — caller retries
+    // LR S62 (shorter-text rule): a multi-member copy records the
+    // summarizer's model — there is no single original.
+    return {choose_summary(joined, summary).text, inference.memory_model};
 }
 
 } // namespace ragger

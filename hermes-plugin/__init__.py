@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import http.client
 import socket
@@ -35,6 +36,16 @@ logger = logging.getLogger(__name__)
 
 _CIRCUIT_THRESHOLD = 5
 _CIRCUIT_COOLDOWN = 120.0   # seconds before auto-reset
+
+
+def _int_or_error(value, name):
+    """int() that reports instead of raising (PHASE9B step 9): a bad argument
+    is a validation error returned to the tool caller, never an exception out
+    of handle_tool_call. Returns (value, None) or (None, message)."""
+    try:
+        return int(value), None
+    except (TypeError, ValueError):
+        return None, f"{name} must be an integer"
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +139,88 @@ def _as_bool(value: str, default: bool) -> bool:
     return default
 
 
+# ---------------------------------------------------------------------------
+# Auto-recall modes (Ragger setting `auto_recall_mode`)
+# ---------------------------------------------------------------------------
+#
+# A mode is a request builder plus a hit formatter; add a mode by adding one
+# entry to _RECALL_MODES (and its value to the daemon's auto_recall_mode enum).
+#   decisions: only active decisions, matched against the prompt (decisions
+#              carry a trigger written as a future question); one line each:
+#              "[knowledge:5] <trigger> → <ruling>", with the status appended
+#              when it is not 'current'. Uses memory_search split mode: the
+#              daemon returns only decisions whose raw vector similarity is at
+#              least `auto_recall_min_similarity`; the `both` list (vector and
+#              FTS agree) is injected before `vector_only`; `fts_only` is not
+#              used (an FTS score has no portable threshold).
+#   flat:      the legacy flat /search over everything: the bare text.
+# A mode is (build_request(query, min_similarity) -> (path, payload),
+#            format_lines(response_dict) -> [line]).
+_DEFAULT_RECALL_MODE = "decisions"
+_DEFAULT_MIN_SIMILARITY = 0.30
+_RECALL_LIMIT = {"decisions": 3, "flat": 5}
+
+
+def _recall_request_decisions(query: str, min_similarity: float) -> tuple:
+    return "/memory/search", {"query": query, "layers": ["knowledge"],
+                              "kinds": ["decision"], "status": "active",
+                              "limit": _RECALL_LIMIT["decisions"],
+                              "split": True,
+                              "min_vector_score": max(0.0, float(min_similarity))}
+
+
+def _recall_request_flat(query: str, min_similarity: float) -> tuple:
+    return "/search", {"query": query, "limit": _RECALL_LIMIT["flat"]}
+
+
+def _recall_lines_decisions(got: dict) -> list:
+    groups = got.get("groups") if isinstance(got, dict) else None
+    if isinstance(groups, dict):
+        # Split response: `both` first (the two searches agree), then
+        # `vector_only`; the daemon already applied the similarity minimum.
+        hits = list(groups.get("both") or []) + list(groups.get("vector_only") or [])
+        if got.get("vector_available") is False:
+            logger.debug("Ragger recall: no embedder, nothing to inject")
+    else:
+        # An older daemon without split mode: the blended results, ungated.
+        hits = got.get("results", []) if isinstance(got, dict) else []
+    hits = hits[:_RECALL_LIMIT["decisions"]]
+    lines = []
+    for h in hits:
+        if not isinstance(h, dict) or not h.get("snippet"):
+            continue
+        extra = h.get("extra") if isinstance(h.get("extra"), dict) else {}
+        trigger = str(extra.get("trigger", "")).strip()
+        status = str(extra.get("status", "")).strip()
+        head = f"[{h.get('id', '')}] "
+        body = f"{trigger} → {h['snippet']}" if trigger else h["snippet"]
+        tail = f" ({status})" if status and status != "current" else ""
+        lines.append(head + body + tail)
+    return lines
+
+
+def _recall_lines_flat(got: dict) -> list:
+    hits = got.get("results", []) if isinstance(got, dict) else []
+    return [h.get("text", "") for h in hits if isinstance(h, dict) and h.get("text")]
+
+
+_RECALL_MODES = {
+    "decisions": (_recall_request_decisions, _recall_lines_decisions),
+    "flat": (_recall_request_flat, _recall_lines_flat),
+}
+
+
+def _recall_query(query: str, history: list) -> str:
+    """The text to match against. A short prompt ("yes", "do it") has nothing
+    to match, so it borrows the previous user messages. Kept as one function
+    so the strategy can change without touching the callers."""
+    query = (query or "").strip()
+    if len(query.split()) >= 6:
+        return query
+    prior = [m for m in history if m and m != query][-2:]
+    return " ".join(prior + [query]).strip()
+
+
 def _load_ragger_config() -> dict:
     """Resolve the plugin's connection + behavior settings from the daemon.
 
@@ -156,6 +249,8 @@ def _load_ragger_config() -> dict:
         "port": "8432",
         "auth_token": token,
         "auto_recall": True,
+        "auto_recall_mode": _DEFAULT_RECALL_MODE,
+        "auto_recall_min_similarity": _DEFAULT_MIN_SIMILARITY,
         "socket_enable": True,
         "socket_path": socket_path,
     }
@@ -173,6 +268,15 @@ def _load_ragger_config() -> dict:
         if raw_bind and raw_bind != "0.0.0.0":
             cfg["host"] = raw_bind
         cfg["auto_recall"] = _as_bool(settings.get("auto_recall", ""), True)
+        mode = str(settings.get("auto_recall_mode", "")).split("#")[0].strip()
+        if mode in _RECALL_MODES:
+            cfg["auto_recall_mode"] = mode
+        raw_sim = str(settings.get("auto_recall_min_similarity", "")).split("#")[0].strip()
+        try:
+            if raw_sim:
+                cfg["auto_recall_min_similarity"] = max(0.0, float(raw_sim))
+        except ValueError:
+            pass   # keep the default
         cfg["socket_enable"] = _as_bool(settings.get("socket_enable", ""), True)
 
     return cfg
@@ -244,7 +348,7 @@ SEARCH_SCHEMA = {
             },
             "limit": {
                 "type": "integer",
-                "description": "Maximum number of results (default: 5).",
+                "description": "Maximum number of results (default: the `default_search_limit` setting).",
             },
         },
         "required": ["query"],
@@ -272,11 +376,230 @@ STORE_SCHEMA = {
                     "Free-form label, not a database-enforced enum (Ragger does a plain "
                     "string match server-side — any string works, but stick to the "
                     "convention for consistent retrieval). Convention: 'fact', "
-                    "'decision', 'preference', or 'lesson'. Default: 'fact'."
+                    "'preference', or 'lesson'. Default: 'fact'. 'decision' is NOT "
+                    "accepted here: a decision needs a trigger, so use memory_decision."
                 ),
             },
         },
         "required": ["text"],
+    },
+}
+
+
+DECISION_SCHEMA = {
+    "name": "memory_decision",
+    "description": (
+        "Record a standing decision: a ruling plus the situation it applies to. "
+        "`trigger` is REQUIRED and is written the way a FUTURE question would be "
+        "asked (e.g. 'Use when choosing a full-text index strategy') -- search "
+        "matches on it, so phrase it in the asker's words, not the conclusion's. "
+        "To replace an earlier decision, pass its id in `supersedes`; the old one "
+        "is kept and marked superseded, never overwritten. This is the ONLY "
+        "way to store a decision: ragger_store(category='decision') is rejected. "
+        "The result may carry `possible_supersedes`: other active decisions this "
+        "one may be replacing (hint only — nothing was changed; review them)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "The ruling itself, imperative."},
+            "trigger": {"type": "string",
+                        "description": "When this applies, in the vocabulary of a future query."},
+            "rationale": {"type": "string",
+                          "description": "Why; alternatives considered and rejected."},
+            "scope": {"type": "string", "description": "What this does NOT apply to."},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "status": {"type": "string", "enum": ["current", "provisional", "pending"],
+                       "description": "Default current. provisional = agreed, not yet proven."},
+            "supersedes": {"type": "integer", "description": "knowledge id this replaces (any kind)."},
+            "evidence": {"type": "array",
+                         "items": {"type": ["integer", "string"]},
+                         "description": "episode ids (or \"episode:<id>\" handles) this rests on. Cite an episode you relied on; get ids from memory_search (layer 'episode') hits."},
+        },
+        "required": ["text", "trigger"],
+    },
+}
+
+
+MEMORY_NOTE_SCHEMA = {
+    "name": "memory_note",
+    "description": (
+        "Store a note (fact, preference, lesson) into memory. To scope a note "
+        "to a project, tag it (e.g. `project:ragger`). The result may carry "
+        "`possible_supersedes`: current "
+        "decisions this note may contradict (hint only -- nothing was changed; "
+        "review them and use memory_decision for a real ruling). Pass evidence "
+        "(episode ids from search) when you are recording a synthesized "
+        "insight; it is stored as an insight linked to those sources. "
+        "`trigger` is only valid on an insight (with evidence); `session` is "
+        "recorded on the stored row."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "The note text."},
+            "tags": {"type": "array", "items": {"type": "string"},
+                     "description": "Optional tags (use `project:<name>` to scope)."},
+            "evidence": {"type": "array",
+                         "items": {"type": ["integer", "string"]},
+                         "description": "episode ids (or \"episode:<id>\" handles) this note synthesizes; get ids from memory_search (layer 'episode') hits. When present the note is stored as an insight (response carries \"kind\":\"insight\") instead of a plain note."},
+            "trigger": {"type": "string",
+                        "description": "When this insight applies, in the vocabulary of a future query. Only valid together with evidence; on a plain note the server rejects it."},
+            "session": {"type": "string",
+                        "description": "Session GUID to record as provenance ('current' resolves to this Hermes session)."},
+        },
+        "required": ["text"],
+    },
+}
+
+
+MEMORY_TIMELINE_SCHEMA = {
+    "name": "memory_timeline",
+    "description": (
+        "What happened recently, as a deterministic newest-first list (no "
+        "search ranking). granularity 'turn' = per-exchange summaries "
+        "(falling back to raw user text), 'episode' = episode summaries "
+        "(default), 'session' = one row per session (guid, name, turn span, "
+        "episode count, newest episode text), 'knowledge' = stored knowledge "
+        "rows newest first (id, kind, status). Filters: session GUID ('current' = this conversation), since/until "
+        "('YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or relative '30d'/'12h'). "
+        "Page through with the returned next_cursor; null means the end."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "session": {"type": "string", "description": "Only this session GUID ('current' = this one)."},
+            "since": {"type": "string", "description": "Lower time bound."},
+            "until": {"type": "string", "description": "Upper time bound (bare date = end of day)."},
+            "granularity": {"type": "string", "enum": ["turn", "episode", "session", "knowledge"],
+                            "description": "turn | episode | session | knowledge (default episode)."},
+            "limit": {"type": "integer", "description": "Page size (default 20, max 100)."},
+            "cursor": {"type": "string", "description": "Opaque next_cursor from the previous page."},
+        },
+    },
+}
+
+
+MEMORY_UPDATE_SCHEMA = {
+    "name": "memory_update",
+    "description": (
+        "Curate one row's METADATA by typed handle: knowledge status (legal "
+        "transitions only; 'superseded' is set only by storing a superseding "
+        "row), tags (replaces the whole set). Agent notes accept tags; "
+        "summarizer rollups and turn / turn_summary / document rows are not "
+        "editable. Text is "
+        "NEVER edited in place -- to change what something says, store a new "
+        "decision (memory_decision with supersedes) or note. Returns the "
+        "updated row."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "Typed handle '<layer>:<rowid>'."},
+            "status": {"type": "string",
+                       "description": "Knowledge status: current | provisional | pending | retired."},
+            "tags": {"type": ["array", "string"], "items": {"type": "string"},
+                     "description": "Replacement tags (array) or comma-separated string; replaces the whole set."},
+        },
+        "required": ["id"],
+    },
+}
+
+
+
+
+MEMORY_SEARCH_SCHEMA = {
+    "name": "memory_search",
+    "description": (
+        "Layered search across the conversation and knowledge corpora (turn "
+        "summaries, episodes, knowledge). Returns typed handles "
+        "+ snippets only -- call memory_get with chosen handles for full text. "
+        "Documents are NOT searched here -- use document_search. "
+        "`layers` narrows by layer; omit for all. `kinds` narrows knowledge "
+        "hits (decision, insight, note). Pass session='current' to search "
+        "only this conversation, or exclude_session='current' to skip it. "
+        "status: 'active' (default) hides superseded/retired knowledge; 'any' "
+        "includes them. since/until: 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or "
+        "relative ('30d', '12h')."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "What to search for."},
+            "layers": {"type": "array", "items": {"type": "string"},
+                       "description": "Subset of: turn_summary, episode, knowledge. 'turn' is raw exchange text, searched only when named explicitly (prefer turn_summary/episode). 'session' matches session titles (FTS only, opt-in; hits are 'session:<guid>'). Documents use document_search. Legacy 'decision'/'insight' are accepted and mean knowledge of that kind."},
+            "kinds": {"type": "array", "items": {"type": "string"},
+                      "description": "Narrow knowledge hits: decision, insight, note."},
+            "since": {"type": "string", "description": "Only results at/after this time."},
+            "until": {"type": "string", "description": "Only results at/before this time."},
+            "status": {"type": "string",
+                       "description": "Knowledge only: active (default) | any | one exact status."},
+            "session": {"type": "string",
+                        "description": "Only this session GUID ('current' = this session)."},
+            "exclude_session": {"type": "string",
+                                "description": "Drop this session GUID ('current' = this session)."},
+            "limit": {"type": "integer", "description": "Max results (default 10, max 50)."},
+            "max_tokens": {"type": "integer",
+                           "description": "Token budget (~chars/4) over snippets; 0 = none."},
+            "mode": {"type": "string",
+                     "description": "hybrid (default) | semantic (vector only; needs an embedder) | keyword (text index only)."},
+            "tags": {"type": ["array", "string"], "items": {"type": "string"},
+                     "description": "Knowledge rows must carry ALL listed tags (AND rule; trimmed, case-insensitive; `project:<name>` is just a tag). A comma string is accepted. Layers without tags are excluded."},
+        },
+        "required": ["query"],
+    },
+}
+
+
+DOCUMENT_SEARCH_SCHEMA = {
+    "name": "document_search",
+    "description": (
+        "Search imported documents (their own verb; memory_search does not "
+        "cover them). Returns document:<N> handles + snippets -- call "
+        "memory_get with chosen handles for full text. `source` narrows to "
+        "paths containing this substring (case-insensitive)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "What to search for."},
+            "source": {"type": "string",
+                       "description": "Only documents whose stored source path contains this."},
+            "limit": {"type": "integer", "description": "Max results (default 10, max 50)."},
+            "mode": {"type": "string",
+                     "description": "hybrid (default) | semantic (vector only; needs an embedder) | keyword (text index only)."},
+        },
+        "required": ["query"],
+    },
+}
+
+
+MEMORY_GET_SCHEMA = {
+    "name": "memory_get",
+    "description": (
+        "Read full memory rows by typed handles (from memory_search), or page "
+        "through one session's conversation history. Exactly one mode per call: "
+        "ids, or session (+optional after_turn/before_turn/limit). expand: none | "
+        "context (neighbouring turns/chunks) | sources (one level down: a "
+        "knowledge row's episodes, an episode's summaries, a summary's "
+        "turn) | chain "
+        "(a knowledge row's full supersede lineage, oldest to newest; may "
+        "cross kinds). Pass session='current' for this conversation."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "ids": {"type": "array", "items": {"type": "string"},
+                    "description": "Typed handles '<layer>:<rowid>' (mode 1)."},
+            "expand": {"type": "string", "description": "none | context | sources | chain."},
+            "session": {"type": "string",
+                        "description": "Session GUID for history paging (mode 2; 'current' = this session)."},
+            "after_turn": {"type": "integer",
+                           "description": "History: turns with turn_id > this (0 = from start)."},
+            "before_turn": {"type": "integer",
+                            "description": "History: turns with turn_id < this (0 = to end)."},
+            "limit": {"type": "integer", "description": "History page size (default 20, max 100)."},
+        },
     },
 }
 
@@ -292,17 +615,25 @@ class RaggerMemoryProvider(MemoryProvider):
         self._base_url = "http://127.0.0.1:8432"
         self._auth_token = ""
         self._auto_recall = True
+        self._auto_recall_mode = _DEFAULT_RECALL_MODE
+        self._auto_recall_min_similarity = _DEFAULT_MIN_SIMILARITY
+        self._recent_user: List[str] = []     # last few user messages, for short-prompt recall
+        self._flags_warned = False
         self._socket_enable = True
         self._socket_path = str(Path.home() / ".ragger" / "ragger.sock")
         self._prefetch_result = ""
         self._model = ""
+        self._session_id = ""   # Hermes session id; provenance for memory_decision
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
-        # Circuit breaker
+        # Circuit breaker. Touched from the gateway thread, the prefetch
+        # thread and the post-turn async thread, so all three accessors take
+        # one lock (PHASE9B step 9).
         import time as _time
         self._time = _time
         self._failures = 0
         self._breaker_until = 0.0
+        self._breaker_lock = threading.Lock()
 
     @property
     def name(self) -> str:
@@ -313,24 +644,64 @@ class RaggerMemoryProvider(MemoryProvider):
     # ------------------------------------------------------------------
 
     def _breaker_open(self) -> bool:
-        if self._failures < _CIRCUIT_THRESHOLD:
-            return False
-        if self._time.monotonic() >= self._breaker_until:
-            self._failures = 0
-            return False
-        return True
+        with self._breaker_lock:
+            if self._failures < _CIRCUIT_THRESHOLD:
+                return False
+            if self._time.monotonic() >= self._breaker_until:
+                self._failures = 0
+                return False
+            return True
 
     def _record_ok(self) -> None:
-        self._failures = 0
+        with self._breaker_lock:
+            self._failures = 0
+
+    def _classify(self, got):
+        """Shared classification of a _post_status() result.
+
+        Returns (ok, payload):
+          - got is None      -> (False, message) and a breaker FAILURE: the
+            daemon never answered (socket error, timeout).
+          - status >= 400    -> (False, server message) and a breaker OK:
+            the daemon answered; a 4xx is the caller's mistake, so it must
+            not trip the breaker (PHASE9B step 9).
+          - otherwise        -> (True, parsed JSON body), breaker OK.
+        """
+        if got is None:
+            self._record_fail()
+            return False, "Ragger request failed. Is the daemon running? Try: ragger start"
+        self._record_ok()
+        status, body = got
+        if status >= 400:
+            return False, body.strip()
+        try:
+            return True, json.loads(body)
+        except ValueError:
+            return False, "Ragger returned a non-JSON reply: " + body[:200]
+
+    def _agent_tool_result(self, got):
+        """Shared result handling for the Phase 2 agent tools (memory_search /
+        memory_get): _post_status returned None (daemon down) or a
+        (status, body) pair. A 4xx body is the server's ERROR message."""
+        ok, payload = self._classify(got)
+        return json.dumps({"error": payload} if not ok else payload)
 
     def _record_fail(self) -> None:
-        self._failures += 1
-        if self._failures >= _CIRCUIT_THRESHOLD:
-            self._breaker_until = self._time.monotonic() + _CIRCUIT_COOLDOWN
+        count = 0
+        with self._breaker_lock:
+            self._failures += 1
+            if self._failures >= _CIRCUIT_THRESHOLD:
+                self._breaker_until = self._time.monotonic() + _CIRCUIT_COOLDOWN
+                # Log on the rising edge only. Before this, every failure
+                # past the threshold logged again — a daemon that stayed down
+                # turned each turn into another warning line.
+                if self._failures == _CIRCUIT_THRESHOLD:
+                    count = self._failures
+        if count:
             logger.warning(
                 "Ragger circuit breaker tripped after %d failures — "
                 "pausing for %ds. Is 'ragger start' running?",
-                self._failures, int(_CIRCUIT_COOLDOWN),
+                count, int(_CIRCUIT_COOLDOWN),
             )
 
     # ------------------------------------------------------------------
@@ -364,6 +735,34 @@ class RaggerMemoryProvider(MemoryProvider):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read())
+        except Exception as exc:
+            logger.debug("Ragger POST %s: %s", path, exc)
+            return None
+
+    def _post_status(self, path: str, payload: dict, timeout: float = 5.0):
+        """POST and return (http_status, body_text), or None on a TRANSPORT
+        failure (daemon down, timeout). Unlike _post(), a 4xx comes back as a
+        value: a validation error is the caller's mistake and must neither be
+        reported as 'daemon down' nor trip the circuit breaker."""
+        body = json.dumps(payload).encode()
+        if self._socket_enable:
+            conn = _UnixSocketHTTPConnection(self._socket_path, timeout=timeout)
+            try:
+                conn.request("POST", path, body=body, headers=self._headers())
+                resp = conn.getresponse()
+                return resp.status, resp.read().decode("utf-8", "replace")
+            except Exception as exc:
+                logger.debug("Ragger POST %s (socket): %s", path, exc)
+                return None
+            finally:
+                conn.close()
+        req = urllib.request.Request(self._base_url + path, data=body,
+                                     headers=self._headers(), method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status, resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode("utf-8", "replace")
         except Exception as exc:
             logger.debug("Ragger POST %s: %s", path, exc)
             return None
@@ -419,10 +818,17 @@ class RaggerMemoryProvider(MemoryProvider):
             return False
 
     def initialize(self, session_id: str, **kwargs) -> None:
+        self._session_id = session_id or ""
         cfg = _load_ragger_config()
         self._base_url = f"http://{cfg['host']}:{cfg['port']}"
         self._auth_token = cfg["auth_token"]
         self._auto_recall = cfg["auto_recall"]
+        self._auto_recall_mode = cfg["auto_recall_mode"]
+        self._auto_recall_min_similarity = cfg["auto_recall_min_similarity"]
+        # Learn, once per session and off the gateway thread, whether the daemon
+        # is capturing and summarizing; say so in the log if it is not.
+        threading.Thread(target=self._check_daemon_flags, daemon=True,
+                         name="ragger-flags").start()
         self._socket_enable = cfg["socket_enable"]
         self._socket_path = cfg["socket_path"]
 
@@ -431,20 +837,59 @@ class RaggerMemoryProvider(MemoryProvider):
 
         Hermes switches models mid-session, so we refresh this each turn
         rather than caching it at initialize(). The model name flows to
-        Ragger's /turn endpoint, which stores it on the turn + its L2
-        summary (the row that records *who the user was talking to*).
+        Ragger's /turn endpoint, which stores it on the turn + its turn summary
+        (the row that records *who the user was talking to*).
         """
         model = kwargs.get("model")
         if model:
             self._model = model
+        if message:
+            self._recent_user = (self._recent_user + [str(message)])[-4:]
 
     def system_prompt_block(self) -> str:
+        # The full usage guidance, read at call time so an edit to the file
+        # applies from the next session. Falls back to a short static block if
+        # the file is missing (installer not run).
+        try:
+            text = _INSTRUCTIONS_PATH.read_text(encoding="utf-8").strip()
+        except OSError:
+            text = ""
+        if text:
+            return text
         return (
             "# Ragger Memory\n"
             "Local semantic memory is active. Use ragger_search to recall past context, "
             "facts, decisions, and preferences. Use ragger_store to save anything worth "
             "remembering across conversations."
         )
+
+    def _check_daemon_flags(self) -> None:
+        """Log once if the daemon is not capturing or not summarizing.
+
+        Reads GET /health: capture_turns (bool), summarizer_model and
+        summarizer_engine (strings; "" = not configured). Never raises."""
+        if self._flags_warned:
+            return
+        try:
+            health = self._get("/health", timeout=3.0)
+        except Exception:
+            return
+        if not isinstance(health, dict):
+            return
+        self._flags_warned = True
+        if health.get("capture_turns") is False:
+            logger.warning("Ragger: capture_turns is off, so turns are NOT being recorded "
+                           "(turn it on in the Ragger dashboard or `ragger config set capture_turns true`).")
+        if "summarizer_model" in health:
+            if not health.get("summarizer_model"):
+                logger.warning("Ragger: no summarizer is configured, so captured turns will not be summarized.")
+            elif not health.get("summarizer_engine"):
+                logger.warning("Ragger: summarizer model '%s' is not served by any configured endpoint.",
+                               health.get("summarizer_model"))
+            elif health.get("summarizer_reachable") is False:
+                logger.warning("Ragger: the summarizer endpoint '%s' is not answering, so turns are "
+                               "captured but not summarized until it is back.",
+                               health.get("summarizer_engine"))
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Kick off a background search to warm the prefetch cache.
@@ -456,17 +901,23 @@ class RaggerMemoryProvider(MemoryProvider):
         if not self._auto_recall or self._breaker_open():
             return
 
+        mode = self._auto_recall_mode if self._auto_recall_mode in _RECALL_MODES else _DEFAULT_RECALL_MODE
+        build_request, format_lines = _RECALL_MODES[mode]
+        path, payload = build_request(_recall_query(query, list(self._recent_user)),
+                                      self._auto_recall_min_similarity)
+
         def _run():
-            result = self._post("/search", {"query": query, "limit": 5}, timeout=4.0)
-            if result is not None:
-                self._record_ok()
-                hits = result.get("results", [])
-                if hits:
-                    lines = [h.get("text", "") for h in hits if h.get("text")]
-                    with self._prefetch_lock:
-                        self._prefetch_result = "\n".join(f"- {line}" for line in lines)
-            else:
-                self._record_fail()
+            # PHASE9B step 9: a 4xx is our own bad query, not a daemon outage —
+            # it must not trip the breaker, and this is a background warm-up,
+            # so log it and move on.
+            ok, got = self._classify(self._post_status(path, payload, timeout=4.0))
+            if not ok:
+                logger.debug("Ragger prefetch: %s", got)
+                return
+            lines = format_lines(got if isinstance(got, dict) else {})
+            if lines:
+                with self._prefetch_lock:
+                    self._prefetch_result = "\n".join(f"- {line}" for line in lines)
 
         self._prefetch_thread = threading.Thread(
             target=_run, daemon=True, name="ragger-prefetch",
@@ -489,7 +940,7 @@ class RaggerMemoryProvider(MemoryProvider):
 
         The daemon stores the raw turn — and later summarizes it — only when
         [server] capture_turns is enabled; otherwise this is a server-side
-        no-op. session_id groups turns for session summaries. Agent-driven
+        no-op. session_id groups turns into episodes. Agent-driven
         ragger_store remains the path for explicitly-curated memories.
         """
         if self._breaker_open() or not user_content:
@@ -587,16 +1038,30 @@ class RaggerMemoryProvider(MemoryProvider):
         if title:
             payload["session_name"] = title
             payload["name_source"] = "hermes_title"
-        result = self._post("/turn", payload, timeout=4.0)
-        if result is None:
-            self._record_fail()
-        else:
-            self._record_ok()
+        # PHASE9B step 9: transport failure counts; an HTTP 4xx (the daemon
+        # rejected this turn) does not, and is only worth a debug line — turn
+        # capture must never raise into the caller.
+        ok, detail = self._classify(self._post_status("/turn", payload, timeout=4.0))
+        if not ok:
+            logger.debug("Ragger turn capture: %s", detail)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [SEARCH_SCHEMA, STORE_SCHEMA]
+        return [SEARCH_SCHEMA, STORE_SCHEMA, DECISION_SCHEMA,
+                MEMORY_SEARCH_SCHEMA, DOCUMENT_SEARCH_SCHEMA, MEMORY_GET_SCHEMA,
+                MEMORY_NOTE_SCHEMA,
+                MEMORY_TIMELINE_SCHEMA, MEMORY_UPDATE_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
+        """Tool entry point. Must never raise for bad arguments: anything the
+        caller can pass that this code can't process comes back as an error
+        JSON (PHASE9B step 9)."""
+        try:
+            return self._dispatch_tool_call(tool_name, args, **kwargs)
+        except (TypeError, ValueError, AttributeError, KeyError) as exc:
+            logger.debug("Ragger tool %s rejected arguments: %s", tool_name, exc)
+            return json.dumps({"error": f"Invalid arguments for {tool_name}: {exc}"})
+
+    def _dispatch_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if self._breaker_open():
             return json.dumps({
                 "error": "Ragger temporarily unavailable (circuit breaker tripped). "
@@ -604,17 +1069,22 @@ class RaggerMemoryProvider(MemoryProvider):
             })
 
         if tool_name == "ragger_search":
-            query = args.get("query", "").strip()
+            query = str(args.get("query", "")).strip()
             if not query:
                 return json.dumps({"error": "Missing required parameter: query"})
-            limit = max(1, int(args.get("limit", 5)))
-            result = self._post("/search", {"query": query, "limit": limit})
-            if result is None:
-                self._record_fail()
-                return json.dumps({
-                    "error": "Ragger search failed. Is the daemon running? Try: ragger start"
-                })
-            self._record_ok()
+            # X11 (M11): an omitted limit sends NO limit key so the server's
+            # `default_search_limit` applies (the schema always said so; the
+            # code used to hard-code 5). A passed limit keeps the old
+            # coercion: int(), floored at 1, error JSON otherwise.
+            payload: dict = {"query": query}
+            if args.get("limit") is not None:
+                try:
+                    payload["limit"] = max(1, int(args["limit"]))
+                except (TypeError, ValueError):
+                    return json.dumps({"error": "limit must be an integer"})
+            ok, result = self._classify(self._post_status("/search", payload))
+            if not ok:
+                return json.dumps({"error": result})
             hits = result.get("results", [])
             if not hits:
                 return json.dumps({"result": "No relevant memories found."})
@@ -625,24 +1095,191 @@ class RaggerMemoryProvider(MemoryProvider):
             return json.dumps({"results": items, "count": len(items)})
 
         elif tool_name == "ragger_store":
-            text = args.get("text", "").strip()
+            text = str(args.get("text", "")).strip()
             if not text:
                 return json.dumps({"error": "Missing required parameter: text"})
-            category = args.get("category", "fact").strip() or "fact"
-            result = self._post(
+            category = str(args.get("category", "fact")).strip() or "fact"
+            if category == "decision":
+                # The daemon rejects category=decision on /store (a decision
+                # needs a trigger); say so here instead of a round trip.
+                return json.dumps({"error": "a decision requires a trigger: use "
+                                            "memory_decision (text + trigger), not "
+                                            "ragger_store(category='decision')"})
+            ok, result = self._classify(self._post_status(
                 "/store",
                 {
                     "text": text,
                     "metadata": {"category": category, "source": "hermes-agent"},
                 },
-            )
-            if result is None:
+            ))
+            if not ok:
+                return json.dumps({"error": result})
+            return json.dumps({"result": "Stored.", "id": result.get("id", "")})
+
+        elif tool_name == "memory_decision":
+            text = str(args.get("text", "")).strip()
+            trigger = str(args.get("trigger", "")).strip()
+            if not text or not trigger:
+                return json.dumps({"error": "memory_decision requires both text and trigger"})
+            payload = {"text": text, "trigger": trigger, "session": self._session_id}
+            for key in ("rationale", "scope", "status"):
+                if args.get(key):
+                    payload[key] = str(args[key])
+            if args.get("tags"):
+                payload["tags"] = [str(t) for t in args["tags"]]
+            if args.get("supersedes") is not None:
+                v, err = _int_or_error(args["supersedes"], "supersedes")
+                if err:
+                    return json.dumps({"error": err})
+                payload["supersedes"] = v
+            if args.get("evidence"):
+                # LR S80: episode ids or "episode:<id>" handles; the server
+                # parses both, so pass values through and only reject junk.
+                ev = args["evidence"]
+                if not isinstance(ev, list) or not all(
+                        isinstance(x, int) or isinstance(x, str) for x in ev):
+                    return json.dumps({"error": 'evidence must be a list of '
+                                                'episode ids or "episode:<id>" handles'})
+                payload["evidence"] = ev
+            got = self._post_status("/decision", payload)
+            if got is None:
                 self._record_fail()
                 return json.dumps({
                     "error": "Ragger store failed. Is the daemon running? Try: ragger start"
                 })
-            self._record_ok()
-            return json.dumps({"result": "Stored.", "id": result.get("id", "")})
+            self._record_ok()   # the daemon answered, even if it said 400
+            status, body = got
+            if status >= 400:
+                return json.dumps({"error": body.strip()})
+            try:
+                return json.dumps(json.loads(body))
+            except ValueError:
+                return json.dumps({"error": "Ragger returned a non-JSON reply: " + body[:200]})
+
+        elif tool_name == "memory_search":
+            query = str(args.get("query", "")).strip()
+            if not query:
+                return json.dumps({"error": "Missing required parameter: query"})
+            payload: dict = {"query": query}
+            for key in ("since", "until", "status", "mode"):
+                if args.get(key):
+                    payload[key] = str(args[key])
+            if args.get("layers"):
+                payload["layers"] = [str(x) for x in args["layers"]]
+            if args.get("kinds"):
+                payload["kinds"] = [str(x) for x in args["kinds"]]
+            if args.get("tags"):
+                t = args["tags"]
+                payload["tags"] = [str(x) for x in t] if isinstance(t, list) else str(t)
+            # 'current' resolves to this Hermes session before posting.
+            if args.get("session"):
+                s = str(args["session"])
+                payload["session"] = self._session_id if s == "current" else s
+            if args.get("exclude_session"):
+                s = str(args["exclude_session"])
+                payload["exclude_session"] = self._session_id if s == "current" else s
+            for key in ("limit", "max_tokens"):
+                if args.get(key) is not None:
+                    v, err = _int_or_error(args[key], key)
+                    if err:
+                        return json.dumps({"error": err})
+                    payload[key] = v
+            got = self._post_status("/memory/search", payload)
+            return self._agent_tool_result(got)
+
+        elif tool_name == "document_search":
+            query = str(args.get("query", "")).strip()
+            if not query:
+                return json.dumps({"error": "Missing required parameter: query"})
+            payload = {"query": query}
+            if args.get("source"):
+                payload["source"] = str(args["source"])
+            if args.get("mode"):
+                payload["mode"] = str(args["mode"])
+            if args.get("limit") is not None:
+                v, err = _int_or_error(args["limit"], "limit")
+                if err:
+                    return json.dumps({"error": err})
+                payload["limit"] = v
+            got = self._post_status("/memory/documents", payload)
+            return self._agent_tool_result(got)
+
+        elif tool_name == "memory_note":
+            text = str(args.get("text", "")).strip()
+            if not text:
+                return json.dumps({"error": "Missing required parameter: text"})
+            # LR S59: session provenance the way memory_decision sends it;
+            # 'current' resolves to this Hermes session.
+            payload = {"text": text, "session": self._session_id}
+            if args.get("tags"):
+                payload["tags"] = [str(t) for t in args["tags"]]
+            if args.get("trigger"):
+                payload["trigger"] = str(args["trigger"])
+            if args.get("session"):
+                s = str(args["session"])
+                payload["session"] = self._session_id if s == "current" else s
+            if args.get("evidence"):
+                # Phase 5: evidence routes the write to store_insight server-side.
+                # LR S80: episode ids or "episode:<id>" handles pass through.
+                ev = args["evidence"]
+                if not isinstance(ev, list) or not all(
+                        isinstance(x, int) or isinstance(x, str) for x in ev):
+                    return json.dumps({"error": 'evidence must be a list of '
+                                                'episode ids or "episode:<id>" handles'})
+                payload["evidence"] = ev
+            got = self._post_status("/memory/note", payload)
+            return self._agent_tool_result(got)
+
+        elif tool_name == "memory_timeline":
+            payload: dict = {}
+            for key in ("since", "until", "granularity", "cursor"):
+                if args.get(key):
+                    payload[key] = str(args[key])
+            for key in ("limit",):
+                if args.get(key) is not None:
+                    v, err = _int_or_error(args[key], key)
+                    if err:
+                        return json.dumps({"error": err})
+                    payload[key] = v
+            if args.get("session"):
+                s = str(args["session"])
+                payload["session"] = self._session_id if s == "current" else s
+            got = self._post_status("/memory/timeline", payload)
+            return self._agent_tool_result(got)
+
+        elif tool_name == "memory_update":
+            rid = str(args.get("id", "")).strip()
+            if not rid:
+                return json.dumps({"error": "Missing required parameter: id"})
+            payload = {"id": rid}
+            for key in ("status", "tags"):
+                if args.get(key) is not None:
+                    v = args[key]
+                    # LR S78: tags may be an array or a comma string; str() on a
+                    # list would send Python repr, so pass lists through.
+                    payload[key] = [str(x) for x in v] if isinstance(v, list) else str(v)
+            got = self._post_status("/memory/update", payload)
+            return self._agent_tool_result(got)
+
+        elif tool_name == "memory_get":
+            payload: dict = {}
+            if args.get("ids"):
+                payload["ids"] = [str(x) for x in args["ids"]]
+            if args.get("expand"):
+                payload["expand"] = str(args["expand"])
+            if args.get("session"):
+                s = str(args["session"])
+                payload["session"] = self._session_id if s == "current" else s
+            for key in ("after_turn", "before_turn", "limit"):
+                if args.get(key) is not None:
+                    v, err = _int_or_error(args[key], key)
+                    if err:
+                        return json.dumps({"error": err})
+                    payload[key] = v
+            if not payload.get("ids") and not payload.get("session"):
+                return json.dumps({"error": "memory_get needs either ids or session"})
+            got = self._post_status("/memory/get", payload)
+            return self._agent_tool_result(got)
 
         return json.dumps({"error": f"Unknown tool: {tool_name}"})
 

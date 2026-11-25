@@ -34,18 +34,9 @@ public:
     
     /// Get count via HTTP.
     int count();
-    
-    /// Delete a memory via HTTP.
-    bool delete_memory(int memory_id);
-    
-    /// Delete batch via HTTP.
-    int delete_batch(const std::vector<int>& memory_ids);
-    
+
     /// Search by metadata via HTTP.
     std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit = 0);
-
-    /// Register user via HTTP POST /register.
-    json register_user(const std::string& username);
 
 private:
     std::string host_;
@@ -60,7 +51,6 @@ private:
     
     HttpResponse http_get(const std::string& path) const;
     HttpResponse http_post(const std::string& path, const std::string& body) const;
-    HttpResponse http_delete(const std::string& path) const;
     HttpResponse http_request(const std::string& method, const std::string& path,
                               const std::string& body = "") const;
 };

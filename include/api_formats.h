@@ -38,6 +38,11 @@ struct ApiFormat {
     std::string stream_type_field; // "type" or empty
     std::string stream_type_value; // "content_block_delta" or empty
     std::string stream_stop;       // "[DONE]" or "message_stop"
+    // Why the model stopped, and which values mean "cut off before it was
+    // done" (the token limit was hit). A truncated answer is not a complete
+    // one: callers must not store it as if it were. Empty path = no check.
+    std::string response_finish_reason;               // "choices[0].finish_reason" / "stop_reason"
+    std::vector<std::string> finish_truncated_values; // {"length"} / {"max_tokens"}
 };
 
 /// Message for request building
@@ -66,6 +71,14 @@ nlohmann::json build_request_body(
 
 /// Extract content from a non-streaming response
 std::string extract_content(const ApiFormat& fmt, const nlohmann::json& response);
+
+/// True when a non-streaming response says the model was cut off at the token
+/// limit (its finish reason is one of fmt.finish_truncated_values). `reason`,
+/// when given, receives the finish reason string ("" when absent). A format
+/// with no finish-reason path, or a response without the field, is never
+/// reported as truncated.
+bool response_truncated(const ApiFormat& fmt, const nlohmann::json& response,
+                        std::string* reason = nullptr);
 
 /// Extract text from a streaming delta chunk, respecting type filters
 std::string extract_stream_delta(const ApiFormat& fmt, const nlohmann::json& chunk);

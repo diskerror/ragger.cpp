@@ -85,6 +85,13 @@ bool set_config_field_raw(Config& cfg, std::string_view key, const std::string& 
 /// `db_path` is the resolved main DB. Silent no-op if the DB is absent.
 void overlay_settings_from_db(Config& cfg, const std::string& db_path);
 
+/// Fill the runtime-only API key values (embedding_external_api_key,
+/// summarizer_api_key) from the environment variables NAMED by
+/// embedding_api_key_env / summarizer_api_key_env. An unset or empty variable
+/// gives an empty key. Keys are never persisted; call after any change to
+/// either name or after a full config load.
+void resolve_api_keys(Config& cfg);
+
 /// All schema keys in declaration order (for `config get -a` and the CLI
 /// help listing).
 std::vector<std::string_view> all_config_keys();

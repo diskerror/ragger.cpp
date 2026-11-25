@@ -10,7 +10,9 @@
  *
  * Strategy: point the logger at a THROWAWAY db (/tmp), log fabricated lookups,
  * then reopen the db read-only and assert the rows landed correctly. No live
- * data, no embedder, no daemon — pure unit test of the logging path.
+ * data, no daemon — unit tests of the logging path. The final S55 test is the
+ * exception: it drives RaggerMemory::search() end-to-end (embedder required,
+ * SKIPped without one) to prove the search path actually calls log_lookup.
  */
 
 #ifdef RAGGER_STATS
@@ -21,11 +23,14 @@
 #include <sqlite3.h>
 
 #include "check.h"
+#include "memory.h"
+#include "test_env.h"
 #include <cmath>
 #include <filesystem>
 #include <limits>
 #include <print>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -41,17 +46,25 @@ static void cleanup() {
 }
 
 // Tiny read-only helper: run a single-int aggregate query against the db.
-static int scalar(const std::string& sql) {
+static int scalar_at(const std::string& db_path, const std::string& sql) {
     sqlite3* db = nullptr;
-    CHECK(sqlite3_open(DB.c_str(), &db) == SQLITE_OK);
+    CHECK(sqlite3_open(db_path.c_str(), &db) == SQLITE_OK);
     sqlite3_stmt* st = nullptr;
-    CHECK(sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr) == SQLITE_OK);
+    const int prep = sqlite3_prepare_v2(db, sql.c_str(), -1, &st, nullptr);
+    if (prep != SQLITE_OK) {  // e.g. no such table — surface it, don't CHECK-abort before the message
+        std::println(stderr, "scalar_at: prepare failed ({}): {}",
+                     sqlite3_errmsg(db), sql);
+        sqlite3_close(db);
+        CHECK(false && "prepare failed");
+    }
     int out = -1;
     if (sqlite3_step(st) == SQLITE_ROW) out = sqlite3_column_int(st, 0);
     sqlite3_finalize(st);
     sqlite3_close(db);
     return out;
 }
+
+static int scalar(const std::string& sql) { return scalar_at(DB, sql); }
 
 // Read a single text cell.
 static std::string scalar_text(const std::string& sql) {
@@ -96,7 +109,39 @@ static SearchResult mk(int id, const std::string& text, float score,
     return r;
 }
 
+// S55 (C §7 item 9): end-to-end — RaggerMemory::search() on the vector path
+// writes exactly one lookups row per call into the base's stats.db (the
+// StatsLogger ctor in RaggerMemory's ctor creates it at
+// config().resolved_stats_db_path(), which TestEnv points at the scratch
+// base). Paths that do NOT log today (known gap, 8.2 — nothing asserted):
+//   * search()'s reembedding/repair and degraded/unready-embedder early
+//     returns (memory.cpp returns before the RAGGER_STATS block);
+//   * agent_search (the whole agent surface — MCP + HTTP — never reaches
+//     log_lookup).
+static void p13_search_logs_one_lookup_per_call(TestEnv& env) {
+    std::println("  p13_search_logs_one_lookup_per_call...");
+    const std::string stats_db = env.base() + "/stats.db";
+    {
+        ragger::RaggerMemory mem(env.base() + "/memories.db");
+        CHECK(mem.embeddings_degraded() == false);  // vector path, not degraded
+        mem.store("alpha bravo stats probe row");
+        mem.store("charlie delta another stats row");
+
+        const int before = scalar_at(stats_db, "SELECT COUNT(*) FROM lookups");
+        mem.search("alpha bravo");
+        CHECK(scalar_at(stats_db, "SELECT COUNT(*) FROM lookups") == before + 1);
+        mem.search("charlie delta");
+        mem.search("echo foxtrot");  // no matching text: the lookup row lands regardless
+        CHECK(scalar_at(stats_db, "SELECT COUNT(*) FROM lookups") == before + 3);
+        // The hits child rows follow top_n (default 3): 3 searches, few rows.
+        CHECK(scalar_at(stats_db, "SELECT COUNT(*) FROM hits") >= 1);
+        mem.close();
+    }
+    std::println("    OK");
+}
+
 int main() {
+    TestEnv env("stats");  // must be first: isolates from ~/.ragger (RULES.md #17)
     std::println("Running stats logger tests:");
 
     // --- 1. Construction creates the db + schema -----------------------
@@ -193,14 +238,14 @@ int main() {
         // Two hits: one with all three signals active, one where phon was
         // inactive (-1 sentinel → NULL) to prove the active/inactive distinction.
         SearchResult a = mk(201, "all three active", 0.88f, {{"collection", "doc"}});
-        a.vec_score = 0.9f; a.bm25_score = 0.5f; a.phon_score = 0.2f; a.blended = 8.9f;
+        a.vec_score = 0.9f; a.fts_score = 0.5f; a.phon_score = 0.2f; a.blended = 8.9f;
         SearchResult b = mk(202, "phon inactive", 0.60f, {{"collection", "doc"}});
-        b.vec_score = 0.4f; b.bm25_score = 0.3f; b.phon_score = -1.0f; b.blended = 4.4f;
+        b.vec_score = 0.4f; b.fts_score = 0.3f; b.phon_score = -1.0f; b.blended = 4.4f;
         s.log_lookup("signal probe", 5, 0.0f, {a, b}, 5.0, /*top_n=*/3);
     }
     // Active signals round-trip as their stored values.
     CHECK(std::abs(scalar_real("SELECT vec_score  FROM hits WHERE memory_id=201") - 0.9) < 1e-6);
-    CHECK(std::abs(scalar_real("SELECT bm25_score FROM hits WHERE memory_id=201") - 0.5) < 1e-6);
+    CHECK(std::abs(scalar_real("SELECT fts_score FROM hits WHERE memory_id=201") - 0.5) < 1e-6);
     CHECK(std::abs(scalar_real("SELECT phon_score FROM hits WHERE memory_id=201") - 0.2) < 1e-6);
     CHECK(std::abs(scalar_real("SELECT blended    FROM hits WHERE memory_id=201") - 8.9) < 1e-6);
     // Inactive phon (-1) is stored as NULL, not -1.
@@ -208,6 +253,40 @@ int main() {
     // ...while its active vec/bm25 still land.
     CHECK(std::abs(scalar_real("SELECT vec_score FROM hits WHERE memory_id=202") - 0.4) < 1e-6);
     std::println("    OK");
+
+    // --- S24 (C m16): concurrent log_lookup calls must not collide -------
+    // 8 threads x 25 lookups into one StatsLogger: every row must land.
+    // Pre-fix the shared sqlite3* ran BEGIN/COMMIT from many threads at once
+    // ("cannot start a transaction within a transaction", swallowed).
+    std::println("  p10_concurrent_log_lookup...");
+    cleanup();
+    {
+        StatsLogger s(DB);
+        CHECK(s.enabled());
+        std::vector<std::thread> threads;
+        for (int t = 0; t < 8; ++t) {
+            threads.emplace_back([&s, t] {
+                for (int i = 0; i < 25; ++i) {
+                    s.log_lookup("q-" + std::to_string(t) + "-" + std::to_string(i),
+                                 3, 0.0f, { mk(1000 + i, "hit", 0.5f) });
+                }
+            });
+        }
+        for (auto& th : threads) th.join();
+        CHECK(scalar("SELECT COUNT(*) FROM lookups") == 200);
+    }
+    std::println("    OK");
+
+    // S55: end-to-end search()->lookups coverage needs the embedder (the
+    // vector path is the one that logs today). SKIP like the other
+    // model-dependent tests when the model is absent.
+    {
+        const auto model_dir = env.model_dir();
+        if (!fs::exists(model_dir + "/model.onnx") && !fs::exists(model_dir + "/onnx/model.onnx"))
+            std::println("  p13_search_logs_one_lookup_per_call: SKIPPED (no model)");
+        else
+            p13_search_logs_one_lookup_per_call(env);
+    }
 
     cleanup();
     std::println("All stats logger tests passed.");

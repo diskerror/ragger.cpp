@@ -60,30 +60,20 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     }
 
     try {
-        if (config().embedding_engine == "external") {
-            embedder_ = std::make_unique<Embedder>(
-                config().embedding_external_host,
-                config().embedding_external_port,
-                config().embedding_external_model,
-                config().embedding_external_api_key,
-                config().embedding_dimensions);
-        } else {
-            std::string resolved_model_dir = config().resolved_model_dir();
-            embedder_ = std::make_unique<Embedder>(resolved_model_dir);
-        }
+        embedder_ = make_embedder_from_config(config());
     } catch (const std::exception& e) {
         Diskerror::Logger::critical(std::format(
             lang::ERR_EMBED_MODEL_UNUSABLE,
             config().embedding_model,
             config().resolved_model_dir(), e.what()));
-        embedder_ = std::make_unique<Embedder>();   // disabled
+        embedder_ = std::make_shared<Embedder>();   // disabled
         embeddings_degraded_ = true;
     }
 
     // The resolved path — used for both the storage backend and the user store.
     const std::string resolved_db = expand_path(db_path);
 
-    backend_    = std::make_unique<sqlite::Backend>(*embedder_, resolved_db);
+    backend_    = std::make_unique<sqlite::Backend>(*embedder_snapshot(), resolved_db);
     user_store_ = std::make_unique<UserStore>(resolved_db);
 
     // NOTE: no legacy "prepend a provider" migration here. A stored value that
@@ -104,7 +94,7 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
     //                                          re-encoding (so an aborted rebuild
     //                                          leaves settings≠config and the
     //                                          guard still catches it next time).
-    const std::string current_model = config().embedding_model;
+    const std::string current_model = config().embedding_identity_model();
     const std::string current_vtype =
         vector_codec::canonical(config().embedding_vector_type);
     const std::string current_dims = std::to_string(config().embedding_dimensions);
@@ -141,6 +131,12 @@ RaggerMemory::RaggerMemory(const std::string& db_path,
         }
     }
 
+    // Tell SemanticSQLite how this file's vectors are made (embedder, offset,
+    // API-key variable name). Never when degraded: the recorded identity is
+    // then unproven and must not be restated as fact.
+    if (!skip_embedding_guard && !embeddings_degraded_)
+        publish_semqlite_identity();
+
     // NOTE: embedding backfill no longer runs here. A large backfill (e.g.
     // after a blob-format or version change touching every row) used to run
     // synchronously in this constructor and could block daemon startup for
@@ -165,6 +161,25 @@ std::vector<TurnRecord> RaggerMemory::turns_by_session_desc(
     return backend_->turns_by_session_desc(session_guid, limit);
 }
 
+void RaggerMemory::publish_semqlite_identity() {
+    // The model, vector type and dimensions are already recorded in
+    // semqlite_config under SemanticSQLite's names (get/set_setting redirect
+    // them). This adds the three facts Ragger derives rather than stores.
+    const auto& c = config();
+    std::string embedder = "onnx";
+    if (c.embedding_engine == "external") {
+        if (c.embedding_external_host.empty() || c.embedding_external_port <= 0)
+            return;   // not configured: nothing truthful to publish
+        embedder = std::format("http://{}:{}", c.embedding_external_host,
+                               c.embedding_external_port);
+    }
+    user_store_->set_semqlite_config("embedding_embedder", embedder);
+    // 0.17 stores the bare vector payload (the version byte lives in the
+    // embedding_version column), so there is no header to skip.
+    user_store_->set_semqlite_config("embedding_offset", "0");
+    user_store_->set_semqlite_config("embedding_api_key_env", c.embedding_api_key_env);
+}
+
 std::optional<std::string> RaggerMemory::get_setting(const std::string& key) {
     return user_store_->get_setting(key);
 }
@@ -187,20 +202,16 @@ int RaggerMemory::store_turn(const std::string& user_text,
                              const std::string& session_guid,
                              const std::string& source_timestamp,
                              const std::string& session_name,
-                             const std::string& name_source) {
+                             const std::string& name_source,
+                             int64_t started_epoch) {
     return backend_->store_turn(user_text, assistant_text, model_name,
                                 defer_embedding, session_guid, source_timestamp,
-                                session_name, name_source);
+                                session_name, name_source, started_epoch);
 }
 
 bool RaggerMemory::finalize_turn(int turn_id, const std::string& assistant_text,
                                  const std::string& model_name) {
     return backend_->finalize_turn(turn_id, assistant_text, model_name);
-}
-
-bool RaggerMemory::update_document_embedding(int document_id,
-                                             const std::vector<float>& emb) {
-    return backend_->update_document_embedding(document_id, emb);
 }
 
 int RaggerMemory::store_decision(const std::string& text,
@@ -211,58 +222,75 @@ int RaggerMemory::store_decision(const std::string& text,
     return backend_->store_decision(text, status, tags, source_timestamp, defer_embedding);
 }
 
-bool RaggerMemory::update_decision_embedding(int decision_id,
-                                             const std::vector<float>& emb) {
-    return backend_->update_decision_embedding(decision_id, emb);
+KnowledgeResult RaggerMemory::store_knowledge(const KnowledgeInput& in) {
+    return backend_->store_knowledge(in);
 }
 
-bool RaggerMemory::update_summary_embedding(int summary_id,
-                                            const std::vector<float>& emb) {
-    return backend_->update_summary_embedding(summary_id, emb);
+json RaggerMemory::list_document_sources() {
+    return backend_->list_document_sources();
 }
 
-bool RaggerMemory::update_turn_embedding(int turn_id,
-                                         const std::vector<float>& emb) {
-    return backend_->update_turn_embedding(turn_id, emb);
+json RaggerMemory::delete_document_source(int document_source_id) {
+    return backend_->delete_document_source(document_source_id);
 }
 
-int RaggerMemory::cleanup_old_conversations(float max_age_hours) {
-    return backend_->cleanup_old_conversations(max_age_hours);
+json RaggerMemory::find_document_source(const std::string& path) {
+    return backend_->find_document_source(path);
+}
+std::vector<AgentHit> RaggerMemory::agent_search(const AgentSearchQuery& q) {
+    return backend_->agent_search(q);
 }
 
-int RaggerMemory::store_summary(const std::string& text, const std::string& level,
-                                const std::string& model_name,
-                                const std::string& session_guid,
-                                const std::string& source_timestamp,
-                                const std::string& tags) {
-    return backend_->store_summary(text, level, model_name, session_guid,
-                                   source_timestamp, tags);
+std::vector<AgentHit> RaggerMemory::agent_document_search(const DocumentSearchQuery& q) {
+    return backend_->agent_document_search(q);
 }
 
-bool RaggerMemory::update_summary_text(int summary_id, const std::string& text,
-                                       const std::string& model_name) {
-    return backend_->update_summary_text(summary_id, text, model_name);
+json RaggerMemory::agent_get(const AgentGetQuery& q) {
+    return backend_->agent_get(q);
 }
 
-std::vector<std::string> RaggerMemory::recent_summaries(const std::string& level,
-                                                        int limit) {
-    return backend_->recent_summaries(level, limit);
+json RaggerMemory::agent_timeline(const TimelineQuery& q) {
+    return backend_->agent_timeline(q);
+}
+
+json RaggerMemory::agent_update(const UpdateRequest& req) {
+    return backend_->agent_update(req);
+}
+
+json RaggerMemory::agent_review(const std::string& action,
+                                const std::vector<std::string>& ids) {
+    return backend_->agent_review(action, ids);
+}
+
+std::vector<std::pair<int,float>> RaggerMemory::possible_supersedes_for_text(
+        const std::string& text) {
+    return backend_->possible_supersedes_for_text(text);
+}
+
+int RaggerMemory::store_note(const std::string& text, const std::string& tags,
+                             const std::string& source_timestamp,
+                             const std::string& model_name,
+                             const std::string& session_guid) {
+    KnowledgeInput in;
+    in.kind = "note";
+    in.text = text;
+    in.tags = tags.empty() ? "imported" : tags + ",imported";
+    in.source_timestamp = source_timestamp;
+    in.model_name = model_name;
+    in.session_guid = session_guid;
+    return backend_->store_knowledge(in).id;
 }
 
 std::vector<std::string> RaggerMemory::current_decisions(int limit) {
     return backend_->current_decisions(limit);
 }
 
-bool RaggerMemory::set_decision_status(int decision_id, const std::string& status) {
-    return backend_->set_decision_status(decision_id, status);
-}
-
 std::vector<std::string> RaggerMemory::decisions_by_status(const std::string& status, int limit) {
     return backend_->decisions_by_status(status, limit);
 }
 
-bool RaggerMemory::summary_exists_exact(const std::string& text, const std::string& created_at) {
-    return backend_->summary_exists_exact(text, created_at);
+bool RaggerMemory::note_exists_exact(const std::string& text, const std::string& created_at) {
+    return backend_->note_exists_exact(text, created_at);
 }
 
 bool RaggerMemory::decision_exists_exact(const std::string& text, const std::string& created_at) {
@@ -283,10 +311,7 @@ bool RaggerMemory::update_turn_meta(int turn_id, const std::string& timestamp,
     return backend_->update_turn_meta(turn_id, timestamp, session_guid);
 }
 
-bool RaggerMemory::update_text(int memory_id, const std::string& text, json metadata,
-                                bool defer_embedding) {
-    return backend_->update_text(memory_id, text, std::move(metadata), defer_embedding);
-}
+// PHASE8: update_text is gone (text is never rewritten in place).
 
 SearchResponse RaggerMemory::search(const std::string& query,
                                     int limit,
@@ -306,8 +331,9 @@ SearchResponse RaggerMemory::search(const std::string& query,
     }
     // When embeddings are degraded (drift mismatch at startup), fall back to
     // text-only search (custom terms index). Vector similarity is
-    // unavailable but lookups still work.
-    if (embeddings_degraded_ || !embedder_->ready()) {
+    // unavailable but lookups still work. S20: one snapshot per call.
+    auto emb = embedder_snapshot();
+    if (embeddings_degraded_ || !emb->ready()) {
         return backend_->search_text_only(query, limit);
     }
     SearchResponse resp = backend_->search(query, limit, min_score, std::move(collections));
@@ -336,24 +362,35 @@ std::vector<SearchResult> RaggerMemory::load_all(const std::string& collection) 
     return backend_->load_all(collection);
 }
 
-int RaggerMemory::rebuild_embeddings(bool progress, const std::string& table) {
-    return backend_->rebuild_embeddings(*embedder_, progress, table);
+int RaggerMemory::rebuild_embeddings(const ProgressFn& progress, const std::string& table,
+                                     const CancelFlag* cancel) {
+    auto emb = embedder_snapshot();
+    return backend_->rebuild_embeddings(*emb, progress, table, cancel);
 }
 
 RaggerMemory::EmbeddingStatus RaggerMemory::embedding_status() {
     EmbeddingStatus s;
     // Current = what the stored vectors are (drift-guard settings keys).
     s.current_model = user_store_->get_setting("embedding_model")
-                          .value_or(config().embedding_model);
+                          .value_or(config().embedding_identity_model());
     s.current_vtype = user_store_->get_setting("vector_type")
                           .value_or(config().embedding_vector_type);
     s.current_dims  = std::stoi(user_store_->get_setting("dimensions")
                           .value_or(std::to_string(config().embedding_dimensions)));
     s.current_engine = config().embedding_engine;
     // Desired = staged config target (seeded from current when unset).
-    s.desired_model = config().desired_embedding_model.empty()
-                          ? s.current_model
-                          : config().desired_embedding_model;
+    // The recorded identity names the endpoint's own model when the engine is
+    // external, so the desired side must be compared in the same terms.
+    const std::string desired_engine_now =
+        config().desired_embedding_engine.empty() ? s.current_engine
+                                                  : config().desired_embedding_engine;
+    s.desired_model =
+        desired_engine_now == "external"
+            ? config().embedding_external_model
+            : (config().desired_embedding_model.empty()
+                   ? (s.current_engine == "external" ? config().embedding_model
+                                                     : s.current_model)
+                   : config().desired_embedding_model);
     s.desired_vtype = config().desired_embedding_vector_type.empty()
                           ? s.current_vtype : config().desired_embedding_vector_type;
     s.desired_dims  = config().desired_embedding_dimensions == 0
@@ -370,13 +407,14 @@ RaggerMemory::EmbeddingStatus RaggerMemory::embedding_status() {
 }
 
 bool RaggerMemory::embeddings_unavailable() const {
-    return !embedder_ || !embedder_->ready();
+    auto emb = embedder_snapshot();
+    return !emb || !emb->ready();
 }
 
 bool RaggerMemory::try_recover_embeddings() {
     if (!embeddings_degraded_) return false;  // nothing to recover
 
-    const std::string current_model = config().embedding_model;
+    const std::string current_model = config().embedding_identity_model();
     const std::string current_vtype =
         vector_codec::canonical(config().embedding_vector_type);
     const std::string current_dims = std::to_string(config().embedding_dimensions);
@@ -397,18 +435,16 @@ bool RaggerMemory::try_recover_embeddings() {
     // embed. Build the real one now. Until this succeeds we stay degraded, so
     // a config that is merely self-consistent but still wrong does not flip
     // semantic search back on and start writing vectors nobody can use.
-    if (!embedder_->ready()) {
+    auto emb = embedder_snapshot();
+    if (!emb->ready()) {
         try {
-            if (config().embedding_engine == "external") {
-                embedder_ = std::make_unique<Embedder>(
-                    config().embedding_external_host,
-                    config().embedding_external_port,
-                    config().embedding_external_model,
-                    config().embedding_external_api_key,
-                    config().embedding_dimensions);
-            } else {
-                embedder_ = std::make_unique<Embedder>(config().resolved_model_dir());
-            }
+            std::shared_ptr<Embedder> fresh = make_embedder_from_config(config());
+            // Swap the member under the mutex (S20); the old Embedder stays
+            // alive until every in-flight snapshot drops its reference. The
+            // backend holds a raw pointer — repoint it NOW (C §1.2).
+            { std::lock_guard<std::mutex> lk(embedder_mu_); embedder_ = fresh; }
+            emb = std::move(fresh);
+            backend_->set_embedder(*emb);
             Diskerror::Logger::warn(std::format(
                 lang::MSG_EMBED_MODEL_RECOVERED, current_model));
         } catch (const std::exception& e) {
@@ -426,7 +462,7 @@ bool RaggerMemory::try_recover_embeddings() {
 
     // Backfill any rows left without embeddings.
     try {
-        int filled = backend_->backfill_embeddings(*embedder_);
+        int filled = backend_->backfill_embeddings(*emb);
         if (filled > 0) {
             Diskerror::Logger::info(
                 std::format(lang::MSG_BACKFILLED_EMBEDDINGS, filled));
@@ -487,14 +523,12 @@ int RaggerMemory::update_embeddings() {
     // model, so putting the old one back would make the live embedder
     // disagree with the recorded identity.
     bool promoted = false;
-    std::unique_ptr<Embedder> previous_embedder;
+    std::shared_ptr<Embedder> previous_embedder;
     try {
         const std::string desired_model_name =
             config().desired_embedding_model.empty()
                 ? config().embedding_model
                 : config().desired_embedding_model;
-        const std::string desired_model_dir =
-            ragger_base_dir() + "/models/" + desired_model_name;
         const std::string desired_engine =
             config().desired_embedding_engine.empty()
                 ? config().embedding_engine
@@ -504,18 +538,12 @@ int RaggerMemory::update_embeddings() {
         // unreadable model must fail here, with nothing promoted — promoting
         // first would record an identity the daemon cannot load, and the next
         // startup would throw out of the constructor and refuse to boot.
-        std::unique_ptr<Embedder> desired_embedder;
-        if (desired_engine == "external") {
-            desired_embedder = std::make_unique<Embedder>(
-                config().embedding_external_host,
-                config().embedding_external_port,
-                config().embedding_external_model,
-                config().embedding_external_api_key,
-                config().desired_embedding_dimensions > 0
-                    ? config().desired_embedding_dimensions : 0);
-        } else {
-            desired_embedder = std::make_unique<Embedder>(desired_model_dir);
-        }
+        // dims is passed explicitly (0 = probe the endpoint) so the configured
+        // embedding_dimensions of the OLD identity never leak into the new one.
+        std::shared_ptr<Embedder> desired_embedder = make_embedder_from_config(
+            config(), desired_engine, desired_model_name,
+            config().desired_embedding_dimensions > 0
+                ? config().desired_embedding_dimensions : 0);
         Embedder& active = *desired_embedder;
 
         const std::string vtype = vector_codec::canonical(
@@ -550,7 +578,11 @@ int RaggerMemory::update_embeddings() {
         // degrades search the same way but is also actionable: housekeeping
         // knows to finish the job instead of waiting for a human.
         user_store_->set_setting("reembed_repair_pending", "true");
-        user_store_->set_setting("embedding_model", desired_model_name);
+        // Recorded identity: the endpoint's own model name when external.
+        user_store_->set_setting(
+            "embedding_model",
+            desired_engine == "external" ? config().embedding_external_model
+                                         : desired_model_name);
         user_store_->set_setting("vector_type", vtype);
         user_store_->set_setting("dimensions", std::to_string(dims));
         // Write the same identity to both the settings table and the live
@@ -559,11 +591,27 @@ int RaggerMemory::update_embeddings() {
         // spellings it degrades. Models are stored canonically (provider/model,
         // LM Studio-style) under base_dir/models, so desired_model_name is
         // already the canonical form — just keep both sides symmetric.
-        mutable_config().embedding_model = desired_model_name;
-        mutable_config().embedding_vector_type = vtype;
-        mutable_config().embedding_dimensions = dims;
-        mutable_config().embedding_engine = desired_engine;
-        previous_embedder = std::exchange(embedder_, std::move(desired_embedder));
+        update_config([&](Config& c) {
+            c.embedding_model       = desired_model_name;
+            c.embedding_vector_type = vtype;
+            c.embedding_dimensions  = dims;
+            c.embedding_engine      = desired_engine;
+            return true;
+        });
+        // The backend's frozen dtype must follow the config BEFORE any
+        // rebuild, or rebuild writes old-dtype blobs under the new name.
+        backend_->set_vector_type(
+            vector_codec::parse(vtype).value_or(vector_codec::VectorType::F16));
+        publish_semqlite_identity();   // embedder / offset now match the new engine
+        {
+            // S20: pointer swap under the mutex; request threads keep the old
+            // Embedder alive in their snapshots until they finish.
+            std::lock_guard<std::mutex> lk(embedder_mu_);
+            previous_embedder = std::exchange(embedder_, std::move(desired_embedder));
+        }
+        // Repoint the backend at the new Embedder before the first re-encode
+        // (the previous one is held in previous_embedder, still alive).
+        backend_->set_embedder(*embedder_snapshot());
         promoted = true;
 
         // warn, not info: the daemon's default log_level is "warn", and an
@@ -574,7 +622,7 @@ int RaggerMemory::update_embeddings() {
             lang::MSG_REEMBED_STARTED,
             desired_model_name, desired_engine));
 
-        int count = backend_->rebuild_embeddings(active, /*progress=*/false);
+        int count = backend_->rebuild_embeddings(active, /*progress=*/{});
 
         // Verify rather than trust. A rebuild that stops partway leaves rows
         // at the previous embedding version — same width, same blob format,
@@ -601,7 +649,10 @@ int RaggerMemory::update_embeddings() {
         // new model IS the recorded identity and repair_pending stays set so
         // housekeeping finishes the remaining rows.
         if (!promoted) {
-            if (previous_embedder) embedder_ = std::move(previous_embedder);
+            if (previous_embedder) {
+                { std::lock_guard<std::mutex> lk(embedder_mu_); embedder_ = previous_embedder; }
+                backend_->set_embedder(*previous_embedder);  // restore the binding too
+            }
             user_store_->set_setting("reembed_repair_pending", "false");
         }
         user_store_->set_setting("reembedding", "false");
@@ -639,8 +690,9 @@ int RaggerMemory::resume_interrupted_reembed() {
     // stabilises can't spin forever.
 
     constexpr int kMaxPasses = 5;
+    auto emb = embedder_snapshot();
     for (int pass = 0; pass < kMaxPasses; ++pass) {
-        int n = backend_->backfill_embeddings(*embedder_);
+        int n = backend_->backfill_embeddings(*emb);
         total += n;
         if (n == 0) {
             user_store_->set_setting("reembed_repair_pending", "false");
@@ -654,20 +706,13 @@ int RaggerMemory::resume_interrupted_reembed() {
     return total;
 }
 
-int RaggerMemory::backfill_embeddings() {
-    return backend_->backfill_embeddings(*embedder_);
+int RaggerMemory::backfill_embeddings(const CancelFlag* cancel) {
+    auto emb = embedder_snapshot();
+    return backend_->backfill_embeddings(*emb, "all", cancel);
 }
 
 std::vector<std::string> RaggerMemory::collections() const {
     return backend_->collections();
-}
-
-bool RaggerMemory::delete_memory(int memory_id) {
-    return backend_->delete_memory(memory_id);
-}
-
-int RaggerMemory::delete_batch(const std::vector<int>& memory_ids) {
-    return backend_->delete_batch(memory_ids);
 }
 
 std::vector<SearchResult> RaggerMemory::search_by_metadata(const json& metadata_filter, int limit,
@@ -686,9 +731,10 @@ CaptureResult capture_turn(RaggerMemory& memory,
                            const std::string& model,
                            const std::string& session_id,
                            const std::string& session_name,
-                           const std::string& name_source) {
+                           const std::string& name_source,
+                           int64_t started_at) {
     // Gate: turn capture is opt-in. Agent-driven store/search are unaffected.
-    if (!config().capture_turns) return {false, -1};
+    if (!config().capture_turns) return {false, -1, {}};
 
     // Strip any leading Hermes system-injected annotation (interruption
     // notices, model-switch notes, compaction handoffs, bg-process reports)
@@ -701,13 +747,13 @@ CaptureResult capture_turn(RaggerMemory& memory,
     // Skip empty pushes. A turn needs real content on at least one side: keep
     // assistant-only turns (interrupted turn the agent still answered), but
     // drop a turn that was nothing but a system note with no assistant output.
-    if (clean_user.empty() && assistant.empty()) return {false, -1};
+    if (clean_user.empty() && assistant.empty()) return {false, -1, {}};
 
     int turn_id = memory.store_turn(clean_user, assistant, model,
                                     /*defer_embedding=*/false, session_id,
                                     /*source_timestamp=*/"",
-                                    session_name, name_source);
-    return {true, turn_id};
+                                    session_name, name_source, started_at);
+    return {true, turn_id, clean_user};
 }
 
 namespace {
@@ -790,13 +836,12 @@ SessionContext build_context(RaggerMemory& memory,
     auto* backend = memory.backend();
     if (!backend) return out;
 
-    // The walk: turns + L2 summaries newest-first. raw_turn / turn_summary
+    // The walk: turns + turn summaries newest-first. raw_turn / turn_summary
     // layers consume from these in chronological order (newest popped
     // first). Other layers (session/project/decisions) pull recent rows
     // independent of the walk.
     auto turns_desc        = backend->turns_by_session_desc(session_id, 0);
     auto turn_summaries    = backend->turn_summaries_by_session_desc(session_id, 0);
-    auto session_summaries = backend->session_summaries_desc(session_id, 0);
 
     // Walk pointers — index into the newest-first arrays. Turn summaries
     // for raw turns already consumed are skipped via the timestamp
@@ -849,21 +894,19 @@ SessionContext build_context(RaggerMemory& memory,
                 }
                 break;
             }
-            case LayerKind::SessionSummary: {
+            case LayerKind::Episode: {
+                // This session's episodes, newest-first (PHASE5 D.3).
                 int wanted = layer.limit > 0 ? layer.limit : 1;
                 int taken = 0;
-                for (const auto& s : session_summaries) {
-                    if (taken >= wanted) break;
-                    rev.push_back({"session_summary", s.text, s.timestamp});
+                for (const auto& e : backend->episodes_by_session_desc(session_id, wanted)) {
+                    rev.push_back({"episode", e.text, e.timestamp});
                     ++taken;
                 }
                 break;
             }
             case LayerKind::ProjectSummary: {
-                int wanted = layer.limit > 0 ? layer.limit : 1;
-                for (const auto& text : backend->recent_summaries("project", wanted)) {
-                    rev.push_back({"project_summary", text, ""});
-                }
+                // Parses for compatibility with user recipe copies; emits
+                // nothing — the project rollup layer was removed at 0.17.
                 break;
             }
             case LayerKind::Decisions: {

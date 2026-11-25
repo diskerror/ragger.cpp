@@ -31,6 +31,10 @@ Backend::Backend(const std::string& db_path, bool readonly)
 
 Backend::~Backend() = default;
 
+bool Backend::migration_pending(const std::string& version) {
+    return Impl::migration_pending(version);
+}
+
 std::string Backend::db_path() const { return pImpl->db_path; }
 
 std::string Backend::store(const std::string& text, json metadata, bool defer_embedding) {
@@ -49,11 +53,12 @@ int Backend::store_turn(const std::string& user_text,
                               const std::string& session_guid,
                               const std::string& source_timestamp,
                               const std::string& session_name,
-                              const std::string& name_source) {
+                              const std::string& name_source,
+                              int64_t started_epoch) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->store_turn(user_text, assistant_text, model_name,
                              defer_embedding, session_guid, source_timestamp,
-                             session_name, name_source);
+                             session_name, name_source, started_epoch);
 }
 
 std::vector<TurnRecord> Backend::turns_by_session(
@@ -68,19 +73,11 @@ bool Backend::finalize_turn(int turn_id, const std::string& assistant_text,
     return pImpl->finalize_turn(turn_id, assistant_text, model_name);
 }
 
-int Backend::store_summary(const std::string& text, const std::string& level,
-                                 const std::string& model_name,
-                                 const std::string& session_guid,
-                                 const std::string& source_timestamp,
-                                 const std::string& tags) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->store_summary(text, level, model_name, session_guid,
-                                source_timestamp, tags);
-}
+// PHASE8: the old summary-store forwarder is gone with its table.
 
-bool Backend::summary_exists_exact(const std::string& text, const std::string& created_at) {
+bool Backend::note_exists_exact(const std::string& text, const std::string& created_at) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->summary_exists_exact(text, created_at);
+    return pImpl->note_exists_exact(text, created_at);
 }
 
 bool Backend::decision_exists_exact(const std::string& text, const std::string& created_at) {
@@ -105,11 +102,13 @@ bool Backend::update_turn_meta(int turn_id, const std::string& timestamp,
     return pImpl->update_turn_meta(turn_id, timestamp, session_guid);
 }
 
-bool Backend::update_summary_text(int summary_id, const std::string& text,
-                                        const std::string& model_name) {
+// X22: the turn's current assistant_text (see storage_backend.h).
+std::optional<std::string> Backend::turn_assistant_text(int turn_id) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->update_summary_text(summary_id, text, model_name);
+    return pImpl->turn_assistant_text(turn_id);
 }
+
+// PHASE8: the old summary text-update forwarder is gone.
 
 bool Backend::turn_summary_exists(int turn_id) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
@@ -132,25 +131,108 @@ int Backend::reset_abandoned_turn_summaries(int limit) {
     return pImpl->reset_abandoned_turn_summaries(limit);
 }
 
-bool Backend::set_summary_tags(int summary_id, const std::string& tags) {
+// LR S66/S67: back-fill primitives (see storage_backend.h for contracts).
+std::vector<StorageBackend::TurnSummaryBackfillCandidate>
+Backend::turn_summary_backfill_candidates(const std::string& kind,
+                                const std::string& model_name,
+                                const std::vector<int>& ids) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->set_summary_tags(summary_id, tags);
+    return pImpl->turn_summary_backfill_candidates(kind, model_name, ids);
 }
 
-std::vector<std::string> Backend::recent_summaries(const std::string& level,
-                                                         int limit) {
+bool Backend::apply_turn_summary_text(int turn_summary_id, const std::string& text,
+                            const std::string& summary_model_name, bool overwrite) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->recent_summaries(level, limit);
+    return pImpl->apply_turn_summary_text(turn_summary_id, text, summary_model_name, overwrite);
 }
+
+// X22: stale turn-summary selection + in-place refresh (see storage_backend.h).
+std::vector<StorageBackend::StaleTurnSummaryCandidate>
+Backend::stale_turn_summary_candidates(int limit) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->stale_turn_summary_candidates(limit);
+}
+
+bool Backend::refresh_turn_summary(int turn_summary_id, const std::string& text,
+                                   const std::string& summary_model_name,
+                                   int observed_stale, bool clear_stale) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->refresh_turn_summary(turn_summary_id, text, summary_model_name,
+                                       observed_stale, clear_stale);
+}
+
+std::vector<StorageBackend::TriggerCandidate>
+Backend::trigger_backfill_candidates() {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->trigger_backfill_candidates();
+}
+
+bool Backend::apply_trigger(int knowledge_id, const std::string& trigger) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->apply_trigger(knowledge_id, trigger);
+}
+
+std::vector<StorageBackend::StrandedCandidate>
+Backend::stranded_turn_summary_candidates(int& ties) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->stranded_turn_summary_candidates(ties);
+}
+
+bool Backend::attach_stranded_turn_summary(int turn_summary_id, int episode_id) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->attach_stranded_turn_summary(turn_summary_id, episode_id);
+}
+
+int Backend::stranded_open_tail_count() {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->stranded_open_tail_count();
+}
+
+// X31: read-only lock probe (see storage_backend.h).
+bool Backend::episode_is_locked(int episode_id) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->episode_is_locked(episode_id);
+}
+
+// X23: episode-regeneration primitives (see storage_backend.h).
+std::vector<StorageBackend::EpisodeMember>
+Backend::episode_members(int episode_id) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->episode_members(episode_id);
+}
+
+std::optional<StorageBackend::EpisodeMember>
+Backend::turn_summary_member_by_id(int turn_summary_id) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->turn_summary_member_by_id(turn_summary_id);
+}
+
+bool Backend::replace_episode_text(int episode_id, const std::string& text,
+                                   const std::string& model_name,
+                                   const std::vector<std::pair<int,int>>& cleared,
+                                   const std::vector<int>& attach_ids) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->replace_episode_text(episode_id, text, model_name, cleared,
+                                       attach_ids);
+}
+
+std::vector<StorageBackend::SessionNameCandidate>
+Backend::unnamed_session_candidates() {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->unnamed_session_candidates();
+}
+
+bool Backend::apply_session_name(int session_id, const std::string& name,
+                                 const std::string& name_source) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->apply_session_name(session_id, name, name_source);
+}
+
+// PHASE8: the old summary tag-setter / recent-list forwarders are gone.
 
 std::vector<std::string> Backend::current_decisions(int limit) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->current_decisions(limit);
-}
-
-bool Backend::set_decision_status(int decision_id, const std::string& status) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->set_decision_status(decision_id, status);
 }
 
 std::vector<std::string> Backend::decisions_by_status(const std::string& status, int limit) {
@@ -163,25 +245,15 @@ std::vector<TurnRecord> Backend::unsummarized_turns(int limit) {
     return pImpl->unsummarized_turns(limit);
 }
 
-std::vector<DraftSummary> Backend::draft_summaries(int limit) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->draft_summaries(limit);
-}
-
-std::vector<std::string> Backend::sessions_needing_close(int pause_minutes) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->sessions_needing_close(pause_minutes);
-}
-
 std::string Backend::last_episode_end(const std::string& session_guid) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->last_episode_end(session_guid);
 }
 
-std::vector<SummaryRecord> Backend::l2_summaries_since(
+std::vector<SummaryRecord> Backend::turn_summary_summaries_since(
         const std::string& session_guid, const std::string& since_ts) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->l2_summaries_since(session_guid, since_ts);
+    return pImpl->turn_summary_summaries_since(session_guid, since_ts);
 }
 
 std::vector<EpisodeCandidateTurn> Backend::episode_candidate_turns(
@@ -190,71 +262,31 @@ std::vector<EpisodeCandidateTurn> Backend::episode_candidate_turns(
     return pImpl->episode_candidate_turns(session_guid, since_ts);
 }
 
-int Backend::store_episode(const std::string& text,
-        const std::string& model_name, const std::string& session_guid,
-        const std::string& first_ts, const std::string& last_ts) {
+// X5 (M1): hold the backend mutex for the whole run, like every sibling
+// forwarder. JobRunner::run calls this from a worker thread while HTTP
+// handlers, the summarizer and housekeeping use the same sqlite3* and the
+// text index's cached statements — unlocked, that was a data race. Same-
+// process callers stall during a reindex (accepted; per-batch locking is a
+// possible later refinement). RAII: a cancel or a throwing callback releases
+// the lock on the way out. Impl::reindex_all/reindex_table and TextIndex only
+// touch Impl members (never a Backend:: method), and the jobs.cpp/CLI progress
+// callbacks only update their own state or stdout, so nothing here re-enters
+// this mutex (std::mutex is not recursive).
+std::vector<std::pair<std::string, int>> Backend::reindex_all(
+        const ProgressFn& progress, const CancelFlag* cancel) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->store_episode(text, model_name, session_guid, first_ts, last_ts);
+    return pImpl->reindex_all(progress, cancel);
+}
+
+
+int Backend::store_episode_close(const EpisodeClose& close) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->store_episode_close(close);
 }
 
 std::vector<std::string> Backend::episodes_needing_close(int idle_minutes) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->episodes_needing_close(idle_minutes);
-}
-
-std::vector<std::string> Backend::episode_texts(const std::string& session_guid) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->episode_texts(session_guid);
-}
-
-bool Backend::set_summary_updated_at(int summary_id) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->set_summary_updated_at(summary_id);
-}
-
-std::vector<ClosedRun> Backend::sessions_needing_close_boundary() {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->sessions_needing_close_boundary();
-}
-
-std::vector<ClosedRun> Backend::projects_needing_close_boundary(int gap_days) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->projects_needing_close_boundary(gap_days);
-}
-
-void Backend::advance_session_boundary_watermark(int turn_id) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    pImpl->advance_session_boundary_watermark(turn_id);
-}
-
-void Backend::advance_project_boundary_watermark(int turn_id) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    pImpl->advance_project_boundary_watermark(turn_id);
-}
-
-std::vector<std::string> Backend::bounded_session_rollup_texts(
-        const std::string& session_guid, int64_t first_ts, int64_t last_ts) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->bounded_session_rollup_texts(session_guid, first_ts, last_ts);
-}
-
-std::vector<std::string> Backend::bounded_project_rollup_texts(
-        int64_t first_ts, int64_t last_ts) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->bounded_project_rollup_texts(first_ts, last_ts);
-}
-
-int Backend::store_session_summary(const std::string& text,
-        const std::string& model_name, const std::string& session_guid,
-        int64_t first_ts, int64_t last_ts) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->store_session_summary(text, model_name, session_guid, first_ts, last_ts);
-}
-
-int Backend::store_project_summary(const std::string& text,
-        const std::string& model_name, int64_t first_ts, int64_t last_ts) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->store_project_summary(text, model_name, first_ts, last_ts);
 }
 
 std::vector<TurnRecord> Backend::turns_by_session_desc(
@@ -271,16 +303,13 @@ Backend::turn_summaries_by_session_desc(
 }
 
 std::vector<SummaryRecord>
-Backend::session_summaries_desc(
+Backend::episodes_by_session_desc(
         const std::string& session_guid, int limit) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->session_summaries_desc(session_guid, limit);
+    return pImpl->episodes_by_session_desc(session_guid, limit);
 }
 
-bool Backend::update_text(int memory_id, const std::string& text, json metadata, bool defer_embedding) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->update_text(memory_id, text, std::move(metadata), defer_embedding);
-}
+// PHASE8: update_text forwarder is gone (text is never rewritten in place).
 
 SearchResponse Backend::search(const std::string& query, int limit,
                                      float min_score,
@@ -308,14 +337,28 @@ std::vector<SearchResult> Backend::load_all(const std::string& collection) {
     return pImpl->load_all(collection);
 }
 
-int Backend::rebuild_embeddings(Embedder& embedder, bool progress, const std::string& table) {
+int Backend::rebuild_embeddings(Embedder& embedder, const ProgressFn& progress,
+                                const std::string& table, const CancelFlag* cancel) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->rebuild_embeddings(embedder, progress, table);
+    return pImpl->rebuild_embeddings(embedder, progress, table, cancel);
 }
 
-int Backend::backfill_embeddings(Embedder& embedder, const std::string& table) {
+// RaggerMemory swaps its Embedder object on recovery/update; the backend must
+// be repointed immediately or the next store/search is a use-after-free.
+void Backend::set_embedder(Embedder& e) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->backfill_embeddings(embedder, table);
+    pImpl->embedder = &e;
+}
+
+void Backend::set_vector_type(vector_codec::VectorType t) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    pImpl->vtype_ = t;
+}
+
+int Backend::backfill_embeddings(Embedder& embedder, const std::string& table,
+                                 const CancelFlag* cancel) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->backfill_embeddings(embedder, table, cancel);
 }
 
 uint8_t Backend::embedding_version() const {
@@ -328,20 +371,25 @@ uint8_t Backend::increment_embedding_version() {
     return pImpl->increment_embedding_version();
 }
 
-int Backend::reindex_table(const std::string& table, bool progress) {
+int Backend::reindex_table(const std::string& table, const ProgressFn& progress,
+                           const CancelFlag* cancel) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->reindex_table(table, progress);
+    return pImpl->reindex_table(table, progress, cancel);
+}
+
+Backend::HousekeepingPlan Backend::housekeeping_plan() const {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->housekeeping_plan();
+}
+
+std::vector<std::pair<std::string, int>> Backend::reindex_plan(const std::string& table) const {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->reindex_plan(table);
 }
 
 void Backend::reset_terms_table() {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     pImpl->reset_terms_table();
-}
-
-bool Backend::update_document_embedding(int document_id,
-                                              const std::vector<float>& emb) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->update_document_embedding(document_id, emb);
 }
 
 int Backend::store_decision(const std::string& text,
@@ -353,39 +401,86 @@ int Backend::store_decision(const std::string& text,
     return pImpl->store_decision(text, status, tags, source_timestamp, defer_embedding);
 }
 
-bool Backend::update_decision_embedding(int decision_id,
+KnowledgeResult Backend::store_knowledge(const KnowledgeInput& in) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->store_knowledge(in);
+}
+
+void Backend::invalidate_all_caches() {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    pImpl->invalidate_all_caches();
+}
+
+json Backend::list_document_sources() {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->list_document_sources();
+}
+
+json Backend::delete_document_source(int document_source_id) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->delete_document_source(document_source_id);
+}
+
+json Backend::find_document_source(const std::string& path) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->find_document_source(path);
+}
+
+
+
+std::vector<AgentHit> Backend::agent_search(const AgentSearchQuery& q) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->agent_search(q);
+}
+
+std::vector<AgentHit> Backend::agent_document_search(const DocumentSearchQuery& q) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->agent_document_search(q);
+}
+
+json Backend::agent_get(const AgentGetQuery& q) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->agent_get(q);
+}
+
+json Backend::agent_timeline(const TimelineQuery& q) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->agent_timeline(q);
+}
+
+json Backend::agent_update(const UpdateRequest& req) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->agent_update(req);
+}
+
+json Backend::agent_review(const std::string& action,
+                           const std::vector<std::string>& ids) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->agent_review(action, ids);
+}
+
+std::vector<std::pair<int,float>> Backend::possible_supersedes_for_text(
+        const std::string& text) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->possible_supersedes_for_text(text);
+}
+
+bool Backend::update_decision_embedding(int knowledge_id,
                                               const std::vector<float>& emb) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->update_decision_embedding(decision_id, emb);
+    return pImpl->update_decision_embedding(knowledge_id, emb);
 }
 
-bool Backend::update_summary_embedding(int summary_id,
-                                             const std::vector<float>& emb) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->update_summary_embedding(summary_id, emb);
-}
-
-bool Backend::update_turn_embedding(int turn_id,
-                                          const std::vector<float>& emb) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->update_turn_embedding(turn_id, emb);
-}
+// PHASE8: the old summary embedding write-back forwarder is gone.
 
 std::vector<std::string> Backend::collections() const {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->collections();
 }
 
-void Backend::close() { pImpl->close(); }
-
-bool Backend::delete_memory(int memory_id) {
+void Backend::close() {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->delete_memory(memory_id);
-}
-
-int Backend::delete_batch(const std::vector<int>& memory_ids) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->delete_batch(memory_ids);
+    pImpl->close();
 }
 
 std::vector<SearchResult> Backend::search_by_metadata(const json& metadata_filter, int limit,
@@ -393,28 +488,6 @@ std::vector<SearchResult> Backend::search_by_metadata(const json& metadata_filte
                                                            const std::string& before) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->search_by_metadata(metadata_filter, limit, after, before);
-}
-
-int Backend::cleanup_old_conversations(float max_age_hours) {
-    std::lock_guard<std::mutex> lk(pImpl->mu);
-    auto cutoff = std::chrono::system_clock::now() -
-        std::chrono::duration_cast<std::chrono::system_clock::duration>(
-            std::chrono::duration<double, std::ratio<3600>>(max_age_hours));
-    int64_t cutoff_epoch = db_epoch(std::chrono::system_clock::to_time_t(cutoff));
-
-    // v2: raw verbatim exchanges (L1 turns) are what age out by retention;
-    // their gist is preserved in the L2/L3 summaries. Purge old turns by
-    // timestamp. (Pre-v2 this deleted summaries tagged collection='conversation';
-    // that column is gone in the lean schema.)
-    Stmt stmt(pImpl->db,
-        "DELETE FROM turns WHERE created_at < ?");
-    stmt.bind(1, cutoff_epoch);
-
-    int deleted = 0;
-    if (stmt.exec()) {
-        deleted = static_cast<int>(sqlite3_changes(pImpl->db));
-    }
-    return deleted;
 }
 
 // ---- users / settings CRUD (delegate through mutex) -----------------------
@@ -458,6 +531,16 @@ std::optional<UserInfo> Backend::get_user_by_token_hash(const std::string& token
 std::optional<std::string> Backend::get_setting(const std::string& key) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
     return pImpl->get_setting(key);
+}
+
+std::optional<std::string> Backend::get_semqlite_config(const std::string& key) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->get_semqlite_config(key);
+}
+
+void Backend::set_semqlite_config(const std::string& key, const std::string& value) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    pImpl->set_semqlite_config(key, value);
 }
 
 void Backend::set_setting(const std::string& key, const std::string& value) {

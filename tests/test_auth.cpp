@@ -4,6 +4,7 @@
  * Tests token generation, hashing, and persistence.
  */
 #include "auth.h"
+#include "check.h"
 #include "config.h"
 #include "user_store.h"
 #include "util/fs.h"
@@ -202,6 +203,56 @@ void test_token_roundtrip() {
     std::println(" OK");
 }
 
+// PHASE2 Step 5: cross-origin write guard (C §1.8).
+void test_request_origin_allowed() {
+    std::println("  test_request_origin_allowed...");
+    using ragger::request_origin_allowed;
+    // Foreign origin + write method → refused.
+    CHECK(!request_origin_allowed("POST", "http://evil.example", "127.0.0.1:8432"));
+    CHECK(!request_origin_allowed("PUT", "http://evil.example:80", "127.0.0.1:8432"));
+    // Same origin → allowed.
+    CHECK(request_origin_allowed("POST", "http://127.0.0.1:8432", "127.0.0.1:8432"));
+    CHECK(request_origin_allowed("DELETE", "https://localhost:8432", "localhost:8432"));
+    // No Origin header (curl/CLI/plugin/MCP) → allowed.
+    CHECK(request_origin_allowed("POST", "", "127.0.0.1:8432"));
+    // Safe methods pass even with a foreign Origin.
+    CHECK(request_origin_allowed("GET", "http://evil.example", "127.0.0.1:8432"));
+    CHECK(request_origin_allowed("OPTIONS", "http://evil.example", "127.0.0.1:8432"));
+    // Case-insensitive host compare.
+    CHECK(request_origin_allowed("POST", "HTTP://LOCALHOST:8432", "localhost:8432"));
+    // Prefix tricks must fail.
+    CHECK(!request_origin_allowed("POST", "http://127.0.0.1:8432.evil.example", "127.0.0.1:8432"));
+    std::println(" OK");
+}
+
+// X7 (C4): host_is_loopback — the pure Host-authority check that gates the
+// loopback auth bypass. Full truth table pinned here.
+void test_host_is_loopback() {
+    std::println("  test_host_is_loopback...");
+    using ragger::host_is_loopback;
+    // Loopback names (with/without port, case-insensitive, bracketed IPv6).
+    CHECK(host_is_loopback("localhost"));
+    CHECK(host_is_loopback("localhost:7777"));
+    CHECK(host_is_loopback("LOCALHOST:7777"));
+    CHECK(host_is_loopback("127.0.0.1"));
+    CHECK(host_is_loopback("127.0.0.1:7777"));
+    CHECK(host_is_loopback("[::1]"));
+    CHECK(host_is_loopback("[::1]:7777"));
+    CHECK(host_is_loopback("::1"));
+    // Foreign names and prefix/suffix tricks.
+    CHECK(!host_is_loopback("evil.example"));
+    CHECK(!host_is_loopback("evil.example:7777"));
+    CHECK(!host_is_loopback("127.0.0.1.evil.example"));
+    CHECK(!host_is_loopback("localhost.evil.example"));
+    // Not every 127/8 address, not the wildcard, not empty, not malformed.
+    CHECK(!host_is_loopback("127.0.0.2"));
+    CHECK(!host_is_loopback("0.0.0.0"));
+    CHECK(!host_is_loopback(""));
+    CHECK(!host_is_loopback("localhost:"));   // empty port
+    CHECK(!host_is_loopback("local host"));
+    std::println(" OK");
+}
+
 int main() {
     std::println("Running auth tests:");
 
@@ -223,6 +274,8 @@ int main() {
     test_useradd_update_existing();
     test_userdel();
     test_token_roundtrip();
+    test_request_origin_allowed();
+    test_host_is_loopback();
 
     ragger::set_ragger_base_override("");
     fs::remove_all(isolated_base);

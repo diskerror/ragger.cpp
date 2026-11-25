@@ -5,6 +5,8 @@
 #include "build_info.h"
 #include "server.h"
 #include "memory.h"
+#include "mcp.h"
+#include "agent_api.h"
 #include "user_store.h"
 #include "sqlite/backend.h"
 #include "lang.h"
@@ -14,11 +16,13 @@
 #include "config_access.h"
 #include "embedder.h"
 #include "util/fs.h"
+#include "util/parse.h"
 #include "inference.h"
 
 #include <curl/curl.h>
 #include "summarizer.h"
 #include "summarizer_service.h"
+#include "jobs.h"
 #include "nlohmann_json.hpp"
 
 #include "httplib.h"
@@ -112,19 +116,32 @@ struct Server::Impl {
     int             port;
     std::string     server_token_;
     std::optional<UserInfo> default_user_;
-    std::unique_ptr<InferenceClient>    inference_;
+    std::shared_ptr<InferenceClient>    inference_;
+    mutable std::mutex                  inference_mu_;  // guards inference_ (C §1.3)
     std::unique_ptr<SummarizerService>  summarizer_;
+    // LR S91 (D4, D-6): single-flight maintenance jobs (reindex,
+    // housekeeping, backfill:<kind>). Built before setup_routes() so the
+    // routes can capture it; shut down with the background threads.
+    std::unique_ptr<JobRunner>          jobs_;
 
-    // Per-user memory cache (username → RaggerMemory)
-    std::unordered_map<std::string, std::unique_ptr<RaggerMemory>> user_memories_;
-    std::mutex user_memories_mutex_;
+    /// Snapshot accessor: callers hold the returned shared_ptr for as long
+    /// as they need the client, independent of any concurrent reload.
+    std::shared_ptr<InferenceClient> inference() const {
+        std::lock_guard<std::mutex> lk(inference_mu_);
+        return inference_;
+    }
+    void set_inference(std::shared_ptr<InferenceClient> c) {
+        std::lock_guard<std::mutex> lk(inference_mu_);
+        inference_ = std::move(c);
+    }
 
-    // SSE activity-log tailing: byte offset already streamed to /events.
-    std::uintmax_t activity_log_offset_ = 0;
+    // SSE activity-log tailing moved to per-subscriber offsets (S17).
 
     // Housekeeping timer
     std::atomic<bool> timer_running_{false};
     std::thread timer_thread_;
+    std::atomic<bool> poller_running_{false};
+    std::thread poller_thread_;
     std::string pid_file_;
 
     Impl(RaggerMemory& mem, const std::string& h, int p)
@@ -132,6 +149,8 @@ struct Server::Impl {
     {
         bootstrap_auth();
         init_inference();
+        jobs_ = std::make_unique<JobRunner>(
+            memory, [this] { return inference(); }, [this] { run_housekeeping(); });
         tcp_svr = make_tcp_server();
         if (!config().server_name.empty()) {
             httplib::Headers server_header{{"Server", config().server_name}};
@@ -199,23 +218,26 @@ struct Server::Impl {
             Diskerror::Logger::info(std::format(lang::MSG_WARMUP_ERROR, e.what()));
         }
         // Preload default model on local inference engines
-        if (inference_) {
-            preload_local_model(inference_->model);
+        if (auto inf = inference()) {
+            preload_local_model(inf, inf->model);
         }
     }
 
     /// Preload a model if its endpoint is local (non-commercial).
-    /// Runs in background thread to avoid blocking startup.
-    void preload_local_model(const std::string& model_name) {
-        if (model_name.empty() || !inference_) return;
+    /// Runs in background thread to avoid blocking startup. Takes the
+    /// client by shared_ptr copy — the detached thread must not capture
+    /// `this` and race a reload/teardown (C §1.3).
+    void preload_local_model(std::shared_ptr<InferenceClient> inf,
+                             const std::string& model_name) {
+        if (model_name.empty() || !inf) return;
         try {
-            auto& ep = inference_->resolve_endpoint(model_name);
+            auto& ep = inf->resolve_endpoint(model_name);
             if (!ep.is_local()) return;
         } catch (...) {
             return;
         }
-        std::thread([this, model_name]() {
-            auto err = inference_->ensure_model_loaded(model_name);
+        std::thread([inf, model_name]() {
+            auto err = inf->ensure_model_loaded(model_name);
             if (err.empty()) {
                 Diskerror::Logger::info(std::format(lang::MSG_PRELOADED_MODEL, model_name));
             } else {
@@ -228,30 +250,10 @@ struct Server::Impl {
         }).detach();
     }
 
-    /// Run one housekeeping pass: purge old turns, catch up missing
-    /// summaries, and backfill any NULL embeddings.
+    /// Run one housekeeping pass: catch up missing summaries, and backfill
+    /// any NULL embeddings.
     void run_housekeeping() {
-        const auto& cfg = config();
-        float max_age_hours = cfg.cleanup_max_age_hours;
-
-        // 1. Purge old conversation entries — use the main memory backend,
-        //    not a separate sqlite::Backend. Opening a second connection to the
-        //    same file while the main backend holds it can produce SQLite
-        //    BUSY/LOCKED contention that silently prevents the backfill UPDATE
-        //    in step 3 from committing.
-        if (max_age_hours > 0) {
-            try {
-                int deleted = memory.cleanup_old_conversations(max_age_hours);
-                if (deleted > 0) {
-                    Diskerror::Logger::info(std::format(
-                        lang::MSG_HOUSEKEEPING_EXPIRED, 0, deleted));
-                }
-            } catch (const std::exception& e) {
-                Diskerror::Logger::critical(std::format(lang::ERR_CLEANUP_DB, e.what()));
-            }
-        }
-
-        // 2. Catch up unsummarized turns and draft summaries.
+        // 2. Catch up unsummarized turns.
         if (summarizer_) {
             summarizer_->enqueue_catch_up();
         }
@@ -283,83 +285,80 @@ struct Server::Impl {
         //    `ragger reindex [table|all]` for manual rebuilds.)
     }
 
-    // Per-user housekeeping locks: username → fd
-    std::unordered_map<std::string, int> housekeeping_locks_;
-    std::mutex housekeeping_locks_mutex_;
-
-    /// Try to acquire housekeeping lock for a specific user.
-    /// Lock file: /tmp/ragger/housekeeping-{username}.lock
-    /// Returns true if this instance now owns housekeeping for that user.
-    bool acquire_user_housekeeping_lock(const std::string& username) {
-        std::lock_guard<std::mutex> lock(housekeeping_locks_mutex_);
-        if (housekeeping_locks_.count(username)) return true;  // already own it
-
-        fs::create_directories("/tmp/ragger");
-        std::string lock_path = "/tmp/ragger/housekeeping-" + username + ".lock";
-        int fd = open(lock_path.c_str(), O_WRONLY | O_CREAT, 0644);
-        if (fd < 0) return false;
-
-        if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
-            ::close(fd);
-            return false;  // another instance owns it
-        }
-
-        // Write our PID
-        ftruncate(fd, 0);
-        auto pid_str = std::to_string(getpid());
-        (void)write(fd, pid_str.c_str(), pid_str.size());
-        housekeeping_locks_[username] = fd;
-        Diskerror::Logger::info(std::format(lang::MSG_HOUSEKEEPING_OWNER, username));
-        return true;
+    /// Start background timer for periodic housekeeping.
+    void start_background_threads() {
+        start_signal_poller();
+        start_housekeeping_timer();
     }
 
-    /// Start background timer for periodic housekeeping.
-    /// Housekeeping only acts on users whose locks we hold.
+    /// Signal handling thread — ALWAYS started, even with
+    /// housekeeping_interval == 0 (C §1.5): shutdown, restart, and SIGHUP
+    /// reload must not depend on the housekeeping thread existing. With
+    /// SA_RESTART, accept() resumes after a signal, so without this poller
+    /// SIGTERM was swallowed and POST /restart answered "restarting" but
+    /// nothing happened.
+    void start_signal_poller() {
+        poller_running_ = true;
+        poller_thread_ = std::thread([this]() {
+            while (poller_running_) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                // (1) shutdown / restart — stop the listeners exactly as the
+                // old housekeeping-thread block did; main() re-execs on
+                // restart after the listeners return.
+                if (g_shutdown_requested.load(std::memory_order_relaxed) ||
+                    g_restart_requested.load(std::memory_order_relaxed)) {
+                    Diskerror::Logger::info(
+                        g_restart_requested.load(std::memory_order_relaxed)
+                            ? "Restart signal received; stopping listeners to re-exec"
+                            : "Shutdown signal received; stopping listeners");
+                    if (unix_svr.is_running()) unix_svr.stop();
+                    if (tcp_svr && tcp_svr->is_running()) tcp_svr->stop();
+                    return;
+                }
+                // (2) Reload (SIGHUP): config, plus the search caches — the
+                // DB file may have been changed by another process (CLI
+                // import/delete, a hand edit). SIGHUP, not a new signal, so
+                // a newer CLI can never kill an older daemon. Lives here so
+                // reload works with housekeeping disabled (every CLI write
+                // sends SIGHUP).
+                if (g_config_reload_requested.exchange(false)) {
+                    memory.backend()->invalidate_all_caches();
+                    Diskerror::Logger::info(lang::MSG_CACHE_RELOADED);
+                    int n = reload_config();
+                    if (n > 0) {
+                        Diskerror::Logger::info(std::format(ragger::lang::MSG_CONFIG_RELOADED_N, n));
+                        // Re-initialize inference client if endpoints changed
+                        reload_inference();
+                    } else {
+                        Diskerror::Logger::info(lang::MSG_CONFIG_RELOADED_NONE);
+                    }
+                }
+            }
+        });
+    }
+
+    /// Periodic housekeeping only. The interval is re-read every iteration
+    /// so a changed setting takes effect without a restart; 0 still means
+    /// the thread is not started at all.
     void start_housekeeping_timer() {
-        int interval = config().housekeeping_interval;
-        if (interval == 0) {
+        if (config().housekeeping_interval == 0) {
             Diskerror::Logger::info(lang::MSG_HOUSEKEEPING_DISABLED);
             return;
         }
         timer_running_ = true;
-        timer_thread_ = std::thread([this, interval]() {
+        timer_thread_ = std::thread([this]() {
             while (timer_running_) {
+                const int interval = config().housekeeping_interval;  // live
+                if (interval <= 0) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                    continue;
+                }
                 for (int i = 0; i < interval && timer_running_; ++i) {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
-                    // Check for shutdown (or restart, which stops listeners
-                    // the same way — main() re-execs afterward).
-                    if (g_shutdown_requested.load(std::memory_order_relaxed) ||
-                        g_restart_requested.load(std::memory_order_relaxed)) {
-                        Diskerror::Logger::info(
-                            g_restart_requested.load(std::memory_order_relaxed)
-                                ? "Restart signal received; stopping listeners to re-exec"
-                                : "Shutdown signal received; stopping listeners");
-                        timer_running_ = false;
-                        if (unix_svr.is_running()) unix_svr.stop();
-                        if (tcp_svr && tcp_svr->is_running()) tcp_svr->stop();
-                        break;
-                    }
                     // Check for signal-triggered housekeeping
                     if (g_housekeeping_requested.exchange(false)) {
                         Diskerror::Logger::info(lang::MSG_HOUSEKEEPING_SIGNAL);
                         run_housekeeping();
-                    }
-                    // Check for config reload (SIGHUP)
-                    if (g_config_reload_requested.exchange(false)) {
-                        int n = reload_config();
-                        if (n > 0) {
-                            Diskerror::Logger::info(std::format(ragger::lang::MSG_CONFIG_RELOADED_N, n));
-                            // Re-initialize inference client if endpoints changed
-                            try {
-                                inference_ = std::make_unique<InferenceClient>(
-                                    InferenceClient::from_config(config()));
-                                Diskerror::Logger::info(lang::MSG_INFERENCE_CLIENT_OK);
-                            } catch (const std::exception& e) {
-                                Diskerror::Logger::critical(std::format(lang::ERR_INFERENCE_CLIENT_FAIL, e.what()));
-                            }
-                        } else {
-                            Diskerror::Logger::info(lang::MSG_CONFIG_RELOADED_NONE);
-                        }
                     }
                 }
                 if (timer_running_) {
@@ -369,26 +368,52 @@ struct Server::Impl {
         });
     }
 
-    void stop_housekeeping_timer() {
+    void stop_background_threads() {
+        // LR S91: a running job is cancelled and joined BEFORE the timer
+        // stops, so shutdown never leaves a half-run worker (the S90 cancel
+        // contract keeps the DB consistent).
+        if (jobs_) jobs_->shutdown();
         timer_running_ = false;
+        poller_running_ = false;
         if (timer_thread_.joinable()) {
             timer_thread_.join();
         }
-        // Release all user housekeeping locks
-        std::lock_guard<std::mutex> lock(housekeeping_locks_mutex_);
-        for (auto& [username, fd] : housekeeping_locks_) {
-            flock(fd, LOCK_UN);
-            ::close(fd);
+        if (poller_thread_.joinable()) {
+            poller_thread_.join();
         }
-        housekeeping_locks_.clear();
+    }
+
+    /// Rebuild the inference client from the current config. The client
+    /// copies the model names, endpoints and max_tokens when it is built, so
+    /// a change to any of them takes effect only through a rebuild. Callers
+    /// holding the old snapshot (inference()) finish with it.
+    void reload_inference() {
+        try {
+            auto fresh = std::make_shared<InferenceClient>(
+                InferenceClient::from_config(config()));
+            set_inference(std::move(fresh));
+            Diskerror::Logger::info(lang::MSG_INFERENCE_CLIENT_OK);
+        } catch (const std::exception& e) {
+            Diskerror::Logger::critical(std::format(lang::ERR_INFERENCE_CLIENT_FAIL, e.what()));
+        }
+    }
+
+    /// Settings InferenceClient::from_config reads: saving one of these
+    /// through PUT /config must rebuild the client, or the daemon keeps
+    /// calling the old model/endpoint until a restart or SIGHUP.
+    static bool affects_inference(std::string_view key) {
+        return key == "summarizer_model" || key == "summarizer_api_url" ||
+               key == "summarizer_api_key" || key == "summarizer_max_tokens" ||
+               key.starts_with("inference_");
     }
 
     void init_inference() {
         const auto& cfg = config();
         auto client = InferenceClient::from_config(cfg);
         if (!client.endpoints.empty()) {
-            inference_ = std::make_unique<InferenceClient>(std::move(client));
-            Diskerror::Logger::info(std::format(lang::MSG_INFERENCE_ENABLED, inference_->endpoints.size()));
+            auto n = client.endpoints.size();
+            set_inference(std::make_shared<InferenceClient>(std::move(client)));
+            Diskerror::Logger::info(std::format(lang::MSG_INFERENCE_ENABLED, n));
         }
     }
 
@@ -416,11 +441,15 @@ struct Server::Impl {
     }
 
     /// True if this request must present a valid token. False for requests
-    /// arriving on the unix socket (empty remote_addr) or from localhost.
+    /// arriving on the unix socket (empty remote_addr) or from loopback — but
+    /// a loopback peer is only trusted when its Host header also names
+    /// loopback (X7/C4). A DNS-rebinding page reaches us over loopback while
+    /// sending its own Host, so it is no longer pre-authenticated; it must
+    /// present a token (this is not a 403 — a token holder still works).
     bool request_requires_auth(const httplib::Request& req) const {
-        if (req.remote_addr.empty()) return false;  // unix socket
+        if (req.remote_addr.empty()) return false;  // unix socket (no Host check)
         if (req.remote_addr == "127.0.0.1" || req.remote_addr == "::1") {
-            return false;
+            return !host_is_loopback(req.get_header_value("Host"));
         }
         return true;
     }
@@ -464,164 +493,176 @@ struct Server::Impl {
         return std::nullopt;
     }
 
-    /// Get per-user memory (or fallback to common).
-    /// In single-user mode, always returns the main memory instance.
-    RaggerMemory& _get_memory(const std::string& /*username*/) {
-        // Single-user mode: always return the main memory
-        return memory;
-    }
-
-
     // ---- Route handlers (named for navigability) ---------------------------
 
+    // LR S70 (R4): the verb body is agent_store (agent_api.h), shared with
+    // MCP `store` and the CLI. This handler is envelope only: parse, call,
+    // respond. Validation failures throw std::invalid_argument and map to
+    // 400 "ERROR: <msg>" via guarded() (D-4: mapping shared, envelope kept).
     void handle_store(const UserInfo& user, const httplib::Request& req,
                       httplib::Response& res) {
         auto body = json::parse(req.body);
-        std::string text = body.value("text", "");
-        json metadata = body.value("metadata", json::object());
-        if (text.empty()) {
-            Diskerror::Logger::debug("POST /store 400");
-            res.status = 400;
-            res.set_content(lang::HTTP_MISSING_TEXT, "text/plain");
-            return;
-        }
-        if (!metadata.contains("collection") || metadata["collection"].get<std::string>().empty())
-            metadata["collection"] = "memory";
-        if (!metadata.contains("source") || metadata["source"].get<std::string>().empty())
-            metadata["source"] = user.username;
-        auto& mem = _get_memory(user.username);
-
-        // Route curated decisions to the L6 decisions table; everything else
-        // (fact/preference/lesson/unspecified) lands in summaries via store().
-        std::string category = metadata.value("category", "");
-        if (category == "decision") {
-            std::string tags = metadata.value("tags", "");
-            // Default "current" (the only status the recall pipeline
-            // surfaces). Callers can pass metadata.status="roadmap" for
-            // planned/future work that shouldn't clutter every session's
-            // recall until it's actually done.
-            std::string status = metadata.value("status", "current");
-            int did = mem.store_decision(text, status, tags);
-            Diskerror::Logger::debug("POST /store 200 (decision)");
-            respond_json(res, json{{"id", std::to_string(did)},
-                                 {"status", "stored"},
-                                 {"table", "decisions"}});
-            return;
-        }
-
-        std::string id = mem.store(text, metadata);
-        Diskerror::Logger::debug("POST /store 200");
-        respond_json(res, json{{"id", id}, {"status", "stored"}});
+        respond_json(res, agent_store(memory, body, user.username));
     }
 
-    void handle_search(const UserInfo& user, const httplib::Request& req,
+    // POST /decision -- structured decision (agent API Phase 1, db 0.17).
+    // Body: {text, trigger, rationale?, scope?, tags?, status?, supersedes?,
+    //        session?, evidence?: [episode_id,...] (LR S80)}
+    // tags may be a string ("a,b") or an array of strings.
+    // LR S72 (R4): verb body moved to agent_memory_decision (agent_api.h);
+    // validation failures map to 400 "ERROR: <msg>" via guarded() (D-4).
+    void handle_decision(const UserInfo& /*user*/, const httplib::Request& req,
+                         httplib::Response& res) {
+        auto body = json::parse(req.body);
+        respond_json(res, agent_memory_decision(memory, body));
+    }
+
+    // POST /memory/note — agent note (agent API Phase 3).
+    // Body: {text, tags?, evidence?}. Stores via store(), so the row lands
+    // where ragger_store notes land (knowledge kind='note'). The response carries
+    // possible_supersedes exactly like /decision — compared against current
+    // decisions, hint only, nothing is changed.
+    // Phase 5 step 6 + LR S80: `evidence: [episode_id]` routes the write to
+    // store_knowledge(kind="insight") instead — a synthesized insight linked
+    // to its sources, and the response carries "kind":"insight". Without evidence nothing
+    // changes.
+    // LR S72 (R4): the whole body — including the insight routing that used
+    // to be written twice (inventory D14) — lives in agent_memory_note
+    // (agent_api.h). The empty-text 400 message unified there too (D6).
+    void handle_memory_note(const UserInfo& user, const httplib::Request& req,
+                            httplib::Response& res) {
+        auto body = json::parse(req.body);
+        respond_json(res, agent_memory_note(memory, body, user.username));
+    }
+
+    // POST /memory/timeline — deterministic newest-first range scan
+    // (agent API Phase 4). Body: {session?, since?, until?,
+    // granularity?, limit?, cursor?}. Returns {items, next_cursor}.
+    // LR S71 (R4): verb body moved to agent_memory_timeline (agent_api.h).
+    void handle_memory_timeline(const UserInfo& /*user*/, const httplib::Request& req,
+                                httplib::Response& res) {
+        auto body = json::parse(req.body);
+        respond_json(res, agent_memory_timeline(memory, body));
+        Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "POST", "/memory/timeline", "200"));
+    }
+
+    // POST /memory/update — metadata-only curation (agent API Phase 4).
+    // Body: {id, status?, tags?, text?}. `text` present is always
+    // rejected: text changes go through a new decision/note with supersedes.
+    // LR S72 (R4): verb body moved to agent_memory_update (agent_api.h).
+    void handle_memory_update(const UserInfo& /*user*/, const httplib::Request& req,
+                              httplib::Response& res) {
+        auto body = json::parse(req.body);
+        respond_json(res, agent_memory_update(memory, body));
+    }
+
+    // POST /memory/review — pending-decision queue (agent API Phase 4).
+    // Body: {action: list|approve|reject, ids?: [handles]}.
+    // LR S72 (R4): verb body moved to agent_memory_review (agent_api.h);
+    // the action/ids extraction moved to parse_review_request (D18).
+    void handle_memory_review(const UserInfo& /*user*/, const httplib::Request& req,
+                              httplib::Response& res) {
+        auto body = json::parse(req.body);
+        respond_json(res, agent_memory_review(memory, body));
+    }
+
+    // POST /memory/search — layered agent search (agent API Phase 2).
+    // Body = AgentSearchQuery fields: {query, layers?: [..], since?, until?,
+    // status?, session?, exclude_session?, limit?, max_tokens?}.
+    // Returns {"results":[AgentHit...]}. Validation failures are 400.
+    // LR S71 (R4): verb body moved to agent_memory_search (agent_api.h).
+    void handle_memory_search(const UserInfo& /*user*/, const httplib::Request& req,
+                              httplib::Response& res) {
+        auto body = json::parse(req.body);
+        respond_json(res, agent_memory_search(memory, body));
+        Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "POST", "/memory/search", "200"));
+    }
+
+    // POST /memory/documents — LR S76 (D-7): documents' own search verb.
+    // Body = {query, source?, limit?}; same hit shape as /memory/search.
+    void handle_memory_documents(const UserInfo& /*user*/, const httplib::Request& req,
+                                 httplib::Response& res) {
+        auto body = json::parse(req.body);
+        respond_json(res, agent_document_search(memory, body));
+        Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "POST", "/memory/documents", "200"));
+    }
+
+    // POST /memory/get — agent row reads (agent API Phase 2).
+    // Body = AgentGetQuery fields: {ids?: [handles], expand?, session?,
+    // after_turn?, before_turn?, limit?}. Exactly one mode per call.
+    // LR S71 (R4): verb body moved to agent_memory_get (agent_api.h).
+    void handle_memory_get(const UserInfo& /*user*/, const httplib::Request& req,
+                           httplib::Response& res) {
+        auto body = json::parse(req.body);
+        respond_json(res, agent_memory_get(memory, body));
+        Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "POST", "/memory/get", "200"));
+    }
+
+    // LR S71 (R4): flat search body moved to agent_search (agent_api.h).
+    // The empty-query 400 message unified there ("query is required").
+    void handle_search(const UserInfo& /*user*/, const httplib::Request& req,
                        httplib::Response& res) {
         auto body = json::parse(req.body);
-        std::string query = body.value("query", "");
-        if (query.empty()) {
-            Diskerror::Logger::debug("POST /search 400");
-            res.status = 400; res.set_content(lang::HTTP_MISSING_QUERY, "text/plain"); return;
-        }
-        int limit       = body.value("limit", config().default_search_limit);
-        float min_score = body.value("min_score", config().default_min_score);
-        auto collections = body.value("collections", std::vector<std::string>{});
-        auto t0 = std::chrono::high_resolution_clock::now();
-        auto& mem = _get_memory(user.username);
-        auto sr = mem.search(query, limit, min_score, collections);
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::high_resolution_clock::now() - t0).count();
-        json timing = sr.timing;
-        timing["total_ms"] = ms;
-        Diskerror::Logger::trace(std::format(lang::DBG_QUERY_LOG, query, sr.results.size(), ms));
+        respond_json(res, agent_search(memory, body));
         Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "POST", "/search", "200"));
-        respond_json(res, json{{"results", search_results_to_json(sr.results)},
-                             {"timing",  timing}});
     }
 
     // POST /turn: ingest one agent-pushed conversation turn for background
     // summarization. No-op unless [server] capture_turns is true.
-    void handle_turn(const UserInfo& user, const httplib::Request& req,
+    // LR S72 (R4): arg rules + capture + payload via agent_capture_turn
+    // (the missing-user 400 body unified into the shared mapping, D16).
+    // The eager summarizer handoff stays HTTP-only (D17: MCP turns are
+    // found by the daemon's periodic tick — no in-process summarizer).
+    void handle_turn(const UserInfo& /*user*/, const httplib::Request& req,
                      httplib::Response& res) {
         auto body = json::parse(req.body);
-        std::string user_text  = body.value("user", "");
-        std::string assistant  = body.value("assistant", "");
-        std::string model      = body.value("model", "");
-        std::string session_id = body.value("session_id", "");
-        std::string session_name = body.value("session_name", "");
-        std::string name_source  = body.value("name_source", "");
-        if (user_text.empty()) {
-            Diskerror::Logger::debug("POST /turn 400");
-                        respond_json(res, json{{"error", "missing required field: user"}}, 400);
-            return;
+        const auto result = agent_capture_turn(memory, body);
+        // PHASE6 2.2: hand the fresh turn straight to the summarizer so turn summary
+        // runs as soon as the single worker is free (the periodic tick is
+        // the safety net, not the primary path). Non-blocking: enqueue only,
+        // the request never waits for inference. summarizer_ is assigned in
+        // serve() before the listeners start, so every request thread sees a
+        // fully-constructed pointer without locking.
+        if (result.captured && summarizer_) {
+            // X22: after a same-exchange merge the request's
+            // `assistant` fragment is NOT the whole reply — enqueue the
+            // turn's CURRENT assistant_text so a first-time turn summary for a turn
+            // that was merged before its first summary summarizes
+            // everything. Fall back to the fragment when the read fails or
+            // comes back empty.
+            std::string assistant = body.value("assistant", std::string());
+            if (const auto full = memory.backend()->turn_assistant_text(result.turn_id);
+                full && !full->empty())
+                assistant = *full;
+            if (!assistant.empty())
+                summarizer_->enqueue_turn(result.turn_id, result.clean_user, assistant,
+                                          body.value("model", std::string()),
+                                          body.value("session_id", std::string()),
+                                          /*source_timestamp=*/"");
         }
-        auto& mem = _get_memory(user.username);
-        auto result = capture_turn(mem, user_text, assistant, model, session_id,
-                                   session_name, name_source);
-        // Raw text is written to both turns and summaries (as a NULL-model_id
-        // placeholder) by capture_turn. The summarizer picks it up on the next
-        // housekeeping tick (every 60s) via enqueue_catch_up — no immediate
-        // LLM call here.
+        respond_json(res, capture_turn_payload(result));
         Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "POST", "/turn", "200"));
-        respond_json(res, json{{"status",  result.captured ? "captured" : "disabled"},
-                             {"turn_id", result.turn_id}});
     }
 
     // GET /session/<guid>[?recipe=name]: assemble a recipe-shaped context payload.
-    void handle_session(const UserInfo& user, const httplib::Request& req,
+    // LR S72 (R4): verb body moved to agent_build_context (agent_api.h);
+    // the handler only maps path + query onto the shared args object (D21).
+    void handle_session(const UserInfo& /*user*/, const httplib::Request& req,
                         httplib::Response& res) {
-        std::string sid = req.matches[1];
-        std::string recipe_name = req.get_param_value("recipe");
-        auto& mem = _get_memory(user.username);
-        auto ctx = build_context(mem, sid, recipe_name);
-        if (!ctx.enabled) {
-            respond_json(res, json{{"status", "disabled"}});
-            return;
-        }
-        json chunks = json::array();
-        for (const auto& c : ctx.chunks)
-            chunks.push_back({{"kind", c.kind}, {"text", c.text}, {"timestamp", c.timestamp}});
+        json args{{"session_id", std::string(req.matches[1])},
+                  {"recipe", req.get_param_value("recipe")}};
+        respond_json(res, agent_build_context(memory, args));
         Diskerror::Logger::debug(std::format(lang::DBG_HTTP, "GET", "/session", "200"));
-        respond_json(res, json{{"status",     "ok"},
-                             {"session_id", sid},
-                             {"recipe",     ctx.recipe_name},
-                             {"chunks",     chunks}});
     }
 
-    void handle_delete_memory(const UserInfo& user, const httplib::Request& req,
-                               httplib::Response& res) {
-        int id = std::stoi(req.matches[1]);
-        auto& mem = _get_memory(user.username);
-        if (mem.delete_memory(id)) {
-            Diskerror::Logger::debug("DELETE /memory 200");
-            respond_json(res, json{{"id", id}, {"status", "deleted"}});
-        } else {
-            Diskerror::Logger::debug("DELETE /memory 404");
-            res.status = 404; res.set_content(lang::HTTP_MEMORY_NOT_FOUND, "text/plain");
-        }
-    }
-
-    void handle_delete_batch(const UserInfo& user, const httplib::Request& req,
-                              httplib::Response& res) {
-        auto body = json::parse(req.body);
-        if (!body.contains("ids") || !body["ids"].is_array()) {
-            Diskerror::Logger::debug("POST /delete_batch 400");
-            res.status = 400; res.set_content(lang::HTTP_MISSING_IDS, "text/plain"); return;
-        }
-        auto ids = body["ids"].get<std::vector<int>>();
-        auto& mem = _get_memory(user.username);
-        int deleted = mem.delete_batch(ids);
-        Diskerror::Logger::debug("POST /delete_batch 200");
-        respond_json(res, json{{"deleted", deleted}});
-    }
-
-    void handle_search_by_metadata(const UserInfo& user, const httplib::Request& req,
+    void handle_search_by_metadata(const UserInfo& /*user*/, const httplib::Request& req,
                                     httplib::Response& res) {
         auto body = json::parse(req.body);
         if (!body.contains("metadata") || !body["metadata"].is_object()) {
             Diskerror::Logger::debug("POST /search_by_metadata 400");
             res.status = 400; res.set_content(lang::HTTP_MISSING_METADATA, "text/plain"); return;
         }
-        auto results = _get_memory(user.username).search_by_metadata(
+        auto results = memory.search_by_metadata(
             body["metadata"], body.value("limit", 0),
             body.value("after", ""), body.value("before", ""));
         Diskerror::Logger::debug("POST /search_by_metadata 200");
@@ -634,13 +675,20 @@ struct Server::Impl {
     void setup_routes(httplib::Server& svr) {
         // GET /health — no auth required
         svr.Get("/health", [this](const httplib::Request&, httplib::Response& res) {
-            respond_json(res, json{{"status",   "ok"},
-                                 {"version",  RAGGER_VERSION},
-                                 {"commit",   RAGGER_COMMIT},
-                                 {"built",    RAGGER_BUILD_DATE},
-                                 {"memories", memory.count()},
-                                 {"embeddable_rows", memory.count_embeddable_rows()},
-                                 {"degraded", memory.embeddings_degraded()}});
+            json body{{"status",   "ok"},
+                      {"version",  RAGGER_VERSION},
+                      {"commit",   RAGGER_COMMIT},
+                      {"built",    RAGGER_BUILD_DATE},
+                      {"memories", memory.count()},
+                      {"embeddable_rows", memory.count_embeddable_rows()},
+                      {"degraded", memory.embeddings_degraded()}};
+            // capture_turns + summarizer_model/engine: lets a plugin say WHY
+            // nothing is captured or summarized (see capture_summarizer_flags).
+            if (auto inf = inference())
+                body.update(capture_summarizer_flags(config(), *inf));
+            else
+                body.update(capture_summarizer_flags(config(), InferenceClient({}, "")));
+            respond_json(res, body);
             Diskerror::Logger::debug("GET /health 200");
         });
 
@@ -654,12 +702,30 @@ struct Server::Impl {
                     res.set_content(lang::HTTP_UNAUTHORIZED, "text/plain");
                     return;
                 }
+                // Cross-origin write guard (C §1.8): after auth, before the
+                // handler. A browser sends Origin on cross-site writes; the
+                // authority must match Host. GET/HEAD/OPTIONS and requests
+                // with no Origin (curl, CLI, plugin, MCP) pass through.
+                if (!request_origin_allowed(req.method,
+                                            req.get_header_value("Origin"),
+                                            req.get_header_value("Host"))) {
+                    Diskerror::Logger::debug(std::format("{} {} 403 (origin)", req.method, req.path));
+                    res.status = 403;
+                    res.set_content("ERROR: cross-origin request refused", "text/plain");
+                    return;
+                }
                 try {
                     handler(*user, req, res);
                 } catch (const json::exception& e) {
                     Diskerror::Logger::debug(std::format("{} {} 400", req.method, req.path));
                     res.status = 400;
                     res.set_content(std::format(lang::HTTP_JSON_ERROR, e.what()), "text/plain");
+                } catch (const std::invalid_argument& e) {
+                    // Malformed inputs (bad ids, bad ports, validation failures)
+                    // are client errors, not server faults (C §1.10).
+                    Diskerror::Logger::debug(std::format("{} {} 400", req.method, req.path));
+                    res.status = 400;
+                    res.set_content(std::string("ERROR: ") + e.what(), "text/plain");
                 } catch (const std::exception& e) {
                     Diskerror::Logger::critical(std::format(lang::ERR_ROUTE_FAILED, req.method, req.path, e.what()));
                     res.status = 500;
@@ -668,35 +734,25 @@ struct Server::Impl {
             };
         };
 
-        svr.Get("/count", guarded([this](const UserInfo& user, const httplib::Request&,
+        svr.Get("/count", guarded([this](const UserInfo& /*user*/, const httplib::Request&,
                                          httplib::Response& res) {
-            respond_json(res, json{{"count", _get_memory(user.username).count()}});
+            respond_json(res, json{{"count", memory.count()}});
             Diskerror::Logger::debug("GET /count 200");
         }));
 
         svr.Post("/store",              guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_store(u, req, res); }));
+        svr.Post("/decision",           guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_decision(u, req, res); }));
         svr.Post("/search",             guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_search(u, req, res); }));
+        svr.Post("/memory/search",      guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_search(u, req, res); }));
+        svr.Post("/memory/documents",   guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_documents(u, req, res); }));
+        svr.Post("/memory/get",         guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_get(u, req, res); }));
+        svr.Post("/memory/note",        guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_note(u, req, res); }));
+        svr.Post("/memory/timeline",    guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_timeline(u, req, res); }));
+        svr.Post("/memory/update",      guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_update(u, req, res); }));
+        svr.Post("/memory/review",      guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_memory_review(u, req, res); }));
         svr.Post("/turn",               guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_turn(u, req, res); }));
         svr.Get(R"(/session/([^/]+))",  guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_session(u, req, res); }));
-        svr.Delete(R"(/memory/(\d+))",  guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_delete_memory(u, req, res); }));
-        svr.Post("/delete_batch",       guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_delete_batch(u, req, res); }));
         svr.Post("/search_by_metadata", guarded([this](const UserInfo& u, const httplib::Request& req, httplib::Response& res) { handle_search_by_metadata(u, req, res); }));
-
-        svr.Get("/user/token", guarded([this](const UserInfo& user, const httplib::Request&,
-                                              httplib::Response& res) {
-            struct passwd* pw = getpwnam(user.username.c_str());
-            if (!pw) { res.status = 404; res.set_content(std::format(R"({{"error":"{}"}})", lang::HTTP_SYSTEM_USER_NOT_FOUND), "application/json"); return; }
-            std::string token_file = std::string(pw->pw_dir) + "/.ragger/token";
-            std::ifstream f(token_file);
-            if (!f) { res.status = 404; res.set_content(std::format(R"({{"error":"{}"}})", lang::HTTP_NO_TOKEN_FILE), "application/json"); return; }
-            std::string token;
-            std::getline(f, token);
-            size_t s = token.find_first_not_of(" \t\r\n");
-            size_t e = token.find_last_not_of(" \t\r\n");
-            if (s != std::string::npos) token = token.substr(s, e - s + 1);
-            Diskerror::Logger::debug("GET /user/token 200");
-            respond_json(res, json{{"token", token}, {"username", user.username}});
-        }));
 
         // ---- Dashboard (embedded HTML/JS) --------------------------------
         // GET /dashboard[?token=...] -> the single-page control panel. The
@@ -748,13 +804,20 @@ struct Server::Impl {
                 Diskerror::Logger::debug(std::format("PUT /config/{} {}", key, res.status));
                 return;
             }
+            if (affects_inference(key)) reload_inference();
             // Echo the resolved (post-default) value plus apply flags.
             auto v = get_config_value(config(), key);
             json out = {{"key", key}, {"value", v.value_or("")},
                         {"restart_required", r->restart_required},
                         {"rebuild_required", r->rebuild_required}};
             res.set_content(out.dump(), "application/json");
-            Diskerror::Logger::debug(std::format("PUT /config/{} 200", key));
+            // S27 (C §4): a config change is an audit event — info level
+            // with key and new value. A secret's value never reaches the
+            // log (the response body is the caller's own submission).
+            if (const auto* meta = lang::config_meta(key); meta && meta->secret)
+                Diskerror::Logger::info(std::format("PUT /config/{} 200 (secret: value not logged)", key));
+            else
+                Diskerror::Logger::info(std::format("PUT /config/{} 200 -> {}", key, v.value_or("")));
         }));
 
         // GET /stats -> one-shot status snapshot (server + table sizes).
@@ -860,13 +923,18 @@ struct Server::Impl {
                                                     httplib::Response& res) {
             std::string host = req.get_param_value("host");
             std::string port_s = req.get_param_value("port");
-            std::string key = req.get_param_value("key");
+            // The API key is an environment variable the daemon resolves itself;
+            // a `key` query parameter is no longer needed (and would put a
+            // credential in a URL).
+            std::string key = config().embedding_external_api_key;
             if (host.empty() || port_s.empty()) {
                 res.status = 400;
                 res.set_content(R"({"error":"host and port required"})", "application/json");
                 return;
             }
-            int port = std::stoi(port_s);
+            int port = 0;
+            if (!util::parse_positive_int(port_s, port))
+                throw std::invalid_argument("port must be a positive integer");
             Embedder probe_emb(host, port, "", key);
             auto models = probe_emb.list_remote_models();
             json arr = json::array();
@@ -876,7 +944,8 @@ struct Server::Impl {
 
         // POST /models/external/probe -> send a test embedding request to a
         // remote endpoint and return the vector dimensionality.
-        // Body: {"host":"...", "port":N, "model":"...", "key":"..."}
+        // Body: {"host":"...", "port":N, "model":"..."} — the API key is NOT
+        // read from the body; it comes from config (embedding_external_api_key).
         svr.Post("/models/external/probe", guarded([this](const UserInfo&, const httplib::Request& req,
                                                           httplib::Response& res) {
             auto body = json::parse(req.body, nullptr, false);
@@ -888,7 +957,7 @@ struct Server::Impl {
             std::string host = body.value("host", "");
             int port = body.value("port", 0);
             std::string model = body.value("model", "");
-            std::string key = body.value("key", "");
+            std::string key = config().embedding_external_api_key;   // from the env var
             if (host.empty() || port == 0 || model.empty()) {
                 res.status = 400;
                 res.set_content(R"({"error":"host, port, and model required"})", "application/json");
@@ -978,15 +1047,29 @@ struct Server::Impl {
                 return;
             }
             std::string repo = body["repo"].get<std::string>();
-            // Validate repo format: "provider/model"
-            auto slash = repo.find('/');
-            if (slash == std::string::npos || slash == 0 || slash == repo.size() - 1) {
+            // Validate repo format: "provider/model" — strict, so no
+            // traversal into or out of the models directory (C §1.6).
+            if (!is_safe_model_repo(repo)) {
                 res.status = 400;
                 res.set_content(R"({"error":"repo must be 'provider/model'"})", "application/json");
                 return;
             }
 
             std::string dest = ragger_base_dir() + "/models/" + repo;
+            // Belt and braces: the canonical destination must still live
+            // under <base>/models (defense in depth against a future
+            // base-dir quirk slipping past the syntax check).
+            {
+                namespace stdfs = std::filesystem;
+                const auto dest_canon   = stdfs::weakly_canonical(dest).string();
+                const auto models_root  = stdfs::weakly_canonical(ragger_base_dir() + "/models").string();
+                if (dest_canon.size() <= models_root.size() + 1 ||
+                    dest_canon.compare(0, models_root.size() + 1, models_root + "/") != 0) {
+                    res.status = 400;
+                    res.set_content(R"({"error":"repo must be 'provider/model'"})", "application/json");
+                    return;
+                }
+            }
             std::string hf_base = "https://huggingface.co/" + repo + "/resolve/main";
 
             // Check if already present (model.onnx or onnx/model.onnx)
@@ -1167,7 +1250,9 @@ struct Server::Impl {
             auto colon = hp.rfind(':');
             if (colon != std::string::npos) {
                 host = hp.substr(0, colon);
-                try { port = std::stoi(hp.substr(colon + 1)); } catch (...) {}
+                try { port = std::stoi(hp.substr(colon + 1)); }
+                catch (const std::exception& e) { Diskerror::Logger::debug(std::format("origin host:port parse: {}", e.what())); }
+                catch (...) { Diskerror::Logger::debug("origin host:port parse: unknown exception"); }
             } else {
                 host = hp; port = 80;
             }
@@ -1291,6 +1376,71 @@ struct Server::Impl {
             g_restart_requested.store(true, std::memory_order_relaxed);
         }));
 
+        // LR S91 (D4, D-6): maintenance jobs — same `guarded` auth as every
+        // other route (no separate admin token exists; the only separation
+        // is that these are NEVER added to the MCP tools or the plugin
+        // schemas). Jobs are the S90 verbs: reindex, housekeeping,
+        // backfill:<kind>. There is no re-embed job (Reid runs it, rule 17).
+        // Register /jobs/cancel BEFORE the name pattern so it wins.
+        svr.Post("/jobs/cancel", guarded([this](const UserInfo&, const httplib::Request&,
+                                                httplib::Response& res) {
+            jobs_->cancel();
+            respond_json(res, json{{"status", "cancel-requested"}});
+        }));
+        svr.Post(R"(/jobs/([A-Za-z0-9_:.-]+))",
+                 guarded([this](const UserInfo&, const httplib::Request& req,
+                                httplib::Response& res) {
+            const std::string name = req.matches[1];
+            // X6 (M7): a non-empty body must be a JSON object, and a
+            // present `dry_run` must be a boolean — rejected BEFORE
+            // jobs_->start() so a malformed body never starts a real job.
+            // guarded() maps invalid_argument to 400 "ERROR: <msg>".
+            bool dry_run = false;
+            if (!req.body.empty()) {
+                auto body = json::parse(req.body, nullptr, /*allow_exceptions=*/false);
+                if (body.is_discarded() || !body.is_object())
+                    throw std::invalid_argument("body must be a JSON object");
+                if (body.contains("dry_run")) {
+                    if (!body["dry_run"].is_boolean())
+                        throw std::invalid_argument("dry_run must be a boolean");
+                    dry_run = body["dry_run"].get<bool>();
+                }
+            }
+            std::string error;
+            switch (jobs_->start(name, dry_run, error)) {
+                case JobRunner::StartResult::Started:
+                    Diskerror::Logger::info(std::format(
+                        "POST /jobs/{} -> started{}", name, dry_run ? " (dry run)" : ""));
+                    respond_json(res, json{{"status", "started"},
+                                           {"job", name},
+                                           {"dry_run", dry_run}}, 202);
+                    break;
+                case JobRunner::StartResult::Busy:
+                    res.status = 409;
+                    res.set_content("ERROR: " + error, "text/plain");
+                    break;
+                case JobRunner::StartResult::Unknown:
+                    res.status = 400;
+                    res.set_content("ERROR: " + error, "text/plain");
+                    break;
+            }
+        }));
+        svr.Get("/jobs", guarded([this](const UserInfo&, const httplib::Request&,
+                                        httplib::Response& res) {
+            respond_json(res, jobs_->status_json());
+        }));
+
+        // LR S95 (P12): the tool definitions over HTTP — the exact array MCP
+        // tools/list returns (same tools/*.json source of truth, same
+        // capture_turns/build_context gates). Token-guarded like everything
+        // else; agents still discover tools through MCP, this is for
+        // inspection and cross-surface parity tests.
+        svr.Get("/tools", guarded([this](const UserInfo&, const httplib::Request&,
+                                         httplib::Response& res) {
+            respond_json(res, mcp_tools_list(config().capture_turns,
+                                             config().build_context));
+        }));
+
         // GET /events -> Server-Sent Events stream. Pushes a "stats" event
         // (server status + table sizes) and any new activity-log lines every
         // few seconds. One-directional; the dashboard subscribes with
@@ -1301,17 +1451,30 @@ struct Server::Impl {
             res.set_header("Connection", "keep-alive");
             res.set_chunked_content_provider(
                 "text/event-stream",
-                [this](size_t /*offset*/, httplib::DataSink& sink) {
+                [this, offset = std::uintmax_t{},
+                       last_job_seq = std::uint64_t{}](size_t /*offset_arg*/, httplib::DataSink& sink) mutable {
                     // Emit a stats frame.
                     std::string frame = "event: stats\ndata: " +
                                         build_stats_json().dump() + "\n\n";
                     if (!sink.write(frame.data(), frame.size())) return false;
 
                     // Emit any new activity-log lines as "activity" events.
-                    for (auto& line : drain_activity_lines()) {
+                    for (auto& line : drain_activity_lines(offset)) {
                         std::string a = "event: activity\ndata: " +
                                         json{{"line", line}}.dump() + "\n\n";
                         if (!sink.write(a.data(), a.size())) return false;
+                    }
+
+                    // LR S91: a "job" frame whenever the job state or
+                    // progress changed since THIS subscriber's last frame
+                    // (the S17 per-subscriber offset pattern — log tailing
+                    // is never disturbed by job events).
+                    const std::uint64_t jseq = jobs_ ? jobs_->event_seq() : 0;
+                    if (jseq != last_job_seq) {
+                        last_job_seq = jseq;
+                        std::string jf = "event: job\ndata: " +
+                                         jobs_->status_json().dump() + "\n\n";
+                        if (!sink.write(jf.data(), jf.size())) return false;
                     }
 
                     std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -1339,7 +1502,11 @@ struct Server::Impl {
         try {
             for (auto& [name, n] : memory.backend()->table_row_counts())
                 tables[name] = n;
-        } catch (...) { /* backend unavailable — empty tables */ }
+        } catch (const std::exception& e) {   // S27 (C §4): never silent
+            Diskerror::Logger::debug(std::format("stats: table counts failed: {}", e.what()));
+        } catch (...) {
+            Diskerror::Logger::debug("stats: table counts failed: unknown exception");
+        }
         return json{
             {"status",   "running"},
             {"version",  RAGGER_VERSION},
@@ -1348,29 +1515,32 @@ struct Server::Impl {
         };
     }
 
-    // Return activity-log lines appended since the last drain. Best-effort:
-    // tracks a byte offset into the live activity.log and reads the tail.
-    std::vector<std::string> drain_activity_lines() {
+    // Return activity-log lines appended since the CALLER's byte offset
+    // (S17, C M6): each /events subscriber owns its offset, so two dashboard
+    // tabs each receive every line instead of splitting one shared stream.
+    // Best-effort: first read starts at EOF (only NEW activity); a shrunk
+    // file means rotation -> reset to 0; capped at the last ~20 lines.
+    std::vector<std::string> drain_activity_lines(std::uintmax_t& offset) {
         std::vector<std::string> out;
         const std::string path = config().resolved_log_file_path();
         std::error_code ec;
         auto size = std::filesystem::file_size(path, ec);
         if (ec) return out;
-        if (activity_log_offset_ == 0 && size > 0) {
+        if (offset == 0 && size > 0) {
             // First read: start at EOF so we only stream NEW activity.
-            activity_log_offset_ = size;
+            offset = size;
             return out;
         }
-        if (size < activity_log_offset_) activity_log_offset_ = 0;  // rotated
-        if (size == activity_log_offset_) return out;
+        if (size < offset) offset = 0;  // rotated
+        if (size == offset) return out;
         std::ifstream f(path, std::ios::binary);
         if (!f) return out;
-        f.seekg(static_cast<std::streamoff>(activity_log_offset_));
+        f.seekg(static_cast<std::streamoff>(offset));
         std::string line;
         while (std::getline(f, line)) {
             if (!line.empty()) out.push_back(line);
         }
-        activity_log_offset_ = size;
+        offset = size;
         // Cap to the last ~20 lines so a burst doesn't flood the client.
         if (out.size() > 20) out.erase(out.begin(), out.end() - 20);
         return out;
@@ -1391,7 +1561,7 @@ static bool is_port_available(const std::string& host, int port) {
     int sock = ::socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return false;
 
-    // Allow binding to TIME_WAIT sockets (matches Crow's SO_REUSEADDR)
+    // Allow binding to TIME_WAIT sockets (SO_REUSEADDR, same as the real bind)
     int opt = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
@@ -1411,8 +1581,10 @@ bool Server::run() {
     const bool want_tcp  = cfg.tcp_enabled && !pImpl->host.empty();
 
     if (want_tcp && !is_port_available(pImpl->host, pImpl->port)) {
+        // S18 (C M6): report failure to the caller — std::exit here skipped
+        // destructors with three DB connections already open.
         Diskerror::Logger::critical(std::format(lang::ERR_PORT_IN_USE, pImpl->port));
-        std::exit(1);
+        return false;
     }
 
     std::string addr;
@@ -1455,20 +1627,25 @@ bool Server::run() {
     sa.sa_handler = sighup_handler;
     sigaction(SIGHUP, &sa, nullptr);
 
+
     sa.sa_handler = sigterm_handler;
     sigaction(SIGTERM, &sa, nullptr);
     sigaction(SIGINT,  &sa, nullptr);
 
-    // Start housekeeping timer (runs every 60s + on SIGUSR1)
-    pImpl->start_housekeeping_timer();
-
-    // Start the daemon-resident summarizer (L2 per-turn + L3 on idle pause).
+    // Start the daemon-resident summarizer (per-turn turn summaries + episode
+    // close on idle).
     // Only the HTTP daemon runs this: it keeps the inference + embedder warm
     // and catches up any turns that were captured via MCP while the daemon
     // was down. See SummarizerService doc for the timestamp-linkage rule.
+    // S18 (C M6): created and started BEFORE the background threads — the
+    // housekeeping timer reads summarizer_.
     pImpl->summarizer_ = std::make_unique<SummarizerService>(
-        *pImpl->memory.backend(), pImpl->inference_.get());
+        *pImpl->memory.backend(), [impl = pImpl.get()] { return impl->inference(); });
     pImpl->summarizer_->start();
+
+    // Start background threads: the always-on signal poller plus the
+    // periodic housekeeping timer (runs every interval + on SIGUSR1).
+    pImpl->start_background_threads();
 
     // Launch each enabled listener on its own thread. listen() blocks until
     // the corresponding Server::stop() is called, so the main thread blocks
@@ -1534,10 +1711,12 @@ bool Server::run() {
 
     // Cleanup
     if (pImpl->summarizer_) pImpl->summarizer_->stop();
-    pImpl->stop_housekeeping_timer();
+    pImpl->stop_background_threads();
     if (!pImpl->pid_file_.empty()) std::remove(pImpl->pid_file_.c_str());
 
-    return g_restart_requested.load(std::memory_order_relaxed);
+    // Ran and stopped normally; a pending restart is read by the caller via
+    // Server::restart_requested() (S18: false is reserved for start failure).
+    return true;
 }
 
 bool Server::restart_requested() {
@@ -1546,7 +1725,7 @@ bool Server::restart_requested() {
 
 void Server::stop() {
     if (pImpl->summarizer_) pImpl->summarizer_->stop();
-    pImpl->stop_housekeeping_timer();
+    pImpl->stop_background_threads();
     if (pImpl->unix_svr.is_running()) pImpl->unix_svr.stop();
     if (pImpl->tcp_svr && pImpl->tcp_svr->is_running()) pImpl->tcp_svr->stop();
 }

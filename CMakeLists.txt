@@ -17,7 +17,7 @@ if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CXX_COMPILER AND NOT DE
     endforeach()
 endif()
 
-project(ragger VERSION 0.16.2.6 LANGUAGES C CXX)
+project(ragger VERSION 0.17.0 LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -231,6 +231,22 @@ add_custom_command(
 )
 add_custom_target(generate_dashboard_html DEPENDS "${RAGGER_GENERATED_DIR}/dashboard_html.inc")
 
+# LR S95: embed the MCP tool definitions (tools/*.json, one file per tool)
+# into one header. The JSON files are the single source of truth for name,
+# description and inputSchema; mcp.cpp assembles the list order and applies
+# the capture_turns / build_context gates.
+file(GLOB RAGGER_TOOL_FILES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tools/*.json")
+add_custom_command(
+    OUTPUT "${RAGGER_GENERATED_DIR}/tools_json.inc"
+    COMMAND ${CMAKE_COMMAND}
+            -DSRC_DIR=${CMAKE_SOURCE_DIR}/tools
+            -DDST=${RAGGER_GENERATED_DIR}/tools_json.inc
+            -P ${CMAKE_SOURCE_DIR}/cmake/embed_tools.cmake
+    DEPENDS ${RAGGER_TOOL_FILES} "${CMAKE_SOURCE_DIR}/cmake/embed_tools.cmake"
+    COMMENT "Embedding tools/*.json -> tools_json.inc"
+)
+add_custom_target(generate_tools_json DEPENDS "${RAGGER_GENERATED_DIR}/tools_json.inc")
+
 # ---------------------------------------------------------------------------
 # ragger library (core logic, no main())
 # ---------------------------------------------------------------------------
@@ -243,10 +259,12 @@ add_library(ragger_core STATIC
     src/util/http_client.cpp
     src/summarizer.cpp
     src/summarizer_service.cpp
+    src/backfill.cpp
+    src/jobs.cpp
+    src/episode_boundaries.cpp
     src/recipe.cpp
     src/recipe_cli.cpp
     src/embedder.cpp
-    src/embed_executor.cpp
     src/tokenizer_wrapper.cpp
     src/fts_tokenize.cpp
     src/text_index.cpp
@@ -257,6 +275,12 @@ add_library(ragger_core STATIC
     src/sqlite/cache.cpp
     src/sqlite/write.cpp
     src/sqlite/search.cpp
+    src/sqlite/agent_read.cpp
+    src/sqlite/agent_write.cpp
+    src/sqlite/agent_common.cpp
+    src/sqlite/status.cpp
+    src/agent_parse.cpp
+    src/agent_api.cpp
     src/sqlite/maintenance.cpp
     src/user_store.cpp
     src/import.cpp
@@ -269,6 +293,7 @@ add_library(ragger_core STATIC
     src/api_formats.cpp
     src/auth.cpp
     src/mcp.cpp
+    src/daemon_control.cpp
 )
 target_include_directories(ragger_core PUBLIC
     "${CMAKE_SOURCE_DIR}/include"
@@ -277,7 +302,15 @@ target_include_directories(ragger_core PRIVATE
     "${RAGGER_GENERATED_DIR}"
 )
 add_dependencies(ragger_core generate_default_config)
+
+# Development fallback for the API formats dir: the source tree this binary
+# was built from (used by src/api_formats.cpp behind an fs::exists guard, so
+# installed builds skip it). Replaces a hardcoded "~/CLionProjects/Ragger"
+# guess in the binary.
+target_compile_definitions(ragger_core PRIVATE
+    RAGGER_DEV_FORMATS_DIR="${CMAKE_SOURCE_DIR}/formats")
 add_dependencies(ragger_core generate_dashboard_html)
+add_dependencies(ragger_core generate_tools_json)
 # Build info: regenerated on every build, rewritten only when the
 # version/commit changes (then only build_info.cpp recompiles).
 set(RAGGER_BUILD_INFO_CPP "${CMAKE_BINARY_DIR}/generated/build_info.cpp")
@@ -299,8 +332,8 @@ if(RAGGER_STATS)
 endif()
 target_link_libraries(ragger_core PUBLIC
     c_lib_utils
-    diskerror_embedding_codec
     diskerror_search
+    diskerror_embedding_codec
     ${RAGGER_SQLITE_TARGET}
     onnxruntime
     tokenizers_cpp
@@ -315,7 +348,7 @@ target_link_libraries(ragger_core PUBLIC
 # ---------------------------------------------------------------------------
 # ragger executable
 # ---------------------------------------------------------------------------
-add_executable(ragger src/main.cpp src/daemon_control.cpp)
+add_executable(ragger src/main.cpp)
 target_link_libraries(ragger PRIVATE
     ragger_core)
 

@@ -12,5 +12,7 @@
     "stream_content": "choices[0].delta.content",
     "stream_type_field": null,
     "stream_type_value": null,
-    "stream_stop": "[DONE]"
+    "stream_stop": "[DONE]",
+    "response_finish_reason": "choices[0].finish_reason",
+    "finish_truncated": ["length"]
 }

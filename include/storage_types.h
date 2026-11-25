@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,48 @@
 namespace ragger {
 
 using json = nlohmann::json;
+
+/// Input to store_knowledge (PHASE7): one row of knowledge(kind). Formerly
+/// DecisionInput for store_structured_decision/store_insight. `text` is
+/// required; the kind rules (status::kKinds): decision requires a trigger,
+/// insight requires >=1 evidence, note neither.
+struct KnowledgeInput {
+    std::string kind;                 ///< decision | insight | note (see status::kKinds)
+    std::string text;                 ///< the ruling itself
+    std::string trigger;              ///< "Use when ..." — future-query vocabulary ("" = NULL)
+    std::string rationale;            ///< why; alternatives rejected ("" = NULL)
+    std::string scope;                ///< what it does NOT apply to ("" = NULL)
+    std::string tags;                 ///< comma-separated, stored verbatim ("" = absent)
+    std::string status = "current";   ///< current | provisional | pending
+    std::optional<int> supersedes;    ///< knowledge_id this replaces (any kind)
+    std::string session_guid;         ///< source session GUID ("" = none)
+    std::string model_name;           ///< producing model ("" = NULL model_id)
+    std::string source_timestamp;     ///< historical created_at ("" = now)
+    std::vector<int> evidence;        ///< episode_ids backing the row (LR S80, D2)
+};
+
+/// Input to store_episode_close (db 0.17, PHASE5 B.1): one closed episode —
+/// its text plus the recorded membership. span_start/span_end are epoch
+/// seconds of the first/last member turn. members must be non-empty and all
+/// belong to session_guid; any straggler fails the whole close.
+struct EpisodeClose {
+    std::string text;
+    std::string model_name;
+    std::string session_guid;
+    int64_t span_start = 0;
+    int64_t span_end = 0;
+    std::vector<int> member_turn_summary_ids;
+};
+
+struct KnowledgeResult {
+    int id = 0;                       ///< new knowledge_id
+    std::string kind;                 ///< echoed kind of the stored row
+    std::optional<int> superseded;    ///< knowledge_id flipped to 'superseded'
+    /// Flag-only hint (Phase 2 step 5): up to 3 OTHER active knowledge rows
+    /// (kind decision|insight) whose embedding cosine with the new row is
+    /// >= decision_supersede_threshold. Never a merge — the caller decides.
+    std::vector<std::pair<int,float>> possible_supersedes;
+};
 
 struct SearchResult {
     int         id;
@@ -28,18 +71,19 @@ struct SearchResult {
     // Each *_score is the min-max-normalized [0,1] signal value that actually
     // fed the weighted blend; a value of -1 means that signal was inactive for
     // this search (bm25 disabled). `blended` is the final weighted ranking
-    // score (vector_weight*vec + bm25_weight*bm25). phon_score is retained at
+    // score (vector_weight*vec + fts_weight*bm25). phon_score is retained at
     // -1 for API/stats-schema compat only -- the old independent phonetic
-    // signal was folded into bm25_score by TextIndex::score_query() (v0.16;
+    // signal was folded into fts_score by TextIndex::score_query() (v0.16;
     // see fts_w_metaphone).
     float vec_score  = -1.0f;
-    float bm25_score = -1.0f;
+    float fts_score = -1.0f;
     float phon_score = -1.0f;
     float blended    = 0.0f;
 };
 
-/// Input for storing a Level 5 RAG document chunk (lean v2 documents schema).
-/// `chunk_index` of 0 means "unchunked" (single-row document). `imported_at`
+/// Input for storing a RAG document chunk (lean v2 documents schema).
+/// A `chunk_index` <= 0 is stored as NULL ("unchunked" single-row document).
+/// `imported_at`
 /// should be the same string for every chunk of one import so they share a
 /// single timestamp (issue #48); empty = backend stamps now_iso() at insert.
 ///
@@ -61,6 +105,82 @@ struct SearchResponse {
     json                      timing;
 };
 
+/// memory_search request (agent API Phase 2). Empty vectors/strings = no filter.
+struct AgentSearchQuery {
+    std::string query;
+    std::vector<std::string> layers;   ///< subset of turn|turn_summary|episode|summary|document|knowledge;
+                                       ///  input aliases decision|insight accepted (PHASE7) = knowledge
+                                       ///  restricted to that kind; empty = all
+    std::vector<std::string> kinds;    ///< knowledge kinds filter (decision|insight|note); empty = all;
+                                       ///  unknown kind -> invalid_argument
+    std::string since;                 ///< "YYYY-MM-DD", "YYYY-MM-DD HH:MM:SS", or relative "30d"/"12h"; "" = none
+    std::string until;                 ///< same formats; "" = none
+    std::string status = "active";     ///< knowledge only: "active" (current+provisional) | "any" | one exact status
+    std::string session;               ///< only this session GUID
+    std::string exclude_session;       ///< drop this session GUID
+    int limit = 10;
+    int max_tokens = 0;                ///< 0 = no budget; else stop adding results past ~max_tokens (chars/4)
+    std::string mode = "hybrid";       ///< LR S77: hybrid | semantic | keyword
+    // X25: split mode. The backend ignores these three; the verb layer
+    // (agent_memory_search) reads them and composes two agent_search runs.
+    bool split = false;                ///< three disjoint lists (both / vector_only / fts_only) instead of one blended ranking
+    float min_vector_score = 0.0f;     ///< raw cosine minimum for the vector list (split only); 0 = off
+    float min_fts_score = 0.0f;        ///< raw keyword-score minimum for the FTS list (split only); 0 = off (scores are corpus-dependent)
+    std::vector<std::string> tags;     ///< LR S78 (logic §2): knowledge hits must carry ALL
+                                       ///  listed tags (trimmed, case-insensitive elements of
+                                       ///  the stored comma list); layers without tags are
+                                       ///  excluded when non-empty; empty = no filter
+};
+
+/// LR S76 (D-7): documents are their own verb. `source` is a case-insensitive
+/// substring filter on document_sources.path; "" = all sources.
+struct DocumentSearchQuery {
+    std::string query;
+    std::string source;
+    int limit = 10;
+    std::string mode = "hybrid";   // LR S77: hybrid | semantic | keyword
+};
+
+struct AgentHit {
+    std::string id;          ///< typed handle "<layer>:<rowid>"
+    std::string layer;
+    float score = 0;
+    std::string matched_by;  ///< "vector" | "fts" | "both"
+    std::string created;     ///< local "YYYY-MM-DD HH:MM:SS"
+    std::string snippet;     ///< first <=240 chars of text, cut at a word boundary, "…" appended if cut
+    json extra;              ///< layer-specific: decision → {status, trigger}; summary → {level}; turn_summary → {turn_id, session}
+};
+
+/// memory_get request (agent API Phase 2). Exactly one mode per call:
+/// ids (mode 1) XOR session (mode 2) — both or neither is invalid_argument.
+struct AgentGetQuery {
+    std::vector<std::string> ids;   ///< typed handles; mode 1
+    std::string expand = "none";    ///< none | context | sources | chain
+    std::string session;            ///< mode 2: history range for this session GUID
+    int after_turn = 0;             ///< mode 2: turns with turn_id > after_turn (0 = from start)
+    int before_turn = 0;            ///< mode 2: turns with turn_id < before_turn (0 = to end)
+    int limit = 20;                 ///< mode 2 page size, clamped [1,100]
+};
+
+/// memory_timeline request (agent API Phase 4): deterministic range scan,
+/// newest first, key-paginated. No embeddings involved.
+struct TimelineQuery {
+    std::string session;           ///< GUID; "" = all
+    std::string since, until;      ///< same formats as AgentSearchQuery
+    std::string granularity = "episode";   ///< turn | episode | session
+    int limit = 20;                ///< clamp [1,100]
+    std::string cursor;            ///< opaque "<created_epoch>:<rowid>"; "" = newest first page
+};
+
+/// memory_update request (agent API Phase 4): metadata-only curation.
+/// Text never changes in place — a text change is a new row with supersedes.
+struct UpdateRequest {
+    std::string id;                          ///< typed handle
+    std::optional<std::string> status;
+    std::optional<std::string> tags;         ///< replaces the whole tag string
+    std::optional<std::string> text;         ///< present => always rejected
+};
+
 /// User information (extracted from sqlite::Backend for modularity)
 struct UserInfo {
     int         id;
@@ -69,18 +189,11 @@ struct UserInfo {
     std::string token_hash;
 };
 
-/// A summary row that was written as a heuristic fallback ('draft') while
-/// inference was unavailable. The summarizer rewrites these when it comes back.
-struct DraftSummary {
-    int         summary_id;
-    std::string level;
-    std::string session_guid;   // empty when session_id is NULL
-    std::string timestamp;      // source-turn timestamp for L2
-};
-
-/// A summary row returned by session-level queries (turn or session summaries).
+/// A summary row returned by session-level queries (turn/episode reads).
+/// `id` carries the producer's key: turn_summary_id for turn_summary_summaries_since
+/// and turn_summaries_by_session_desc; episode_id for episodes_by_session_desc.
 struct SummaryRecord {
-    int         summary_id;
+    int         id;
     std::string text;
     std::string status;
     std::string timestamp;
@@ -92,9 +205,11 @@ struct SummaryRecord {
 /// into episodes without a second round-trip to the DB.
 struct EpisodeCandidateTurn {
     int                turn_summary_id;
-    std::string        summary_text;     // L2 turn-summary text
+    std::string        summary_text;     // turn-summary text
     std::string        timestamp;        // "%F %T" local-time string for store_episode
     int64_t            epoch;            // created_at epoch seconds (for gap math)
+    int64_t            started_epoch = 0; // turns.started_on (X32; 0 = unknown)
+    std::string        summary_model_name; // turn summary's summary_model_id resolved ("" = NULL)
     std::vector<float> turn_embedding;   // from turns.embedding
     std::vector<float> summary_embedding;// from turn_summaries.embedding
 };

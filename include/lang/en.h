@@ -112,23 +112,25 @@ constexpr const char* CLI_USAGE_SEARCH        = "Usage: ragger search <query>";
 constexpr const char* CLI_USAGE_STORE         = "Usage: ragger store <text>";
 constexpr const char* CLI_USAGE_DECISION      =
     "Usage:\n"
-    "  ragger decision add <text> [--status=current|roadmap] [--tags=a,b,c]\n"
-    "      Store a curated L6 decision/lesson. --status defaults to\n"
-    "      \"current\" (the only status the recall pipeline surfaces).\n"
-    "      Use --status=roadmap for planned/future work you want tracked\n"
-    "      but don't want cluttering every session's recall until it's\n"
-    "      actually done.\n"
-    "  ragger decision list [--status=current|roadmap|superseded|deprecated] [-n N]\n"
-    "      List decisions by status, newest first. Defaults to \"current\".\n"
+    "  ragger decision add <text> --trigger=\"Use when ...\" [--status=current|provisional|pending] [--tags=a,b,c]\n"
+    "      Store a curated decision. --trigger is REQUIRED: the situation the\n"
+    "      decision applies to, phrased the way a future question would be\n"
+    "      asked, because that is what search matches against.\n"
+    "      --status defaults to \"current\".\n"
+    "  ragger decision list [--status=current|provisional|pending|retired|superseded] [-n N]\n"
+    "      List decisions by status, newest first. Defaults to \"current\";\n"
+    "      up to 20 rows unless -n says otherwise.\n"
     "  ragger decision set-status <decision_id> <status>\n"
-    "      Change a decision's status (e.g. promote a roadmap item to\n"
-    "      \"current\" once it's done, or mark one \"superseded\"/\"deprecated\").";
+    "      Change a decision's status (e.g. mark one \"retired\").";
+constexpr const char* CLI_USAGE_DELETE_DOC    =
+    "Usage: ragger delete-doc <id>\n"
+    "  <id> is the document's index (primary key) number; find it with `ragger list-docs`.";
 constexpr const char* CLI_USAGE_USERADD       = "Usage: ragger useradd <username>";
 constexpr const char* CLI_USAGE_USERMOD       = "Usage: ragger usermod <username>";
 constexpr const char* CLI_USAGE_USERDEL       = "Usage: ragger userdel <username>";
 constexpr const char* CLI_USAGE_PASSWD        = "Usage: ragger passwd <username>";
 constexpr const char* CLI_USAGE_IMPORT        =
-    "Usage: ragger import-docs <file> [file...]      # markdown/text → L5 documents\n"
+    "Usage: ragger import-docs <file> [file...]      # markdown/text → documents\n"
     "       [--title T] [--year YYYY] [--tags a,b,c]\n"
     "Deprecated alias: ragger import <file> [file...] (same behavior, warns)\n"
     "\n"
@@ -137,7 +139,7 @@ constexpr const char* CLI_USAGE_IMPORT_CONVERSATIONS =
     "Usage:\n"
     "  ragger import-conversations PATH\n"
     "      Import Claude/Telegram/Claude-Code conversation history into turns\n"
-    "      (L1/L2), session summaries (L3/L4), and memories (L5/L6 decisions).\n"
+    "      and knowledge (notes; a memories.json file becomes a decision).\n"
     "      Format is auto-detected from PATH's JSON structure.\n"
     "\n"
     "  Options:\n"
@@ -160,7 +162,7 @@ constexpr const char* CLI_USAGE_IMPORT_CONVERSATIONS =
     "                              timestamp override. Same --all exception.\n"
     "\n"
     "  ragger import-conversations summaries <file> [file...]\n"
-    "      One hand-authored L4 project summary per file.\n"
+    "      One note per file (stored as knowledge kind='note').\n"
     "  ragger import-conversations summaries --jsonl=FILE\n"
     "      {text, tags?, timestamp?} per line.\n"
     "\n"
@@ -212,6 +214,7 @@ constexpr const char* ERR_PORT_IN_USE         = "Error: port {} is already in us
 
 // --- Import ---
 constexpr const char* MSG_IMPORTING_CHUNKS    = "Importing {} chunks from {}...";
+constexpr const char* MSG_DOC_ALREADY_IMPORTED = "{} was already imported as document {} (\"{}\", {}) — skipped. To re-import it, delete the old document first.";
 constexpr const char* MSG_IMPORT_CHUNK        = "  Chunk {}/{}: {}";
 constexpr const char* MSG_IMPORT_DONE         = "✓ Imported {} chunks";
 
@@ -278,7 +281,7 @@ constexpr const char* MSG_USER_REGISTERED     = "✓ Registered in database (use
 constexpr const char* WARN_DB_DEFERRED        = "Warning: DB registration deferred ({})";
 
 // --- Rebuild ---
-constexpr const char* MSG_REBUILD_CONFIRM     = "This will re-embed all {} stored rows (turns, summaries, decisions, documents). It's safe to run with the server up, but it blocks all other requests until it finishes — the server will appear to hang.";
+constexpr const char* MSG_REBUILD_CONFIRM     = "This will re-embed all {} stored rows (turns, turn summaries, episodes, knowledge, documents). It's safe to run with the server up, but it blocks all other requests until it finishes — the server will appear to hang.";
 constexpr const char* PROMPT_CONTINUE         = "Continue? [y/N] ";
 constexpr const char* MSG_ABORTED             = "Aborted.";
 constexpr const char* MSG_DB_BACKING_UP       = "Backing up database...";
@@ -289,20 +292,18 @@ constexpr const char* MSG_EMBEDDINGS_REBUILT  = "✓ Embeddings rebuilt: {} rows
 constexpr const char* WARN_EMBED_SUBPROCESS   = "Warning: embed subprocess failed (attempt {}/{}); embedding skipped";
 constexpr const char* WARN_IMPORT_EMBED_SKIPPED = "Warning: {}/{} chunks left unembedded (embed subprocess failed or timed out); re-import to retry";
 
-// --- Summarizer service (daemon-resident L2/L3 worker) -------------
-constexpr const char* MSG_SUMMARIZER_START    = "Summarizer started (catch-up queued: {} turn(s), {} draft(s), {} session(s) to close)";
+// --- Summarizer service (daemon-resident turn and episode worker) -------------
+constexpr const char* MSG_SUMMARIZER_START    = "[summarizer] catch-up queued {} turn(s), {} episode close(s)";
 constexpr const char* MSG_SUMMARIZER_STOP     = "Summarizer stopped";
-constexpr const char* MSG_SUMMARIZER_L2       = "L2 turn summary written for session {} at {}";
-constexpr const char* MSG_SUMMARIZER_L3       = "L3 session summary finalized for session {}";
-constexpr const char* MSG_SUMMARIZER_DRAFT    = "Stored draft L2 (inference unreachable) for session {} at {}";
-constexpr const char* MSG_SUMMARIZER_REDRAFT  = "Rewrote draft L2 summary_id {} with real summary";
-constexpr const char* WARN_SUMMARIZER_L2      = "Summarizer L2 failed for turn_id {}: {}";
-constexpr const char* WARN_SUMMARIZER_L3      = "Summarizer L3 failed for session {}: {}";
-constexpr const char* WARN_SUMMARIZER_DRAFT   = "Summarizer draft retry failed for summary_id {}: {}";
+constexpr const char* MSG_SUMMARIZER_TURN_SUMMARY = "Turn summary written for session {} at {}";
+constexpr const char* WARN_SUMMARIZER_TURN_SUMMARY = "Summarizer turn summary failed for turn_id {}: {}";
+constexpr const char* WARN_SUMMARIZER_L3      = "[summarizer] episode catch-up failed: {}";
+constexpr const char* MSG_SUMMARIZER_NO_ENDPOINT = "[summarizer] disabled: no inference endpoint configured";
 constexpr const char* WARN_SUMMARY            = "Warning: summary generation failed: {}";
 
 // --- Generic CLI error wrapper ---
 constexpr const char* ERR_INFERENCE           = "Error: {}";
+constexpr const char* ERR_CLI                 = "Error: {}";
 
 // --- Errors: config ---
 constexpr const char* ERR_CONFIG_NOT_INIT     = "Config not initialized — call init_config() first";
@@ -315,12 +316,19 @@ constexpr const char* ERR_EMBED_UPDATE_FAILED = "embed_tables: UPDATE {} id {} f
 constexpr const char* ERR_EXPORT_SCAN_FAILED  = "export: scan of {} failed mid-read (rc={}): {}";
 constexpr const char* ERR_STORE_FAILED        = "Failed to store: {}";
 
+// X19: a decision must have a trigger, and the generic `store` verb
+// can never carry one. One string for every surface (HTTP 400 body, MCP
+// isError text, CLI error) — no per-surface variants.
+constexpr const char* ERR_STORE_DECISION_REQUIRES_TRIGGER =
+    "a decision requires a trigger: store does not accept category 'decision' "
+    "— use the memory_decision verb (POST /decision)";
+
 // --- Errors: embedder ---
 constexpr const char* ERR_MODEL_NOT_FOUND     = "Model file not found: {}";
 constexpr const char* ERR_TOKENIZER_NOT_FOUND = "Tokenizer file not found: {}";
 constexpr const char* ERR_EMPTY_TOKENIZATION  = "Empty tokenization result";
 constexpr const char* ERR_OUTPUT_SHAPE        = "Unexpected output shape from model";
-constexpr const char* ERR_EMBEDDING_MISMATCH  = "Embedding model mismatch: database was built with '{}' but config specifies '{}'. Reorganise your models directory and run 'ragger rebuild' to re-embed.";
+constexpr const char* ERR_EMBEDDING_MISMATCH  = "Embedding model mismatch: database was built with '{}' but config specifies '{}'. Reorganise your models directory and run 'ragger re-embed' to re-encode.";
 constexpr const char* ERR_VECTOR_TYPE_MISMATCH = "Vector dtype mismatch: database was built with '{}' embeddings but config specifies '{}'. Run 'ragger re-embed' to re-encode at the new precision.";
 // Ragger-managed ONNX models live at ~/.ragger/models/<provider>/<model>/, so
 // a valid internal model name is always "provider/model". These report a bad
@@ -377,23 +385,30 @@ Commands:
   serve              Run the server in the foreground (what the daemon invokes)
   search <query>     Search memories by meaning
   store <text>       Store a new memory
-  decision <sub>      Curated L6 decisions/lessons (see `ragger decision`
+  decision <sub>      Curated decisions/lessons (see `ragger decision`
                      with no args for full option list)
-                       add <text> [--status=current|roadmap] [--tags=a,b,c]
-                       list [--status=current|roadmap|...] [-n N]
+                       add <text> [--status=current|provisional|pending] [--tags=a,b,c]
+                       list [--status=current|provisional|pending|retired|superseded] [-n N]
                        set-status <decision_id> <status>
   count              Show number of stored memories
+  config get|set     Read/change settings: config get -a [-j] | get <name> [-j]
+                     | set <name> <value> (blank value = default)
+  dashboard          Print the dashboard URL with access token (-b opens browser)
   import <file...>   Deprecated alias for import-docs (warns, same behavior)
   import-docs <file...>
-                     Import markdown/text files (paragraph-aware chunking) → L5 documents
+                     Import markdown/text files (paragraph-aware chunking) → documents
                        --title <T>  --year <YYYY>  --tags a,b,c
+  list-docs          List imported documents (id, chunks, year, title, path)
+  delete-doc <id>    Delete an imported document and all its chunks. <id> is the
+                     document index number, discoverable with `ragger list-docs`
   import-conversations <PATH> [--all]
                      Import Claude web/Claude Code/Telegram conversation history
-                     (format auto-detected) into turns, session summaries, and
-                     memories/decisions. See `ragger import-conversations` with
-                     no args for full option list.
+                     (format auto-detected) into turns and knowledge (notes;
+                     memories.json becomes a decision). See
+                     `ragger import-conversations` with no args for full option
+                     list.
                      Subcommand: import-conversations summaries <file...>
-                       one hand-authored L4 project summary per file
+                       one note per file
   export <all|table> Dump database as SQL (like mysqldump)
                        -e, --embeddings  include embedding blobs
                        --output <file>   write to file instead of stdout
@@ -405,15 +420,26 @@ Commands:
   passwd <name>      Set (or clear) a user's web-UI login password
   add-self           Bootstrap ~/.ragger/token for the current user
   housekeeping       Trigger housekeeping on running daemon
-  reload             Reload config on running daemon (SIGHUP)
-                     options: --user <name>, --dry-run
+                     (supports --dry-run)
+  reload-cache       Make the running daemon re-read its search caches from the DB
+                     (done automatically after commands that may change the DB)
+  reload             Reload config and search caches on running daemon (SIGHUP)
   re-embed <table|all> Re-encode embeddings for one table or all memories
-                     (progress per table; tables: turns, turn_summaries,
-                     summaries, decisions, documents, or "all")
+                     (progress per table; tables: turns, knowledge, documents,
+                     turn_summaries, episodes, or "all")
   reindex <table|all> Rebuild the custom text index (terms + TF-IDF)
-                     tables: turns, turn_summaries, summaries, decisions,
-                     documents, or "all" ("all" also resets the shared
-                     terms table + its id counter, clearing orphaned terms)
+                     tables: turns, knowledge, documents, turn_summaries,
+                     episodes, sessions, or "all" ("all" also resets the
+                     shared terms table + its id counter, clearing orphaned
+                     terms)
+  backfill <kind>    Repair/back-fill stored data (each kind supports --dry-run):
+                     turn-summary-null        summarize turn_summaries rows with NULL text
+                     turn-summary-empty       fill legacy '' rows whose turn has content
+                     turn-summary-regenerate  re-summarize rows selected by --model or --ids
+                                    (refuses with no filter)
+                     triggers       draft missing decision/insight triggers
+                     stranded       attach turn-summary rows lying inside a closed episode span
+                     session-names  draft titles for unnamed sessions
   show-embedding-model  Show current embedding model info
   embed               Embed text from stdin, write JSON array to stdout
   help               Show this help
@@ -427,6 +453,8 @@ constexpr const char* VERSION_FORMAT          = "ragger {}\ncommit {}\nbuilt  {}
 constexpr const char* ERR_DAEMON_NOT_FOUND    = "Error: no running ragger daemon found";
 constexpr const char* ERR_SIGNAL_FAILED       = "Error: failed to signal process: {}";
 constexpr const char* MSG_CONFIG_RELOAD_OK    = "✓ Config reload triggered (pid {})";
+constexpr const char* MSG_CACHE_RELOAD_OK     = "✓ Cache reload triggered (pid {})";
+constexpr const char* MSG_CACHE_RELOADED      = "Reload: search caches dropped; they reload from the DB on next use";
 
 // --- Config reload warnings ---
 constexpr const char* WARN_CONFIG_RESTART     = " [WARN] Config reload: '{}' changed but requires restart";
@@ -437,8 +465,6 @@ constexpr const char* MSG_WARMUP_ERROR          = "Warmup: {}";
 constexpr const char* MSG_PRELOADED_MODEL       = "Preloaded model: {}";
 constexpr const char* MSG_MODEL_PRELOAD_SKIPPED = "Model preload skipped: {}";
 constexpr const char* ERR_CLEANUP_DB            = "Cleanup failed for main DB: {}";
-constexpr const char* MSG_HOUSEKEEPING_EXPIRED  = "Housekeeping: {} sessions expired, {} conversations cleaned";
-constexpr const char* MSG_HOUSEKEEPING_OWNER    = "Housekeeping owner for user '{}'";
 constexpr const char* MSG_HOUSEKEEPING_DISABLED = "Housekeeping: disabled (interval = 0)";
 constexpr const char* MSG_HOUSEKEEPING_SIGNAL   = "Housekeeping triggered by signal";
 constexpr const char* MSG_CONFIG_RELOADED_N     = "Config reloaded: {} value(s) changed";
@@ -461,12 +487,8 @@ constexpr const char* DBG_QUERY_LOG             = "query=\"{}\" results={} time=
 constexpr const char* HTTP_UNAUTHORIZED         = "Unauthorized";
 constexpr const char* HTTP_MISSING_TEXT         = "Missing 'text' field";
 constexpr const char* HTTP_MISSING_QUERY        = "Missing 'query' field";
-constexpr const char* HTTP_MISSING_IDS          = "Missing or invalid 'ids' field";
 constexpr const char* HTTP_MISSING_METADATA     = "Missing or invalid 'metadata' field";
 constexpr const char* HTTP_JSON_ERROR           = "JSON error: {}";
-constexpr const char* HTTP_MEMORY_NOT_FOUND     = "Memory not found";
-constexpr const char* HTTP_SYSTEM_USER_NOT_FOUND = "system user not found";
-constexpr const char* HTTP_NO_TOKEN_FILE        = "no token file";
 
 // --- Server: startup/runtime ---
 constexpr const char* MSG_HEALTH_CHECK_TCP      = "  Health check: curl http://{}/health";
@@ -486,16 +508,15 @@ constexpr const char* ERR_MCP_TEXT_REQUIRED     = "Error: text parameter require
 constexpr const char* ERR_MCP_USER_REQUIRED     = "Error: user parameter required";
 constexpr const char* ERR_MCP_QUERY_REQUIRED    = "Error: query parameter required";
 constexpr const char* MSG_MCP_NO_RESULTS        = "No results found.";
-constexpr const char* MSG_MCP_HOUSEKEEPING      = "MCP housekeeping: cleaned {} expired conversations";
+constexpr const char* MSG_MCP_IGNORE_NON_JSON   = "[mcp] ignoring non-JSON input";
 constexpr const char* ERR_MCP_METHOD_NOT_FOUND  = "Method not found: {}";
 
 // --- Client errors ---
 constexpr const char* ERR_CLIENT_STORE        = "Store failed: HTTP {}";
 constexpr const char* ERR_CLIENT_SEARCH       = "Search failed: HTTP {}";
 constexpr const char* ERR_CLIENT_COUNT        = "Count failed: HTTP {}";
-constexpr const char* ERR_CLIENT_DELETE_BATCH = "Delete batch failed: HTTP {}";
 constexpr const char* ERR_CLIENT_SEARCH_META  = "Search by metadata failed: HTTP {}";
-constexpr const char* ERR_CLIENT_REGISTER     = "Register failed: HTTP {}";
+constexpr const char* ERR_CLIENT_REGISTER     = "Register failed: HTTP {}";  // S12: register_user removed; constant kept for message-history continuity
 constexpr const char* ERR_CLIENT_SOCKET       = "Failed to create socket: {}";
 constexpr const char* ERR_CLIENT_CONNECT      = "Connection failed: {}";
 
@@ -504,6 +525,7 @@ constexpr const char* ERR_CURL_INIT           = "Failed to initialize libcurl";
 constexpr const char* ERR_HTTP_REQUEST        = "HTTP request failed: {}";
 constexpr const char* ERR_INFERENCE_API       = "Inference API error {}: {}";
 constexpr const char* ERR_PARSE_RESPONSE      = "Failed to parse response: {}";
+constexpr const char* ERR_RESPONSE_TRUNCATED  = "Response cut off at the token limit (finish reason: {}); not used";
 constexpr const char* ERR_UNKNOWN_ENDPOINT    = "Unknown endpoint: {}";
 constexpr const char* ERR_NO_ENDPOINTS        = "No inference endpoints configured";
 constexpr const char* ERR_ENGINE_UNREACHABLE  = "Inference engine not reachable at {}";
@@ -523,6 +545,7 @@ constexpr const char* ERR_UNKNOWN_FORMAT      = "Unknown API format '{}'. No {}.
 
 // --- MCP errors ---
 constexpr const char* ERR_MCP_UNKNOWN_TOOL    = "Unknown tool: {}";
+constexpr const char* ERR_MCP_UNKNOWN_CONFIG_KEY = "Unknown config key: {}";
 
 // --- Import / file errors ---
 constexpr const char* ERR_FILE_NOT_FOUND      = "File not found: {}";
@@ -533,6 +556,9 @@ constexpr const char* CLI_MIN_CHUNK_SIZE      = "Min chunk size for import";
 constexpr const char* CLI_TITLE               = "Document title (import; default: filename)";
 constexpr const char* CLI_YEAR                = "Document publish year (import)";
 constexpr const char* CLI_TAGS                = "Document tags/subjects, comma-separated (import)";
+constexpr const char* CLI_TRIGGER             =
+    "decision add: the situation the decision applies to, phrased the way a "
+    "future question would be asked (required)";
 constexpr const char* CLI_YES                 = "Skip confirmation prompts (for scripting)";
 
 // --- Main.cpp specific strings (useradd/userdel/add-self) ---
@@ -543,8 +569,60 @@ constexpr const char* MSG_EMBEDDING_PATH_DEFAULT= "(default)";
 constexpr const char* MSG_HOUSEKEEPING_TRIGGERED= "Housekeeping triggered";
 
 // --- Main.cpp specific (daemon control) ---
-constexpr const char* ERR_DAEMON_PID_NOT_RUNNING= "Daemon not running (pid {} not found)";
 constexpr const char* ERR_PERMISSION_DENIED_SIGNAL= "Permission denied: cannot send signal to daemon process";
+
+// ---- built-in summarizer prompts --------------------------------------------
+// Model instructions, used when the matching summarizer_*_prompt setting is
+// empty. They live here so all of Ragger's English text is in one place. The
+// English is only the built-in default: a model usually understands it even
+// when summarizing text in another language, but it may also answer in the
+// language of the instruction, so anyone can override a prompt in their own
+// language (same placeholders). Written by a frontier model, not tuned to any
+// particular local model: see docs/configuration.md.
+
+// Turn summary. Two {} placeholders: target chars, hard cap.
+inline constexpr std::string_view PROMPT_TURN_SUMMARY =
+    "Summarize this exchange into a concise memory entry, in third person "
+    "past tense. Keep who said what: record the user's questions, "
+    "requests, decisions and corrections as the user's; record the "
+    "assistant's proposals, findings and actions as the assistant's. A "
+    "proposal is not a decision unless the user accepted it in this "
+    "exchange. Keep concrete names, numbers, file names and conclusions; "
+    "drop pleasantries and narration. Target about {} characters; never "
+    "exceed {}. If the exchange is trivial (a single command like /exit, "
+    "a one-line greeting), reply with a short phrase.";
+
+// Episode summary. {N} = member count, then two {}: target chars, hard cap.
+inline constexpr std::string_view PROMPT_EPISODE_SUMMARY =
+    "You are given {N} consecutive summaries of one conversation span. "
+    "Write a single standalone summary of the whole span that keeps every "
+    "decision, configuration choice, technical fact, name, and date. Do "
+    "not invent anything that is not present in the input. Do not use "
+    "headers, do not wrap the text in quotation marks, and refer to the "
+    "parties by role (the user, the assistant), never by pronoun. The "
+    "summary must never be longer than the input. Target about {} "
+    "characters; never exceed {}.";
+
+// Session title. No placeholders: the length is stated in the text.
+inline constexpr std::string_view PROMPT_SESSION_TITLE =
+    "Name this conversation session from the summaries below. Reply with "
+    "the title only: 3 to 8 words, the main topic, in the style of a "
+    "file name or a heading. No quotes, no trailing punctuation, no "
+    "sentence, no \"Discussion of...\". Do not use the words Discussion, "
+    "Summary, Session or Issues. Name the specific thing: the feature, "
+    "file, error or decision. Prefer the project or feature name if one "
+    "appears.";
+
+// Knowledge trigger. No placeholders.
+inline constexpr std::string_view PROMPT_KNOWLEDGE_TRIGGER =
+    "Write a TRIGGER for the stored memory below: one short line, phrased "
+    "as the question someone would ask, or the situation they would be "
+    "in, when this memory should come back up. Use the words a future "
+    "asker would use, not the memory's own wording where they differ. Do "
+    "not state the decision or its answer. Example: for \"Use unix socket "
+    "for the daemon API, not TCP\" the trigger is \"How should clients "
+    "connect to the Ragger daemon?\" Output the line only: no quotes, no "
+    "prefix.";
 
 // =====================================================================
 // Config schema — single source of truth for CLI + dashboard.
@@ -552,8 +630,11 @@ constexpr const char* ERR_PERMISSION_DENIED_SIGNAL= "Permission denied: cannot s
 // meanings. Keys match the DB `settings` rows and the Config struct.
 // Sections drive the dashboard's left-hand tabs (server, embedding,
 // search, summarizer, logging, housekeeping, import).
+// The size comes from the initializer list (std::to_array), so a stale
+// element count can never leave value-initialized blank entries that
+// GET /config / MCP get_config / `config get -a` would serve (C2).
 // =====================================================================
-inline constexpr std::array<ConfigMeta, 61> kConfigSchema = {{
+inline constexpr auto kConfigSchema = std::to_array<ConfigMeta>({
     // ---- server ----
     {"socket_enable", "server", "Socket Enable", CfgType::Boolean, CfgEdit::RestartRequired,
      "true", "",
@@ -588,6 +669,12 @@ inline constexpr std::array<ConfigMeta, 61> kConfigSchema = {{
     {"auto_recall", "server", "Auto Recall", CfgType::Boolean, CfgEdit::Live,
      "true", "",
      "Hint served to agent-framework plugins: when true, they may prefetch memories and inject a memory-context block into prompts. The daemon does no injection itself. Independent of Capture Turns."},
+    {"auto_recall_mode", "server", "Auto Recall Mode", CfgType::Enum, CfgEdit::Live,
+     "decisions", "decisions,flat",
+     "What plugins inject when Auto Recall is on: decisions = active decisions matched to the prompt (by their triggers); flat = the legacy flat search over all memories."},
+    {"auto_recall_min_similarity", "server", "Auto Recall Min Similarity", CfgType::Float, CfgEdit::Live,
+     "0.30", "",
+     "Minimum vector similarity (raw cosine, 0-1) for a memory to be injected by auto-recall. Calibrated for the current embedding model: re-measure after changing the embedder. 0 = inject the top results regardless."},
     {"default_recipe", "server", "Default Recipe", CfgType::String, CfgEdit::Live,
      "natural_fading", "",
      "Recipe name applied when the caller doesn't specify one. Recipes are loaded from ~/.ragger/recipes."},
@@ -596,7 +683,7 @@ inline constexpr std::array<ConfigMeta, 61> kConfigSchema = {{
     // Current identity: what the stored vectors ARE. Read-only display; the
     // drift guard / rebuild owns these. Editing happens on the desired_* keys.
     {"embedding_model", "embedding", "Current Model", CfgType::String, CfgEdit::Locked,
-     "sentence-transformers/all-MiniLM-L6-v2", "",
+     "sentence-transformers/all-MiniLM-L12-v2", "",
      "The embedding model the stored vectors were built with. Read-only — change the desired model below and re-embed to switch."},
     {"embedding_engine", "embedding", "Current Engine", CfgType::Enum, CfgEdit::Locked,
      "internal", "internal,external",
@@ -624,7 +711,7 @@ inline constexpr std::array<ConfigMeta, 61> kConfigSchema = {{
      "Target on-disk vector precision. f32 (lossless, 4B/dim), f16 (half, 2B/dim), bf16 (bfloat16, 2B/dim), or int8 (quantized, 1B/dim). Changing this stages a re-embed; run 'Update now' or ragger re-embed to re-encode at the new precision."},
     {"desired_embedding_dimensions", "embedding", "Desired Dimensions", CfgType::Integer, CfgEdit::RebuildRequired,
      "", "",
-     "Target vector dimensionality. Model-determined; usually leave as the model's native size."},
+     "Target vector dimensionality. Model-determined; usually leave as the model's native size. The field will not be editable if only one dimension value is available."},
     // External connection details (shown only when engine=external).
     {"embedding_external_host", "embedding", "External Host", CfgType::String, CfgEdit::RebuildRequired,
      "", "",
@@ -632,19 +719,10 @@ inline constexpr std::array<ConfigMeta, 61> kConfigSchema = {{
     {"embedding_external_port", "embedding", "External Port", CfgType::Integer, CfgEdit::RebuildRequired,
      "0", "",
      "Port of the external embedding server."},
-    {"embedding_external_api_key", "embedding", "External API Key", CfgType::String, CfgEdit::RebuildRequired,
-     "", "",
-     "API key for the external embedding endpoint, if required."},
+    {"embedding_api_key_env", "embedding", "API Key Variable", CfgType::String, CfgEdit::RestartRequired,
+     "RAGGER_EMBEDDING_API_KEY", "",
+     "NAME of the environment variable that holds the embedding endpoint's API key (never the key itself). Also published to the database's semqlite_config so SemanticSQLite reads the same variable. A daemon started by launchd does not inherit your shell environment: set the variable in the launchd plist."},
     // Embedding tweaks (always visible).
-    {"embed_timeout_ms", "embedding", "Embed Timeout (ms)", CfgType::Integer, CfgEdit::Live,
-     "10000", "",
-     "Per-embed subprocess timeout in milliseconds."},
-    {"embed_retries", "embedding", "Embed Retries", CfgType::Integer, CfgEdit::Live,
-     "1", "",
-     "Retries on a failed or timed-out embed."},
-    {"embed_max_workers", "embedding", "Max Workers", CfgType::Integer, CfgEdit::Live,
-     "8", "",
-     "Cap on concurrent embed subprocesses."},
 
     // ---- search ----
     {"default_limit", "search", "Default Limit", CfgType::Integer, CfgEdit::Live,
@@ -653,10 +731,13 @@ inline constexpr std::array<ConfigMeta, 61> kConfigSchema = {{
     {"default_min_score", "search", "Default Min Score", CfgType::Float, CfgEdit::Live,
      "0.4", "",
      "Minimum similarity score for results (0.0 - 1.0)."},
-    {"bm25_enabled", "search", "BM25 Enabled", CfgType::Boolean, CfgEdit::Live,
+    {"decision_supersede_threshold", "search", "Supersede Hint Threshold", CfgType::Float, CfgEdit::Live,
+     "0.8", "",
+     "When storing a decision, other active decisions whose embedding similarity to it reaches this value (0.0 - 1.0) are returned as possible_supersedes hints. Flag only — nothing is merged or changed."},
+    {"fts_enabled", "search", "FTS Enabled", CfgType::Boolean, CfgEdit::Live,
      "true", "",
      "Enable BM25 keyword matching alongside vector search."},
-    {"bm25_weight", "search", "BM25 Weight", CfgType::Float, CfgEdit::Live,
+    {"fts_weight", "search", "FTS Weight", CfgType::Float, CfgEdit::Live,
      "4", "",
      "Weight for keyword matching. Weights are ratios and need not sum to 1.0 (\"3 and 7\" == \"0.3 and 0.7\")."},
     {"vector_weight", "search", "Vector Weight", CfgType::Float, CfgEdit::Live,
@@ -678,13 +759,13 @@ inline constexpr std::array<ConfigMeta, 61> kConfigSchema = {{
     // ---- summarizer ----
     {"summarizer_model", "summarizer", "Model", CfgType::String, CfgEdit::Live,
      "qwen3-4b-instruct-2507", "",
-     "Model used for L2/L3 summarization."},
+     "Model used for turn and episode summarization."},
     {"summarizer_api_url", "summarizer", "API URL", CfgType::String, CfgEdit::Live,
      "http://localhost:1234/v1", "",
      "Inference endpoint. Default follows the LM Studio convention."},
-    {"summarizer_api_key", "summarizer", "API Key", CfgType::String, CfgEdit::Live,
-     "", "",
-     "API key for the summarizer endpoint, if required."},
+    {"summarizer_api_key_env", "summarizer", "API Key Variable", CfgType::String, CfgEdit::Live,
+     "RAGGER_SUMMARIZER_API_KEY", "",
+     "NAME of the environment variable that holds the summarizer endpoint's API key, if it needs one (never the key itself). A daemon started by launchd does not inherit your shell environment: set the variable in the launchd plist."},
     {"summarizer_max_tokens", "summarizer", "Max Tokens", CfgType::Integer, CfgEdit::Live,
      "1024", "",
      "Maximum tokens for a summary generation. 0 inherits the global inference default."},
@@ -694,31 +775,40 @@ inline constexpr std::array<ConfigMeta, 61> kConfigSchema = {{
     {"summarizer_max_pct", "summarizer", "Max %", CfgType::Integer, CfgEdit::Live,
      "60", "",
      "Hard cap as % of raw turn; 0 = 60%. Always >= target %."},
-    {"summarizer_prompt", "summarizer", "Prompt", CfgType::Text, CfgEdit::Live,
+    {"summarizer_min_words", "summarizer", "Min Words Floor", CfgType::Integer, CfgEdit::Live,
+     "20", "",
+     "A source with at most this many words is copied verbatim into the summary store without calling the summarizer model (LR S62). 0 disables the floor."},
+    {"summarizer_prompt", "summarizer", "Turn Prompt", CfgType::Text, CfgEdit::Live,
      "", "",
-     "System prompt sent to the summarizer. Empty uses the built-in default. A single space suppresses the system prompt entirely. Two {} placeholders are required (target chars, hard cap)."},
+     "System prompt for summarizing each turn. Empty uses the built-in default (PROMPT_TURN_SUMMARY in lang/en.h). A single space suppresses the system prompt entirely. Two {} placeholders are required (target chars, hard cap)."},
+    {"summarizer_episode_prompt", "summarizer", "Episode Prompt", CfgType::Text, CfgEdit::Live,
+     "", "",
+     "System prompt for summarizing an episode from its turn summaries. Empty uses the built-in default (PROMPT_EPISODE_SUMMARY). Placeholders: {N} is replaced by the number of summaries given, then two {} are required (target chars, hard cap)."},
+    {"summarizer_title_prompt", "summarizer", "Session Title Prompt", CfgType::Text, CfgEdit::Live,
+     "", "",
+     "System prompt for naming a session from its turn summaries (the Name sessions job). Empty uses the built-in default (PROMPT_SESSION_TITLE). No placeholders: the summaries are sent as the user message. State the wanted title length (for example 3 to 8 words) in the prompt text itself; the built-in default asks for 3 to 8 words."},
+    {"summarizer_trigger_prompt", "summarizer", "Knowledge Trigger Prompt", CfgType::Text, CfgEdit::Live,
+     "", "",
+     "System prompt for drafting a decision's or insight's trigger (the Back-fill triggers job). Empty uses the built-in default (PROMPT_KNOWLEDGE_TRIGGER). No placeholders: the memory text is sent as the user message."},
 
     // ---- logging ----
-    {"log_level", "logging", "Log Level", CfgType::Enum, CfgEdit::Live,
+    {"log_level", "logging", "Log Level", CfgType::Enum, CfgEdit::RestartRequired,
      "warn", "trace,debug,info,warn,error,critical",
      "Verbosity of the single activity log. Everything (query/HTTP/MCP/general) goes to one log."},
-    {"log_max_size_mb", "logging", "Log Max Size (MB)", CfgType::Integer, CfgEdit::Live,
+    {"log_max_size_mb", "logging", "Log Max Size (MB)", CfgType::Integer, CfgEdit::RestartRequired,
      "1", "",
      "Rotate activity.log once it reaches this size (MB). 0 disables size-based rotation. Built in — no external tool or root needed."},
-    {"log_max_age_days", "logging", "Log Max Age (days)", CfgType::Integer, CfgEdit::Live,
+    {"log_max_age_days", "logging", "Log Max Age (days)", CfgType::Integer, CfgEdit::RestartRequired,
      "14", "",
      "Delete rotated backups older than this many days. Never touches the live log. 0 disables age-based cleanup."},
 
     // ---- housekeeping ----
-    {"cleanup_max_age_hours", "housekeeping", "Cleanup Max Age (hrs)", CfgType::Float, CfgEdit::Live,
-     "0", "",
-     "Raw-turn lifetime (0 = keep forever). Set to hours to auto-purge."},
     {"housekeeping_interval", "housekeeping", "Housekeeping Interval (sec)", CfgType::Integer, CfgEdit::Live,
      "60", "",
      "Seconds between housekeeping passes (0 disables; values <10 clamp to 10)."},
     {"episode_idle_minutes", "housekeeping", "Episode Idle Minutes", CfgType::Integer, CfgEdit::Live,
      "15", "",
-     "Idle gap (minutes) that closes an episode of work within a session. Also drives session/project rollups."},
+     "Idle gap (minutes) that closes an episode of work within a session."},
     {"episode_threshold_base", "housekeeping", "Episode Threshold Base", CfgType::Float, CfgEdit::Live,
      "0.2", "",
      "Starting similarity threshold for mid-session episode boundaries. boundary fires when avg(turn_sim, summary_sim) <= threshold; threshold rises with idle time."},
@@ -733,10 +823,7 @@ inline constexpr std::array<ConfigMeta, 61> kConfigSchema = {{
      "Minutes of idle per threshold increment."},
     {"catch_up_batch_size", "housekeeping", "Catch-up Batch Size", CfgType::Integer, CfgEdit::Live,
      "8", "",
-     "Per-tick cap on unsummarized turns / draft retries enqueued at once. Keeps a manual resummarize to a small deliberate slice per tick."},
-    {"project_gap_days", "housekeeping", "Project Gap Days", CfgType::Integer, CfgEdit::Live,
-     "7", "",
-     "Minimum time-gap (days) between consecutive turns that triggers a project-boundary close."},
+     "Per-tick cap on unsummarized turns / episode closes enqueued at once. Keeps a manual resummarize to a small deliberate slice per tick."},
     {"max_turn_failures", "housekeeping", "Max Turn Failures", CfgType::Integer, CfgEdit::Live,
      "3", "",
      "Consecutive inference failures on a single turn before marking it 'bad' and removing it from the unsummarized queue. 0 = retry forever (old behaviour)."},
@@ -748,7 +835,7 @@ inline constexpr std::array<ConfigMeta, 61> kConfigSchema = {{
     {"normalize_home", "import", "Normalize Home", CfgType::Boolean, CfgEdit::Live,
      "true", "",
      "Replace /Users/<you> or /home/<user> with ~ in stored paths."},
-}};
+});
 
 inline std::span<const ConfigMeta> config_schema() {
     return {kConfigSchema.data(), kConfigSchema.size()};
@@ -801,6 +888,7 @@ inline constexpr std::array<std::pair<std::string_view, std::string_view>, 6> MA
     {"=", "equals"},
     {"\xE2\x89\xA0", "not equal to"},  // UTF-8 not-equals (≠, U+2260: E2 89 A0)
     {"\xE2\x89\x88", "approximately equal to"},  // UTF-8 approx-equals (≈, U+2248: E2 89 88)
+    {"\xE2\x88\x92", "minus"},  // UTF-8 minus (−, U+2212: E2 88 92)
 }};
 
 /**

@@ -1,7 +1,8 @@
 /**
  * SQLite backend for memory storage
  *
- * Mirrors ragger_memory/sqlite_backend.py from the Python version.
+ * The `sqlite::Backend` facade: one class whose implementation lives in
+ * src/sqlite/ (schema, admin, cache, write, search, maintenance).
  */
 #pragma once
 
@@ -31,6 +32,11 @@ public:
     explicit Backend(const std::string& db_path, bool readonly = false);
     ~Backend() override;
 
+    /// PHASE9: true iff this binary migrates FROM `version` in-process
+    /// (a kLegs origin, not already current). Thin public window onto the
+    /// Impl::kLegs chain for tests and tooling.
+    static bool migration_pending(const std::string& version);
+
     /// Path to the database file.
     std::string db_path() const override;
 
@@ -42,7 +48,8 @@ public:
     int store_document(const DocumentChunk& chunk,
                        bool defer_embedding = false) override;
 
-    /// Store / finalize a raw L1 conversation turn (turns table).
+    /// Store / finalize a raw conversation turn (turns table).
+    /// `started_epoch` (X32; 0 = not given) stores turns.started_on.
     int store_turn(const std::string& user_text,
                    const std::string& assistant_text,
                    const std::string& model_name = "",
@@ -50,40 +57,49 @@ public:
                    const std::string& session_guid = "",
                    const std::string& source_timestamp = "",
                    const std::string& session_name = "",
-                   const std::string& name_source = "") override;
+                   const std::string& name_source = "",
+                   int64_t started_epoch = 0) override;
     std::vector<TurnRecord> turns_by_session(
         const std::string& session_guid) override;
     bool finalize_turn(int turn_id,
                        const std::string& assistant_text,
                        const std::string& model_name = "") override;
 
-    /// Write back a document's embedding (import path).
-    bool update_document_embedding(int document_id,
-                                   const std::vector<float>& emb) override;
-
-    /// Store a curated L6 decision/lesson. Returns decision_id.
+    /// Store a curated decision (knowledge kind='decision'). Returns
+    /// knowledge_id.
     int store_decision(const std::string& text,
                        const std::string& status = "current",
                        const std::string& tags = "",
                        const std::string& source_timestamp = "",
                        bool defer_embedding = false) override;
 
-    /// Write back a single row's embedding for any embedded context table.
-    bool update_decision_embedding(int decision_id,
-                                   const std::vector<float>& emb) override;
-    bool update_summary_embedding(int summary_id,
-                                  const std::vector<float>& emb) override;
-    bool update_turn_embedding(int turn_id,
-                               const std::vector<float>& emb) override;
+    KnowledgeResult store_knowledge(const KnowledgeInput& in) override;
+    json find_document_source(const std::string& path) override;
+    json list_document_sources() override;
+    void invalidate_all_caches() override;
+    json delete_document_source(int document_source_id) override;
 
-    // --- summaries (L2/L3) pipeline (issue #22) ---
-    int store_summary(const std::string& text, const std::string& level,
-                      const std::string& model_name = "",
-                      const std::string& session_guid = "",
-                      const std::string& source_timestamp = "",
-                      const std::string& tags = "") override;
-    bool summary_exists_exact(const std::string& text,
-                              const std::string& created_at) override;
+    /// Agent API Phase 2 reads (see StorageBackend docs).
+    std::vector<AgentHit> agent_search(const AgentSearchQuery& q) override;
+    std::vector<AgentHit> agent_document_search(const DocumentSearchQuery& q) override;
+    json agent_get(const AgentGetQuery& q) override;
+
+    /// Agent API Phase 4: timeline / curation / review (see StorageBackend docs).
+    json agent_timeline(const TimelineQuery& q) override;
+    json agent_update(const UpdateRequest& req) override;
+    json agent_review(const std::string& action,
+                      const std::vector<std::string>& ids) override;
+
+    /// Near-duplicate decision hints for free text (Phase 3 note surface).
+    std::vector<std::pair<int,float>> possible_supersedes_for_text(
+        const std::string& text) override;
+
+    /// Write back a single row's embedding for any embedded context table.
+    bool update_decision_embedding(int knowledge_id,
+                                   const std::vector<float>& emb) override;
+
+    bool note_exists_exact(const std::string& text,
+                           const std::string& created_at) override;
     bool decision_exists_exact(const std::string& text,
                                const std::string& created_at) override;
     bool turn_exists_fuzzy(const std::string& user_text,
@@ -94,12 +110,8 @@ public:
     bool update_turn_meta(int turn_id,
                           const std::string& timestamp = "",
                           const std::string& session_guid = "") override;
-    bool update_summary_text(int summary_id, const std::string& text,
-                             const std::string& model_name = "") override;
-    bool set_summary_tags(int summary_id, const std::string& tags) override;
-    std::vector<std::string> recent_summaries(const std::string& level, int limit) override;
+    std::optional<std::string> turn_assistant_text(int turn_id) override;
     std::vector<std::string> current_decisions(int limit) override;
-    bool set_decision_status(int decision_id, const std::string& status) override;
     std::vector<std::string> decisions_by_status(const std::string& status, int limit) override;
     std::vector<TurnRecord> unsummarized_turns(int limit = 0) override;
 
@@ -110,56 +122,58 @@ public:
     bool mark_turn_summarized(int turn_id, const std::string& model_name) override;
     int  reset_abandoned_turn_summaries(int limit = 0) override;
 
-    std::vector<DraftSummary> draft_summaries(int limit = 0) override;
-    std::vector<std::string> sessions_needing_close(int pause_minutes) override;
+    // --- LR S66/S67 back-fill primitives (see storage_backend.h) ---------
+    std::vector<TurnSummaryBackfillCandidate> turn_summary_backfill_candidates(
+        const std::string& kind, const std::string& model_name,
+        const std::vector<int>& ids) override;
+    bool apply_turn_summary_text(int turn_summary_id, const std::string& text,
+                       const std::string& summary_model_name,
+                       bool overwrite) override;
+    std::vector<StaleTurnSummaryCandidate> stale_turn_summary_candidates(int limit) override;
+    bool refresh_turn_summary(int turn_summary_id, const std::string& text,
+                              const std::string& summary_model_name,
+                              int observed_stale, bool clear_stale) override;
+    std::vector<TriggerCandidate> trigger_backfill_candidates() override;
+    bool apply_trigger(int knowledge_id, const std::string& trigger) override;
+    std::vector<StrandedCandidate> stranded_turn_summary_candidates(int& ties) override;
+    bool attach_stranded_turn_summary(int turn_summary_id, int episode_id) override;
+    int stranded_open_tail_count() override;
+    bool episode_is_locked(int episode_id) override;
+    std::vector<EpisodeMember> episode_members(int episode_id) override;
+    std::optional<EpisodeMember> turn_summary_member_by_id(int turn_summary_id) override;
+    bool replace_episode_text(int episode_id, const std::string& text,
+                              const std::string& model_name,
+                              const std::vector<std::pair<int,int>>& cleared,
+                              const std::vector<int>& attach_ids) override;
+    std::vector<SessionNameCandidate> unnamed_session_candidates() override;
+    bool apply_session_name(int session_id, const std::string& name,
+                            const std::string& name_source) override;
+
     std::string last_episode_end(const std::string& session_guid) override;
-    std::vector<SummaryRecord> l2_summaries_since(
+    std::vector<SummaryRecord> turn_summary_summaries_since(
         const std::string& session_guid, const std::string& since_ts) override;
     std::vector<EpisodeCandidateTurn> episode_candidate_turns(
         const std::string& session_guid, const std::string& since_ts) override;
-    int store_episode(const std::string& text,
-                      const std::string& model_name,
-                      const std::string& session_guid,
-                      const std::string& first_ts,
-                      const std::string& last_ts) override;
+    int store_episode_close(const EpisodeClose& close) override;
     std::vector<std::string> episodes_needing_close(int idle_minutes) override;
-    std::vector<std::string> episode_texts(const std::string& session_guid) override;
-    bool set_summary_updated_at(int summary_id) override;
-    std::vector<ClosedRun> sessions_needing_close_boundary() override;
-    std::vector<ClosedRun> projects_needing_close_boundary(int gap_days) override;
-    void advance_session_boundary_watermark(int turn_id) override;
-    void advance_project_boundary_watermark(int turn_id) override;
-    std::vector<std::string> bounded_session_rollup_texts(
-        const std::string& session_guid, int64_t first_ts, int64_t last_ts) override;
-    std::vector<std::string> bounded_project_rollup_texts(
-        int64_t first_ts, int64_t last_ts) override;
-    int store_session_summary(const std::string& text, const std::string& model_name,
-                              const std::string& session_guid,
-                              int64_t first_ts, int64_t last_ts) override;
-    int store_project_summary(const std::string& text, const std::string& model_name,
-                              int64_t first_ts, int64_t last_ts) override;
     std::vector<TurnRecord> turns_by_session_desc(
         const std::string& session_guid, int limit = 0) override;
     std::vector<SummaryRecord> turn_summaries_by_session_desc(
         const std::string& session_guid, int limit = 0) override;
-    std::vector<SummaryRecord> session_summaries_desc(
+    std::vector<SummaryRecord> episodes_by_session_desc(
         const std::string& session_guid, int limit = 0) override;
 
-    /// Replace text + metadata of an existing row.
-    bool update_text(int memory_id,
-                     const std::string& text,
-                     json metadata = {},
-                     bool defer_embedding = false) override;
+    // PHASE8: update_text is gone (text is never rewritten in place).
 
-    /// Hybrid search over summaries: vector cosine blended with FTS5 keyword
-    /// relevance. (`collections` is currently a no-op — lean v2 summaries has
-    /// no collection column; kept for API compat.)
+    /// Hybrid search across the four corpora: vector cosine blended with the
+    /// custom terms-index keyword relevance. (`collections` is currently a
+    /// no-op; kept for API compat.)
     SearchResponse search(const std::string& query,
                           int limit = 5,
                           float min_score = 0.0f,
                           std::vector<std::string> collections = {}) override;
 
-    /// Text-only fallback: FTS5 keyword + phonetic scoring, no embeddings.
+    /// Text-only fallback: text-index keyword + phonetic scoring, no embeddings.
     SearchResponse search_text_only(const std::string& query,
                                     int limit = 5) override;
 
@@ -178,23 +192,30 @@ public:
     std::vector<SearchResult> load_all(const std::string& collection = "") override;
 
     /// Rebuild embeddings for all stored documents. Returns doc count.
-    int rebuild_embeddings(Embedder& embedder, bool progress = true,
-                           const std::string& table = "all") override;
+    int rebuild_embeddings(Embedder& embedder, const ProgressFn& progress = {},
+                           const std::string& table = "all",
+                           const CancelFlag* cancel = nullptr) override;
+    void set_embedder(Embedder& embedder) override;
+    void set_vector_type(vector_codec::VectorType t) override;
     int backfill_embeddings(Embedder& embedder,
-                            const std::string& table = "all") override;
+                            const std::string& table = "all",
+                            const CancelFlag* cancel = nullptr) override;
     uint8_t embedding_version() const override;
     uint8_t increment_embedding_version() override;
-    int reindex_table(const std::string& table, bool progress = false) override;
+    int reindex_table(const std::string& table, const ProgressFn& progress = {},
+                        const CancelFlag* cancel = nullptr) override;
     void reset_terms_table() override;
 
     /// Get distinct collection names.
     std::vector<std::string> collections() const override;
 
-    /// Delete a memory by ID. Returns true if deleted.
-    bool delete_memory(int memory_id) override;
-
-    /// Delete multiple memories by ID. Returns count deleted.
-    int delete_batch(const std::vector<int>& memory_ids) override;
+    /// PHASE9B step 5: atomic full text-index rebuild (see backend_impl.h).
+    std::vector<std::pair<std::string, int>> reindex_all(
+        const ProgressFn& progress = {},
+        const CancelFlag* cancel = nullptr) override;
+    HousekeepingPlan housekeeping_plan() const override;
+    std::vector<std::pair<std::string, int>> reindex_plan(
+        const std::string& table = "all") const override;
 
     /// Search by metadata field matching with optional temporal filtering. Returns vector of results.
     std::vector<SearchResult> search_by_metadata(const json& metadata_filter, int limit = 0,
@@ -202,9 +223,6 @@ public:
                                                  const std::string& before = "") override;
 
     void close() override;
-
-    /// Delete old conversation entries older than specified hours. Returns count deleted.
-    int cleanup_old_conversations(float max_age_hours) override;
 
     // --- Users / settings ---
     std::optional<UserInfo> get_user_by_username(const std::string& username) override;
@@ -216,6 +234,8 @@ public:
     std::optional<UserInfo> get_user_by_token_hash(const std::string& token_hash) override;
     std::optional<std::string> get_setting(const std::string& key) override;
     void set_setting(const std::string& key, const std::string& value) override;
+    std::optional<std::string> get_semqlite_config(const std::string& key) override;
+    void set_semqlite_config(const std::string& key, const std::string& value) override;
 
     // --- Schema introspection ---
     std::vector<SchemaObject> list_schema_objects() override;

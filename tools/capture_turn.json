@@ -1,0 +1,47 @@
+{
+  "description": "Push a completed conversation turn (user + assistant) into memory for background summarization. Called from an agent's turn hook.",
+  "inputSchema": {
+    "properties": {
+      "assistant": {
+        "description": "The assistant reply of the turn.",
+        "type": "string"
+      },
+      "metadata": {
+        "description": "Optional metadata (source, hook, etc.). Accepted and ignored \u2014 nothing reads it.",
+        "type": "object"
+      },
+      "model": {
+        "description": "Model that produced the reply.",
+        "type": "string"
+      },
+      "name_source": {
+        "description": "Origin of session_name: 'hermes_title', 'openclaw', 'derived', etc. Omit if no session_name.",
+        "type": "string"
+      },
+      "session_id": {
+        "description": "Conversation/session GUID grouping the turn.",
+        "type": "string"
+      },
+      "session_name": {
+        "description": "Human-readable session/conversation title. Framework-specific: Hermes passes its session title, others may derive from context.",
+        "type": "string"
+      },
+      "started_at": {
+        "description": "When the user prompt arrived: epoch seconds or a 'YYYY-MM-DD HH:MM:SS' local timestamp. Optional; omit when unknown. Must not be after the turn's own time.",
+        "type": [
+          "integer",
+          "string"
+        ]
+      },
+      "user": {
+        "description": "The user message of the turn.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "user"
+    ],
+    "type": "object"
+  },
+  "name": "capture_turn"
+}

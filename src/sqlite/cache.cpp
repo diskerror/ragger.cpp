@@ -1,40 +1,9 @@
 #include "sqlite/backend_impl.h"
-#include "embedder.h"
 #include "config.h"
-#include "lang.h"
-#include "util/fs.h"
 #include "util/time.h"
-#include "util/sqlite.h"
-#include "double_metaphone.h"
-#include "fts_tokenize.h"
-#include "sqlite/text_index.h"
-#include "vector_codec.h"
 #include "Logger.h"
-#include <format>
-#include "nlohmann_json.hpp"
 
-#include <sqlite3.h>
-#include <Eigen/Dense>
 
-#include <algorithm>
-#include <cctype>
-#include <chrono>
-#include <cstdlib>
-#include <cstring>
-#include <ctime>
-#include <unordered_map>
-#include <unordered_set>
-#include <iomanip>
-#include <iterator>
-#include <filesystem>
-#include <numeric>
-#include <optional>
-#include <regex>
-#include <set>
-#include <mutex>
-#include <iostream>
-#include <sstream>
-#include <stdexcept>
 
 namespace ragger::sqlite {
 
@@ -69,6 +38,23 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
     return false;
 }
 
+// Pack decoded rows into a cache's L2-normalized row matrix — the tail
+// shared by all five ensure_*_cache() loaders (review 2C). Templated on the
+// cache type because Backend::Impl is private; deduction from the concrete
+// EmbeddingCache instance keeps the boundary intact.
+template <class Cache>
+void pack_embeddings(Cache& c, const std::vector<std::vector<float>>& rows,
+                     int dims) {
+    const int n = static_cast<int>(rows.size());
+    c.embeddings.resize(n, dims);
+    for (int i = 0; i < n; ++i) {
+        c.embeddings.row(i) =
+            Eigen::Map<const Eigen::RowVectorXf>(rows[i].data(), dims);
+        float nrm = c.embeddings.row(i).norm();
+        if (nrm > 1e-12f) c.embeddings.row(i) /= nrm;
+    }
+}
+
 }  // anonymous namespace
 
 
@@ -76,23 +62,18 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
     // which handles the current version-tagged format AND legacy formats (RV1
     // headers, raw f16/f32). On any failure (NULL, deferred-but-unbackfilled
     // row, corruption, or a dimension mismatch) a zero vector is returned;
-    // the first such row per cache load is logged once (table + id).
+    // failures are counted into `bad_count` (S39) and the caller logs ONE
+    // warn line per load with the first offender and the total.
     std::vector<float> Backend::Impl::decode_embedding_blob(const void* blob, int blob_bytes,
                                              int dims, const char* table,
-                                             int row_id, bool& warned) {
+                                             int row_id, int& bad_count) {
         std::vector<float> emb;
         if (blob == nullptr) {         // deferred row; silent (expected)
             emb.assign(static_cast<size_t>(dims), 0.0f);
             return emb;
         }
-        if (!decode_any(blob, blob_bytes, dims, vtype_, emb) && !warned) {
-            warned = true;
-            Diskerror::Logger::warn(std::format(
-                "[cache] {} row {}: undecodable embedding blob ({} bytes, "
-                "expected {}-dim {}); using zero vector",
-                table, row_id, blob_bytes, dims,
-                vector_codec::to_string(vtype_)));
-        }
+        if (!decode_any(blob, blob_bytes, dims, vtype_, emb))
+            ++bad_count;
         return emb;
     }
 
@@ -117,248 +98,188 @@ bool decode_any(const void* blob, int blob_bytes, int expected_dims,
 
 
     // ---- cache --------------------------------------------------------
-    void Backend::Impl::invalidate_cache() { cache_valid = false; }
+    // PHASE8: the old summaries vector cache (member + ensure/invalidate) is
+    // gone with its table; notes ride knowledge_cache_.
+    void Backend::Impl::invalidate_doc_cache() { doc_cache_.valid = false; }
 
-    void Backend::Impl::invalidate_doc_cache() { doc_cache_valid = false; }
+    void Backend::Impl::invalidate_knowledge_cache() { knowledge_cache_.valid = false; }
 
-    void Backend::Impl::invalidate_dec_cache() { dec_cache_valid = false; }
+    void Backend::Impl::invalidate_turn_cache() { turn_cache_.valid = false; }
 
-    void Backend::Impl::invalidate_turn_cache() { turn_cache_valid = false; }
+    void Backend::Impl::invalidate_episode_cache() { episode_cache_.valid = false; }
+    void Backend::Impl::invalidate_raw_turn_cache() { raw_turn_cache_.valid = false; }
 
 
-    // Loads the summaries table into the vector cache. Keyword scores come
-    // from FTS5 (summaries_fts) at query time — see keyword_scores().
-    void Backend::Impl::ensure_cache() {
-        if (cache_valid) return;
+    // Shared body of the five loaders (PHASE3 Step 5). The loop shape is
+    // identical everywhere: id/text/embedding at columns 0/1/2, timestamp at
+    // column 5, everything else handed to fill_meta. SQL strings below are
+    // character-for-character the pre-refactor loader queries.
+    void Backend::Impl::load_cache(EmbeddingCache& c, const char* label,
+                                   const std::string& sql,
+                                   const std::function<void(Stmt&, json&)>& fill_meta) {
+        c.ids.clear();
+        c.texts.clear();
+        c.metadata.clear();
+        c.timestamps.clear();
 
-        cached_ids.clear();
-        cached_texts.clear();
-        cached_metadata.clear();
-        cached_timestamps.clear();
-
-        Stmt s(db,
-            "SELECT summary_id, text, embedding, level, tags, "
-            "       datetime(created_at,'unixepoch','localtime') "
-            "FROM summaries");
-
+        Stmt s(db, sql);
         std::vector<std::vector<float>> emb_rows;
         const int expected_dims = config().embedding_dimensions;
-        bool blob_warned = false;
+        int bad = 0, bad_first_id = 0, bad_first_bytes = 0;
 
         while (s.step()) {
-            auto col_text = [&](int i) -> std::string { return s.column_text(i); };
-            cached_ids.push_back(s.column_int(0));
-            cached_texts.push_back(col_text(1));
+            c.ids.push_back(s.column_int(0));
+            c.texts.push_back(s.column_text(1));
 
             const void* blob = s.column_blob(2);
             int blob_bytes   = s.column_bytes(2);
-            std::vector<float> emb = decode_embedding_blob(
-                blob, blob_bytes, expected_dims, "summaries",
-                cached_ids.back(), blob_warned);
-            emb_rows.push_back(std::move(emb));
+            const int bad_before = bad;
+            emb_rows.push_back(decode_embedding_blob(
+                blob, blob_bytes, expected_dims, label,
+                c.ids.back(), bad));
+            if (bad > bad_before && bad_before == 0) {
+                bad_first_id = c.ids.back();
+                bad_first_bytes = blob_bytes;
+            }
 
-            // Lean v2 summaries: surface level/tags as metadata so the
-            // generic API and keep-protection (via tags) have what they need.
             json meta = json::object();
-            meta["source"] = "summary";
-            meta["level"]  = col_text(3);
-            std::string tags = col_text(4);
-            if (!tags.empty()) meta["tags"] = tags;
-            cached_metadata.push_back(std::move(meta));
+            fill_meta(s, meta);
+            c.metadata.push_back(std::move(meta));
 
-            cached_timestamps.push_back(col_text(5));
+            c.timestamps.push_back(s.column_text(5));
         }
 
-        // Pack into Eigen matrix (rows × dims). Every row is padded/zeroed to
-        // expected_dims so NULL-embedding rows don't poison the matrix shape.
-        int n = static_cast<int>(emb_rows.size());
-        cached_embeddings.resize(n, expected_dims);
-        for (int i = 0; i < n; ++i) {
-            cached_embeddings.row(i) =
-                Eigen::Map<Eigen::RowVectorXf>(emb_rows[i].data(), expected_dims);
-            float nrm = cached_embeddings.row(i).norm();
-            if (nrm > 1e-12f) cached_embeddings.row(i) /= nrm;
+        // One warn line per load: first offender's details plus the total (S39).
+        if (bad > 0) {
+            Diskerror::Logger::warn(std::format(
+                "[cache] {} row {}: undecodable embedding blob ({} bytes, "
+                "expected {}-dim {}); using zero vector; "
+                "{} undecodable embedding(s) in {}",
+                label, bad_first_id, bad_first_bytes, expected_dims,
+                vector_codec::to_string(vtype_), bad, label));
         }
 
-        cache_valid = true;
+        pack_embeddings(c, emb_rows, expected_dims);
     }
 
 
-    // Loads the documents (L5) table into the parallel vector cache. Mirrors
-    // ensure_cache(): vector scores come from here, keyword scores from FTS5
-    // (documents_fts) at query time. Metadata carries source="document" plus
-    // the title so search() consumers can distinguish documents from summaries.
+    // PHASE8: the old summaries loader is gone; the four loaders below
+    // cover every corpus.
+
     void Backend::Impl::ensure_doc_cache() {
-        if (doc_cache_valid) return;
-
-        doc_ids.clear();
-        doc_texts.clear();
-        doc_metadata.clear();
-        doc_timestamps.clear();
-
-        Stmt s(db,
+        if (doc_cache_.valid) return;
+        load_cache(doc_cache_, "documents",
             "SELECT d.document_id, d.text, d.embedding, "
             "       ifnull(ds.title,''), d.tags, "
             "       datetime(ds.imported_at, 'unixepoch', 'localtime') "
             "FROM documents d "
             "LEFT JOIN document_sources ds "
-            "  ON ds.document_source_id = d.document_source_id");
-
-        std::vector<std::vector<float>> emb_rows;
-        const int expected_dims = config().embedding_dimensions;
-        bool blob_warned = false;
-
-        while (s.step()) {
-            auto col_text = [&](int i) -> std::string { return s.column_text(i); };
-            doc_ids.push_back(s.column_int(0));
-            doc_texts.push_back(col_text(1));
-
-            const void* blob = s.column_blob(2);
-            int blob_bytes   = s.column_bytes(2);
-            std::vector<float> emb = decode_embedding_blob(
-                blob, blob_bytes, expected_dims, "documents",
-                doc_ids.back(), blob_warned);
-            emb_rows.push_back(std::move(emb));
-
-            json meta = json::object();
-            meta["source"] = "document";
-            meta["title"]  = col_text(3);
-            std::string tags = col_text(4);
-            if (!tags.empty()) meta["tags"] = tags;
-            doc_metadata.push_back(std::move(meta));
-
-            doc_timestamps.push_back(col_text(5));
-        }
-
-        int n = static_cast<int>(emb_rows.size());
-        doc_embeddings.resize(n, expected_dims);
-        for (int i = 0; i < n; ++i) {
-            doc_embeddings.row(i) =
-                Eigen::Map<Eigen::RowVectorXf>(emb_rows[i].data(), expected_dims);
-            float nrm = doc_embeddings.row(i).norm();
-            if (nrm > 1e-12f) doc_embeddings.row(i) /= nrm;
-        }
-
-        doc_cache_valid = true;
+            "  ON ds.document_source_id = d.document_source_id",
+            [](Stmt& s, json& meta) {
+                meta["source"] = "document";
+                meta["title"]  = s.column_text(3);
+                std::string tags = s.column_text(4);
+                if (!tags.empty()) meta["tags"] = tags;
+            });
+        doc_cache_.valid = true;
     }
 
 
-    // Loads the decisions (L6) table into the parallel vector cache. Mirrors
-    // ensure_cache(): vector scores come from here, keyword scores from FTS5
-    // (decisions_fts) at query time. Metadata carries source="decision" plus
-    // the status so search() consumers can distinguish decisions from the
-    // other corpora.
-    void Backend::Impl::ensure_dec_cache() {
-        if (dec_cache_valid) return;
-
-        dec_ids.clear();
-        dec_texts.clear();
-        dec_metadata.clear();
-        dec_timestamps.clear();
-
-        Stmt s(db,
-            "SELECT decision_id, text, embedding, status, tags, "
-            "       datetime(created_at,'unixepoch','localtime') "
-            "FROM decisions");
-
-        std::vector<std::vector<float>> emb_rows;
-        const int expected_dims = config().embedding_dimensions;
-        bool blob_warned = false;
-
-        while (s.step()) {
-            auto col_text = [&](int i) -> std::string { return s.column_text(i); };
-            dec_ids.push_back(s.column_int(0));
-            dec_texts.push_back(col_text(1));
-
-            const void* blob = s.column_blob(2);
-            int blob_bytes   = s.column_bytes(2);
-            std::vector<float> emb = decode_embedding_blob(
-                blob, blob_bytes, expected_dims, "decisions",
-                dec_ids.back(), blob_warned);
-            emb_rows.push_back(std::move(emb));
-
-            json meta = json::object();
-            meta["source"] = "decision";
-            meta["status"] = col_text(3);
-            std::string tags = col_text(4);
-            if (!tags.empty()) meta["tags"] = tags;
-            dec_metadata.push_back(std::move(meta));
-
-            dec_timestamps.push_back(col_text(5));
-        }
-
-        int n = static_cast<int>(emb_rows.size());
-        dec_embeddings.resize(n, expected_dims);
-        for (int i = 0; i < n; ++i) {
-            dec_embeddings.row(i) =
-                Eigen::Map<Eigen::RowVectorXf>(emb_rows[i].data(), expected_dims);
-            float nrm = dec_embeddings.row(i).norm();
-            if (nrm > 1e-12f) dec_embeddings.row(i) /= nrm;
-        }
-
-        dec_cache_valid = true;
+    // knowledge (PHASE7 B.2): ONE corpus replacing dec_cache_ + ins_cache_.
+    // Consequence (TODO Q10): retired and superseded rows are NOT in the
+    // semantic cache (same as superseded always was); the 0.16 rollups that
+    // arrive as retired notes in Phase 8 are therefore invisible to semantic
+    // search — the FTS path and memory_get still reach them.
+    void Backend::Impl::ensure_knowledge_cache() {
+        if (knowledge_cache_.valid) return;
+        load_cache(knowledge_cache_, "knowledge",
+            "SELECT knowledge_id, text, embedding, status, tags, "
+            "       datetime(created_at,'unixepoch','localtime'), "
+            "       ifnull(trigger,''), session_id, kind "
+            "FROM knowledge "
+            // db 0.17: superseded / retired / pending rows are history or
+            // unreviewed drafts -- kept in the table, hidden from search.
+            // Allow-list, not deny-list, so a future status stays hidden
+            // until someone decides it should surface. 'roadmap' keeps its
+            // pre-0.17 visibility.
+            "WHERE status IN (" + status::in_list_sql(status::kCacheLoaded) + ")",
+            [](Stmt& s, json& meta) {
+                meta["source"] = "knowledge";
+                meta["kind"] = s.column_text(8);
+                meta["status"] = s.column_text(3);
+                std::string tags = s.column_text(4);
+                if (!tags.empty()) meta["tags"] = tags;
+                std::string trig = s.column_text(6);
+                if (!trig.empty()) meta["trigger"] = trig;
+                if (!s.is_null(7)) meta["session_id"] = s.column_int(7);
+            });
+        knowledge_cache_.valid = true;
     }
 
 
-    // Loads the turn_summaries (L2) table into the parallel vector cache.
-    // Mirrors ensure_dec_cache(): vector scores come from here, keyword
-    // scores from FTS5 (turn_summaries_fts) at query time. WHERE text IS NOT
-    // NULL excludes unfinalized placeholder rows (summarizer hasn't run yet)
-    // — these must never surface in search results or feed the embedding
-    // similarity matrix. Metadata carries source="turn_summary" plus
-    // turn_id/session_id (turn_summaries has no tags/status/level columns).
     void Backend::Impl::ensure_turn_cache() {
-        if (turn_cache_valid) return;
-
-        turn_ids.clear();
-        turn_texts.clear();
-        turn_metadata.clear();
-        turn_timestamps.clear();
-
-        Stmt s(db,
+        if (turn_cache_.valid) return;
+        load_cache(turn_cache_, "turn_summaries",
             "SELECT turn_summary_id, text, embedding, turn_id, session_id, "
             "       datetime(turn_datetime,'unixepoch','localtime') "
-            "FROM turn_summaries WHERE text != ''");
+            "FROM turn_summaries WHERE text != ''",
+            [](Stmt& s, json& meta) {
+                meta["source"] = "turn_summary";
+                if (!s.is_null(3)) meta["turn_id"] = s.column_int(3);
+                if (!s.is_null(4)) meta["session_id"] = s.column_int(4);
+                // Human-readable datetime (mirrors turns.created_at) for
+                // temporal ordering; kept alongside turn_id (raw-turn lookup
+                // key).
+                std::string ts = s.column_text(5);
+                if (!ts.empty()) meta["datetime"] = ts;
+            });
+        turn_cache_.valid = true;
+    }
 
-        std::vector<std::vector<float>> emb_rows;
-        const int expected_dims = config().embedding_dimensions;
-        bool blob_warned = false;
 
-        while (s.step()) {
-            auto col_text = [&](int i) -> std::string { return s.column_text(i); };
-            turn_ids.push_back(s.column_int(0));
-            turn_texts.push_back(col_text(1));
+    // PHASE5 B.3: episodes are a search corpus of their own. Marker rows
+    // (text = '') never load. `level` metadata is kept alongside `layer` so
+    // legacy /search output keeps its shape.
+    void Backend::Impl::ensure_episode_cache() {
+        if (episode_cache_.valid) return;
+        load_cache(episode_cache_, "episodes",
+            "SELECT episode_id, text, embedding, tags, session_id, "
+            "       datetime(span_end,'unixepoch','localtime'), model_id "
+            "FROM episodes WHERE text != ''",
+            [](Stmt& s, json& meta) {
+                meta["source"] = "episode";
+                meta["level"]  = "episode";
+                std::string tags = s.column_text(3);
+                if (!tags.empty()) meta["tags"] = tags;
+                if (!s.is_null(4)) meta["session_id"] = s.column_int(4);
+                if (!s.is_null(6)) meta["model_id"] = s.column_int(6);
+            });
+        episode_cache_.valid = true;
+    }
 
-            const void* blob = s.column_blob(2);
-            int blob_bytes   = s.column_bytes(2);
-            std::vector<float> emb = decode_embedding_blob(
-                blob, blob_bytes, expected_dims, "turn_summaries",
-                turn_ids.back(), blob_warned);
-            emb_rows.push_back(std::move(emb));
 
-            json meta = json::object();
-            meta["source"] = "turn_summary";
-            if (!s.is_null(3)) meta["turn_id"] = s.column_int(3);
-            if (!s.is_null(4)) meta["session_id"] = s.column_int(4);
-            // Human-readable datetime (mirrors turns.created_at) for temporal
-            // ordering; kept alongside turn_id (raw-turn lookup key).
-            std::string ts = col_text(5);
-            if (!ts.empty()) meta["datetime"] = ts;
-            turn_metadata.push_back(std::move(meta));
-
-            turn_timestamps.push_back(std::move(ts));
-        }
-
-        int n = static_cast<int>(emb_rows.size());
-        turn_embeddings.resize(n, expected_dims);
-        for (int i = 0; i < n; ++i) {
-            turn_embeddings.row(i) =
-                Eigen::Map<Eigen::RowVectorXf>(emb_rows[i].data(), expected_dims);
-            float nrm = turn_embeddings.row(i).norm();
-            if (nrm > 1e-12f) turn_embeddings.row(i) /= nrm;
-        }
-
-        turn_cache_valid = true;
+    // LR S75: raw exchanges for the OPT-IN `turn` corpus. Display text joins
+    // user + assistant with a blank line (the embedding was computed over
+    // turn_embed_text's unit-separator form; the separator must not reach a
+    // snippet). Truly empty rows (both sides empty/NULL) are excluded — they
+    // carry nothing to find. NULL embeddings (deferred) load as zero vectors
+    // like every other corpus; the text index still finds them.
+    void Backend::Impl::ensure_raw_turn_cache() {
+        if (raw_turn_cache_.valid) return;
+        load_cache(raw_turn_cache_, "turns",
+            "SELECT turn_id, "
+            "       ifnull(user_text,'') || CASE "
+            "         WHEN ifnull(assistant_text,'') = '' THEN '' "
+            "         ELSE char(10) || char(10) || assistant_text END, "
+            "       embedding, session_id, 0, "
+            "       datetime(created_at,'unixepoch','localtime') "
+            "FROM turns "
+            "WHERE ifnull(user_text,'') != '' OR ifnull(assistant_text,'') != ''",
+            [](Stmt& s, json& meta) {
+                meta["source"] = "turn";
+                if (!s.is_null(3)) meta["session_id"] = s.column_int(3);
+            });
+        raw_turn_cache_.valid = true;
     }
 
 

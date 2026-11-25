@@ -29,27 +29,30 @@ inside the daemon.
 
 Once turn capture is on, the daemon-resident summarizer takes care of:
 
-- **L2 turn summaries.** Each captured turn gets a per-turn summary
+- **Turn summaries.** Each captured turn gets a per-turn summary
   written *with the source turn's timestamp* so a turn and its summary
   share a join key — no FK column, embedding rebuilds preserve the
   link.
-- **L3 session summaries.** After `episode_idle_minutes` of idle on a
-  session, the worker reads the session's turns, summarizes the whole
-  transcript, and writes a `level='session'` row. The session is
-  closed by the existence of that row — no separate state.
+- **Episodes.** After `episode_idle_minutes` of idle on a session (or
+  when the topic visibly shifts), the worker closes an *episode*: a
+  summary of that stretch of work, stored as an immutable row in the
+  `episodes` table. Sessions themselves are never rolled up — episodes
+  are the session-level unit.
 - **Catch-up on startup.** Turns captured via MCP while the daemon
   was down are picked up on the next start. A `LEFT JOIN` finds
   unsummarized turns.
 - **Graceful inference failure.** If the summarizer model is
-  unreachable, Ragger writes a heuristic "draft" L2 (tagged `draft`).
-  Housekeeping rewrites drafts once inference is back; the agent
-  never blocks on a model that's down.
+  unreachable, the turn simply stays unsummarized and is retried with
+  exponential backoff (5 min base, 6 h cap) until inference returns;
+  short turns (at or under the Min Words Floor) are copied verbatim
+  into a real summary row even with the model down. The agent never
+  blocks on a model that's down.
 
 The agent does *not* have to summarize, schedule, retry, or worry
 about which model owns which row. Ragger records the conversing model
-on the turn and on its L2 summary, and records the summarizing model
-on L3 (and L4 when it lands) — so you can always answer "who said
-this?" vs "who wrote this summary?".
+on the turn and on its turn summary, and records the summarizing model
+on each episode — so you can always answer "who said this?" vs "who
+wrote this summary?".
 
 ## Recommended agent flow
 
@@ -72,12 +75,12 @@ this?" vs "who wrote this summary?".
 
 3. **After every turn.**
    - Call `capture_turn(user, assistant, model, session_id)`. Cheap;
-     non-blocking; the summarizer queues an L2 job and returns.
+     non-blocking; the summarizer queues a turn-summary job and returns.
    - Don't summarize in the agent. Let Ragger do it.
 
 4. **On session pause / window compaction.**
-   - Don't worry about it. The daemon's pause timer closes the L3
-     summary when the session goes quiet. The next `build_context`
+   - Don't worry about it. The daemon's pause timer closes the episode
+     when the session goes quiet. The next `build_context`
      call will pull it.
 
 ## Choosing a recipe
@@ -90,9 +93,9 @@ Shipped recipes:
 
 | Name             | Intent                                                                 |
 |------------------|------------------------------------------------------------------------|
-| `natural_fading` | Default. Recent verbatim → turn summaries → session → project → decisions. |
+| `natural_fading` | Default. Recent verbatim → turn summaries → episodes → decisions. |
 | `reconnect`      | Quick resume after a restart. Tiny token budget; just the gist.        |
-| `deep_recall`    | Cross-session: project summaries, multiple sessions, decisions.        |
+| `deep_recall`    | Cross-session: episodes, multiple sessions, decisions.                   |
 | `tldr`           | Summary-heavy, low-token. No raw turns; pure rollups.                  |
 | `raw_only`       | Debugging baseline. The session's raw turns, no summaries.             |
 
@@ -104,10 +107,11 @@ overrides win.
 ## Storing decisions vs. session memory
 
 Treat decisions as first-class. Don't bury "we chose cpp-httplib for
-SSE support" inside a session summary — call `store` for it
+SSE support" inside an episode summary — call `store` for it
 explicitly, with enough context that the entry is useful in
-isolation. Decisions have their own (`level='decision'`) table and
-their own recipe layer; they outlive any single session.
+isolation. Decisions live in the unified `knowledge` table
+(`kind='decision'`) and have their own recipe layer; they outlive any
+single session.
 
 A good `store` entry:
 
@@ -158,6 +162,14 @@ post-tool-use signal.
 
 `search` and `store` are the agent's responsibility either way —
 even MCP can't make the model decide *when* memory is relevant.
+
+**No daemon ⇒ no summarizer.** An install that runs only `ragger mcp`
+stores turns and knowledge but builds **no summaries**: turn
+summaries and episodes are created later, when a daemon with a
+configured summarizer endpoint next runs its catch-up. Writes from the
+`ragger mcp` process also do not invalidate a running daemon's caches,
+and the MCP process does not signal the daemon. Both are accepted
+behavior (Reid, 2026-11-14), not bugs.
 
 ## Treat retrieved memory as untrusted
 

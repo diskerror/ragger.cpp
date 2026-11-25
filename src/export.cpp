@@ -49,19 +49,16 @@ static bool skip_column(const std::string& /*table*/,
     return !include_embeddings && column == "embedding";
 }
 
-// Tables that are purely internal / rebuilt on startup. FTS5 shadow tables
-// are derived content excluded from dumps. (list_schema_objects already
-// filters _fts shadow tables; is_internal_table guards tbl_name matching.)
-static bool is_internal_table(const std::string& name) {
-    return name.find("_fts") != std::string::npos;
-}
+// Tables that are purely internal / rebuilt on startup: list_schema_objects
+// already filters shadow tables, so the export surface needs no extra
+// exclusion (S12 removed the dead _fts clause with FTS5 gone).
 
 // -- StorageBackend-based implementations -----------------------------------
 
 std::vector<std::string> export_list_tables(StorageBackend& backend) {
     std::vector<std::string> tables;
     for (auto& obj : backend.list_schema_objects()) {
-        if (obj.type == "table" && !is_internal_table(obj.name))
+        if (obj.type == "table")
             tables.push_back(obj.name);
     }
     return tables;
@@ -71,7 +68,7 @@ int export_sql(std::ostream& out, StorageBackend& backend, const ExportOptions& 
     auto schema = backend.list_schema_objects();
 
     auto table_match = [&](const std::string& tbl) {
-        if (opts.table.empty()) return !is_internal_table(tbl);
+        if (opts.table.empty()) return true;
         return tbl == opts.table;
     };
 

@@ -12,7 +12,7 @@ Documents are split into paragraph-sized chunks (short paragraphs merged
 to a minimum size, never split mid-sentence). Each chunk is:
 
 1. Embedded into a 384-dimensional vector using a local sentence-transformer
-   model (`all-MiniLM-L6-v2`)
+   model, `all-MiniLM-L12-v2` by default
 2. Tokenized into stemmed unigrams and within-sentence bigrams, each paired
    with a Double Metaphone phonetic code, and indexed into Ragger's own
    `terms` / `<table>_terms` tables (v0.16 — replaces the older SQLite FTS5 +
@@ -58,8 +58,8 @@ a `phon` column) in favor of a small, fully custom, hand-rolled index —
   bigram, literal (stemmed) or metaphone, no type/flag column. They
   self-filter: a real word and its phonetic code never collide as strings.
 - **`<table>_terms`** — one join table per text table (`turns_terms`,
-  `turn_summaries_terms`, `summaries_terms`, `decisions_terms`,
-  `documents_terms`), each `(record_id, term_id, count)`.
+  `turn_summaries_terms`, `episodes_terms`,
+  `knowledge_terms`, `documents_terms`), each `(record_id, term_id, count)`.
 - **Tokenization pipeline:** normalize → expand negated contractions
   (`isn't` → `is not`, keeping the negation) → stopword-filter the raw word
   → **stem** (Porter/Snowball, from the `c_lib` project) → emit the stem as
@@ -119,13 +119,13 @@ matching internally (see `fts_w_unigram`/`fts_w_bigram`/`fts_w_metaphone`
 below).
 
 Configure the overall vector-vs-text-index blend via `vector_weight` and
-`bm25_weight` in `[search]` (the name `bm25_weight` is kept for backward
+`fts_weight` in `[search]` (the name `fts_weight` is kept for backward
 compatibility even though the scoring is no longer literally BM25):
 
 ```ini
 [search]
 vector_weight = 8
-bm25_weight   = 4
+fts_weight   = 4
 ```
 
 Then tune the text index's own internal blend via `fts_w_unigram`,
@@ -146,7 +146,7 @@ Using integers avoids floating-point config parsing issues.
 
 ```ini
 [search]
-bm25_enabled    = false   # turn off the text index altogether
+fts_enabled    = false   # turn off the text index altogether
 fts_w_metaphone = 0       # keep literal matching, drop phonetic matching
 ```
 
@@ -155,7 +155,7 @@ fts_w_metaphone = 0       # keep literal matching, drop phonetic matching
 Keyword relevance is computed by Ragger's own TF-IDF text index (see
 "Custom Text Index" above), not an external library — the internal knobs
 (`fts_w_unigram`, `fts_w_bigram`, `fts_w_metaphone`, `fts_literal_enabled`)
-are the tuning surface, alongside the overall `bm25_weight` blend weight.
+are the tuning surface, alongside the overall `fts_weight` blend weight.
 
 ## Chunking Strategy
 
@@ -245,12 +245,10 @@ docling myfile.pdf -o myfile.md
 ragger import-docs myfile.md --tags docs
 ```
 
-> **Important:** Imported document chunks (L5) are **not** returned by
-> `ragger search` or the `/search` HTTP endpoint. The `search()` method
-> queries the `summaries` table only; the `documents` table has its own
-> `documents_terms` index but is not yet merged into general search. Document search
-> via a recipe layer is planned for a future release. Use `store` (not
-> `import-docs`) if you need your content to appear in regular `search` results.
+> **Note:** `ragger search` and the `/search` HTTP endpoint cover all
+> four searchable corpora: documents, knowledge (decisions,
+> insights, notes), turn summaries, and episodes. Each result's
+> `metadata.source` names its corpus.
 
 ## Performance Characteristics
 

@@ -1,0 +1,359 @@
+/**
+ * agent_api.cpp — shared bodies of the agent API verbs (see agent_api.h).
+ *
+ * S70: `store`. Before this step HTTP /store carried the collection/source
+ * validation and defaults while MCP `store` had neither, and each surface
+ * shaped its own reply; the CLI had no category path at all. The body below
+ * is now the only place the verb's arguments, defaults, kind rule and
+ * response shape are defined.
+ */
+#include "agent_api.h"
+
+#include "agent_parse.h"
+#include "config.h"
+#include "inference.h"
+#include "lang.h"
+#include "Logger.h"
+#include "store_kind.h"
+#include "util/time.h"
+
+#include <algorithm>
+#include <chrono>
+#include <map>
+#include <stdexcept>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace ragger {
+
+namespace {
+/// AgentHit -> JSON (the shaping was duplicated in server.cpp and mcp.cpp;
+/// inventory D13). Key set unchanged.
+nlohmann::json agent_hit_to_json(const AgentHit& h) {
+    return nlohmann::json{{"id", h.id},
+                          {"layer", h.layer},
+                          {"score", h.score},
+                          {"matched_by", h.matched_by},
+                          {"created", h.created},
+                          {"snippet", h.snippet},
+                          {"extra", h.extra}};
+}
+
+/// X25: one hit of the split response. Deliberately NO `score` and NO
+/// `matched_by`: the blended number is meaningless here, and one name with
+/// two meanings is the bug this feature removes. An absent score is JSON
+/// null (never 0, never omitted); present scores go through the same JSON
+/// number path as agent_hit_to_json's `score` (no extra rounding).
+nlohmann::json split_hit_to_json(const std::string& id, const AgentHit* v,
+                                 const AgentHit* f) {
+    // layer/created/snippet/extra come from the vector run when present,
+    // else from the FTS run (same rows; the vector copy is canonical).
+    const AgentHit& src = v ? *v : *f;
+    return nlohmann::json{{"id", id},
+                          {"layer", src.layer},
+                          {"created", src.created},
+                          {"snippet", src.snippet},
+                          {"extra", src.extra},
+                          {"vector_score", v ? nlohmann::json(v->score)
+                                             : nlohmann::json(nullptr)},
+                          {"fts_score", f ? nlohmann::json(f->score)
+                                          : nlohmann::json(nullptr)}};
+}
+
+/// X25: split mode (Reid's ruling 2026-11-16). Two ordinary agent_search
+/// runs — semantic and keyword — partitioned by handle into three disjoint
+/// lists: both / vector_only / fts_only. Every existing filter applies to
+/// both runs identically because both carry the same query fields. No
+/// storage-layer change.
+nlohmann::json agent_memory_search_split(RaggerMemory& mem, const AgentSearchQuery& q) {
+    AgentSearchQuery qv = q; qv.mode = "semantic";
+    AgentSearchQuery ql = q; ql.mode = "keyword";
+
+    // The keyword run always runs. The vector run degrades to an empty list
+    // ONLY when the embedder is missing; any other invalid_argument (bad
+    // layer/kind/time) must still surface as a 400, so it is rethrown.
+    const auto fts_all = mem.agent_search(ql);
+    std::vector<AgentHit> vec_all;
+    bool vector_available = true;
+    try {
+        vec_all = mem.agent_search(qv);
+    } catch (const std::invalid_argument& e) {
+        if (std::string_view(e.what()).starts_with("semantic search needs an embedder"))
+            vector_available = false;
+        else
+            throw;
+    }
+
+    // Hits arrive sorted by score descending and capped at `limit`, so
+    // dropping the tail below the minimum is exactly "top X above the
+    // minimum" (section 1 definition).
+    std::vector<AgentHit> vec, fts;
+    for (const auto& h : vec_all)
+        if (h.score >= q.min_vector_score) vec.push_back(h);
+    for (const auto& h : fts_all)
+        if (h.score >= q.min_fts_score) fts.push_back(h);
+
+    std::map<std::string, const AgentHit*> vmap, fmap;
+    for (const auto& h : vec) vmap[h.id] = &h;
+    for (const auto& h : fts) fmap[h.id] = &h;
+
+    std::vector<const AgentHit*> vb, vv, vf;   // both / vector_only / fts_only
+    for (const auto& [id, v] : vmap) {
+        const auto f = fmap.count(id) ? fmap[id] : nullptr;
+        (f ? vb : vv).push_back(v);
+    }
+    for (const auto& [id, f] : fmap)
+        if (!vmap.count(id)) vf.push_back(f);
+
+    // Order: both and vector_only by vector_score descending, fts_only by
+    // fts_score descending; ties by handle ascending (deterministic).
+    auto by_vector = [](const AgentHit* a, const AgentHit* b) {
+        if (a->score != b->score) return a->score > b->score;
+        return a->id < b->id;
+    };
+    std::sort(vb.begin(), vb.end(), by_vector);
+    std::sort(vv.begin(), vv.end(), by_vector);
+    std::sort(vf.begin(), vf.end(), [](const AgentHit* a, const AgentHit* b) {
+        if (a->score != b->score) return a->score > b->score;
+        return a->id < b->id;
+    });
+
+    nlohmann::json both = nlohmann::json::array(),
+                   vonly = nlohmann::json::array(),
+                   fonly = nlohmann::json::array();
+    for (const auto* v : vb)
+        both.push_back(split_hit_to_json(v->id, v, fmap[v->id]));
+    for (const auto* v : vv)
+        vonly.push_back(split_hit_to_json(v->id, v, nullptr));
+    for (const auto* f : vf)
+        fonly.push_back(split_hit_to_json(f->id, nullptr, f));
+
+    return nlohmann::json{{"groups",
+                           {{"both", std::move(both)},
+                            {"vector_only", std::move(vonly)},
+                            {"fts_only", std::move(fonly)}}},
+                          {"vector_available", vector_available},
+                          {"min_vector_score", q.min_vector_score},
+                          {"min_fts_score", q.min_fts_score}};
+}
+} // namespace
+
+nlohmann::json agent_store(RaggerMemory& mem, const nlohmann::json& args,
+                           const std::string& default_source) {
+    if (!args.is_object())
+        throw std::invalid_argument("arguments must be an object");
+    const std::string text = args.value("text", std::string());
+    if (text.empty())
+        throw std::invalid_argument("text is required");
+
+    nlohmann::json metadata = args.value("metadata", nlohmann::json::object());
+    if (metadata.is_null())
+        metadata = nlohmann::json::object();
+    if (!metadata.is_object())
+        throw std::invalid_argument("metadata must be an object");
+    // S27 (C §4): a non-string collection/source is a client error with a
+    // clear message. This validation used to live in the HTTP handler only;
+    // every surface now rejects it the same way.
+    if (metadata.contains("collection") && !metadata["collection"].is_string())
+        throw std::invalid_argument("metadata.collection must be a string");
+    if (metadata.contains("source") && !metadata["source"].is_string())
+        throw std::invalid_argument("metadata.source must be a string");
+    if (!metadata.contains("collection") || metadata["collection"].get<std::string>().empty())
+        metadata["collection"] = "memory";
+    if (!metadata.contains("source") || metadata["source"].get<std::string>().empty())
+        metadata["source"] = default_source;
+
+    const std::string id = mem.store(text, metadata);
+    return nlohmann::json{{"id", id},
+                          {"status", "stored"},
+                          {"kind", std::string(store_kind_for(metadata))}};
+}
+
+nlohmann::json agent_search(RaggerMemory& mem, const nlohmann::json& args) {
+    // One message now (inventory D4: was HTTP "Missing 'query' field" /
+    // MCP "Error: query parameter required").
+    const std::string query = args.value("query", std::string());
+    if (query.empty())
+        throw std::invalid_argument("query is required");
+    const int limit = args.value("limit", config().default_search_limit);
+    const float min_score = args.value("min_score", config().default_min_score);
+    const auto collections = args.value("collections", std::vector<std::string>{});
+
+    const auto t0 = std::chrono::high_resolution_clock::now();
+    auto sr = mem.search(query, limit, min_score, collections);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::high_resolution_clock::now() - t0).count();
+    nlohmann::json timing = sr.timing;
+    timing["total_ms"] = ms;
+    Diskerror::Logger::trace(std::format(lang::DBG_QUERY_LOG, query, sr.results.size(), ms));
+
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& r : sr.results)
+        arr.push_back({{"id", r.id}, {"text", r.text}, {"score", r.score},
+                       {"metadata", r.metadata}, {"timestamp", r.timestamp}});
+    return nlohmann::json{{"results", std::move(arr)},
+                          {"timing", std::move(timing)}};
+}
+
+nlohmann::json agent_memory_search(RaggerMemory& mem, const nlohmann::json& args) {
+    // D12 resolved: the empty-query check existed only on MCP; every
+    // surface now rejects it the same way (HTTP used to run a garbage
+    // empty-string search).
+    AgentSearchQuery q = parse_agent_search_query(args);
+    if (q.query.empty())
+        throw std::invalid_argument("query is required");
+    // X25: split mode is composed here in the verb layer from two ordinary
+    // agent_search runs; the default path below is byte-identical to before.
+    if (q.split)
+        return agent_memory_search_split(mem, q);
+    const auto hits = mem.agent_search(q);
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& h : hits)
+        arr.push_back(agent_hit_to_json(h));
+    return nlohmann::json{{"results", std::move(arr)}};
+}
+
+nlohmann::json agent_memory_get(RaggerMemory& mem, const nlohmann::json& args) {
+    return mem.agent_get(parse_agent_get_query(args));
+}
+
+nlohmann::json agent_document_search(RaggerMemory& mem, const nlohmann::json& args) {
+    const auto hits = mem.agent_document_search(parse_document_search_query(args));
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& h : hits)
+        arr.push_back(agent_hit_to_json(h));
+    return nlohmann::json{{"results", std::move(arr)}};
+}
+
+nlohmann::json agent_memory_timeline(RaggerMemory& mem, const nlohmann::json& args) {
+    return mem.agent_timeline(parse_timeline_query(args));
+}
+
+nlohmann::json agent_memory_note(RaggerMemory& mem, const nlohmann::json& args,
+                                 const std::string& default_source) {
+    const std::string text = args.value("text", std::string());
+    if (text.empty())
+        throw std::invalid_argument("text is required");
+    validate_note_request(args);   // LR S59 (D-3): trigger needs evidence
+
+    // ---- insight routing (Phase 5) --------------------------------------
+    // evidence array -> store_knowledge(kind='insight'). This branch used to
+    // be written twice (server.cpp and mcp.cpp, inventory D14); it exists
+    // once here. Response keys unchanged on both paths.
+    if (args.contains("evidence") && args["evidence"].is_array()) {
+        const auto r = mem.store_knowledge(parse_note_insight(args, text));
+        return nlohmann::json{{"id", r.id},
+                              {"kind", r.kind},
+                              {"status", "stored"},
+                              {"superseded", r.superseded ? nlohmann::json(*r.superseded)
+                                                          : nlohmann::json(nullptr)},
+                              {"possible_supersedes", supersedes_json(r.possible_supersedes)}};
+    }
+
+    // ---- plain note ------------------------------------------------------
+    nlohmann::json metadata = nlohmann::json::object();
+    metadata["source"] = default_source;
+    if (args.contains("tags"))
+        metadata["tags"] = args["tags"];
+    // LR S59: plain notes carry session provenance (GUID lookup only,
+    // unknown GUID stores with NULL session — Impl::store's rule).
+    if (args.contains("session") && args["session"].is_string())
+        metadata["session"] = args["session"];
+    const std::string id = mem.store(text, metadata);
+    return nlohmann::json{{"id", id},
+                          {"status", "stored"},
+                          {"possible_supersedes",
+                           supersedes_json(mem.possible_supersedes_for_text(text))}};
+}
+
+nlohmann::json agent_memory_decision(RaggerMemory& mem, const nlohmann::json& args) {
+    const auto r = mem.store_knowledge(parse_decision_input(args));
+    return nlohmann::json{{"id", r.id},
+                          {"kind", r.kind},
+                          {"status", "stored"},
+                          {"superseded", r.superseded ? nlohmann::json(*r.superseded)
+                                                      : nlohmann::json(nullptr)},
+                          {"possible_supersedes", supersedes_json(r.possible_supersedes)}};
+}
+
+nlohmann::json agent_memory_update(RaggerMemory& mem, const nlohmann::json& args) {
+    return mem.agent_update(parse_update_request(args));
+}
+
+nlohmann::json agent_memory_review(RaggerMemory& mem, const nlohmann::json& args) {
+    const auto [action, ids] = parse_review_request(args);
+    return mem.agent_review(action, ids);
+}
+
+CaptureResult agent_capture_turn(RaggerMemory& mem, const nlohmann::json& args) {
+    // One message now (D16: was HTTP {"error":"missing required field: user"}
+    // as a JSON body / MCP "Error: user parameter required").
+    const std::string user = args.value("user", std::string());
+    if (user.empty())
+        throw std::invalid_argument("user is required");
+
+    // X32: optional started_at — the time the user prompt arrived. Accepts a
+    // JSON integer (epoch seconds) or a db-format timestamp string (exactly
+    // what source_timestamp accepts: the shared parse_db_timestamp); null or
+    // absent = not given. A capture turn's created_at is "now", so a value
+    // more than a day ahead is a clock/typo error, and any value after "now"
+    // would start the turn after it ended.
+    int64_t started_at = 0;
+    if (args.contains("started_at") && !args["started_at"].is_null()) {
+        const auto& jv = args["started_at"];
+        if (jv.is_number_integer()) {
+            started_at = jv.get<int64_t>();
+        } else if (jv.is_string()) {
+            const auto parsed = parse_db_timestamp(jv.get<std::string>());
+            if (!parsed)
+                throw std::invalid_argument(
+                    "started_at must be an integer epoch or a timestamp string");
+            started_at = db_epoch(*parsed);
+        } else {
+            throw std::invalid_argument(
+                "started_at must be an integer epoch or a timestamp string");
+        }
+        if (started_at > db_epoch() + 86400)
+            throw std::invalid_argument("started_at is in the future");
+        if (started_at > db_epoch())
+            throw std::invalid_argument("started_at is after the turn time");
+    }
+
+    return capture_turn(mem, user,
+                        args.value("assistant", std::string()),
+                        args.value("model", std::string()),
+                        args.value("session_id", std::string()),
+                        args.value("session_name", std::string()),
+                        args.value("name_source", std::string()),
+                        started_at);
+}
+
+nlohmann::json capture_summarizer_flags(const Config& cfg, const InferenceClient& inference) {
+    const SummarizerInfo s = describe_summarizer(inference);
+    return nlohmann::json{{"capture_turns",     cfg.capture_turns},
+                          {"summarizer_model",  s.model},
+                          {"summarizer_engine", s.engine},
+                          {"summarizer_reachable", summarizer_reachable(inference)}};
+}
+
+nlohmann::json capture_turn_payload(const CaptureResult& result) {
+    return nlohmann::json{{"status", result.captured ? "captured" : "disabled"},
+                          {"turn_id", result.turn_id}};
+}
+
+nlohmann::json agent_build_context(RaggerMemory& mem, const nlohmann::json& args) {
+    const std::string session = args.value("session_id", std::string());
+    const auto ctx = build_context(mem, session, args.value("recipe", std::string()));
+    if (!ctx.enabled)
+        return nlohmann::json{{"status", "disabled"}};
+    nlohmann::json chunks = nlohmann::json::array();
+    for (const auto& c : ctx.chunks)
+        chunks.push_back({{"kind", c.kind}, {"text", c.text}, {"timestamp", c.timestamp}});
+    return nlohmann::json{{"status", "ok"},
+                          {"session_id", session},
+                          {"recipe", ctx.recipe_name},
+                          {"chunks", std::move(chunks)}};
+}
+
+} // namespace ragger

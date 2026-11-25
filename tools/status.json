@@ -1,0 +1,8 @@
+{
+  "description": "Report Ragger's runtime status: version, total memories, per-table row counts, whether embeddings are degraded/unavailable, `capture_turns` (false: captured turns are dropped), and `summarizer_model` / `summarizer_engine` (empty strings: no summarizer configured; engine empty alone: no endpoint serves the model) and `summarizer_reachable` (that endpoint answers GET /v1/models; cached 15 s). Read-only.",
+  "inputSchema": {
+    "properties": {},
+    "type": "object"
+  },
+  "name": "status"
+}

@@ -19,6 +19,7 @@
 
 #ifdef RAGGER_STATS
 
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -54,6 +55,11 @@ public:
 
 private:
     sqlite3* db_ = nullptr;
+    // S24 (C m16): one sqlite3* shared by every httplib worker thread;
+    // BEGIN/COMMIT from two threads at once collided ("cannot start a
+    // transaction within a transaction") and swallowed the rows. One
+    // log_lookup at a time.
+    std::mutex mu_;
 };
 
 } // namespace ragger

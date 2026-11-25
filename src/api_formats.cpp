@@ -9,6 +9,7 @@
 #include <fstream>
 #include <filesystem>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <algorithm>
 #include <set>
@@ -35,7 +36,9 @@ static const ApiFormat OPENAI_FORMAT = {
     "choices[0].delta.content", // stream_content
     "",                         // stream_type_field
     "",                         // stream_type_value
-    "[DONE]"                    // stream_stop
+    "[DONE]",                   // stream_stop
+    "choices[0].finish_reason", // response_finish_reason
+    { "length" }                // finish_truncated_values
 };
 
 // -----------------------------------------------------------------------
@@ -45,14 +48,16 @@ static std::vector<std::string> _format_search_dirs() {
     std::vector<std::string> dirs;
     dirs.push_back(config().resolved_formats_dir());
 
-    // Package formats dir: try relative to the source tree (development only).
-    std::string home = home_dir();
-    if (!home.empty()) {
-        std::string source_formats = home + "/CLionProjects/Ragger/formats";
-        if (fs::exists(source_formats)) {
-            dirs.push_back(source_formats);
-        }
+    // Development fallback: the formats dir of the source tree this binary
+    // was built from (RAGGER_DEV_FORMATS_DIR, set by CMake). On installed
+    // builds that path doesn't exist and the guard skips it — this replaces
+    // an older hardcoded "~/CLionProjects/Ragger/formats" guess, which
+    // baked one developer's checkout layout into every binary.
+#ifdef RAGGER_DEV_FORMATS_DIR
+    if (fs::exists(RAGGER_DEV_FORMATS_DIR)) {
+        dirs.push_back(RAGGER_DEV_FORMATS_DIR);
     }
+#endif
 
     return dirs;
 }
@@ -61,6 +66,9 @@ static std::vector<std::string> _format_search_dirs() {
 // Cache
 // -----------------------------------------------------------------------
 static std::map<std::string, ApiFormat> _cache;
+// get_format() is called from httplib worker threads (summarizer requests
+// run concurrently), so the cache needs one lock around check-and-load.
+static std::mutex _cache_mutex;
 
 /// Get a string from JSON, treating null as the default value.
 static std::string json_string(const nlohmann::json& j, const std::string& key,
@@ -97,6 +105,17 @@ static std::optional<ApiFormat> _load_format_file(const std::string& name) {
                 fmt.stream_type_field = json_string(j, "stream_type_field", "");
                 fmt.stream_type_value = json_string(j, "stream_type_value", "");
                 fmt.stream_stop = json_string(j, "stream_stop", OPENAI_FORMAT.stream_stop);
+                // A format file without these keys gets the OpenAI shape; on a
+                // differently shaped response the path simply does not resolve
+                // and nothing is reported as truncated.
+                fmt.response_finish_reason =
+                    json_string(j, "response_finish_reason", OPENAI_FORMAT.response_finish_reason);
+                if (j.contains("finish_truncated") && j["finish_truncated"].is_array()) {
+                    for (const auto& v : j["finish_truncated"])
+                        if (v.is_string()) fmt.finish_truncated_values.push_back(v.get<std::string>());
+                } else {
+                    fmt.finish_truncated_values = OPENAI_FORMAT.finish_truncated_values;
+                }
                 
                 // Load auth_extra as a map
                 if (j.contains("auth_extra") && j["auth_extra"].is_object()) {
@@ -120,7 +139,9 @@ static std::optional<ApiFormat> _load_format_file(const std::string& name) {
 
 ApiFormat get_format(const std::string& name) {
     std::string use_name = name.empty() ? "openai" : name;
-    
+
+    std::lock_guard<std::mutex> lock(_cache_mutex);
+
     // Check cache
     auto it = _cache.find(use_name);
     if (it != _cache.end()) {
@@ -338,6 +359,19 @@ std::string extract_content(const ApiFormat& fmt, const nlohmann::json& response
     return "";
 }
 
+bool response_truncated(const ApiFormat& fmt, const nlohmann::json& response,
+                        std::string* reason) {
+    if (reason) reason->clear();
+    if (fmt.response_finish_reason.empty()) return false;
+    auto r = _extract_path(response, fmt.response_finish_reason);
+    if (!r || !r->is_string()) return false;
+    const std::string s = r->get<std::string>();
+    if (reason) *reason = s;
+    for (const auto& v : fmt.finish_truncated_values)
+        if (s == v) return true;
+    return false;
+}
+
 std::string extract_stream_delta(const ApiFormat& fmt, const nlohmann::json& chunk) {
     // Check type filter if specified
     if (!fmt.stream_type_field.empty() && !fmt.stream_type_value.empty()) {
@@ -383,11 +417,12 @@ std::map<std::string, std::string> build_headers(const ApiFormat& fmt, const std
     headers["Content-Type"] = "application/json";
     
     if (!api_key.empty()) {
-        if (fmt.auth == "bearer") {
+        // Both auth modes build the header value identically (prefix + key);
+        // they differ only in the format's own auth_header/auth_prefix data
+        // (Bearer-style Authorization vs a named header). One branch so a
+        // future real difference must be a deliberate change here.
+        if (fmt.auth == "bearer" || fmt.auth == "header")
             headers[fmt.auth_header] = fmt.auth_prefix + api_key;
-        } else if (fmt.auth == "header") {
-            headers[fmt.auth_header] = fmt.auth_prefix + api_key;
-        }
     }
     
     // Add extra headers

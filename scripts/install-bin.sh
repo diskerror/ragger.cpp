@@ -98,10 +98,14 @@ fi
 
 # Agent memory-usage instructions (served by `ragger mcp` via the MCP
 # initialize `instructions` field). Install if missing — preserves user edits.
-if [ ! -f "$RAGGER_BASE/agent-memory-instructions.md" ] && \
-   [ -f "$SRC/docs/agent-memory-instructions.md" ]; then
-    info "Installing agent memory instructions"
-    cp "$SRC/docs/agent-memory-instructions.md" "$RAGGER_BASE/agent-memory-instructions.md"
+if [ -f "$SRC/docs/agent-memory-instructions.md" ]; then
+    if [ ! -f "$RAGGER_BASE/agent-memory-instructions.md" ]; then
+        info "Installing agent memory instructions"
+        cp "$SRC/docs/agent-memory-instructions.md" "$RAGGER_BASE/agent-memory-instructions.md"
+    elif ! cmp -s "$SRC/docs/agent-memory-instructions.md" "$RAGGER_BASE/agent-memory-instructions.md"; then
+        cp "$SRC/docs/agent-memory-instructions.md" "$RAGGER_BASE/agent-memory-instructions.md.new"
+        warn "Kept your agent-memory-instructions.md (differs from shipped); shipped copy at $RAGGER_BASE/agent-memory-instructions.md.new"
+    fi
 fi
 
 # Web UI

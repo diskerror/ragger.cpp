@@ -12,6 +12,7 @@
 #include <map>
 #include <stdexcept>
 #include <expected>
+#include <functional>
 
 namespace ragger {
 
@@ -69,8 +70,26 @@ struct Config {
     std::string embedding_engine = "internal";  // "internal" or "external"
     std::string embedding_external_host = "";   // IP or hostname
     int         embedding_external_port = 0;    // 0 = not configured
-    std::string embedding_external_api_key = "";
     std::string embedding_external_model = "";  // model name from the endpoint
+
+    // API keys are environment variables, never stored. The settings table
+    // holds only the NAME of the variable (embedding_api_key_env); the value
+    // below is resolved from the process environment when the config loads
+    // (resolve_api_keys()) and is runtime-only: not a schema key, never saved.
+    // The same name is published to semqlite_config so SemanticSQLite reads
+    // the same variable. A daemon started by launchd does not inherit the
+    // shell environment: set the variable in the launchd plist.
+    std::string embedding_api_key_env = "RAGGER_EMBEDDING_API_KEY";
+    std::string embedding_external_api_key = "";   // resolved from the env var
+
+    /// The model name recorded as the identity of the stored vectors: the
+    /// internal model id, or the endpoint's own model name when the engine is
+    /// external (SemanticSQLite's embedding_model means "the server's model
+    /// id" for an http embedder).
+    std::string embedding_identity_model() const {
+        return embedding_engine == "external" ? embedding_external_model
+                                              : embedding_model;
+    }
 
     // --- Desired embedding identity (staged target for re-embedding) -------
     // Editable via dashboard/CLI. The CURRENT identity above is what the
@@ -86,11 +105,13 @@ struct Config {
     // --- Search ---
     int   default_search_limit = 5;
     float default_min_score    = 0.6f;
-    bool  bm25_enabled         = true;
-    float bm25_weight          = 4.0f;
+    // Agent API Phase 2: cosine threshold above which a newly stored decision
+    // flags other active decisions it may be replacing (possible_supersedes
+    // hint on KnowledgeResult). Flag only — never merges.
+    float decision_supersede_threshold = 0.80f;
+    bool  fts_enabled         = true;
+    float fts_weight          = 4.0f;
     float vector_weight        = 8.0f;
-    // Reserved: not yet wired to search behavior.
-    bool  inject_data          = false;
 
     // TF-IDF text-index blend weights (v0.16 custom terms index). Pushed into
     // TextIndex::set_weights() once per search call. See TextIndexWeights.
@@ -100,9 +121,6 @@ struct Config {
     bool  fts_literal_enabled  = true;
 
     // --- Embed (subprocess) ---
-    int embed_timeout_ms  = 10000;
-    int embed_retries     = 1;
-    int embed_max_workers = 8;   // cap concurrent `ragger embed` subprocesses
 
     // --- Inference ---
     struct InferenceEndpointConfig {
@@ -123,10 +141,11 @@ struct Config {
     int inference_max_tokens = 4096;
     std::vector<InferenceEndpointConfig> inference_endpoints;
 
-    // --- [summarizer] section — model, endpoint, and prompt for L2/L3 ---
+    // --- [summarizer] section — model, endpoint, and prompt for turn and episode ---
     std::string summarizer_model   = "";
     std::string summarizer_api_url = "";
-    std::string summarizer_api_key = "";
+    std::string summarizer_api_key_env = "RAGGER_SUMMARIZER_API_KEY";  // env var NAME
+    std::string summarizer_api_key = "";   // resolved from the env var; runtime-only
     int         summarizer_max_tokens  = 0;  // 0 = inherit from [inference] max_tokens
     // Target summary length as a percentage of the raw turn size (1-100).
     // 0 = use built-in default of 30%.
@@ -134,19 +153,22 @@ struct Config {
     // Hard cap as a percentage of the raw turn size (1-100).
     // 0 = use built-in default of 60%. Always >= target_pct after clamping.
     int         summarizer_max_pct     = 0;
-    // System-prompt sent to the summarizer model. Empty (or missing in the
-    // INI) uses the built-in default. Any non-empty value is passed through
-    // as-is — set to a single space " " to suppress the system prompt entirely.
-    // Two positional placeholders {} {} are required (target chars, hard cap)
-    // when overriding; the default already contains them.
-    static constexpr std::string_view kDefaultSummarizerPrompt =
-        "Summarize this conversation into a concise memory entry. "
-        "Extract key facts, decisions, questions asked, topics discussed. "
-        "Write in third person past tense. Target about {} characters; "
-        "never exceed {}. If the exchange is trivial (a single command "
-        "like /exit, a one-line greeting), respond with a short phrase, "
-        "not a full sentence.";
+    // LR S62 floor: a source with at most this many whitespace words is
+    // copied verbatim (turn summary / episode text) WITHOUT a model call.
+    // 0 disables the floor (only the empty source then copies trivially).
+    int         summarizer_min_words   = 20;
+    // System prompts for the four summarizer jobs. Empty or blank = the
+    // built-in default, which lives in lang/en.h (PROMPT_* constants) with the
+    // rest of the English text. A single space in summarizer_prompt suppresses
+    // the system prompt entirely. Placeholders:
+    //   summarizer_prompt          two {} : target chars, hard cap (required)
+    //   summarizer_episode_prompt  {N} member count, then two {} as above
+    //   summarizer_title_prompt    none; state the title length in the text
+    //   summarizer_trigger_prompt  none
     std::string summarizer_prompt = "";
+    std::string summarizer_episode_prompt = "";
+    std::string summarizer_title_prompt = "";
+    std::string summarizer_trigger_prompt = "";
 
     // --- Logging ---
     std::string log_file;   //  hardcoded to ~/.ragger/logs/activity.log
@@ -188,13 +210,22 @@ struct Config {
     // Purely a hint served to plugins via GET /config — the daemon itself does
     // no injection. Turn capture (capture_turns) is independent and unaffected.
     bool auto_recall = true;
+    // What auto-recall injects when auto_recall is true. "decisions" = only
+    // active decisions matched against the prompt (ranked on their triggers);
+    // "flat" = the legacy flat search over everything. Served to plugins via
+    // GET /config; the daemon does no injection itself.
+    std::string auto_recall_mode = "decisions";
+    // Minimum vector similarity (raw cosine, 0-1) for a memory to be injected
+    // by auto-recall. Per embedder: calibrated for the current embedding model,
+    // re-measure after changing it. 0 = inject the top results regardless.
+    // Served to plugins via GET /config; the daemon does no injection itself.
+    float auto_recall_min_similarity = 0.30f;
     // Recipe name applied when the caller doesn't specify one. Recipes are
     // loaded from ~/.ragger/recipes (JSON files); built-ins cover the case
     // where the directory is missing or empty.
     std::string default_recipe = "natural_fading";
 
     // --- Housekeeping / retention ---
-    float cleanup_max_age_hours  = 0.0f;  // 0 = keep forever (default)
     int   housekeeping_interval  = 60;      // seconds; 0 = disabled, <10 clamped to 10
     int   summary_pause_minutes  = 20;      // DEPRECATED alias for episode_idle_minutes (kept one release)
     // Idle gap (minutes) after a session's last turn that closes the current
@@ -220,8 +251,7 @@ struct Config {
     // project-boundary close, per the session/project boundary-detection
     // design (edge-detected on the gap, not an idle-scan like episodes).
     // Any positive integer; default 7.
-    int   project_gap_days       = 7;
-    // Per-housekeeping-tick cap on how many unsummarized L2 turns (and,
+    // Per-housekeeping-tick cap on how many unsummarized turns (and,
     // separately, how many draft-tagged retry rows) get enqueued in one
     // pass. Was a hardcoded constexpr of 200; made configurable so a manual
     // resummarize (nulling model_id on a batch of `summaries` rows via
@@ -263,10 +293,29 @@ std::string expand_path(const std::string& path);
 /// only store. This remains only for the config-parser unit tests.
 std::expected<Config, ConfigError> load_config(const std::string& path);
 
+/// The compiled-in defaults, without the settings-table overlay.
+Config default_config();
+
+/// "section.key" of every live key in the embedded defaults that the config
+/// schema did not accept (silently dropped otherwise). Empty when healthy.
+std::vector<std::string> default_config_unknown_keys();
+
 /// Global config instance. Must call init_config() before use.
+///
+/// The returned reference is to an IMMUTABLE snapshot and stays valid for the
+/// life of the process: writers (SIGHUP reload, PUT /config, `ragger config
+/// set`, the embedding-identity promotion) never modify a published Config,
+/// they publish a new one through update_config(). A thread that keeps a
+/// `const auto&` into config() across a reload simply keeps seeing the old
+/// values; it never sees a half-written string.
 const Config& config();
-/// Mutable access for CLI overrides applied at startup.
-Config& mutable_config();
+
+/// Copy the current snapshot, let `fn` modify the copy, and publish it when
+/// `fn` returns true (false = discard the copy, nothing changes). Writers are
+/// serialised. Returns what `fn` returned. Superseded snapshots are kept
+/// until exit (a Config is a few KB and writes are rare), which is what makes
+/// every earlier config() reference safe.
+bool update_config(const std::function<bool(Config&)>& fn);
 
 /// Initialize global config. Call once at startup.
 void init_config();

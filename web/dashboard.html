@@ -244,6 +244,35 @@ function renderSection(section) {
     main.appendChild(banner);
     document.getElementById("restart-btn").onclick = doRestart;
     refreshRestart();
+
+    // LR S92 (D4): the Maintenance card — one button per daemon job (the
+    // S91 routes), a Dry-run checkbox (dry_run:true on the same route), a
+    // progress bar driven by the `job` SSE event, Cancel, and the last
+    // result line. No Re-embed button: Reid runs re-embed (rule 17).
+    const maint = document.createElement("div");
+    maint.className = "embed-banner";
+    maint.id = "maintenance-card";
+    maint.innerHTML =
+      '<div class="cur">Maintenance jobs (one at a time; progress below).</div>' +
+      '<div class="embed-row">' +
+        '<button class="btn" id="maint-btn-reindex" data-job="reindex">Reindex</button>' +
+        '<button class="btn" id="maint-btn-turnsummary" data-job="backfill:turn-summary-null">Back-fill turn summary</button>' +
+        '<button class="btn" id="maint-btn-triggers" data-job="backfill:triggers">Back-fill triggers</button>' +
+        '<button class="btn" id="maint-btn-stranded" data-job="backfill:stranded">Re-attach stranded</button>' +
+        '<button class="btn" id="maint-btn-sessions" data-job="backfill:session-names">Name sessions</button>' +
+        '<label style="margin-left:8px"><input type="checkbox" id="maint-dryrun"> Dry run</label>' +
+      '</div>' +
+      '<div class="embed-row">' +
+        '<progress id="maint-progress" max="1" value="0" style="flex:1"></progress>' +
+        '<button class="btn" id="maint-cancel" disabled>Cancel</button>' +
+      '</div>' +
+      '<div class="embed-status" id="maint-result"></div>';
+    main.appendChild(maint);
+    maint.querySelectorAll("button[data-job]").forEach(b => {
+      b.onclick = () => startMaintJob(b.dataset.job);
+    });
+    document.getElementById("maint-cancel").onclick = cancelMaintJob;
+    refreshJobs();
   }
 
   // The Embedding tab gets a special banner (current identity + Update now).
@@ -545,7 +574,7 @@ async function populateSummarizerModels() {
 const INTERNAL_KEYS = ["desired_embedding_model"];
 // Keys only meaningful for external engine:
 const EXTERNAL_KEYS = ["embedding_external_host", "embedding_external_port",
-                       "embedding_external_api_key", "embedding_external_model"];
+                       "embedding_api_key_env", "embedding_external_model"];
 // Keys shown for both but may need different behavior:
 // desired_embedding_dimensions, desired_embedding_vector_type — always visible
 
@@ -668,12 +697,10 @@ async function probeExternalModelDimensions(model) {
 async function connectExternal() {
   const hostEntry = CONFIG.find(e => e.key === "embedding_external_host");
   const portEntry = CONFIG.find(e => e.key === "embedding_external_port");
-  const keyEntry = CONFIG.find(e => e.key === "embedding_external_api_key");
   const modelEntry = CONFIG.find(e => e.key === "embedding_external_model");
 
   const host = hostEntry ? (hostEntry.__field ? hostEntry.__field.value : hostEntry.value) : "";
   const port = portEntry ? (portEntry.__field ? portEntry.__field.value : portEntry.value) : "";
-  const key = keyEntry ? (keyEntry.__field ? keyEntry.__field.value : keyEntry.value) : "";
 
   if (!host || !port) {
     const st = document.getElementById("ext-connect-status");
@@ -689,8 +716,7 @@ async function connectExternal() {
   try {
     const url = api("/models/external") +
       (qs ? "&" : "?") + "host=" + encodeURIComponent(host) +
-      "&port=" + encodeURIComponent(port) +
-      (key ? "&key=" + encodeURIComponent(key) : "");
+      "&port=" + encodeURIComponent(port);
     const r = await fetch(url);
     if (!r.ok) throw new Error("HTTP " + r.status);
     const data = await r.json();
@@ -719,7 +745,7 @@ async function connectExternal() {
       sel.onchange = async () => {
         await commit(modelEntry, sel.value, sel);
         // Auto-probe dimensions when model is selected
-        probeExternalDimensions(host, port, sel.value, key);
+        probeExternalDimensions(host, port, sel.value);
       };
       parent.replaceChild(sel, field);
       modelEntry.__field = sel;
@@ -727,7 +753,7 @@ async function connectExternal() {
       // Auto-probe if a model is already selected
       if (models.length > 0) {
         const selectedModel = sel.value || models[0];
-        probeExternalDimensions(host, port, selectedModel, key);
+        probeExternalDimensions(host, port, selectedModel);
       }
     }
   } catch (e) {
@@ -736,7 +762,7 @@ async function connectExternal() {
   if (btn) { btn.disabled = false; btn.textContent = "Connect"; }
 }
 
-async function probeExternalDimensions(host, port, model, key) {
+async function probeExternalDimensions(host, port, model) {
   const dimsEntry = CONFIG.find(e => e.key === "desired_embedding_dimensions");
   if (!dimsEntry || !dimsEntry.__field) return;
 
@@ -744,7 +770,7 @@ async function probeExternalDimensions(host, port, model, key) {
     const r = await fetch(api("/models/external/probe"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ host, port: parseInt(port), model, key }),
+      body: JSON.stringify({ host, port: parseInt(port), model }),
     });
     if (!r.ok) return;
     const data = await r.json();
@@ -753,6 +779,61 @@ async function probeExternalDimensions(host, port, model, key) {
       commit(dimsEntry, String(data.dimensions), dimsEntry.__field);
     }
   } catch (e) { /* probe failed silently */ }
+}
+
+// ---- maintenance jobs (LR S92) ----------------------------------------------
+// The card lives on the Server tab; state arrives on the `job` SSE event (the
+// S91 JobRunner) and from GET /jobs on first render. One job runs at a time;
+// a second start gets 409 and the banner says so.
+
+async function startMaintJob(name) {
+  // Gray the buttons at once: the first SSE/GET /jobs update can lag a click.
+  document.querySelectorAll("#maintenance-card button[data-job]").forEach(el => { el.disabled = true; });
+  const dry = document.getElementById("maint-dryrun").checked;
+  try {
+    const r = await fetch(api("/jobs/" + name), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dry_run: dry })
+    });
+    if (r.status === 409) { showBanner("A maintenance job is already running."); refreshJobs(); return; }
+    if (!r.ok) { showBanner("Could not start " + name + ": HTTP " + r.status); refreshJobs(); return; }
+  } catch (e) { showBanner("Could not start " + name + ": " + e.message); refreshJobs(); return; }
+  refreshJobs();
+}
+
+async function cancelMaintJob() {
+  try { await fetch(api("/jobs/cancel"), { method: "POST" }); } catch (e) {}
+  refreshJobs();
+}
+
+async function refreshJobs() {
+  try {
+    const r = await fetch(api("/jobs"));
+    if (r.ok) renderJobState(await r.json());
+  } catch (e) {}
+}
+
+function renderJobState(s) {
+  const bar = document.getElementById("maint-progress");
+  const res = document.getElementById("maint-result");
+  const cancel = document.getElementById("maint-cancel");
+  if (!bar || !res) return;              // card not on screen right now
+  const running = !!s.current;
+  const job = s.current || s.last;
+  const total = job && job.total > 0 ? job.total : 0;
+  bar.max = total || 1;
+  bar.value = job ? Math.max(0, job.done) : 0;
+  if (cancel) cancel.disabled = !running;
+  // One job at a time: while one runs, only Cancel is live.
+  document.querySelectorAll("#maintenance-card button[data-job], #maint-dryrun")
+    .forEach(el => { el.disabled = running; });
+  if (!job) { res.textContent = ""; res.className = "embed-status"; return; }
+  const pct = total > 0 ? " (" + job.done + "/" + job.total + ")" : "";
+  res.className = "embed-status" +
+    (job.state === "failed" ? " pending" : job.state === "done" ? " ok" : "");
+  res.textContent = job.name + ": " + job.state + pct +
+    (job.message ? " — " + job.message : "");
 }
 
 // ---- server restart panel --------------------------------------------------
@@ -1058,6 +1139,10 @@ function connectEvents() {
   es.addEventListener("activity", (ev) => {
     try { addActivity(JSON.parse(ev.data).line); } catch (e) {}
   });
+  // LR S92: maintenance job progress (the S91 `job` event).
+  es.addEventListener("job", (ev) => {
+    try { renderJobState(JSON.parse(ev.data)); } catch (e) {}
+  });
   es.onerror = () => {
     setServerBadge(false);
     // EventSource auto-reconnects; just reflect the state.
@@ -1075,6 +1160,8 @@ function updateStats(s) {
   badges.appendChild(sb);
   const tables = s.tables || {};
   for (const name of Object.keys(tables)) {
+    // One turn summary per turn, so its count only repeats the turns badge.
+    if (name === "turn_summaries") continue;
     const b = document.createElement("span");
     b.className = "badge";
     b.textContent = name + ": " + tables[name].toLocaleString();

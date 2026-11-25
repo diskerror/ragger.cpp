@@ -31,7 +31,11 @@ namespace ragger {
 /// to the DB-only sqlite::Backend so the choice can be persisted into the
 /// `settings` table. Returns a process exit code (0 success, non-zero
 /// on error / no recipes found / unknown name).
+/// `persisted` (PHASE9B step 7), when non-null, is set true iff a choice was
+/// actually written — a listing or a "kept the same recipe" run leaves it
+/// false, so the caller only signals the daemon on a real write.
 int run_recipe_cli(const std::vector<std::string>& args,
-                   const std::string& db_path);
+                   const std::string& db_path,
+                   bool* persisted = nullptr);
 
 } // namespace ragger

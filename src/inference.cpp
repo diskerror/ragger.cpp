@@ -17,6 +17,8 @@
 #include <filesystem>
 #include <chrono>
 #include <iomanip>
+#include <map>
+#include <mutex>
 #include <functional>
 #include <string_view>
 
@@ -122,6 +124,43 @@ InferenceClient InferenceClient::from_config(const Config& cfg) {
     client.memory_model = cfg.summarizer_model.empty()
                               ? client.model : cfg.summarizer_model;
     return client;
+}
+
+namespace {
+/// The endpoint that would serve the summarizer model, or nullptr.
+const Endpoint* summarizer_endpoint(const InferenceClient& client) {
+    if (client.endpoints.empty()) return nullptr;
+    for (const auto& ep : client.endpoints)
+        if (ep.matches(client.memory_model)) return &ep;
+    return nullptr;
+}
+} // namespace
+
+SummarizerInfo describe_summarizer(const InferenceClient& client) {
+    SummarizerInfo info;
+    if (client.endpoints.empty()) return info;     // nothing configured
+    info.model = client.memory_model;
+    if (const Endpoint* ep = summarizer_endpoint(client)) info.engine = ep->name;
+    return info;
+}
+
+bool summarizer_reachable(const InferenceClient& client, int timeout_sec, int ttl_sec) {
+    const Endpoint* ep = summarizer_endpoint(client);
+    if (!ep) return false;
+    struct Probe { std::chrono::steady_clock::time_point at; bool ok = false; };
+    static std::mutex mu;
+    static std::map<std::string, Probe> cache;     // key: endpoint url
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = cache.find(ep->api_url);
+        if (it != cache.end() && now - it->second.at < std::chrono::seconds(ttl_sec))
+            return it->second.ok;
+    }
+    const bool ok = ep->is_reachable(timeout_sec);   // outside the lock: may take timeout_sec
+    std::lock_guard<std::mutex> lk(mu);
+    cache[ep->api_url] = Probe{std::chrono::steady_clock::now(), ok};
+    return ok;
 }
 
 // -----------------------------------------------------------------------
@@ -233,7 +272,7 @@ Endpoint& InferenceClient::resolve_endpoint(const std::string& model_name) {
 // -----------------------------------------------------------------------
 // Endpoint health / model listing
 // -----------------------------------------------------------------------
-bool Endpoint::is_reachable() const {
+bool Endpoint::is_reachable(int timeout_sec) const {
     // Try /v1/models first, fall back to base URL
     std::string url = api_url;
     auto pos = url.rfind("/v1");
@@ -244,21 +283,60 @@ bool Endpoint::is_reachable() const {
 
     std::vector<std::string> headers;
     if (!api_key.empty()) {
-        headers.push_back("Authorization: *** " + api_key);
+        headers.push_back(util::bearer_header(api_key));
     }
 
     util::HttpClient http;
-    auto resp = http.get(url, headers, /*timeout_sec=*/3);
+    auto resp = http.get(url, headers, timeout_sec);
     return resp.ok() && resp.status < 400;
 }
 
 bool Endpoint::is_local() const {
-    // Local if URL contains localhost, 127.x, 192.168.x, 10.x, or has /v1 without an API key
-    return api_url.find("localhost") != std::string::npos
-        || api_url.find("127.0.0.") != std::string::npos
-        || api_url.find("192.168.") != std::string::npos
-        || api_url.find("10.") != std::string::npos
-        || api_url.find("0.0.0.0") != std::string::npos;
+    // S14 (C m15): parse the host out of the URL — substring matching used
+    // to call e.g. https://host110.example.com "local" because "10." appears
+    // in the middle. Schemeless or empty URLs are never local.
+    static constexpr std::string_view sep = "://";
+    auto p = api_url.find(sep);
+    if (p == sep.npos) return false;
+    std::string authority = api_url.substr(p + sep.size());
+    if (auto e = authority.find_first_of("/?#"); e != std::string::npos)
+        authority.erase(e);
+    // Strip userinfo: everything up to the last '@' of the authority.
+    if (auto at = authority.rfind('@'); at != std::string::npos)
+        authority.erase(0, at + 1);
+
+    std::string host = authority;
+    if (!host.empty() && host.front() == '[') {
+        // IPv6 literal: the host is the bracket contents.
+        auto close = host.find(']');
+        host = close == std::string::npos ? host.substr(1)
+                                          : host.substr(1, close - 1);
+    } else if (auto c = host.find(':'); c != std::string::npos) {
+        host.erase(c);  // strip :port
+    }
+
+    if (host == "localhost" || host == "0.0.0.0" || host == "::1")
+        return true;
+    if (host.starts_with("127.") || host.starts_with("10.") ||
+        host.starts_with("192.168.")) {
+        // Must be a real dotted quad: four numeric labels, each 0-255.
+        size_t labels = 0;
+        size_t start = 0;
+        while (true) {
+            auto dot = host.find('.', start);
+            auto part = host.substr(start,
+                dot == std::string::npos ? std::string::npos : dot - start);
+            if (part.empty() || part.size() > 3 ||
+                part.find_first_not_of("0123456789") != std::string::npos)
+                return false;
+            if (std::stoi(part) > 255) return false;
+            ++labels;
+            if (dot == std::string::npos) break;
+            start = dot + 1;
+        }
+        return labels == 4;
+    }
+    return false;
 }
 
 std::vector<std::string> Endpoint::list_models() const {
@@ -273,7 +351,7 @@ std::vector<std::string> Endpoint::list_models() const {
 
     std::vector<std::string> headers;
     if (!api_key.empty()) {
-        headers.push_back("Authorization: *** " + api_key);
+        headers.push_back(util::bearer_header(api_key));
     }
 
     util::HttpClient http;
@@ -312,7 +390,7 @@ std::vector<Endpoint::TypedModel> Endpoint::list_models_lmstudio_typed() const {
 
     std::vector<std::string> headers;
     if (!api_key.empty()) {
-        headers.push_back("Authorization: *** " + api_key);
+        headers.push_back(util::bearer_header(api_key));
     }
 
     util::HttpClient http;
@@ -338,58 +416,6 @@ std::vector<Endpoint::TypedModel> Endpoint::list_models_lmstudio_typed() const {
     }
 
     return result;
-}
-
-// -----------------------------------------------------------------------
-// SSE streaming parse helper (used by chat_stream, defined below)
-// -----------------------------------------------------------------------
-struct StreamCallbackData {
-    std::function<void(const std::string&)>* on_token;
-    std::string buffer;
-    ApiFormat* format;
-    std::string raw_response;   // accumulates every raw SSE line for dump
-};
-
-static size_t stream_callback(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    size_t total = size * nmemb;
-    auto* data = static_cast<StreamCallbackData*>(userdata);
-    data->buffer.append(ptr, total);
-
-    // Process complete lines (SSE format: "data: {...}\n")
-    size_t pos;
-    while ((pos = data->buffer.find('\n')) != std::string::npos) {
-        std::string line = data->buffer.substr(0, pos);
-        data->buffer.erase(0, pos + 1);
-
-        // Trim whitespace
-        line.erase(0, line.find_first_not_of(" \t\r"));
-        line.erase(line.find_last_not_of(" \t\r") + 1);
-
-        if (line.empty()) continue;
-
-        // Capture every raw SSE line for payload dump
-        data->raw_response += line + "\n";
-
-        // Check for stream stop
-        if (is_stream_stop(*data->format, line)) continue;
-        
-        if (line.substr(0, 6) != "data: ") continue;
-
-        std::string json_str = line.substr(6);
-        try {
-            auto chunk = nlohmann::json::parse(json_str);
-            
-            // Extract delta content using format
-            std::string content = extract_stream_delta(*data->format, chunk);
-            if (!content.empty() && data->on_token) {
-                (*data->on_token)(content);
-            }
-        } catch (...) {
-            // Skip malformed JSON
-        }
-    }
-
-    return total;
 }
 
 std::string InferenceClient::chat_memory(const std::vector<Message>& messages) {
@@ -424,7 +450,7 @@ std::string InferenceClient::chat(const std::vector<Message>& messages,
     }
 
     util::HttpClient http;
-    auto resp = http.post(url, body, headers, /*timeout_sec=*/0);
+    auto resp = http.post(url, body, headers, timeout_sec);
 
     if (!resp.ok()) {
         throw std::runtime_error(std::format(lang::ERR_HTTP_REQUEST, resp.error));
@@ -435,8 +461,18 @@ std::string InferenceClient::chat(const std::vector<Message>& messages,
     }
 
     // Parse response using format
+    nlohmann::json response;
     try {
-        auto response = nlohmann::json::parse(resp.body);
+        response = nlohmann::json::parse(resp.body);
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::format(lang::ERR_PARSE_RESPONSE, e.what()));
+    }
+    // A reply cut off at the token limit is not a complete one: report it as
+    // a failure so the caller retries instead of storing it.
+    std::string finish;
+    if (response_truncated(fmt, response, &finish))
+        throw std::runtime_error(std::format(lang::ERR_RESPONSE_TRUNCATED, finish));
+    try {
         return extract_content(fmt, response);
     } catch (const std::exception& e) {
         throw std::runtime_error(std::format(lang::ERR_PARSE_RESPONSE, e.what()));

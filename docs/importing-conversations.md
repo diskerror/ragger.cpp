@@ -63,8 +63,8 @@ ragger import-conversations ~/Downloads/claude-export/conversations.json
 ragger import-conversations tg_export.json --format=telegram --self="Jane Doe"
 ~~~
 
-Each exchange becomes one row in the `turns` table (L1), with an
-auto-generated L2 placeholder summary — mirroring exactly what live capture
+Each exchange becomes one row in the `turns` table, with an
+auto-generated placeholder turn summary — mirroring exactly what live capture
 writes, so imported history and live-captured turns are interchangeable
 from a search perspective. Recorded per row:
 
@@ -122,12 +122,13 @@ import — this is deliberate, there's no implicit default:
 With `--all`, in addition to the turns described above:
 
 - Each conversation's own `summary` field (Claude's own per-conversation
-  digest) is stored as one L3 `summaries` row (`level=session`,
-  `tags=session`), dated by that conversation's real `created_at` — no
-  re-summarization needed, it's already good.
-- Each file under `projects/*.json` contributes one L4 `summaries` row
-  (`level=project`, `tags=claude-project`) built from that project's `name`
-  + `description`, dated by the project's own `created_at`.
+  digest) is stored as one knowledge note (`kind='note'`,
+  `tags=session,imported`), dated by that conversation's real
+  `created_at` — no re-summarization needed, it's already good.
+- Each file under `projects/*.json` contributes one knowledge note
+  (`kind='note'`, `tags=claude-project,imported`) built from that
+  project's `name` + `description`, dated by the project's own
+  `created_at`.
 - `memories.json`, if present, is imported as described next.
 
 ## Memories (decisions)
@@ -141,7 +142,8 @@ ways:
 active development to derive per-section dates from the accompanying
 `conversations.json` (topically matching narrative chunks to the
 conversations they describe). For now the whole blob is stored as a single
-`decisions` row (L5/L6, `tags=claude-memory`), dated by the file's mtime.
+`knowledge` row (`kind='decision'`, `tags=claude-memory`), dated by the
+file's mtime.
 `--fdate`/`--date=` are **ignored** in this path (the file's own mtime is
 used automatically) — they only apply to the standalone case below.
 
@@ -161,7 +163,7 @@ Without one of these two flags, a standalone `memories.json` is rejected
 with an explanatory error rather than guessed at. Re-running either form is
 idempotent — the same (text, timestamp) pair is not inserted twice.
 
-If you'd rather not import memories.json as a `decisions` row at all,
+If you'd rather not import memories.json as a `knowledge` row at all,
 `ragger import-docs` will happily chunk it as a plain document instead
 (see [Importing documents](#) — but note `import-docs` does **not**
 special-case JSON; convert it to Markdown first with a script or a tool
@@ -192,16 +194,16 @@ get the list with `ls ~/.claude/projects/<slug>/`.
   on a huge archive, import in batches with `--since`/`--until`, or stop the
   daemon first (`ragger stop`) so the importer has the DB to itself.
 - **memories.json splitting is a work in progress.** Today it lands as one
-  undifferentiated `decisions` row per file. A finer per-section split
+  undifferentiated `knowledge` row per file. A finer per-section split
   (with per-chunk dates derived from topically-matched conversations) is
   planned but not yet wired into the live import path.
 
 ## See also
 
 - `ragger import-docs` — general markdown/text import (paragraph-aware
-  chunking) into L5 documents. Not conversation-aware; use
+  chunking) into `documents`. Not conversation-aware; use
   `import-conversations` for chat history.
 - `ragger import-conversations summaries <file> [file...]` /
-  `--jsonl=FILE` — bulk-load hand-authored L4 project notes directly (a
+  `--jsonl=FILE` — bulk-load hand-authored notes directly, stored as knowledge notes (a
   simpler one-shot ingest path for notes you wrote yourself, as opposed to
   conversation exports).

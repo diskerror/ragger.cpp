@@ -1,13 +1,27 @@
 /**
  * MCP (Model Context Protocol) server implementation.
  *
- * JSON-RPC 2.0 over stdin/stdout.  Tools exposed:
- *   store  — write a memory
- *   search — semantic + BM25 hybrid search
+ * JSON-RPC 2.0 over stdin/stdout.  Tools exposed (see tools_list()):
+ *   store, search, status, capture_turn, build_context, get_config,
+ *   memory_decision, memory_note, memory_search, document_search,
+ *   memory_get, memory_timeline, memory_update. (memory_review left the
+ *   agent tool lists at LR S88 (D7, D-2); there is no CLI memory_review
+ *   verb — curation stays user-driven through the HTTP route
+ *   POST /memory/review, or from the CLI via `decision list --status
+ *   pending` + `decision set-status`.)
+ *   The definitions themselves are tools/*.json, compiled in (LR S95).
  *
- * Housekeeping: if no ragger HTTP server PID file is found, a
- * background thread runs periodic cleanup so the database doesn't
- * grow unbounded when the user only uses MCP mode.
+ * No background housekeeping thread: MCP mode is a short-lived process and
+ * the retention purge it used to run is gone (X18 — honest history has no
+ * opt-out). The summarizer catch-up and embedding backfill live in the
+ * HTTP daemon's housekeeping pass.
+ *
+ * No-daemon rule (Q8, accepted behavior — Reid, 2026-11-14): an install
+ * that runs only `ragger mcp`, without a daemon, stores turns and
+ * knowledge but builds no summaries — turn-summary rows and episodes are created
+ * when a daemon with a configured summarizer endpoint next runs its
+ * catch-up. Writes from this process also do not invalidate a running
+ * daemon's caches, and this process does not SIGHUP the daemon.
  */
 
 #include "build_info.h"
@@ -17,19 +31,22 @@
 #include "lang.h"
 #include "Logger.h"
 #include "memory.h"
+#include "agent_api.h"
+#include "inference.h"
 #include "sqlite/backend.h"
+#include "sqlite/status.h"
 #include "util/fs.h"
 #include "nlohmann_json.hpp"
+#include "tools_json.inc"
 
-#include <chrono>
 #include <csignal>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
+#include <stdexcept>
 #include <print>
-#include <pwd.h>
-#include <thread>
 #include <unistd.h>
 
 namespace ragger {
@@ -38,26 +55,6 @@ using sqlite::Backend;
 // -----------------------------------------------------------------------
 // Internal helpers
 // -----------------------------------------------------------------------
-
-/// Returns true if a ragger HTTP server PID file exists and the process
-/// is still alive, meaning it owns housekeeping for the database.
-static bool http_server_running() {
-    namespace fs = std::filesystem;
-    const std::string dir = "/tmp/ragger";
-    try {
-        for (const auto& entry : fs::directory_iterator(dir)) {
-            auto name = entry.path().filename().string();
-            if (name.rfind("server-", 0) == 0 &&
-                name.substr(name.size() - 4) == ".pid") {
-                std::ifstream pf(entry.path());
-                pid_t pid = 0;
-                if (pf >> pid && pid > 0 && kill(pid, 0) == 0)
-                    return true;
-            }
-        }
-    } catch (...) {}
-    return false;
-}
 
 /// Agent-facing usage guidance, returned in the MCP `initialize` result so
 /// hosts that surface it (per the MCP spec's optional `instructions` field)
@@ -79,121 +76,44 @@ static std::string mcp_instructions() {
 
 /// MCP tool definitions returned for tools/list.
 /// `capture_turn` and `build_context` are omitted when their respective
-/// features are disabled in settings, so agents don't see hooks they can't use.
-static nlohmann::json tools_list() {
-    nlohmann::json tools = nlohmann::json::array({
-        {
-            {"name", "store"},
-            {"description", "Store a memory for later semantic retrieval."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"text",     {{"type", "string"},
-                                  {"description", "The text content to store."}}},
-                    {"metadata", {{"type", "object"},
-                                  {"description", "Optional metadata (category, tags, source, collection, etc.)."}}}
-                }},
-                {"required", nlohmann::json::array({"text"})}
-            }}
-        },
-        {
-            {"name", "search"},
-            {"description", "Search stored memories by semantic similarity."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"query",       {{"type", "string"},
-                                    {"description", "The search query."}}},
-                    {"limit",       {{"type", "integer"},
-                                    {"description", "Maximum number of results (default: 5)."}}},
-                    {"min_score",   {{"type", "number"},
-                                    {"description", "Minimum similarity score 0–1 (default: 0.0)."}}},
-                    {"collections", {{"type", "array"},
-                                    {"items", {{"type", "string"}}},
-                                    {"description", "Filter by collection names."}}}
-                }},
-                {"required", nlohmann::json::array({"query"})}
-            }}
-        },
-        {
-            {"name", "get_config"},
-            {"description", "Read Ragger's live configuration. Returns every "
-                           "setting with its current value and schema metadata "
-                           "(type, default, edit policy, enum options). Pass a "
-                           "`key` to fetch just one setting. Read-only — use this "
-                           "to bootstrap host/port/token or other settings on "
-                           "agent-framework restart instead of reading a config file."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"key", {{"type", "string"},
-                             {"description", "Optional single setting key. Omit for all settings."}}}
-                }}
-            }}
-        },
-        {
-            {"name", "status"},
-            {"description", "Report Ragger's runtime status: version, total "
-                           "memories, per-table row counts, and whether "
-                           "embeddings are degraded/unavailable. Read-only."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", nlohmann::json::object()}
-            }}
-        }
-    });
-    if (config().capture_turns) {
-        tools.push_back({
-            {"name", "capture_turn"},
-            {"description", "Push a completed conversation turn (user + assistant) "
-                           "into memory for background summarization. Called from an "
-                           "agent's turn hook."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"user",       {{"type", "string"},
-                                    {"description", "The user message of the turn."}}},
-                    {"assistant",  {{"type", "string"},
-                                    {"description", "The assistant reply of the turn."}}},
-                    {"model",      {{"type", "string"},
-                                    {"description", "Model that produced the reply."}}},
-                    {"session_id", {{"type", "string"},
-                                    {"description", "Conversation/session GUID grouping the turn."}}},
-                    {"session_name", {{"type", "string"},
-                                    {"description", "Human-readable session/conversation title. "
-                                                    "Framework-specific: Hermes passes its session title, "
-                                                    "others may derive from context."}}},
-                    {"name_source", {{"type", "string"},
-                                    {"description", "Origin of session_name: 'hermes_title', 'openclaw', "
-                                                    "'derived', etc. Omit if no session_name."}}},
-                    {"metadata",   {{"type", "object"},
-                                    {"description", "Optional metadata (source, hook, etc.). Reserved."}}}
-                }},
-                {"required", nlohmann::json::array({"user"})}
-            }}
-        });
-    }
-    if (config().build_context) {
-        tools.push_back({
-            {"name", "build_context"},
-            {"description", "Assemble a session's context as recipe-shaped chunks "
-                           "(oldest first). The default recipe walks back from the "
-                           "latest prompt: a few raw turns, then turn summaries, then "
-                           "the session and project summaries, then pertinent "
-                           "decisions."},
-            {"inputSchema", {
-                {"type", "object"},
-                {"properties", {
-                    {"session_id", {{"type", "string"},
-                                    {"description", "Conversation/session GUID to build context from."}}},
-                    {"recipe",     {{"type", "string"},
-                                    {"description", "Optional recipe name (e.g. natural_fading, raw_only). Defaults to the server's default_recipe."}}}
-                }},
-                {"required", nlohmann::json::array({"session_id"})}
-            }}
-        });
-    }
+/// features are disabled, so agents don't see hooks they can't use.
+/// S54: the two flags are parameters (run_mcp passes config()); the old form
+/// read config() internally, which made the gating untestable without
+/// mutating persisted settings.
+// LR S95: the tool definitions are no longer C++ literals. They live in
+// tools/<name>.json — the single source of truth for name, description and
+// inputSchema — and are compiled in by cmake/embed_tools.cmake (one raw
+// string per file, keyed by file stem). This function only assembles the
+// list ORDER and applies the two config gates (S54): capture_turn and
+// build_context appear only when enabled. A test pins that the embedded
+// memory_decision `status` enum still equals sqlite::status::kCreatable.
+static const nlohmann::json& tool_json(const std::string& name) {
+    static const std::map<std::string, nlohmann::json> parsed = [] {
+        std::map<std::string, nlohmann::json> m;
+        for (const auto& t : TOOLS_JSON)
+            m.emplace(t.name, nlohmann::json::parse(t.json));
+        return m;
+    }();
+    const auto it = parsed.find(name);
+    if (it == parsed.end())
+        throw std::runtime_error("missing embedded tool definition: " + name);
+    return it->second;
+}
+
+static nlohmann::json tools_list(bool capture_turns, bool build_context) {
+    nlohmann::json tools = nlohmann::json::array();
+    for (const char* name : {"store", "memory_decision", "search",
+                             "memory_search", "document_search", "memory_get",
+                             "memory_note", "memory_timeline",
+                             "memory_update", "get_config", "status"})
+        tools.push_back(tool_json(name));
+    if (capture_turns) tools.push_back(tool_json("capture_turn"));
+    if (build_context) tools.push_back(tool_json("build_context"));
     return {{"tools", tools}};
+}
+
+nlohmann::json mcp_tools_list(bool capture_turns, bool build_context) {
+    return tools_list(capture_turns, build_context);
 }
 
 /// Dispatch a tools/call request and return the MCP result object.
@@ -223,78 +143,109 @@ static nlohmann::json tool_call(RaggerMemory& memory,
     };
 
     if (tool_name == "store") {
-        const auto text = arguments.value("text", "");
-        if (text.empty())
-            return error_result(ragger::lang::ERR_MCP_TEXT_REQUIRED);
-        const auto metadata = arguments.value("metadata", nlohmann::json::object());
-        const auto id = memory.store(text, metadata);
-        return text_result(nlohmann::json({{"id", id}, {"status", "stored"}}).dump());
+        // LR S70 (R4): shared body with HTTP /store and the CLI (agent_api.h).
+        // The MCP-only text check and reply shaping are gone; every surface
+        // now produces the same payload {id, status, kind} and the same
+        // validation messages.
+        try {
+            return text_result(ragger::agent_store(memory, arguments, "mcp").dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
+
+    } else if (tool_name == "memory_decision") {
+        // LR S72 (R4): shared body with HTTP POST /decision (agent_api.h).
+        try {
+            return text_result(ragger::agent_memory_decision(memory, arguments).dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
+
+    } else if (tool_name == "memory_search") {
+        // LR S71 (R4): shared body with HTTP /memory/search (agent_api.h).
+        try {
+            return text_result(ragger::agent_memory_search(memory, arguments).dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
+
+    } else if (tool_name == "document_search") {
+        // LR S76 (D-7): shared body with HTTP /memory/documents.
+        try {
+            return text_result(ragger::agent_document_search(memory, arguments).dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
+
+    } else if (tool_name == "memory_get") {
+        // LR S71 (R4): shared body with HTTP /memory/get.
+        try {
+            return text_result(ragger::agent_memory_get(memory, arguments).dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
+
+    } else if (tool_name == "memory_note") {
+        // LR S72 (R4): shared body with HTTP /memory/note (agent_api.h) —
+        // the insight/plain routing that used to be written twice (D14)
+        // exists once now. Provenance stays per-surface ("mcp" here).
+        try {
+            return text_result(ragger::agent_memory_note(memory, arguments, "mcp").dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
+
+    } else if (tool_name == "memory_timeline") {
+        // LR S71 (R4): shared body with HTTP /memory/timeline.
+        try {
+            return text_result(ragger::agent_memory_timeline(memory, arguments).dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
+
+    } else if (tool_name == "memory_update") {
+        // LR S72 (R4): shared body with HTTP POST /memory/update.
+        try {
+            return text_result(ragger::agent_memory_update(memory, arguments).dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
 
     } else if (tool_name == "search") {
-        const auto query = arguments.value("query", "");
-        if (query.empty())
-            return error_result(ragger::lang::ERR_MCP_QUERY_REQUIRED);
-        const int   limit     = arguments.value("limit", config().default_search_limit);
-        const float min_score = arguments.value("min_score", config().default_min_score);
-        const auto  colls     = arguments.value("collections",
-                                                std::vector<std::string>{});
-        const auto  response  = memory.search(query, limit, min_score, colls);
-
-        nlohmann::json arr = nlohmann::json::array();
-        for (const auto& r : response.results) {
-            arr.push_back({
-                {"id",        r.id},
-                {"text",      r.text},
-                {"score",     r.score},
-                {"metadata",  r.metadata},
-                {"timestamp", r.timestamp}
-            });
+        // LR S71 (R4): shared body with HTTP /search and the CLI. The MCP
+        // envelope stays what it always was: the bare results array, no
+        // timing block (inventory D1 — preserved, not unified, by this step).
+        try {
+            return text_result(ragger::agent_search(memory, arguments)["results"].dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
         }
-        return text_result(arr.dump());
 
     } else if (tool_name == "capture_turn") {
-        const auto user = arguments.value("user", "");
-        if (user.empty())
-            return error_result(ragger::lang::ERR_MCP_USER_REQUIRED);
-        const auto assistant = arguments.value("assistant", "");
-        const auto model     = arguments.value("model", "");
-        const auto session   = arguments.value("session_id", "");
-        const auto sess_name = arguments.value("session_name", "");
-        const auto n_source  = arguments.value("name_source", "");
-        const auto result    = capture_turn(memory, user, assistant, model, session,
-                                            sess_name, n_source);
-        return text_result(nlohmann::json({
-            {"status",  result.captured ? "captured" : "disabled"},
-            {"turn_id", result.turn_id}
-        }).dump());
+        // LR S72 (R4): shared body with HTTP POST /turn (agent_api.h).
+        // The missing-user message unified ('user is required', D16). No
+        // summarizer enqueue here (D17): the daemon's tick finds MCP turns.
+        try {
+            return text_result(ragger::capture_turn_payload(
+                ragger::agent_capture_turn(memory, arguments)).dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
+        }
 
     } else if (tool_name == "build_context") {
-        const auto session = arguments.value("session_id", "");
-        const auto recipe  = arguments.value("recipe", "");
-        const auto ctx = build_context(memory, session, recipe);
-        if (!ctx.enabled)
-            return text_result(nlohmann::json({{"status", "disabled"}}).dump());
-        nlohmann::json chunks = nlohmann::json::array();
-        for (const auto& c : ctx.chunks) {
-            chunks.push_back({
-                {"kind",      c.kind},
-                {"text",      c.text},
-                {"timestamp", c.timestamp}
-            });
+        // LR S72 (R4): shared body with HTTP GET /session/<guid>.
+        try {
+            return text_result(ragger::agent_build_context(memory, arguments).dump());
+        } catch (const std::invalid_argument& e) {
+            return error_result(e.what());
         }
-        return text_result(nlohmann::json({
-            {"status",     "ok"},
-            {"session_id", session},
-            {"recipe",     ctx.recipe_name},
-            {"chunks",     chunks}
-        }).dump());
 
     } else if (tool_name == "get_config") {
         const auto key = arguments.value("key", "");
         if (!key.empty()) {
             const auto* meta = lang::config_meta(key);
             if (!meta)
-                return error_result(std::format(lang::ERR_MCP_UNKNOWN_TOOL, key));
+                return error_result(std::format(lang::ERR_MCP_UNKNOWN_CONFIG_KEY, key));
             auto v = get_config_value(config(), key);
             return text_result(config_entry_json(*meta, v.value_or("")).dump());
         }
@@ -305,47 +256,26 @@ static nlohmann::json tool_call(RaggerMemory& memory,
         try {
             for (auto& [name, n] : memory.backend()->table_row_counts())
                 tables[name] = n;
-        } catch (...) { /* backend unavailable — empty tables */ }
-        return text_result(nlohmann::json({
+        } catch (const std::exception& e) {   // S27 (C §4): never silent
+            Diskerror::Logger::debug(std::format("status: table counts failed: {}", e.what()));
+        } catch (...) {
+            Diskerror::Logger::debug("status: table counts failed: unknown exception");
+        }
+        nlohmann::json st = {
             {"status",    "running"},
             {"version",   RAGGER_VERSION},
             {"memories",  memory.count()},
             {"tables",    tables},
             {"degraded",  memory.embeddings_degraded()},
             {"embeddings_unavailable", memory.embeddings_unavailable()}
-        }).dump());
+        };
+        // Same flags as GET /health. `ragger mcp` runs no summarizer itself
+        // (the daemon does), so these report configuration, not liveness.
+        st.update(capture_summarizer_flags(config(), InferenceClient::from_config(config())));
+        return text_result(st.dump());
 
     } else {
         return error_result(std::format(lang::ERR_MCP_UNKNOWN_TOOL, tool_name));
-    }
-}
-
-/// Background thread: periodically remove expired memories when no
-/// HTTP server is doing it.
-static void housekeeping_thread(RaggerMemory& memory,
-                                const std::string& /*username*/) {
-    const auto& cfg = config();
-    const float max_age_hours = cfg.cleanup_max_age_hours;
-    const int   interval      = cfg.housekeeping_interval;
-    if (interval == 0) return;
-
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(interval));
-        if (http_server_running()) continue;  // hand off to HTTP server
-        if (max_age_hours <= 0) continue;
-
-        try {
-            sqlite::Backend tmp(config().resolved_db_path());
-            const int deleted = tmp.cleanup_old_conversations(max_age_hours);
-            if (deleted > 0) {
-                std::string msg(ragger::lang::MSG_MCP_HOUSEKEEPING);
-                size_t pos = msg.find("{}");
-                if (pos != std::string::npos) {
-                    msg.replace(pos, 2, std::to_string(deleted));
-                }
-                Diskerror::Logger::info(msg);
-            }
-        } catch (...) {}
     }
 }
 
@@ -353,25 +283,36 @@ static void housekeeping_thread(RaggerMemory& memory,
 // Public entry point
 // -----------------------------------------------------------------------
 
-void run_mcp(RaggerMemory& memory) {
-    // Spawn housekeeping only when this is the sole Ragger process.
-    if (!http_server_running()) {
-        struct passwd* pw = getpwuid(getuid());
-        const std::string username = pw ? pw->pw_name : "default";
-        std::thread(housekeeping_thread,
-                    std::ref(memory), username).detach();
+// Wrapper over the file-local tool_call: a malformed argument that nlohmann
+// rejects (e.g. {"limit":"10"} where an int is expected) must come back as an
+// isError tool result, not escape as a JSON-RPC protocol error (C §1.12).
+nlohmann::json mcp_tool_call(RaggerMemory& memory, const nlohmann::json& params) {
+    try {
+        return tool_call(memory, params);
+    } catch (const nlohmann::json::exception& e) {
+        return nlohmann::json{
+            {"content", nlohmann::json::array({{{"type", "text"}, {"text", e.what()}}})},
+            {"isError", true}
+        };
     }
+}
 
+void run_mcp(RaggerMemory& memory) {
     // JSON-RPC 2.0 read loop
     auto send = [](const nlohmann::json& msg) {
         std::println("{}", msg.dump());
     };
 
     std::string line;
+    // S15 (C m6): the interactive plain-text search shortcut is for TTY
+    // stdin only. Piped stdin is the JSON-RPC channel — human text there
+    // must never reach stdout, or it corrupts the client's stream.
+    const bool interactive = isatty(STDIN_FILENO) != 0;
     while (std::getline(std::cin, line)) {
         if (line.empty()) continue;
 
         if (line[0] == '{') {
+            nlohmann::json req_id = nullptr;
             try {
                 auto request = nlohmann::json::parse(line);
                 const auto method = request.value("method", "");
@@ -380,7 +321,7 @@ void run_mcp(RaggerMemory& memory) {
 
                 // Notifications have no "id" — no response required.
                 if (!request.contains("id")) continue;
-                const auto req_id = request["id"];
+                req_id = request["id"];
 
                 nlohmann::json result;
 
@@ -394,10 +335,10 @@ void run_mcp(RaggerMemory& memory) {
                     };
 
                 } else if (method == "tools/list") {
-                    result = tools_list();
+                    result = mcp_tools_list(config().capture_turns, config().build_context);
 
                 } else if (method == "tools/call") {
-                    result = tool_call(memory, params);
+                    result = mcp_tool_call(memory, params);
 
                 } else {
                     send({{"jsonrpc", "2.0"}, {"id", req_id},
@@ -409,13 +350,19 @@ void run_mcp(RaggerMemory& memory) {
                 send({{"jsonrpc", "2.0"}, {"id", req_id}, {"result", result}});
 
             } catch (const std::exception& e) {
+                // Echo the request id when we got far enough to parse it, so
+                // the client can correlate the error (C §1.12).
                 send({{"jsonrpc", "2.0"},
-                      {"id",      nullptr},
+                      {"id",      req_id},
                       {"error",   {{"code", -32603}, {"message", e.what()}}}});
             }
 
         } else {
-            // Plain text → interactive search shortcut
+            // Plain text → interactive search shortcut (TTY stdin only).
+            if (!interactive) {
+                Diskerror::Logger::warn(ragger::lang::MSG_MCP_IGNORE_NON_JSON);
+                continue;
+            }
             try {
                 const auto response = memory.search(line);
                 if (response.results.empty()) {

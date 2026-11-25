@@ -130,8 +130,14 @@ TokenizerWrapper::Encoded TokenizerWrapper::encode_with_mask(const std::string& 
     Encoded result;
     result.input_ids = encode(text);
     
-    // Attention mask: all 1s for real tokens
-    result.attention_mask.resize(result.input_ids.size(), 1);
+    // Attention mask: 1 for real tokens, 0 for [PAD]. The shipped tokenizer.json
+    // files pad every input to a fixed 128 tokens; an all-ones mask would let
+    // mean pooling average over ~115 pad positions and collapse every vector.
+    int32_t pad_id = pImpl->tokenizer->TokenToId("[PAD]");
+    if (pad_id < 0) pad_id = 0;
+    result.attention_mask.resize(result.input_ids.size());
+    for (size_t i = 0; i < result.input_ids.size(); ++i)
+        result.attention_mask[i] = (result.input_ids[i] != pad_id) ? 1 : 0;
     
     return result;
 }

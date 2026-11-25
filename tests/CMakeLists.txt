@@ -7,6 +7,8 @@ add_test(NAME test_config COMMAND test_config)
 
 add_executable(test_sqlite_backend test_sqlite_backend.cpp)
 target_link_libraries(test_sqlite_backend PRIVATE ragger_core)
+# X9: the CLI-option checks spawn the freshly-built ragger binary.
+target_compile_definitions(test_sqlite_backend PRIVATE RAGGER_BIN="$<TARGET_FILE:ragger>")
 add_test(NAME test_sqlite_backend COMMAND test_sqlite_backend)
 
 add_executable(test_import test_import.cpp)
@@ -33,6 +35,14 @@ add_executable(test_memory test_memory.cpp)
 target_link_libraries(test_memory PRIVATE ragger_core)
 add_test(NAME test_memory COMMAND test_memory)
 
+add_executable(test_agent_parse test_agent_parse.cpp)
+target_link_libraries(test_agent_parse PRIVATE ragger_core)
+add_test(NAME test_agent_parse COMMAND test_agent_parse)
+
+add_executable(test_rebuild_check test_rebuild_check.cpp)
+target_link_libraries(test_rebuild_check PRIVATE ragger_core)
+add_test(NAME test_rebuild_check COMMAND test_rebuild_check)
+
 
 add_executable(test_path_normalization test_path_normalization.cpp)
 target_link_libraries(test_path_normalization PRIVATE ragger_core)
@@ -46,11 +56,6 @@ add_executable(test_logger test_logger.cpp)
 target_link_libraries(test_logger PRIVATE ragger_core)
 add_test(NAME test_logger COMMAND test_logger)
 
-add_executable(test_embed_executor test_embed_executor.cpp)
-target_link_libraries(test_embed_executor PRIVATE ragger_core)
-# Point the test at the freshly-built ragger binary it spawns.
-target_compile_definitions(test_embed_executor PRIVATE RAGGER_BIN="$<TARGET_FILE:ragger>")
-add_test(NAME test_embed_executor COMMAND test_embed_executor)
 
 add_executable(test_summarizer test_summarizer.cpp)
 target_link_libraries(test_summarizer PRIVATE ragger_core)
@@ -72,6 +77,26 @@ add_executable(test_fts_tokenize test_fts_tokenize.cpp)
 target_link_libraries(test_fts_tokenize PRIVATE ragger_core)
 add_test(NAME test_fts_tokenize COMMAND test_fts_tokenize)
 
+# S53 (C §7 items 1/3): live-HTTP route tests against an in-process Server on
+# an ephemeral port (harness/http_fixture.h). The fixture polls /health for up
+# to 5 s; the binary itself runs in a few seconds, so no TIMEOUT property.
+# ${CMAKE_CURRENT_SOURCE_DIR} is on the include path so harness/http_fixture.h
+# finds check.h / test_env.h beside it.
+add_executable(test_http test_http.cpp)
+target_link_libraries(test_http PRIVATE ragger_core)
+target_include_directories(test_http PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME test_http COMMAND test_http)
+
+# LR S91: the daemon jobs runner (single-flight, cancel, SSE `job` frames,
+# shutdown join) against a live daemon whose inference endpoint is a local
+# stub (harness/http_fixture.h after_env hook). The slow-latch tests make it
+# a slower binary; the shutdown test can wait out one model call.
+add_executable(test_jobs test_jobs.cpp)
+target_link_libraries(test_jobs PRIVATE ragger_core)
+target_include_directories(test_jobs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME test_jobs COMMAND test_jobs)
+set_tests_properties(test_jobs PROPERTIES TIMEOUT 120)
+
 # Stats logger tests — only built/registered when RAGGER_STATS is ON.
 # (ragger_core carries the RAGGER_STATS compile definition transitively, so
 # the test body's #ifdef sees it; we still gate the target so a default build
@@ -80,4 +105,18 @@ if(RAGGER_STATS)
     add_executable(test_stats test_stats.cpp)
     target_link_libraries(test_stats PRIVATE ragger_core)
     add_test(NAME test_stats COMMAND test_stats)
+endif()
+
+# S52 (C m23): the Hermes-plugin robustness script. It is self-contained — it
+# stubs `agent.memory_provider` and loads `hermes-plugin/__init__.py` by path —
+# so no Hermes install is needed on sys.path. It is a PLAIN SCRIPT, not a
+# unittest/pytest module (no TestCase, no __main__ guard): it runs top to
+# bottom, raises AssertionError via its own check() helper and prints "OK", so
+# the interpreter itself is the runner and its exit status is the verdict.
+# When no interpreter is found the test is simply not registered.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_FOUND)
+    add_test(NAME test_plugin_robustness
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/python/test_plugin_robustness.py)
+    set_tests_properties(test_plugin_robustness PROPERTIES TIMEOUT 120)
 endif()

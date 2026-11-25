@@ -31,7 +31,7 @@ port   = 8432                     # TCP port (used when `bind` is set)
 # `bind` is empty/missing, the daemon falls back to bind = 127.0.0.1 so
 # there's always at least one listener. A malformed `bind` value is a
 # startup error (invalid IPv4/IPv6/hostname).
-server_name = ragger            # reserved — parsed but not currently used
+server_name = ragger            # sent as the "Server:" response header
 
 # TLS — only relevant if you expose Ragger beyond localhost (e.g. bind to a
 # LAN/public address, or reverse-proxy from a remote machine). Both must be
@@ -59,7 +59,7 @@ max_tokens = 4096                 # max tokens for inference
 # =====================================================================
 # model + dimensions + vector_type define the DB's vector identity and are
 # recorded in the DB. Changing any of them once the DB holds data requires
-# 'ragger rebuild-embeddings' to re-encode everything.
+# 'ragger re-embed' to re-encode everything.
 [embedding]
 model       = sentence-transformers/all-MiniLM-L12-v2
 dimensions  = 384
@@ -67,7 +67,7 @@ vector_type = f16              # on-disk vector precision: f32 (lossless, 4B/dim
                                #   f16 (IEEE half, 2B/dim), bf16 (bfloat16, 2B/dim),
                                #   or int8 (per-vector quantized, 1B/dim).
                                #   In-memory math is always f32; this only sets the
-                               #   stored blob. Changing it needs rebuild-embeddings.
+                               #   stored blob. Changing it needs ragger re-embed.
 
 # =====================================================================
 # Search
@@ -75,13 +75,16 @@ vector_type = f16              # on-disk vector precision: f32 (lossless, 4B/dim
 [search]
 default_limit     = 5
 default_min_score = 0.4
-bm25_enabled      = true
+# Cosine threshold for the possible_supersedes hint on stored decisions
+# (flag only — never merges or changes rows).
+decision_supersede_threshold = 0.8
+fts_enabled      = true
 # Weights are ratios — don't need to sum to 1.0. "3 and 7" == "0.3 and 0.7"
-bm25_weight   = 4
+fts_weight   = 4
 vector_weight = 8
 
 # Custom TF-IDF text index (v0.16) — replaces the old FTS5 + Double Metaphone
-# sidecar. bm25_weight above is the overall text-index blend weight (vs.
+# sidecar. fts_weight above is the overall text-index blend weight (vs.
 # vector_weight); the settings below tune the index's OWN internal blend of
 # unigram vs. bigram vs. phonetic (metaphone) term matches.
 fts_w_unigram       = 0.3   # TF-IDF weight for single-word (unigram) matches
@@ -93,38 +96,16 @@ fts_literal_enabled = true  # exact stemmed-literal term matching. Disable for
                             # DMP-only (phonetic-only) scoring, no reindex needed.
 
 # =====================================================================
-# Summarizer (inference endpoint used for L2/L3 summarization)
+# Summarizer (inference endpoint used for turn and episode summarization)
 # =====================================================================
 [summarizer]
-model      = qwen3-4b-instruct-2507   # model used for L2/L3 summarization
+model      = qwen3-4b-instruct-2507   # model used for turn and episode summarization
 api_url    = http://localhost:1234/v1 # default: LM Studio convention
-api_key    =
 max_tokens = 1024
 target_pct = 40    # target summary length as % of raw turn; 0 = 30%
 max_pct    = 60    # hard cap as % of raw turn; 0 = 60%
-# When the endpoint is unreachable the summarizer falls back to a tagged
-# `draft` L2 row (trimmed user+assistant) and housekeeping rewrites it
-# with a real summary once inference is back.
-
-# System prompt sent to the summarizer model.
-# Leave empty (or omit) to use the built-in default below.
-# Any non-empty value is passed through verbatim.
-# Set to a single space to suppress the system prompt entirely.
-# Two {} placeholders are required for target chars and hard cap.
-prompt = "Distill this conversation into a compact memory entry. Capture
-         what was decided, built, or resolved — omit greetings, filler, and
-         anything that won't matter later. Write in third person past
-         tense. Target {} characters; hard cap {}. If the exchange is
-         trivial (a greeting, a single command), respond with one short
-         phrase or word."
-
-# =====================================================================
-# Embedder executor (the spawned `ragger embed` subprocess pool)
-# =====================================================================
-[embed]
-timeout_ms  = 10000  # per-embed subprocess timeout
-retries     = 1      # retries on a failed/timed-out embed
-max_workers = 8      # cap on concurrent embed subprocesses
+# The system prompt is NOT set here: an empty summarizer_prompt selects the
+# built-in default (lang::PROMPT_TURN_SUMMARY in include/lang/en.h); set it from the dashboard.
 
 # =====================================================================
 # Logging
@@ -150,7 +131,6 @@ log_max_age_days = 14    # delete rotated backups older than this many
 # Housekeeping
 # =====================================================================
 [housekeeping]
-cleanup_max_age_hours = 0     # raw-turn lifetime (0 = keep forever, default; set to hours to auto-purge)
 housekeeping_interval = 60    # seconds between passes (0 disables)
 episode_idle_minutes  = 15    # idle gap (min) that closes an episode of work
                               # within a session (also drives session/project
@@ -168,18 +148,13 @@ episode_threshold_cap  = 0.5   # max threshold after time scaling
 episode_threshold_step = 0.01  # threshold increment per step
 episode_step_minutes   = 1.0   # minutes of idle per increment
 
-summary_pause_minutes = 20    # DEPRECATED alias for episode_idle_minutes,
-                              # honored only when episode_idle_minutes is unset.
-catch_up_batch_size   = 8     # per-tick cap on unsummarized turns / draft
+summary_pause_minutes = 20    # deprecated alias for episode_idle_minutes
+catch_up_batch_size   = 8     # per-tick cap on unsummarized turns / abandoned
                               # retries enqueued at once. Keeps a manual
-                              # resummarize (nulling model_id on a batch of
-                              # `summaries` rows via direct SQL) to a small,
-                              # deliberate slice per housekeeping tick instead
-                              # of redoing hundreds of inference calls at
-                              # once. Any positive int; default 10.
-project_gap_days      = 7     # minimum time-gap (days) between consecutive
-                              # turns that triggers a project-boundary close.
-                              # Any positive int; default 7.
+                              # resummarize to a small, deliberate slice per
+                              # housekeeping tick instead of redoing hundreds
+                              # of inference calls at once. Any positive int;
+                              # default 10.
 max_turn_failures     = 3     # consecutive inference failures on one turn before
                               # marking it "bad" and removing it from the queue.
                               # 0 = retry forever (old behaviour).

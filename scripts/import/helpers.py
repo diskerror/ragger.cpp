@@ -15,13 +15,14 @@ Settings read from the DB (with the default-settings.txt fallbacks applied when
 a row is absent, since the daemon's compiled-in defaults are not visible here):
   summarizer_api_url    LLM base URL
   summarizer_model      model name
-  summarizer_api_key    bearer token (may be empty)
+  summarizer_api_key_env  NAME of the env var holding the bearer token (may be unset)
   summarizer_max_tokens cap on LLM response
   minimum_chunk_size    min chars to bother storing
 """
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import urllib.request
@@ -39,7 +40,7 @@ DEFAULT_BASE_DIR = Path.home() / ".ragger"
 _DEFAULTS = {
     "summarizer_api_url":    "http://localhost:1234/v1",
     "summarizer_model":      "qwen3-4b-instruct-2507",
-    "summarizer_api_key":    "",
+    "summarizer_api_key_env": "RAGGER_SUMMARIZER_API_KEY",
     "summarizer_max_tokens": "1024",
     "minimum_chunk_size":    "300",
 }
@@ -146,7 +147,9 @@ class RaggerConfig:
 
     @property
     def llm_api_key(self) -> str:
-        return self._get("summarizer_api_key").strip()
+        # The DB stores only the NAME of the environment variable.
+        name = self._get("summarizer_api_key_env").strip()
+        return os.environ.get(name, "").strip() if name else ""
 
     @property
     def llm_max_tokens(self) -> int:

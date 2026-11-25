@@ -102,15 +102,46 @@ Good for development — connects to daemon when running, spawns MCP when not.
 need a daemon. Use `http` when the daemon is already running, or
 when sub-users need to connect with tokens.
 
+## Auto-recall mode
+
+`autoRecallMode` (plugin config) picks what the recall hook injects:
+`decisions` (default) = only active decisions matched to the prompt, one line
+each, `[knowledge:5] <trigger> → <ruling>`; `flat` = the legacy flat search.
+A short prompt ("yes") borrows the previous user messages as its query. The
+Hermes plugin does the same, driven by the daemon setting `auto_recall_mode`
+(dashboard, Server section); OpenClaw reads its own plugin config.
+
+In `decisions` mode the plugin calls `memory_search` with `split: true` and
+`min_vector_score` = `autoRecallMinSimilarity` (plugin config, default 0.3, the
+raw vector cosine; the Hermes plugin reads the daemon setting
+`auto_recall_min_similarity`). It injects the `both` list (vector and FTS
+agree) first, then `vector_only`, at most 3 lines; `fts_only` is not used. The
+minimum is calibrated for the current embedding model: re-measure it after
+changing the embedder. Against an older daemon without split mode it falls
+back to the ungated blended results.
+
+At startup the plugin also logs a warning if the daemon reports
+`capture_turns: false` or no summarizer (see `GET /health`).
+
 ## Agent Tools
 
-This gives the agent three tools:
-- **memory_search** — Semantic search over stored memories
-- **memory_store** — Save new memories with optional metadata
-- **memory_get** — Get the count of stored memories
+> **Caveat: untested.** This plugin was ported to the Ragger 0.17 agent API
+> without a live OpenClaw to test against. It was only exercised against a stub
+> HTTP server (every tool reaches its route, the recall and capture hooks fire).
+> Expect rough edges; reports welcome.
 
-With `autoRecall` enabled, relevant memories are automatically injected
-into context before each agent turn (via the `before_prompt_build` hook).
-With `autoCapture`, each completed turn is pushed to Ragger's `capture_turn`
-(via the `agent_end` hook) for background summarization — the daemon stores
-it only when `[server] capture_turns` is enabled.
+The tool set is the 0.17 agent API, generated from `tools/*.json`
+(`scripts/gen-openclaw-tools.py`; `--check` fails when the plugin is stale):
+
+- **memory_search**: layered search (turn summaries, episodes, knowledge); handles + snippets
+- **memory_get**: full rows by typed handle, or conversation pages by session
+- **memory_timeline**: newest-first lists by turn / episode / session / knowledge
+- **memory_note**: note or insight (insight when `evidence` is given)
+- **memory_decision**: decision with a required `trigger`
+- **memory_update**: metadata-only curation (status, tags)
+- **document_search**: imported documents
+- **memory_store**: flat store of facts, preferences, lessons (`category: "decision"` is rejected; use `memory_decision`)
+- **memory_status**: daemon status
+
+Upgrading from the 0.16 plugin: `memory_get` used to return the memory count
+(now `memory_status`), and `memory_search` was a flat semantic search.

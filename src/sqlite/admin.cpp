@@ -1,45 +1,26 @@
 #include "sqlite/backend_impl.h"
-#include "embedder.h"
-#include "config.h"
 #include "lang.h"
-#include "util/fs.h"
 #include "util/time.h"
-#include "util/sqlite.h"
-#include "double_metaphone.h"
-#include "fts_tokenize.h"
-#include "sqlite/text_index.h"
-#include "vector_codec.h"
 #include "Logger.h"
-#include <format>
-#include "nlohmann_json.hpp"
 
-#include <sqlite3.h>
-#include <Eigen/Dense>
 
-#include <algorithm>
-#include <cctype>
-#include <chrono>
-#include <cstdlib>
-#include <cstring>
-#include <ctime>
-#include <unordered_map>
-#include <unordered_set>
-#include <iomanip>
-#include <iterator>
-#include <filesystem>
-#include <numeric>
-#include <optional>
-#include <regex>
-#include <set>
-#include <mutex>
-#include <iostream>
-#include <sstream>
-#include <stdexcept>
 
 namespace ragger::sqlite {
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
+
+
+    /// `settings` keys whose value lives in `semqlite_config` under
+    /// SemanticSQLite's own key name (embedding identity stamps: what the stored
+    /// vectors are). The `desired_*` staging keys and `embedding_version` are
+    /// Ragger's change-management state and deliberately stay in `settings`.
+    struct SemqliteSettingKey { const char* setting; const char* semqlite; };
+    static constexpr SemqliteSettingKey kSemqliteSettingKeys[] = {
+        {"embedding_model", "embedding_model"},
+        {"vector_type",     "embedding_vector_type"},
+        {"dimensions",      "embedding_dims"},
+    };
 
 
     /// Users + settings tables — declarative, no in-place migration
@@ -71,6 +52,44 @@ namespace fs = std::filesystem;
                 value TEXT NOT NULL
             )
         )");
+
+        // semqlite_config: the facts-about-the-file table SemanticSQLite reads
+        // when it opens this database (same shape as the table its
+        // SEMQLITE_SAVE() writes). It records what the stored vectors ARE
+        // (model, dtype, dimensions, offset, embedder) in SemanticSQLite's own
+        // key names so a user can write EMBED() queries against this file with
+        // no setup. Everything Ragger uses to MANAGE a change (desired_*,
+        // embedding_version, reembedding*) stays in `settings`.
+        exec(R"(
+            CREATE TABLE IF NOT EXISTS semqlite_config (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            )
+        )");
+
+        // One-time, idempotent move of the legacy identity stamps out of
+        // `settings`. Gated on the rows existing (not on db_version) because a
+        // DB already stamped 0.17 never re-runs the 0.16 -> 0.17 leg.
+        // INSERT OR IGNORE keeps a value already in semqlite_config.
+        for (const auto& m : kSemqliteSettingKeys) {
+            exec(std::format(
+                "INSERT OR IGNORE INTO semqlite_config (key, value) "
+                "SELECT '{1}', value FROM settings WHERE key = '{0}'",
+                m.setting, m.semqlite));
+            // If INSERT OR IGNORE discarded a settings value that differs from
+            // what semqlite_config already held, name both before the DELETE
+            // removes the evidence.
+            Stmt s(db, "SELECT value FROM settings WHERE key = ?");
+            s.bind(1, m.setting);
+            if (auto sv = s.step() ? s.column_text_opt(0) : std::nullopt) {
+                if (auto cv = get_semqlite_config(m.semqlite); cv && *cv != *sv) {
+                    Diskerror::Logger::info(std::format(
+                        "settings.{} ({}) superseded by semqlite_config.{} ({})",
+                        m.setting, *sv, m.semqlite, *cv));
+                }
+            }
+            exec(std::format("DELETE FROM settings WHERE key = '{0}'", m.setting));
+        }
     }
 
 
@@ -102,7 +121,12 @@ namespace fs = std::filesystem;
 
     void Backend::Impl::set_user_password(const std::string& username, const std::string& pw_hash) {
         Stmt s(db, "UPDATE users SET password_hash = ? WHERE username = ?");
-        s.bind(1, pw_hash).bind(2, username).step();
+        s.bind(1, pw_hash).bind(2, username);
+        // PHASE9B step 4a: an unchecked write here silently dropped the
+        // password change (e.g. SQLITE_BUSY from the second UserStore
+        // connection contending with the daemon).
+        if (!s.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
     }
 
 
@@ -110,27 +134,75 @@ namespace fs = std::filesystem;
         int64_t ts = db_epoch();
         Stmt s(db,
             "INSERT INTO users (username, token_hash, created_at, updated_at) VALUES (?,?,?,?)");
-        s.bind(1, username).bind(2, token_hash).bind(3, ts).bind(4, ts).step();
-        return sqlite3_changes(db) > 0
-            ? static_cast<int>(sqlite3_last_insert_rowid(db))
-            : -1;
+        s.bind(1, username).bind(2, token_hash).bind(3, ts).bind(4, ts);
+        // PHASE9B step 4a: the old code read sqlite3_changes() after an
+        // unchecked step — after a failure that is the PREVIOUS statement's
+        // count, so a rejected insert could report a stale rowid as success.
+        // Contract (user_store.h): new user_id, or -1 on a constraint
+        // failure (duplicate username); any other error throws.
+        if (!s.exec()) {
+            const int rc = sqlite3_extended_errcode(db);
+            if (rc == SQLITE_CONSTRAINT_UNIQUE || rc == SQLITE_CONSTRAINT_PRIMARYKEY ||
+                rc == SQLITE_CONSTRAINT_TRIGGER || rc == SQLITE_CONSTRAINT)
+                return -1;
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+        }
+        return static_cast<int>(sqlite3_last_insert_rowid(db));
     }
 
 
     bool Backend::Impl::delete_user(const std::string& username) {
         Stmt s(db, "DELETE FROM users WHERE username = ?");
-        s.bind(1, username).step();
+        s.bind(1, username);
+        // PHASE9B step 4a: an error is not "no such user".
+        if (!s.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
         return sqlite3_changes(db) > 0;
     }
 
 
     void Backend::Impl::update_user_token(const std::string& username, const std::string& new_hash) {
         Stmt s(db, "UPDATE users SET token_hash = ? WHERE username = ?");
-        s.bind(1, new_hash).bind(2, username).step();
+        s.bind(1, new_hash).bind(2, username);
+        if (!s.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
     }
 
 
-    std::optional<std::string> Backend::Impl::get_setting(const std::string& key) {
+    /// The semqlite_config key that now holds a `settings` key's value, or
+    /// nullptr when the setting still lives in `settings`.
+    static const char* semqlite_key_for(const std::string& setting_key) {
+        for (const auto& m : kSemqliteSettingKeys)
+            if (setting_key == m.setting) return m.semqlite;
+        return nullptr;
+    }
+
+
+    std::optional<std::string> Backend::Impl::get_semqlite_config(const std::string& key) const {
+        // A read-only connection (export) never ran create_user_schema().
+        if (!table_exists("semqlite_config")) return std::nullopt;
+        Stmt s(db, "SELECT value FROM semqlite_config WHERE key = ?");
+        s.bind(1, key);
+        if (s.step()) return s.column_text_opt(0);
+        return std::nullopt;
+    }
+
+
+    void Backend::Impl::set_semqlite_config(const std::string& key, const std::string& value) {
+        Stmt s(db, "INSERT OR REPLACE INTO semqlite_config (key, value) VALUES (?, ?)");
+        s.bind(1, key).bind(2, value);
+        if (!s.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+    }
+
+
+    std::optional<std::string> Backend::Impl::get_setting(const std::string& key) const {
+        // The embedding identity stamps live in semqlite_config now. Fall back
+        // to a leftover `settings` row only for a connection that never ran the
+        // move (read-only export of a not-yet-opened older file).
+        if (const char* sk = semqlite_key_for(key)) {
+            if (auto v = get_semqlite_config(sk)) return v;
+        }
         Stmt s(db, "SELECT value FROM settings WHERE key = ?");
         s.bind(1, key);
         if (s.step()) return s.column_text_opt(0);
@@ -139,14 +211,20 @@ namespace fs = std::filesystem;
 
 
     void Backend::Impl::set_setting(const std::string& key, const std::string& value) {
+        if (const char* sk = semqlite_key_for(key)) {
+            set_semqlite_config(sk, value);
+            return;
+        }
         Stmt s(db, "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
-        s.bind(1, key).bind(2, value).step();
+        s.bind(1, key).bind(2, value);
+        if (!s.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
     }
 
 
     // ---- Schema introspection (gap closure) --------------------------------
 
-    std::vector<SchemaObject> Backend::Impl::list_schema_objects() {
+    std::vector<SchemaObject> Backend::Impl::list_schema_objects() const {
         std::vector<SchemaObject> result;
         Stmt s(db,
             "SELECT type, name, tbl_name, sql FROM sqlite_master "
@@ -170,7 +248,7 @@ namespace fs = std::filesystem;
     }
 
 
-    std::vector<std::string> Backend::Impl::table_column_names(const std::string& table) {
+    std::vector<std::string> Backend::Impl::table_column_names(const std::string& table) const {
         std::vector<std::string> names;
         Stmt s(db, "PRAGMA table_info(" + table + ")");
         while (s.step_checked()) {
@@ -225,10 +303,10 @@ namespace fs = std::filesystem;
     }
 
 
-    /// Convenience views: epoch ints rendered as local datetime, embedding
-    /// BLOBs collapsed to a has_embedding flag, and term_ids resolved to the
-    /// readable term. These exist purely for human inspection (sqlite3 CLI,
-    /// GUI browsers) -- no application code reads them.
+    /// Convenience views: epoch ints rendered as local datetime, and embedding
+    /// BLOBs collapsed to a has_embedding flag. One per table that holds a
+    /// date integer. These exist purely for human inspection (semqlite, GUI
+    /// browsers) -- no application code reads them.
     ///
     /// DROP-then-CREATE, deliberately NOT "CREATE VIEW IF NOT EXISTS". A view
     /// holds no data, so recreating is free -- and IF NOT EXISTS meant an
@@ -244,8 +322,12 @@ namespace fs = std::filesystem;
             exec(std::format("CREATE VIEW {} AS {}", name, body));
         };
 
+        // PHASE9: hashes are deliberately NOT exposed — these views exist
+        // for human inspection (semqlite), and a view that prints a
+        // token/password hash turns any casual read of the DB into a
+        // credential leak.
         view("users_view", R"(
-            SELECT id, username, token_hash, password_hash,
+            SELECT id, username,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
                    datetime(updated_at, 'unixepoch', 'localtime') AS updated_at
             FROM users
@@ -257,45 +339,55 @@ namespace fs = std::filesystem;
         )");
         view("sessions_view", R"(
             SELECT session_id, guid, name, name_source,
+                   datetime(started_on, 'unixepoch', 'localtime') AS started_on,
+                   datetime(ended_on, 'unixepoch', 'localtime') AS ended_on,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at
             FROM sessions
         )");
-        exec("CREATE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name)");
         view("turns_view", R"(
             SELECT turn_id, user_text, assistant_text, model_id, session_id,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
+                   datetime(started_on, 'unixepoch', 'localtime') AS started_on,
                    unigram_count, bigram_count,
                    embedding_version,
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM turns
         )");
+        // PHASE5: gains episode_id. The view shows ALL rows including ''
+        // marker rows (the raw table is the admin truth); Phase 9 decides
+        // whether a filtered `_live_view` joins the set.
         view("turn_summaries_view", R"(
             SELECT
-                turn_summary_id, text, turn_id, session_id, turn_model_id, summary_model_id,
+                turn_summary_id, text, turn_id, session_id, episode_id,
+                turn_model_id, summary_model_id,
                 datetime(turn_datetime, 'unixepoch', 'localtime') AS turn_datetime,
                 datetime(summarized_on, 'unixepoch', 'localtime') AS summarized_on,
                 unigram_count, bigram_count,
                 embedding_version,
                 CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
             FROM turn_summaries
-            WHERE text != ''
         )");
-        view("summaries_view", R"(
-            SELECT summary_id, text, level, tags, session_id, model_id,
-                   datetime(created_at, 'unixepoch', 'localtime') AS created_at,
-                   datetime(updated_at, 'unixepoch', 'localtime') AS updated_at,
+        view("episodes_view", R"(
+            SELECT episode_id, text, tags, session_id, model_id,
+                   datetime(span_start, 'unixepoch', 'localtime') AS span_start,
+                   datetime(span_end, 'unixepoch', 'localtime') AS span_end,
+                   datetime(modified_on, 'unixepoch', 'localtime') AS modified_on,
                    unigram_count, bigram_count,
                    embedding_version,
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
-            FROM summaries
+            FROM episodes
         )");
-        view("decisions_view", R"(
-            SELECT decision_id, text, status, tags,
+        // the old summaries view is gone with its table (PHASE8); knowledge_view
+        // covers notes now.
+        // knowledge_view (PHASE7): replaces decisions_view + insights_view.
+        view("knowledge_view", R"(
+            SELECT knowledge_id, kind, text, status, tags,
+                   trigger, rationale, scope, supersedes, session_id, model_id,
                    datetime(created_at, 'unixepoch', 'localtime') AS created_at,
                    unigram_count, bigram_count,
                    embedding_version,
                    CASE WHEN embedding IS NULL THEN 0 ELSE 1 END AS has_embedding
-            FROM decisions
+            FROM knowledge
         )");
         view("document_sources_view", R"(
             SELECT document_source_id, title, path, year, tags,
@@ -311,27 +403,17 @@ namespace fs = std::filesystem;
             FROM documents
         )");
 
-        // Junction views (v0.16): the raw <t>_terms tables store term_id, which
-        // is unreadable on inspection. Each view resolves it to the actual term
-        // string. An INNER JOIN is correct here -- the FK to terms(term_id) is
-        // NOT NULL, so a missing parent would be corruption, and surfacing zero
-        // rows for it is the right signal. Ordered most-frequent-first within a
-        // record, which is what you almost always want when eyeballing why
-        // something did or didn't match.
-        struct J { const char* view; const char* junc; const char* pk; };
-        for (const J& j : {
-                 J{"turns_terms_view",          "turns_terms",          "turn_id"},
-                 J{"turn_summaries_terms_view", "turn_summaries_terms", "turn_summary_id"},
-                 J{"summaries_terms_view",      "summaries_terms",      "summary_id"},
-                 J{"documents_terms_view",      "documents_terms",      "document_id"},
-                 J{"decisions_terms_view",      "decisions_terms",      "decision_id"},
-             }) {
-            view(j.view, std::format(
-                "SELECT j.{} AS {}, t.term, j.count "
-                "FROM {} j JOIN terms t ON t.term_id = j.term_id "
-                "ORDER BY j.{}, j.count DESC, t.term",
-                j.pk, j.pk, j.junc, j.pk));
-        }
+        // Retired: the evidence passthrough views and the <t>_terms junction
+        // views (term_id resolved to the term). Only the views that render a
+        // date integer as a date string remain; anything else is a join the
+        // inspector can write. They are dropped by NAME, never "every view not
+        // listed above", so a view a user made in their own copy survives.
+        for (const char* name : {"knowledge_turn_evidence_view",
+                                 "knowledge_episode_evidence_view",
+                                 "knowledge_document_evidence_view"})
+            exec(std::format("DROP VIEW IF EXISTS {}", name));
+        for (const auto& t : kTextTables)
+            exec(std::format("DROP VIEW IF EXISTS {}_view", t.junction));
     }
 
 

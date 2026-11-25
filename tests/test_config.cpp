@@ -1,11 +1,23 @@
 #include "config.h"
+#include "config_access.h"
+#include "daemon_control.h"
+#include "user_store.h"
+#include "config_schema.h"
+#include "lang.h"          // kConfigSchema / config_schema() (inline in lang/en.h)
+#include "test_env.h"
+#include "check.h"
 #include "util/fs.h"
+#include <algorithm>
+#include <atomic>
 #include <cassert>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <filesystem>
 #include <print>
+#include <thread>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -24,17 +36,45 @@ void test_housekeeping_section_parsing() {
         std::ofstream f(path);
         f << "[server]\nport = 8432\n"
           << "[housekeeping]\n"
-          << "cleanup_max_age_hours = 168\n"
           << "housekeeping_interval = 30\n"
           << "catch_up_batch_size = 25\n";
     }
 
     ragger::Config cfg = ragger::load_config(path).value();
-    assert(cfg.cleanup_max_age_hours == 168.0f);
     assert(cfg.housekeeping_interval == 30);
     assert(cfg.catch_up_batch_size == 25);
 
     fs::remove(path);
+    std::println(" OK");
+}
+
+// X18: cleanup_max_age_hours and the purge are gone. A settings row left over
+// from an older release is an unknown key: silently dropped (policy — no
+// migrate() code for stale keys). It must not crash the DB->config overlay
+// (startup path) and every read path must report no such key.
+void x18_stale_cleanup_key_is_dropped() {
+    std::print("  x18_stale_cleanup_key_is_dropped...");
+    const std::string db = ragger::config().resolved_db_path();
+    ragger::UserStore store(db);
+    store.set_setting("cleanup_max_age_hours", "168");
+
+    // Startup overlay: re-reads only schema keys; the stale row is never
+    // applied and must not throw.
+    bool threw = false;
+    try {
+        ragger::reload_config();
+    } catch (...) {
+        threw = true;
+    }
+    CHECK(!threw);
+
+    // Read paths (`ragger config get`): the key no longer exists anywhere.
+    CHECK(ragger::lang::config_meta("cleanup_max_age_hours") == nullptr);
+    CHECK(!ragger::get_config_value(ragger::config(), "cleanup_max_age_hours"));
+    const auto keys = ragger::all_config_keys();
+    CHECK(std::find(keys.begin(), keys.end(), "cleanup_max_age_hours") == keys.end());
+
+    store.set_setting("cleanup_max_age_hours", "");
     std::println(" OK");
 }
 
@@ -66,56 +106,6 @@ void test_catch_up_batch_size_ignores_nonpositive() {
 
     ragger::Config cfg = ragger::load_config(path).value();
     assert(cfg.catch_up_batch_size == 10);  // 0 rejected, default retained
-
-    fs::remove(path);
-    std::println(" OK");
-}
-
-void test_project_gap_days_parsing() {
-    std::print("  test_project_gap_days_parsing...");
-
-    std::string path = "/tmp/ragger_test_project_gap.ini";
-    {
-        std::ofstream f(path);
-        f << "[server]\nport = 8432\n"
-          << "[housekeeping]\nproject_gap_days = 14\n";
-    }
-
-    ragger::Config cfg = ragger::load_config(path).value();
-    assert(cfg.project_gap_days == 14);
-
-    fs::remove(path);
-    std::println(" OK");
-}
-
-void test_project_gap_days_default() {
-    std::print("  test_project_gap_days_default...");
-
-    std::string path = "/tmp/ragger_test_project_gap_default.ini";
-    {
-        std::ofstream f(path);
-        f << "[server]\nport = 8432\n";  // no [housekeeping] section at all
-    }
-
-    ragger::Config cfg = ragger::load_config(path).value();
-    assert(cfg.project_gap_days == 7);  // shipped default
-
-    fs::remove(path);
-    std::println(" OK");
-}
-
-void test_project_gap_days_ignores_nonpositive() {
-    std::print("  test_project_gap_days_ignores_nonpositive...");
-
-    std::string path = "/tmp/ragger_test_project_gap_zero.ini";
-    {
-        std::ofstream f(path);
-        f << "[server]\nport = 8432\n"
-          << "[housekeeping]\nproject_gap_days = 0\n";
-    }
-
-    ragger::Config cfg = ragger::load_config(path).value();
-    assert(cfg.project_gap_days == 7);  // 0 rejected, default retained
 
     fs::remove(path);
     std::println(" OK");
@@ -250,10 +240,10 @@ void test_bool_parsing_variants() {
         {
             std::ofstream f(path);
             f << "[server]\nport = 8432\n"
-              << "[search]\nbm25_enabled = " << val << "\n";
+              << "[search]\nfts_enabled = " << val << "\n";
         }
         ragger::Config cfg = ragger::load_config(path).value();
-        assert(cfg.bm25_enabled == expected);
+        assert(cfg.fts_enabled == expected);
         fs::remove(path);
     };
 
@@ -303,11 +293,10 @@ void test_default_values() {
     assert(cfg.embedding_dimensions == 384);
     assert(cfg.default_search_limit == 5);
     assert(cfg.default_min_score == 0.6f);
-    assert(cfg.bm25_enabled == true);
-    assert(cfg.bm25_weight == 4.0f);
+    assert(cfg.fts_enabled == true);
+    assert(cfg.fts_weight == 4.0f);
     assert(cfg.vector_weight == 8.0f);
     assert(cfg.normalize_home_path == true);
-    assert(cfg.cleanup_max_age_hours == 0.0f);  // 0 = keep forever (never delete raw conversations)
     assert(cfg.housekeeping_interval == 60);
     assert(cfg.capture_turns == true);
     assert(cfg.build_context == false);
@@ -349,22 +338,376 @@ void test_ragger_base_override() {
     std::println(" OK");
 }
 
+// S21 (C m18): the stop/restart sweep targets only daemons and MCP servers,
+// matched on whole argv tokens equal to "serve"/"mcp".
+void p10_is_sweepable_cmdline() {
+    std::print("  p10_is_sweepable_cmdline...\n");
+    using ragger::is_sweepable_cmdline;
+    CHECK(is_sweepable_cmdline({"ragger", "serve"}));
+    CHECK(is_sweepable_cmdline({"/usr/local/bin/ragger", "--ragger-base", "/x", "serve"}));
+    CHECK(is_sweepable_cmdline({"ragger", "mcp"}));
+    CHECK(!is_sweepable_cmdline({"ragger", "re-embed", "all"}));
+    CHECK(!is_sweepable_cmdline({"ragger", "import-docs", "a.md"}));
+    CHECK(!is_sweepable_cmdline({"ragger", "store", "serve me"}));  // one token, not equal to "serve"
+    CHECK(!is_sweepable_cmdline({}));
+    CHECK(!is_sweepable_cmdline({"ragger"}));
+    std::print(" ok\n");
+}
+
+// S23 (C m9): the re-exec argv filter — host/port overrides and their
+// values stripped, everything else untouched.
+void p10_filter_restart_argv() {
+    std::print("  p10_filter_restart_argv...\n");
+    using ragger::filter_restart_argv;
+    CHECK(filter_restart_argv({"ragger", "-p", "1234", "serve"}) ==
+          std::vector<std::string>({"ragger", "serve"}));
+    CHECK(filter_restart_argv({"ragger", "--port=1234", "serve"}) ==
+          std::vector<std::string>({"ragger", "serve"}));
+    CHECK(filter_restart_argv({"ragger", "-H", "0.0.0.0", "serve"}) ==
+          std::vector<std::string>({"ragger", "serve"}));
+    CHECK(filter_restart_argv({"ragger", "-H0.0.0.0", "serve"}) ==
+          std::vector<std::string>({"ragger", "serve"}));
+    CHECK(filter_restart_argv({"ragger", "--host", "h", "--ragger-base", "/x", "serve"}) ==
+          std::vector<std::string>({"ragger", "--ragger-base", "/x", "serve"}));
+    CHECK(filter_restart_argv({"ragger", "serve"}) ==
+          std::vector<std::string>({"ragger", "serve"}));
+    // trailing flag with no value: drop only the flag
+    CHECK(filter_restart_argv({"ragger", "store", "-p"}) ==
+          std::vector<std::string>({"ragger", "store"}));
+    std::print(" ok\n");
+}
+
+// API keys are environment variables: the settings table holds only the NAME
+// of the variable, the value is resolved at runtime and never saved, and a
+// pasted credential is rejected as a name.
+void test_api_keys_come_from_environment() {
+    std::print("  test_api_keys_come_from_environment...\n");
+    using namespace ragger;
+
+    for (const char* key : {"summarizer_api_key_env", "embedding_api_key_env"}) {
+        const auto* meta = lang::config_meta(key);
+        assert(meta != nullptr);
+        assert(!meta->secret);                       // a name, not a credential
+        // The old value-bearing keys are gone from the schema.
+    }
+    assert(lang::config_meta("summarizer_api_key") == nullptr);
+    assert(lang::config_meta("embedding_external_api_key") == nullptr);
+
+    ::setenv("RAGGER_TEST_SUMMARIZER_KEY", "s3cr3t-value", 1);
+    ::unsetenv("RAGGER_TEST_UNSET_VAR");
+
+    auto set = [](std::string_view k, std::string_view v) {
+        auto r = set_config_persisted(k, v);
+        assert(r.has_value());
+    };
+
+    // Naming a variable resolves the live key from the environment...
+    set("summarizer_api_key_env", "RAGGER_TEST_SUMMARIZER_KEY");
+    assert(config().summarizer_api_key == "s3cr3t-value");
+    // ...the persisted/read value is the NAME, never the key...
+    assert(get_config_value(config(), "summarizer_api_key_env").value_or("")
+           == "RAGGER_TEST_SUMMARIZER_KEY");
+    // ...an unset variable gives an empty key, not an error...
+    set("summarizer_api_key_env", "RAGGER_TEST_UNSET_VAR");
+    assert(config().summarizer_api_key.empty());
+    // ...and a pasted credential is not a valid variable name.
+    assert(!set_config_persisted("summarizer_api_key_env", "sk-abc-123.def").has_value());
+    assert(!set_config_persisted("embedding_api_key_env", "9STARTS_WITH_DIGIT").has_value());
+    set("embedding_api_key_env", "RAGGER_TEST_SUMMARIZER_KEY");
+    assert(config().embedding_external_api_key == "s3cr3t-value");
+
+    set("summarizer_api_key_env", "");   // leave clean (back to the default name)
+    set("embedding_api_key_env", "");
+    ::unsetenv("RAGGER_TEST_SUMMARIZER_KEY");
+    std::println(" ok");
+}
+
+// PHASE9A: the shipped defaults must be applied, every live key accepted.
+void p9a_test_shipped_defaults_applied() {
+    std::print("  p9a_test_shipped_defaults_applied...");
+    for (const auto& k : ragger::default_config_unknown_keys())
+        std::println("\n    unknown default key: {}", k);
+    CHECK(ragger::default_config_unknown_keys().empty());
+    ragger::Config d = ragger::default_config();
+    CHECK(d.summarizer_model == "qwen3-4b-instruct-2507");
+    CHECK(d.summarizer_api_url == "http://localhost:1234/v1");
+    CHECK(d.summarizer_max_tokens == 1024);
+    CHECK(d.summarizer_target_pct == 40);
+    CHECK(d.summarizer_max_pct == 60);
+    CHECK(d.embedding_model == "sentence-transformers/all-MiniLM-L12-v2");
+    CHECK(d.embedding_dimensions == 384);
+    CHECK(d.embedding_vector_type == "f16");
+    CHECK(d.summarizer_prompt.empty());   // empty = built-in default prompt
+    std::println(" ok");
+}
+
+// PHASE9A: config() is an immutable snapshot; writers publish a new one.
+void p9a_test_config_snapshots() {
+    std::print("  p9a_test_config_snapshots...");
+    const ragger::Config* before = &ragger::config();
+    const std::string& held = ragger::config().summarizer_prompt;  // taken BEFORE the updates
+    const std::string held_copy = held;
+
+    std::atomic<bool> stop{false};
+    std::atomic<long> torn{0};
+    std::vector<std::thread> readers;
+    for (int t = 0; t < 4; ++t)
+        readers.emplace_back([&] {
+            while (!stop.load()) {
+                const std::string& s = ragger::config().summarizer_prompt;
+                for (size_t i = 1; i < s.size(); ++i)
+                    if (s[i] != s[0]) { ++torn; break; }   // a torn read mixes characters
+            }
+        });
+    for (int i = 0; i < 300; ++i)
+        CHECK(ragger::update_config([&](ragger::Config& c) {
+            c.summarizer_prompt = (i & 1) ? std::string(5, 'a') : std::string(5000, 'b');
+            return true;
+        }));
+    stop = true;
+    for (auto& r : readers) r.join();
+
+    CHECK(torn.load() == 0);
+    CHECK(held == held_copy);                      // the old snapshot is untouched and still valid
+    CHECK(&ragger::config() != before);            // a new snapshot was published
+    CHECK(ragger::config().summarizer_prompt == std::string(5, 'a'));   // i = 299 is odd
+
+    const ragger::Config* cur = &ragger::config();
+    CHECK(!ragger::update_config([](ragger::Config& c) { c.summarizer_prompt = "zzz"; return false; }));
+    CHECK(&ragger::config() == cur);               // false = nothing published
+
+    ragger::update_config([&](ragger::Config& c) { c.summarizer_prompt = held_copy; return true; });
+    std::println(" ok");
+}
+
+// PHASE9B step 3b: summarizer_prompt must be a valid vformat pattern with
+// two args; other Text keys are untouched.
+void p9b_test_summarizer_prompt_validation() {
+    std::print("  p9b_test_summarizer_prompt_validation...\n");
+    auto ok = [](std::string_view k, std::string_view v) {
+        return ragger::validate_config_value(k, v).has_value();
+    };
+    CHECK(ok("summarizer_prompt", ""));   // empty = reset to default
+    CHECK(ok("summarizer_prompt", " "));
+    CHECK(ok("summarizer_prompt", "summarize in {} words, max {}"));
+    CHECK(ok("summarizer_prompt", "{0} {1}"));
+    CHECK(ok("summarizer_prompt", "{{literal braces}}"));
+    CHECK(!ok("summarizer_prompt", "{"));
+    CHECK(!ok("summarizer_prompt", "}"));
+    CHECK(!ok("summarizer_prompt", "{2}"));
+    CHECK(!ok("summarizer_prompt", "{:d"));
+    // Other Text keys keep accepting anything.
+    CHECK(ok("default_recipe", "plain"));
+    // auto_recall_mode is a static enum: only its listed values.
+    CHECK(ok("auto_recall_mode", "decisions"));
+    CHECK(ok("auto_recall_mode", "flat"));
+    CHECK(!ok("auto_recall_mode", "everything"));
+    std::println(" OK");
+}
+
+// S26 (C m12): the two percent knobs are documented 1-100 — values outside
+// that range are rejected at the door (same mechanism as the prompt check;
+// see the deviation note in the step report).
+void p10_pct_validation() {
+    std::print("  p10_pct_validation...\n");
+    auto ok = [](std::string_view k, std::string_view v) {
+        return ragger::validate_config_value(k, v).has_value();
+    };
+    for (const char* key : {"summarizer_target_pct", "summarizer_max_pct"}) {
+        CHECK(ok(key, "1"));
+        CHECK(ok(key, "100"));
+        CHECK(!ok(key, "0"));
+        CHECK(!ok(key, "101"));
+        CHECK(!ok(key, "-5"));
+        CHECK(!ok(key, "abc"));      // existing int-parse path
+        CHECK(ok(key, ""));          // empty = reset to default: always valid
+    }
+    // Other Integer keys keep accepting any int (no accidental range creep).
+    CHECK(ok("housekeeping_interval", "0"));
+    std::println(" OK");
+}
+
+// X26: auto_recall_min_similarity is a Float setting. The existing Float
+// validator (parse_float_strict) accepts any well-formed number and rejects
+// non-numeric text — it does NOT clamp to 0-1 (same as default_min_score and
+// the other float knobs). Pin the contract: 0.30, 0, 1 accepted; abc rejected;
+// empty = reset-to-default always valid. Also pin that the struct default and
+// the schema default string agree (both 0.30).
+// The episode prompt is validated like the turn prompt, after {N} is
+// substituted: any number of {N}-free text with exactly two {} slots or none.
+void x28_episode_prompt_validation() {
+    std::print("  x28_episode_prompt_validation...\n");
+    auto ok = [](std::string_view k, std::string_view v) {
+        return ragger::validate_config_value(k, v).has_value();
+    };
+    CHECK(ok("summarizer_episode_prompt", ""));
+    CHECK(ok("summarizer_episode_prompt", "Merge {N} summaries; aim {} cap {}"));
+    CHECK(ok("summarizer_episode_prompt", "no placeholders at all"));
+    CHECK(!ok("summarizer_episode_prompt", "{"));
+    CHECK(!ok("summarizer_episode_prompt", "{2}"));
+    const auto* meta = ragger::lang::config_meta("summarizer_episode_prompt");
+    CHECK(meta != nullptr);
+    if (meta) {
+        CHECK(meta->default_value == std::string_view(""));
+        CHECK(meta->section == std::string_view("summarizer"));
+    }
+    // Dashboard order: turn, episode, session title, knowledge trigger.
+    const char* want[] = {"summarizer_prompt", "summarizer_episode_prompt",
+                          "summarizer_title_prompt", "summarizer_trigger_prompt"};
+    std::size_t idx = 0, last = 0;
+    const auto schema = ragger::lang::config_schema();
+    for (std::size_t i = 0; i < schema.size() && idx < 4; ++i)
+        if (schema[i].key == want[idx]) { last = i; ++idx; }
+    CHECK(idx == 4);
+    (void)last;
+    std::println(" OK");
+}
+
+// X27: the two one-line-job prompts are plain Text: any value is accepted
+// (no placeholder rules, unlike summarizer_prompt: braces are literal here),
+// empty = built-in, and the defaults are empty.
+void x27_summarizer_job_prompts() {
+    std::print("  x27_summarizer_job_prompts...\n");
+    auto ok = [](std::string_view k, std::string_view v) {
+        return ragger::validate_config_value(k, v).has_value();
+    };
+    for (const char* key : {"summarizer_title_prompt", "summarizer_trigger_prompt"}) {
+        CHECK(ok(key, ""));
+        CHECK(ok(key, "A short title, no quotes."));
+        CHECK(ok(key, "{ literal braces } are fine here"));
+        CHECK(ok(key, "Title of 3 to 8 words"));
+        const auto* meta = ragger::lang::config_meta(key);
+        CHECK(meta != nullptr);
+        if (meta) {
+            CHECK(meta->default_value == std::string_view(""));
+            CHECK(meta->section == std::string_view("summarizer"));
+            CHECK(meta->type == ragger::lang::CfgType::Text);
+            CHECK(meta->edit == ragger::lang::CfgEdit::Live);
+        }
+    }
+    // The title length lives in the prompt text, not in separate keys.
+    CHECK(ragger::lang::config_meta("summarizer_title_min_words") == nullptr);
+    CHECK(ragger::lang::config_meta("summarizer_title_max_words") == nullptr);
+    CHECK(ragger::lang::PROMPT_SESSION_TITLE.find("3 to 8 words") != std::string_view::npos);
+    CHECK(ragger::default_config().summarizer_title_prompt.empty());
+    CHECK(ragger::default_config().summarizer_trigger_prompt.empty());
+    std::println(" OK");
+}
+
+void x26_auto_recall_min_similarity() {
+    std::print("  x26_auto_recall_min_similarity...\n");
+    auto ok = [](std::string_view k, std::string_view v) {
+        return ragger::validate_config_value(k, v).has_value();
+    };
+    CHECK(ok("auto_recall_min_similarity", "0.30"));
+    CHECK(ok("auto_recall_min_similarity", "0"));
+    CHECK(ok("auto_recall_min_similarity", "1"));
+    CHECK(!ok("auto_recall_min_similarity", "abc"));
+    CHECK(ok("auto_recall_min_similarity", ""));   // empty = reset to default
+
+    // The two defaults must match: struct field and schema default string.
+    CHECK(std::abs(ragger::default_config().auto_recall_min_similarity - 0.30f) < 1e-6f);
+    const auto* meta = ragger::lang::config_meta("auto_recall_min_similarity");
+    CHECK(meta != nullptr);
+    if (meta) {
+        CHECK(meta->default_value == std::string_view("0.30"));
+        CHECK(meta->section == std::string_view("server"));
+        CHECK(meta->type == ragger::lang::CfgType::Float);
+        CHECK(meta->edit == ragger::lang::CfgEdit::Live);
+    }
+    std::println(" OK");
+}
+
+// PHASE9B step 7: the episode keys are read per use by summarizer_service,
+// so a SIGHUP reload must apply them (they used to be silently dropped).
+void p9b_test_reload_config_episode_keys() {
+    std::print("  p9b_test_reload_config_episode_keys...\n");
+    const std::string db = ragger::config().resolved_db_path();
+    ragger::UserStore store(db);
+
+    // Nothing written yet: a reload with no change reports 0.
+    CHECK(ragger::reload_config() == 0);
+
+    store.set_setting("episode_threshold_base", "0.42");
+    store.set_setting("episode_threshold_cap", "0.91");
+    store.set_setting("episode_threshold_step", "0.07");
+    store.set_setting("episode_step_minutes", "13");
+
+    CHECK(ragger::reload_config() == 4);
+    const auto& cfg = ragger::config();
+    CHECK(std::abs(cfg.episode_threshold_base - 0.42f) < 1e-6f);
+    CHECK(std::abs(cfg.episode_threshold_cap  - 0.91f) < 1e-6f);
+    CHECK(std::abs(cfg.episode_threshold_step - 0.07f) < 1e-6f);
+    CHECK(cfg.episode_step_minutes == 13);
+
+    // Idempotent: the same rows are not counted as changes again.
+    CHECK(ragger::reload_config() == 0);
+
+    // Reset to defaults so later tests in this binary see the shipped values.
+    for (const char* k : {"episode_threshold_base", "episode_threshold_cap",
+                          "episode_threshold_step", "episode_step_minutes"})
+        store.set_setting(k, "");
+    CHECK(ragger::reload_config() == 4);
+    std::println(" OK");
+}
+
+// X2 (C2): kConfigSchema must have no value-initialized slots. GET /config,
+// MCP get_config and `config get -a` all iterate the schema, so an entry with
+// an empty key or an empty section is served to the dashboard as a blank row.
+void x2_schema_no_blank_entries() {
+    std::print("  x2_schema_no_blank_entries...\n");
+
+    const auto& schema = ragger::lang::config_schema();
+    CHECK(!schema.empty());
+
+    // (a) no empty key, (c) every section non-empty.
+    for (const auto& m : schema) {
+        CHECK(!m.key.empty());
+        CHECK(!m.section.empty());
+    }
+
+    // (b) keys unique.
+    std::vector<std::string_view> keys;
+    keys.reserve(schema.size());
+    for (const auto& m : schema) keys.push_back(m.key);
+    std::sort(keys.begin(), keys.end());
+    CHECK(std::adjacent_find(keys.begin(), keys.end()) == keys.end());
+
+    // The same entries reach the CLI accessor (`config get -a`).
+    const auto cli_keys = ragger::all_config_keys();
+    CHECK(cli_keys.size() == schema.size());
+    for (auto k : cli_keys) CHECK(!k.empty());
+
+    std::print(" ok\n");
+}
+
 int main() {
+    TestEnv env("config");  // must be first: set_config_persisted publishes through update_config
     std::print("Running config tests:\n");
     test_housekeeping_section_parsing();
+    x18_stale_cleanup_key_is_dropped();
+    p9a_test_shipped_defaults_applied();
+    p9b_test_summarizer_prompt_validation();
+    p10_pct_validation();
+    x26_auto_recall_min_similarity();
+    x27_summarizer_job_prompts();
+    x28_episode_prompt_validation();
+    x2_schema_no_blank_entries();
+    p9b_test_reload_config_episode_keys();
+    p9a_test_config_snapshots();
     test_catch_up_batch_size_default();
     test_catch_up_batch_size_ignores_nonpositive();
-    test_project_gap_days_parsing();
-    test_project_gap_days_default();
-    test_project_gap_days_ignores_nonpositive();
     test_logging_section_parsing();
     test_logging_section_defaults();
     test_inference_endpoint_parsing();
     test_socket_bind_config();
     test_bool_parsing_variants();
     test_inline_comments();
+    p10_is_sweepable_cmdline();
+    p10_filter_restart_argv();
 
     test_default_values();
+    test_api_keys_come_from_environment();
 
     test_ragger_base_default();
     test_ragger_base_override();
@@ -392,7 +735,7 @@ int main() {
           << "dimensions = 384\n"
           << "\n"
           << "[search]\n"
-          << "bm25_enabled = false\n"
+          << "fts_enabled = false\n"
           << "default_min_score = 0.5\n";
     }
 
@@ -401,10 +744,10 @@ int main() {
     (void)0;
     assert(cfg.port == 9999);
     assert(cfg.embedding_dimensions == 384);
-    assert(cfg.bm25_enabled == false);
+    assert(cfg.fts_enabled == false);
     assert(cfg.default_min_score == 0.5f);
     // Defaults for unspecified values
-    assert(cfg.bm25_weight == 4.0f);
+    assert(cfg.fts_weight == 4.0f);
     assert(cfg.normalize_home_path == true);
 
     std::filesystem::remove(tmp_conf);

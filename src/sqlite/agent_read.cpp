@@ -1,0 +1,1091 @@
+// Agent API reads: layered search (memory_search), full-row reads with
+// hierarchy expansion / conversation-history paging (memory_get), and the
+// deterministic timeline (Phase 4). The write surface (agent_update /
+// agent_review) lives in agent_write.cpp; helpers shared by both surfaces
+// (agent_snippet / parse_agent_handle / fetch_agent_row) live in
+// agent_common.cpp.
+//
+// Design contract lives in StorageBackend's docs and PHASE2-STEPS.md; the
+// hybrid scoring itself is reused untouched (Impl::search); everything here
+// is post-filtering, handle formatting, and row fetches.
+#include "sqlite/backend_impl.h"
+#include "sqlite/agent_common.h"
+#include "embedder.h"
+#include "config.h"
+#include "util/time.h"
+#include "util/sqlite.h"
+#include "sqlite/text_index.h"
+#include <format>
+#include "nlohmann_json.hpp"
+
+#include <sqlite3.h>
+#include <Eigen/Dense>
+
+#include <algorithm>
+#include <cctype>
+#include <ctime>
+#include <limits>
+#include <map>
+#include <optional>
+#include <set>
+#include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
+namespace ragger::sqlite {
+
+using json = nlohmann::json;
+
+namespace {
+
+// LR S78 (logic §2): tag normalization — trim ASCII whitespace and casefold;
+// applied to both the stored comma-list elements and the requested filter
+// tags, so matching is trimmed + case-insensitive per the contract.
+std::string norm_tag(std::string_view s) {
+    auto b = s.begin(), e = s.end();
+    while (b != e && (unsigned char)*b <= ' ') ++b;
+    while (e != b && (unsigned char)e[-1] <= ' ') --e;
+    std::string out(b, e);
+    for (auto& c : out)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return out;
+}
+
+// ---- since/until resolution -------------------------------------------
+// Accepted formats (PHASE2-STEPS step 3): "YYYY-MM-DD",
+// "YYYY-MM-DD HH:MM:SS", or relative "<N>d" / "<N>h" (ago). Returns a local
+// "YYYY-MM-DD HH:MM:SS" string so the comparison against the rendered
+// datetime() columns is a plain lexicographic compare (same format, same
+// local timezone). A bare date for `until` expands to end-of-day so the
+// day itself is inclusive. Anything else -> invalid_argument.
+// Hand-rolled parse (review 3B): runs on every agent_search call, and
+// libstdc++'s std::regex is slow; the grammar is fixed-width enough that
+// direct character checks are exact.
+std::string resolve_agent_time_bound(const std::string& s, bool end_of_day) {
+    auto fail = [&s]() -> std::string {
+        throw std::invalid_argument("bad since/until value: '" + s + "'");
+    };
+    auto digits_at = [&s](size_t at, size_t n) {
+        for (size_t i = at; i < at + n; ++i)
+            if (s[i] < '0' || s[i] > '9') return false;
+        return true;
+    };
+    auto num_at = [&s](size_t at, size_t n) {
+        int x = 0;
+        for (size_t i = at; i < at + n; ++i) x = x * 10 + (s[i] - '0');
+        return x;
+    };
+    auto valid_date = [](int mo, int d) { return mo >= 1 && mo <= 12 && d >= 1 && d <= 31; };
+    auto valid_time = [](int h, int mi, int se) { return h <= 23 && mi <= 59 && se <= 59; };
+
+    // "<N>d" / "<N>h" (ago). Checked before the date shapes: a date never
+    // ends in 'd'/'h', but a 9-digit relative value ("100000000d") is 10
+    // chars long and would otherwise be misrouted into the date branch.
+    // Capped during accumulation so absurd digit counts reject as
+    // invalid_argument — the regex version let them reach std::stol and
+    // throw out_of_range.
+    if (s.size() >= 2 && (s.back() == 'd' || s.back() == 'h')) {
+        const size_t nlen = s.size() - 1;
+        if (!digits_at(0, nlen)) fail();
+        long long n = 0;
+        for (size_t i = 0; i < nlen; ++i) {
+            n = n * 10 + (s[i] - '0');
+            if (n > 100000000LL) fail();   // absurd offset; reject rather than overflow
+        }
+        long long secs = (s.back() == 'd') ? n * 86400LL : n * 3600LL;
+        std::time_t tt = static_cast<std::time_t>(db_epoch() - secs);
+        return db_timestamp(tt);
+    }
+    // "YYYY-MM-DD" / "YYYY-MM-DD HH:MM:SS"
+    if (s.size() == 10 || s.size() == 19) {
+        if (!(digits_at(0, 4) && s[4] == '-' && digits_at(5, 2) &&
+              s[7] == '-' && digits_at(8, 2)))
+            fail();
+        if (!valid_date(num_at(5, 2), num_at(8, 2))) fail();
+        if (s.size() == 19) {
+            if (!(s[10] == ' ' && digits_at(11, 2) && s[13] == ':' &&
+                  digits_at(14, 2) && s[16] == ':' && digits_at(17, 2)))
+                fail();
+            if (!valid_time(num_at(11, 2), num_at(14, 2), num_at(17, 2))) fail();
+            return s;
+        }
+        return s + (end_of_day ? " 23:59:59" : " 00:00:00");
+    }
+    return fail();
+}
+} // anonymous namespace
+
+
+// =======================================================================
+// agent_search — one hybrid search over a wide pool, then post-filters:
+// layer, time window, session/exclude_session, decision status. Returns
+// handles + snippets only (full text via agent_get).
+// =======================================================================
+std::vector<AgentHit> Backend::Impl::agent_search(const AgentSearchQuery& q) {
+    // ---- 1. validate ----------------------------------------------------
+    // PHASE7 input aliases: a layers entry "decision"/"insight" is accepted
+    // and means knowledge restricted to that kind (existing agents keep
+    // working; hits always report layer:"knowledge" + a kind).
+    std::set<std::string> want_layers;
+    std::set<std::string> kind_filter;
+    for (const auto& l : q.layers) {
+        if (l == "decision" || l == "insight") {
+            want_layers.insert("knowledge");
+            kind_filter.insert(l);
+        } else if (l == "summary") {
+            // PHASE8: the summary layer is gone; notes are knowledge rows.
+            throw std::invalid_argument(
+                "layer 'summary' no longer exists — notes are knowledge "
+                "rows, use layers:[\"knowledge\"] with kinds:[\"note\"]");
+        } else if (l == "document") {
+            // LR S76 (D-7): documents left memory_search's layer list; they
+            // have their own verb.
+            throw std::invalid_argument(
+                "layer 'document' is not searched here — use document_search "
+                "(or the flat search tool), which covers documents");
+        } else if (!is_known_agent_layer(l)) {
+            throw std::invalid_argument("unknown layer: '" + l + "'");
+        } else want_layers.insert(l);
+    }
+    for (const auto& k : q.kinds)
+        if (!status::find_kind(k))
+            throw std::invalid_argument("unknown kind: '" + k + "'");
+    if (!q.kinds.empty()) {
+        if (kind_filter.empty()) kind_filter.insert(q.kinds.begin(), q.kinds.end());
+        else {
+            // explicit kinds intersect the alias set when both are given
+            std::set<std::string> inter;
+            for (const auto& k : q.kinds)
+                if (kind_filter.count(k)) inter.insert(k);
+            kind_filter = inter;
+        }
+        want_layers.insert("knowledge");
+    }
+    const std::string since_b = q.since.empty() ? "" : resolve_agent_time_bound(q.since, false);
+    const std::string until_b = q.until.empty() ? "" : resolve_agent_time_bound(q.until, true);
+    const int limit = std::clamp(q.limit, 1, 50);
+
+    // LR S77 (Q-A): mode selection. hybrid = today's blend (byte-identical);
+    // semantic = vector only (needs a ready embedder); keyword = text index
+    // only (works degraded too).
+    if (q.mode != "hybrid" && q.mode != "semantic" && q.mode != "keyword")
+        throw std::invalid_argument("mode must be one of: hybrid, semantic, keyword");
+    if (q.mode == "semantic" && !(embedder && embedder->ready()))
+        throw std::invalid_argument("semantic search needs an embedder");
+
+    // ---- session filter helpers ------------------------------------------
+    // GUID -> sessions.session_id once per filter. Ruling 2026-11-05
+    // (FINDING NOTES-GROUP-E): an unknown `session` GUID matches NOTHING —
+    // the intent the comments always stated; the old code fell through to
+    // "no filter" instead. `exclude_session` with an unknown GUID excludes
+    // nothing. S43: find_session is the single lookup-only helper (never
+    // creates). Resolved before the pools so the empty case costs no scoring.
+    std::optional<int> sess_id, excl_id;
+    if (!q.session.empty())         sess_id = find_session(q.session);
+    if (!q.exclude_session.empty()) excl_id = find_session(q.exclude_session);
+    if (!q.session.empty() && !sess_id)
+        return {};
+
+    // ---- 2. per-corpus candidate pools (LR S74, review #2) --------------
+    // Each requested corpus is scored on its own (the min-max normalization
+    // has always been per corpus) and contributes its OWN pool of
+    // max(limit*5, 50); one merged pool let a big corpus starve a narrow
+    // filter (live probe: layers:[turn_summary] + session -> 0 hits at
+    // limit 3). Empty layers keeps the default corpus set (conversation log
+    // = turn_summary + episode, plus knowledge; documents stay until S76
+    // moves them to their own verb). Degraded (no usable embedder) mirrors
+    // the contract with text-only scoring per corpus.
+    const int pool = std::max(limit * 5, 50);
+    std::set<std::string> corpora = want_layers;
+    if (corpora.empty())
+        corpora = {"turn_summary", "episode", "knowledge"};  // LR S76: document left
+    std::vector<SearchResult> cands;
+    {
+        // LR S81 (D5): FTS-only corpora (session titles) never enter the
+        // vector blend; semantic mode excludes them entirely. A request for
+        // FTS corpora only needs no embedder at all.
+        std::set<std::string> vec_corpora, lex_corpora;
+        for (const auto& c : corpora)
+            (is_fts_layer(c) ? lex_corpora : vec_corpora).insert(c);
+        if (q.mode == "semantic") lex_corpora.clear();
+        auto merge = [&](std::map<std::string, std::vector<SearchResult>> pools) {
+            for (auto& [src, v] : pools)
+                cands.insert(cands.end(), std::make_move_iterator(v.begin()),
+                             std::make_move_iterator(v.end()));
+        };
+        if (!vec_corpora.empty()) {
+            if (q.mode == "keyword" || !embedder || !embedder->ready())
+                merge(text_pools(q.query, vec_corpora, pool));
+            else
+                merge(hybrid_pools(q.query, vec_corpora, pool, q.mode == "hybrid"));
+        }
+        if (!lex_corpora.empty())
+            merge(text_pools(q.query, lex_corpora, pool));
+    }
+
+    // Knowledge status comes from the rows, never from cache
+    // metadata: the hybrid cache only holds active rows and the text-only
+    // path carries no status at all, so one authoritative batched read per
+    // structured layer keeps every path consistent (see below).
+
+    // 'active' / exact-status needs rows the hybrid cache deliberately hides
+    // (superseded/retired/pending). SEPARATE query path — ensure_knowledge_cache()
+    // keeps its narrow allow-list for normal search.
+    // FTS-only signal; ids already scored by the hybrid pass are not
+    // duplicated.
+    if (q.status != "active") {
+        push_text_weights();
+        auto supplement = [&](const char* table, const char* pk,
+                              const char* source) {
+            std::unordered_set<int> seen;
+            for (const auto& r : cands)
+                if (r.metadata.value("source", "") == source) seen.insert(r.id);
+            for (const auto& hit : text_index_->score_query(table, q.query)) {
+                if (seen.count(hit.id)) continue;
+                Stmt s(db, std::format(
+                    "SELECT text, status, ifnull(trigger,''), "
+                    "datetime(created_at,'unixepoch','localtime') "
+                    "FROM {} WHERE {} = ?", table, pk));
+                s.bind(1, hit.id);
+                if (!s.step()) continue;
+                const std::string status = s.column_text(1);
+                if (q.status != "any" && status != q.status) continue;
+                json meta = json::object();
+                meta["source"] = source;
+                meta["status"] = status;
+                SearchResult sr{hit.id, s.column_text(0), hit.score, std::move(meta), s.column_text(3)};
+                sr.vec_score  = -1.0f;
+                sr.fts_score = hit.score;
+                sr.blended    = hit.score;
+                cands.push_back(std::move(sr));
+            }
+        };
+        supplement("knowledge", "knowledge_id", "knowledge");
+    }
+
+    // ---- batched per-layer lookups (review 3A) ----------------------------
+    // One "WHERE <pk> IN (...)" query per layer per lookup instead of one
+    // prepared query per candidate hit (pool is up to 250 ids). Ids are
+    // DB-internal integers, so inlining them into the IN-list adds no
+    // injection surface and avoids bind-count limits. Rows that vanished
+    // mid-search simply stay absent from the maps.
+    std::map<std::string, std::vector<int>> ids_by_layer;
+    for (const auto& r : cands)
+        ids_by_layer[r.metadata.value("source", "")].push_back(r.id);
+
+    auto in_clause = [](const std::vector<int>& ids) {
+        std::string out;
+        for (int id : ids) {
+            if (!out.empty()) out += ',';
+            out += std::to_string(id);
+        }
+        return out;
+    };
+
+    // kind + status + trigger + tags for the knowledge corpus (the trigger
+    // read was the same N+1 pattern as the status read).
+    std::unordered_map<int, std::string> kno_kind, kno_status, kno_trigger, kno_tags;
+    {
+        auto it = ids_by_layer.find("knowledge");
+        if (it != ids_by_layer.end() && !it->second.empty()) {
+            Stmt s(db, std::format(
+                "SELECT knowledge_id, kind, status, ifnull(trigger,''), ifnull(tags,'') "
+                "FROM knowledge WHERE knowledge_id IN ({})", in_clause(it->second)));
+            while (s.step()) {
+                kno_kind[s.column_int(0)]    = s.column_text(1);
+                kno_status[s.column_int(0)]  = s.column_text(2);
+                kno_trigger[s.column_int(0)] = s.column_text(3);
+                kno_tags[s.column_int(0)]    = s.column_text(4);
+            }
+        }
+    }
+
+    // Owning session per layer (documents have neither; the raw-turn layer
+    // is produced only when opted into, LR S75). Only fetched when a session
+    // filter is active.
+    std::map<std::string, std::unordered_map<int, int>> session_of;
+    auto fill_owning = [&](std::map<std::string, std::unordered_map<int, int>>& out,
+                           const char* layer, const char* sql_prefix) {
+        auto it = ids_by_layer.find(layer);
+        if (it == ids_by_layer.end() || it->second.empty()) return;
+        Stmt s(db, std::format("{} IN ({})", sql_prefix, in_clause(it->second)));
+        while (s.step())
+            if (!s.is_null(1)) out[layer][s.column_int(0)] = s.column_int(1);
+    };
+    if (sess_id || excl_id) {
+        fill_owning(session_of, "turn_summary",
+                    "SELECT turn_summary_id, session_id FROM turn_summaries WHERE turn_summary_id");
+        fill_owning(session_of, "knowledge",
+                    "SELECT knowledge_id, session_id FROM knowledge WHERE knowledge_id");
+        // LR S73 (R13): episodes carry their own session_id, so the session
+        // filter reaches the episode layer too (it used to match nothing).
+        fill_owning(session_of, "episode",
+                    "SELECT episode_id, session_id FROM episodes WHERE episode_id");
+        // LR S75: same for the opt-in raw-turn corpus.
+        fill_owning(session_of, "turn",
+                    "SELECT turn_id, session_id FROM turns WHERE turn_id");
+    }
+    // LR S73: spans for episode-hit extras — one batched read for the pool
+    // (needed whether or not a session filter is active).
+    std::unordered_map<int, std::pair<long long, long long>> ep_span;
+    {
+        auto it = ids_by_layer.find("episode");
+        if (it != ids_by_layer.end() && !it->second.empty()) {
+            Stmt s(db, std::format(
+                "SELECT episode_id, span_start, span_end FROM episodes WHERE episode_id IN ({})",
+                in_clause(it->second)));
+            while (s.step())
+                ep_span[s.column_int(0)] = {s.column_int64(1), s.column_int64(2)};
+        }
+    }
+    // Session GUIDs for turn_summary / episode extras — one query for the whole pool.
+    std::unordered_map<int, std::string> guid_of_session;
+    {
+        std::vector<int> sids;
+        for (const auto& r : cands) {
+            const std::string src = r.metadata.value("source", "");
+            if ((src == "turn_summary" || src == "episode" ||
+                 src == "turn") &&                     // LR S75
+                r.metadata.contains("session_id"))
+                sids.push_back(r.metadata["session_id"].get<int>());
+            else if (src == "session")                 // LR S81: the hit IS the session
+                sids.push_back(r.id);
+        }
+        if (!sids.empty()) {
+            Stmt s(db, std::format(
+                "SELECT session_id, guid FROM sessions WHERE session_id IN ({})",
+                in_clause(sids)));
+            while (s.step()) guid_of_session[s.column_int(0)] = s.column_text(1);
+        }
+    }
+    // LR S81: spans for session-hit extras — one batched read for the pool.
+    std::unordered_map<int, std::pair<std::string, std::string>> sess_span;
+    {
+        auto it = ids_by_layer.find("session");
+        if (it != ids_by_layer.end() && !it->second.empty()) {
+            Stmt s(db, std::format(
+                "SELECT session_id, "
+                "CASE WHEN started_on IS NULL THEN '' "
+                "     ELSE datetime(started_on,'unixepoch','localtime') END, "
+                "CASE WHEN ended_on IS NULL THEN '' "
+                "     ELSE datetime(ended_on,'unixepoch','localtime') END "
+                "FROM sessions WHERE session_id IN ({})", in_clause(it->second)));
+            while (s.step())
+                sess_span[s.column_int(0)] = {s.column_text(1), s.column_text(2)};
+        }
+    }
+
+    // ---- 3. post-filter + shape ------------------------------------------
+    std::vector<AgentHit> hits;
+    for (const auto& r : cands) {
+        const std::string layer = r.metadata.value("source", "");
+        if (!want_layers.empty() && !want_layers.count(layer))
+            continue;
+
+        std::string row_status, row_kind;
+        if (layer == "knowledge") {
+            auto it = kno_status.find(r.id);
+            if (it == kno_status.end() || it->second.empty())
+                continue;                   // row vanished mid-search
+            row_status = it->second;
+            row_kind   = kno_kind[r.id];
+            if (!kind_filter.empty() && !kind_filter.count(row_kind))
+                continue;
+            if (q.status == "active") {
+                // NOTE: deliberately narrower than the search cache's
+                // allow-list: 'roadmap' is planned work, not an active ruling.
+                if (!status::is_in(status::kSearchActive, row_status)) continue;
+            } else if (q.status != "any" && row_status != q.status) {
+                continue;
+            }
+        }
+
+        // LR S78 (logic §2): tags filter — AND rule over knowledge rows: every
+        // listed tag must be a trimmed, case-insensitive element of the stored
+        // comma list (`project:x` is just a tag). Layers that carry no tags
+        // (turn, turn_summary, episode) are excluded while the filter is on.
+        if (!q.tags.empty()) {
+            if (layer != "knowledge") continue;
+            std::set<std::string> have;
+            if (auto tit = kno_tags.find(r.id); tit != kno_tags.end()) {
+                const std::string& stored = tit->second;
+                std::string::size_type start = 0;
+                while (start <= stored.size()) {
+                    auto comma = stored.find(',', start);
+                    const auto end = comma == std::string::npos ? stored.size() : comma;
+                    if (auto t = norm_tag(stored.substr(start, end - start)); !t.empty())
+                        have.insert(t);
+                    if (comma == std::string::npos) break;
+                    start = comma + 1;
+                }
+            }
+            bool all = true;
+            for (const auto& want : q.tags)
+                if (auto t = norm_tag(want); !t.empty() && !have.count(t)) { all = false; break; }
+            if (!all) continue;
+        }
+
+        if (!since_b.empty() && r.timestamp <  since_b) continue;
+        if (!until_b.empty() && r.timestamp >  until_b) continue;
+
+        if (sess_id || excl_id) {
+            std::optional<int> sid;
+            if (layer == "session") {
+                sid = r.id;   // LR S81: the hit IS the session
+            } else {
+                auto lit = session_of.find(layer);
+                if (lit != session_of.end()) {
+                    auto it = lit->second.find(r.id);
+                    if (it != lit->second.end()) sid = it->second;
+                }
+            }
+            if (sess_id && (!sid || *sid != *sess_id)) continue;
+            if (excl_id && sid && *sid == *excl_id) continue;
+        }
+
+        AgentHit h;
+        if (layer == "session") {
+            // LR S81 (D5): session hits are addressed by GUID, like timeline rows.
+            auto git = guid_of_session.find(r.id);
+            h.id = "session:" + (git != guid_of_session.end() ? git->second
+                                                              : std::to_string(r.id));
+        } else {
+            h.id = layer + ":" + std::to_string(r.id);
+        }
+        h.layer = layer;
+        h.score = r.blended;   // the value that actually ranked this hit
+        if (r.vec_score > 0.0f && r.fts_score > 0.0f)      h.matched_by = "both";
+        else if (r.fts_score > 0.0f)                       h.matched_by = "fts";
+        else                                                h.matched_by = "vector";
+        h.created = r.timestamp;
+        h.snippet = agent_snippet(r.text);
+        if (layer == "knowledge") {
+            h.extra = json{{"kind", row_kind}, {"status", row_status}};
+            auto it = kno_trigger.find(r.id);
+            if (it != kno_trigger.end() && !it->second.empty())
+                h.extra["trigger"] = it->second;
+        } else if (layer == "turn_summary") {
+            h.extra = json::object();
+            if (r.metadata.contains("turn_id"))
+                h.extra["turn_id"] = r.metadata["turn_id"];
+            if (r.metadata.contains("session_id")) {
+                auto it = guid_of_session.find(r.metadata["session_id"].get<int>());
+                h.extra["session"] = it != guid_of_session.end()
+                    ? it->second : std::string();
+            }
+        } else if (layer == "episode") {
+            // LR S73 (Q5): episode hits carry their session and span (the
+            // spans rendered like memory_timeline's `created`).
+            h.extra = json::object();
+            if (r.metadata.contains("session_id")) {
+                auto it = guid_of_session.find(r.metadata["session_id"].get<int>());
+                h.extra["session"] = it != guid_of_session.end()
+                    ? it->second : std::string();
+            }
+            auto sp = ep_span.find(r.id);
+            if (sp != ep_span.end()) {
+                h.extra["span_start"] = db_timestamp(static_cast<std::time_t>(sp->second.first));
+                h.extra["span_end"]   = db_timestamp(static_cast<std::time_t>(sp->second.second));
+            }
+        } else if (layer == "turn") {
+            // LR S75: raw-turn hits carry their session GUID.
+            h.extra = json::object();
+            if (r.metadata.contains("session_id")) {
+                auto it = guid_of_session.find(r.metadata["session_id"].get<int>());
+                h.extra["session"] = it != guid_of_session.end()
+                    ? it->second : std::string();
+            }
+        } else if (layer == "session") {
+            // LR S81 (D5): session hits carry their span (the title is the
+            // snippet; there is no body text to excerpt).
+            h.extra = json::object();
+            auto sp = sess_span.find(r.id);
+            h.extra["started_on"] = sp != sess_span.end() ? sp->second.first : "";
+            h.extra["ended_on"]   = sp != sess_span.end() ? sp->second.second : "";
+        }
+        hits.push_back(std::move(h));
+    }
+
+    // ---- 4. rank, budget, truncate ----------------------------------------
+    std::sort(hits.begin(), hits.end(),
+              [](const AgentHit& a, const AgentHit& b) { return a.score > b.score; });
+
+    std::vector<AgentHit> out;
+    long long token_sum = 0;   // running chars/4 over accepted snippets
+    for (auto& h : hits) {
+        if (static_cast<int>(out.size()) >= limit) break;
+        // Budget check happens BEFORE adding, but the first accepted hit is
+        // always kept ("always return at least 1 hit if any matched").
+        if (q.max_tokens > 0 && !out.empty() &&
+            (token_sum + static_cast<long long>(h.snippet.size())) / 4 > q.max_tokens)
+            break;
+        token_sum += static_cast<long long>(h.snippet.size());
+        out.push_back(std::move(h));
+    }
+    return out;
+}
+
+
+// =======================================================================
+// agent_document_search — LR S76 (D-7): documents are their own verb.
+// Same pool sizing and blend conventions as agent_search's per-corpus
+// pools; `source` filters case-insensitively on document_sources.path.
+// =======================================================================
+std::vector<AgentHit> Backend::Impl::agent_document_search(const DocumentSearchQuery& q) {
+    if (q.query.empty())
+        throw std::invalid_argument("query is required");
+    // LR S77: same mode contract as agent_search.
+    if (q.mode != "hybrid" && q.mode != "semantic" && q.mode != "keyword")
+        throw std::invalid_argument("mode must be one of: hybrid, semantic, keyword");
+    if (q.mode == "semantic" && !(embedder && embedder->ready()))
+        throw std::invalid_argument("semantic search needs an embedder");
+    const int limit = std::clamp(q.limit, 1, 50);
+    const int pool = std::max(limit * 5, 50);
+
+    std::vector<SearchResult> cands;
+    {
+        auto pools = (q.mode == "keyword" || !embedder || !embedder->ready())
+            ? text_pools(q.query, {"document"}, pool)
+            : hybrid_pools(q.query, {"document"}, pool, q.mode == "hybrid");
+        for (auto& [src, v] : pools)
+            cands.insert(cands.end(), std::make_move_iterator(v.begin()),
+                         std::make_move_iterator(v.end()));
+    }
+    if (cands.empty()) return {};
+
+    // chunk_index + source path for the pool — one batched read.
+    std::unordered_map<int, std::pair<int, std::string>> chunk_path;
+    {
+        std::vector<int> ids;
+        ids.reserve(cands.size());
+        for (const auto& r : cands) ids.push_back(r.id);
+        std::string placeholders;
+        for (int id : ids) {
+            if (!placeholders.empty()) placeholders += ',';
+            placeholders += std::to_string(id);
+        }
+        Stmt s(db, std::format(
+            "SELECT d.document_id, ifnull(d.chunk_index, 0), ifnull(ds.path, '') "
+            "FROM documents d LEFT JOIN document_sources ds "
+            "  ON d.document_source_id = ds.document_source_id "
+            "WHERE d.document_id IN ({})", placeholders));
+        while (s.step())
+            chunk_path[s.column_int(0)] = {s.column_int(1), s.column_text(2)};
+    }
+
+    auto lower = [](std::string v) {
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        return v;
+    };
+    const std::string src_needle = lower(q.source);
+    std::vector<AgentHit> hits;
+    for (const auto& r : cands) {
+        auto it = chunk_path.find(r.id);
+        if (it == chunk_path.end()) continue;   // row vanished mid-search
+        if (!src_needle.empty()) {
+            const std::string path = lower(it->second.second);
+            if (path.find(src_needle) == std::string::npos) continue;
+        }
+        AgentHit h;
+        h.id    = "document:" + std::to_string(r.id);
+        h.layer = "document";
+        h.score = r.blended;
+        if (r.vec_score > 0.0f && r.fts_score > 0.0f)      h.matched_by = "both";
+        else if (r.fts_score > 0.0f)                       h.matched_by = "fts";
+        else                                                h.matched_by = "vector";
+        h.created = r.timestamp;
+        h.snippet = agent_snippet(r.text);
+        h.extra = json{{"title", r.metadata.value("title", "")},
+                       {"source_path", it->second.second},
+                       {"chunk_index", it->second.first}};
+        hits.push_back(std::move(h));
+    }
+
+    std::sort(hits.begin(), hits.end(),
+              [](const AgentHit& a, const AgentHit& b) { return a.score > b.score; });
+    if (static_cast<int>(hits.size()) > limit) hits.resize(static_cast<size_t>(limit));
+    return hits;
+}
+
+
+// =======================================================================
+// agent_get — full rows by typed handle (mode 1) or paged session history
+// (mode 2). Exactly one mode per call.
+// =======================================================================
+
+
+// =======================================================================
+// agent_timeline — deterministic newest-first range scan (Phase 4).
+// No embeddings: plain indexed reads of turn_summaries / summaries,
+// key-paginated by "<created_epoch>:<rowid>" cursors (the embed_tables()
+// pattern: bounded read, strict "<" continuation, no OFFSET).
+// =======================================================================
+namespace {
+
+// Parse a timeline cursor "<epoch>:<rowid>". Both parts must be all-digits
+// non-negative; anything else -> invalid_argument.
+void parse_timeline_cursor(const std::string& cursor, long long& epoch, long long& rowid) {
+    auto fail = [&cursor]() -> std::invalid_argument {
+        return std::invalid_argument("bad cursor: '" + cursor + "'");
+    };
+    auto colon = cursor.find(':');
+    if (colon == std::string::npos || colon + 1 >= cursor.size())
+        throw fail();
+    const std::string a = cursor.substr(0, colon), b = cursor.substr(colon + 1);
+    auto all_digits = [](const std::string& s) {
+        return !s.empty() && std::all_of(s.begin(), s.end(),
+                                         [](unsigned char c) { return c >= '0' && c <= '9'; });
+    };
+    if (!all_digits(a) || !all_digits(b))
+        throw fail();
+    // Cap digit counts before stoll: an absurd value must reject as
+    // invalid_argument (caller error, HTTP 400), not escape as
+    // std::out_of_range (HTTP 500) -- same rule as the 3B parsers.
+    // 18 digits max stays below LLONG_MAX (~9.22e18).
+    if (a.size() > 18 || b.size() > 18)
+        throw fail();
+    epoch = std::stoll(a);
+    rowid = std::stoll(b);
+}
+
+// Convert a resolved "YYYY-MM-DD HH:MM:SS" bound to epoch seconds for
+// comparison against the INTEGER timestamp columns (same conversion as
+// resolve_epoch()).
+long long bound_to_epoch(const std::string& bound) {
+    auto tt = parse_db_timestamp(bound);
+    if (!tt)
+        throw std::invalid_argument("bad since/until value: '" + bound + "'");
+    return static_cast<long long>(*tt);
+}
+
+} // anonymous namespace
+
+json Backend::Impl::agent_timeline(const TimelineQuery& q) {
+    static const std::set<std::string> kGranularities = {"turn", "episode", "session", "knowledge"};
+    if (!kGranularities.count(q.granularity))
+        throw std::invalid_argument(
+            "granularity must be one of: turn, episode, session, knowledge");
+    const int limit = std::clamp(q.limit, 1, 100);
+
+    long long since_e = 0, until_e = 0;
+    if (!q.since.empty()) since_e = bound_to_epoch(resolve_agent_time_bound(q.since, false));
+    if (!q.until.empty()) until_e = bound_to_epoch(resolve_agent_time_bound(q.until, true));
+
+    std::optional<long long> cur_epoch, cur_row;
+    if (!q.cursor.empty()) {
+        long long e = 0, r = 0;
+        parse_timeline_cursor(q.cursor, e, r);
+        cur_epoch = e;
+        cur_row = r;
+    }
+
+    // Session filter: Ruling 2026-11-05 — an unknown GUID matches NOTHING
+    // (see agent_search). S43: find_session is the single lookup-only helper.
+    std::optional<int> sess_id;
+    if (!q.session.empty())
+        sess_id = find_session(q.session);
+    if (!q.session.empty() && !sess_id)
+        return json{{"items", json::array()}, {"next_cursor", nullptr}};
+
+    // Each granularity builds one SELECT over (created_epoch, rowid, text,
+    // session_guid) with the same filter/cursor plumbing, ordered newest
+    // first. The continuation predicate is strict "<" on the (created, rowid)
+    // pair — never OFFSET. `first_expr` is the created-epoch expression; it
+    // must match the first projected column so the cursor and the ORDER BY
+    // agree.
+    std::string sql;
+    std::string first_expr, row_expr, since_expr;
+    std::vector<std::pair<int, long long>> int_binds;   // positional binds (1-based)
+    if (q.granularity == "turn") {
+        // One entry per turn: its turn_summary text when one exists, else the
+        // raw user text (turns that haven't been summarized yet). Keyed by
+        // (turn_datetime, turn_id) — turn_summaries.turn_id is unique, and
+        // fallback rows are exactly the turns without a summary row.
+        first_expr =
+            "COALESCE((SELECT ts.turn_datetime FROM turn_summaries ts "
+            "WHERE ts.turn_id = t.turn_id AND ts.text != ''), t.created_at)";
+        row_expr = "t.turn_id";
+        since_expr = first_expr;
+        sql =
+            "SELECT " + first_expr + ", " + row_expr + ", "
+            "  COALESCE((SELECT ts.text FROM turn_summaries ts "
+            "            WHERE ts.turn_id = t.turn_id AND ts.text != ''), t.user_text), "
+            "  COALESCE((SELECT guid FROM sessions WHERE session_id = t.session_id), '') "
+            "FROM turns t "
+            "WHERE (t.user_text != '' OR EXISTS "
+            "  (SELECT 1 FROM turn_summaries ts WHERE ts.turn_id = t.turn_id AND ts.text != ''))";
+        if (sess_id) {
+            sql += " AND t.session_id = ?";
+            int_binds.push_back({static_cast<int>(int_binds.size()) + 1, *sess_id});
+        }
+    } else if (q.granularity == "episode") {
+        // PHASE5 C.3: episodes live in their own table now. Rows ordered by
+        // span_start; a date filter matches on SPAN OVERLAP (span_end >=
+        // since AND span_start <= until), not on span start alone.
+        first_expr = "sm.span_start";
+        row_expr = "sm.episode_id";
+        since_expr = "sm.span_end";
+        sql =
+            "SELECT sm.span_start, sm.episode_id, sm.text, "
+            "  COALESCE((SELECT guid FROM sessions WHERE session_id = sm.session_id), '') "
+            "FROM episodes sm WHERE sm.text != ''";
+        if (sess_id) {
+            sql += " AND sm.session_id = ?";
+            int_binds.push_back({static_cast<int>(int_binds.size()) + 1, *sess_id});
+        }
+    } else if (q.granularity == "knowledge") {
+        // LR S79: knowledge rows newest-first by created_at. No span, so the
+        // date filter degenerates to plain created_at bounds (the overlap
+        // rule with itself).
+        first_expr = "k.created_at";
+        row_expr = "k.knowledge_id";
+        since_expr = "k.created_at";
+        sql =
+            "SELECT k.created_at, k.knowledge_id, k.text, "
+            "  COALESCE((SELECT guid FROM sessions WHERE session_id = k.session_id), ''), "
+            "  k.kind, k.status "
+            "FROM knowledge k WHERE 1=1";
+        if (sess_id) {
+            sql += " AND k.session_id = ?";
+            int_binds.push_back({static_cast<int>(int_binds.size()) + 1, *sess_id});
+        }
+    } else { // session
+        // PHASE5 C.3: one row per session in range — never reads summaries
+        // (there are no session rollups at 0.17). started_on/ended_on are the
+        // derived turn span (NULL for a session with no turns). Date filters
+        // match on span overlap, same rule as episodes.
+        first_expr = "COALESCE(s.started_on, s.ended_on, 0)";
+        row_expr = "s.session_id";
+        since_expr = "COALESCE(s.ended_on, s.started_on, 0)";
+        sql =
+            "SELECT " + first_expr + ", " + row_expr + ", "
+            "  s.guid, s.name, "
+            "  datetime(s.started_on,'unixepoch','localtime'), "
+            "  datetime(s.ended_on,'unixepoch','localtime'), "
+            "  (SELECT COUNT(*) FROM episodes e WHERE e.session_id = s.session_id), "
+            "  COALESCE((SELECT e.text FROM episodes e "
+            "            WHERE e.session_id = s.session_id "
+            "            ORDER BY e.span_start DESC, e.episode_id DESC LIMIT 1), '') "
+            "FROM sessions s WHERE 1=1";
+        if (sess_id) {
+            sql += " AND s.session_id = ?";
+            int_binds.push_back({static_cast<int>(int_binds.size()) + 1, *sess_id});
+        }
+    }
+
+    // Time bounds and the cursor apply to the first projected column pair
+    // (created epoch, rowid) — one continuation predicate for all three
+    // granularities: strictly older in (created, rowid) order. The `since`
+    // bound uses since_expr (span end for episodes/sessions — overlap).
+    if (since_e) sql += " AND " + since_expr + " >= ?";
+    if (until_e) sql += " AND " + first_expr + " <= ?";
+    if (cur_epoch)
+        sql += " AND (" + first_expr + " < ? OR (" + first_expr + " = ? AND " + row_expr + " < ?))";
+    sql += " ORDER BY 1 DESC, 2 DESC LIMIT ?";
+
+    Stmt s(db, sql);
+    int bind = 1;
+    for (auto& [idx, v] : int_binds) { (void)idx; s.bind(bind++, v); }
+    if (since_e) s.bind(bind++, since_e);
+    if (until_e) s.bind(bind++, until_e);
+    if (cur_epoch) {
+        s.bind(bind++, *cur_epoch);
+        s.bind(bind++, *cur_epoch);
+        s.bind(bind++, *cur_row);
+    }
+    s.bind(bind, limit + 1);   // one extra row decides next_cursor
+
+    json items = json::array();
+    long long last_epoch = 0, last_row = 0;
+    bool more = false;
+    int rows = 0;
+    while (s.step()) {
+        ++rows;
+        if (rows > limit) { more = true; break; }
+        last_epoch = s.column_int64(0);
+        last_row   = s.column_int64(1);
+        if (q.granularity == "session") {
+            // PHASE5 C.3 shape: the session itself, its derived span, and a
+            // snippet of its newest episode ("" when it has none).
+            items.push_back({
+                {"session_id", last_row},
+                {"guid",       s.column_text(2)},
+                {"name",       s.is_null(3) ? json(nullptr) : json(s.column_text(3))},
+                {"started_on", s.is_null(4) ? json(nullptr) : json(s.column_text(4))},
+                {"ended_on",   s.is_null(5) ? json(nullptr) : json(s.column_text(5))},
+                {"episodes",   s.column_int(6)},
+                {"snippet",    agent_snippet(s.column_text(7))},
+            });
+            continue;
+        }
+        const std::string text = s.column_text(2);
+        json item = {
+            // Turn-granularity entries are keyed by turn_id (the summary is
+            // looked up per turn), so the handle is turn:<id> — resolvable
+            // by agent_get even when the entry shows summary text.
+            {"id",      q.granularity == "turn"
+                           ? std::format("turn:{}", last_row)
+                           : q.granularity == "knowledge"
+                               ? std::format("knowledge:{}", last_row)
+                               : std::format("episode:{}", last_row)},
+            {"created", db_timestamp(static_cast<std::time_t>(last_epoch))},
+            {"session", s.column_text(3)},
+            {"text",    agent_snippet(text)},
+        };
+        if (q.granularity == "knowledge") {   // LR S79
+            item["kind"]   = s.column_text(4);
+            item["status"] = s.column_text(5);
+        }
+        items.push_back(std::move(item));
+    }
+
+    return json{
+        {"items",       std::move(items)},
+        {"next_cursor", more
+            ? json(std::format("{}:{}", last_epoch, last_row))
+            : json(nullptr)},
+    };
+}
+
+
+// =======================================================================
+// agent_get — full rows by typed handle (mode 1) or paged session history
+// (mode 2). Exactly one mode per call.
+// =======================================================================
+json Backend::Impl::agent_get(const AgentGetQuery& q) {
+    const bool has_ids  = !q.ids.empty();
+    const bool has_sess = !q.session.empty();
+    if (has_ids == has_sess)
+        throw std::invalid_argument(
+            "agent_get: exactly one of ids or session must be set");
+
+    // ---- mode 1: full rows by handle -------------------------------------
+    if (has_ids) {
+        json items = json::array();
+        for (const auto& handle : q.ids) {
+            // PHASE7 (TODO Q3 default): typed handles decision:N / insight:N
+            // are rejected — knowledge:N is the only form. PHASE8: summary:N
+            // too (notes are knowledge rows).
+            if (is_legacy_knowledge_handle(handle))
+                throw std::invalid_argument("use knowledge:<id>");
+            if (is_legacy_summary_handle(handle))
+                throw std::invalid_argument(
+                    "use knowledge:<id> (notes are knowledge rows)");
+            std::string layer;
+            int rowid = 0;
+            if (!parse_agent_handle(handle, layer, rowid)) {
+                items.push_back({{"id", handle}, {"error", "not found"}});
+                continue;
+            }
+            json item = fetch_agent_row(db, layer, rowid);
+            if (item.is_null()) {
+                items.push_back({{"id", handle}, {"error", "not found"}});
+                continue;
+            }
+
+            if (q.expand == "context") {
+                json expanded = json::array();
+                if (layer == "turn" || layer == "turn_summary") {
+                    // The 2 turns before and after in the same session. A
+                    // turn_summary anchors on its source turn; a pruned
+                    // (turn_id NULL) summary or an anonymous turn has no
+                    // context window.
+                    int anchor = rowid;
+                    if (layer == "turn_summary") {
+                        Stmt t(db, "SELECT turn_id FROM turn_summaries WHERE turn_summary_id = ?");
+                        t.bind(1, rowid);
+                        if (!t.step() || t.is_null(0)) anchor = -1;
+                        else anchor = t.column_int(0);
+                    }
+                    // LR S79 (P10): neighbors are the session order
+                    // (created_at, turn_id), not raw ids — ids interleave
+                    // across sessions and out-of-order inserts reorder them.
+                    int anchor_sess = 0;
+                    long long anchor_ts = 0;
+                    if (anchor >= 0) {
+                        Stmt a(db, "SELECT session_id, created_at FROM turns WHERE turn_id = ?");
+                        a.bind(1, anchor);
+                        if (!a.step() || a.is_null(0)) anchor = -1;
+                        else { anchor_sess = a.column_int(0); anchor_ts = a.column_int64(1); }
+                    }
+                    if (anchor >= 0) {
+                        std::vector<int> before;
+                        Stmt c(db, "SELECT turn_id FROM turns WHERE session_id = ? "
+                                   "AND (created_at < ? OR (created_at = ? AND turn_id < ?)) "
+                                   "ORDER BY created_at DESC, turn_id DESC LIMIT 2");
+                        c.bind(1, anchor_sess).bind(2, anchor_ts)
+                         .bind(3, anchor_ts).bind(4, anchor);
+                        while (c.step()) before.push_back(c.column_int(0));
+                        std::reverse(before.begin(), before.end());
+                        for (int id : before)
+                            expanded.push_back(fetch_agent_row(db, "turn", id));
+                        Stmt n(db, "SELECT turn_id FROM turns WHERE session_id = ? "
+                                   "AND (created_at > ? OR (created_at = ? AND turn_id > ?)) "
+                                   "ORDER BY created_at ASC, turn_id ASC LIMIT 2");
+                        n.bind(1, anchor_sess).bind(2, anchor_ts)
+                         .bind(3, anchor_ts).bind(4, anchor);
+                        while (n.step())
+                            expanded.push_back(fetch_agent_row(db, "turn", n.column_int(0)));
+                    }
+                } else if (layer == "document") {
+                    // chunk_index ±1 from the same document_source_id.
+                    Stmt c(db, "SELECT document_id FROM documents "
+                               "WHERE document_source_id = ("
+                               "  SELECT document_source_id FROM documents WHERE document_id = ?) "
+                               "  AND document_source_id IS NOT NULL "
+                               "  AND chunk_index IN ("
+                               "    (SELECT chunk_index FROM documents WHERE document_id = ?) - 1, "
+                               "    (SELECT chunk_index FROM documents WHERE document_id = ?) + 1) "
+                               "ORDER BY chunk_index");
+                    c.bind(1, rowid);
+                    c.bind(2, rowid);
+                    c.bind(3, rowid);
+                    while (c.step())
+                        expanded.push_back(fetch_agent_row(db, "document", c.column_int(0)));
+                }
+                if (!expanded.empty()) item["expanded"] = std::move(expanded);
+            } else if (q.expand == "sources") {
+                json expanded = json::array();
+                if (layer == "knowledge") {
+                    // LR S80 (D2): its evidence EPISODES, full rows. The join
+                    // filter keeps ''-text episodes out of expansion even if
+                    // a link survived (RULES 6).
+                    Stmt e(db,
+                        "SELECT de.episode_id FROM knowledge_episode_evidence de "
+                        "JOIN episodes ep ON ep.episode_id = de.episode_id "
+                        "WHERE de.knowledge_id = ? AND ep.text != '' "
+                        "ORDER BY de.episode_id");
+                    e.bind(1, rowid);
+                    while (e.step())
+                        expanded.push_back(fetch_agent_row(db, "episode", e.column_int(0)));
+                } else if (layer == "episode") {
+                    // Recorded membership (PHASE5 C.2): replaces the old
+                    // turn_datetime BETWEEN span heuristic, which
+                    // mis-assigned turn summaries on same-second boundaries.
+                    Stmt c(db, "SELECT turn_summary_id FROM turn_summaries "
+                               "WHERE episode_id = ? AND text != '' "
+                               "ORDER BY turn_datetime, turn_summary_id");
+                    c.bind(1, rowid);
+                    while (c.step())
+                        expanded.push_back(fetch_agent_row(db, "turn_summary", c.column_int(0)));
+                } else if (layer == "turn_summary") {
+                    // LR S86: one level down the hierarchy — its turn (turn:N).
+                    Stmt c(db, "SELECT turn_id FROM turn_summaries "
+                               "WHERE turn_summary_id = ? AND turn_id IS NOT NULL");
+                    c.bind(1, rowid);
+                    while (c.step())
+                        expanded.push_back(fetch_agent_row(db, "turn", c.column_int(0)));
+                }
+                // PHASE8: the old `summary` expand branch is gone with the
+                // layer; notes carry their evidence links like any knowledge row.
+                if (!expanded.empty()) item["expanded"] = std::move(expanded);
+            } else if (q.expand == "chain" && layer == "knowledge") {
+                // Full supersede lineage oldest -> newest: walk `supersedes`
+                // backwards to the root, then forwards from the anchor. The
+                // visited set makes a corrupt cycle terminate. PHASE7: the
+                // chain may cross kinds (insight -> decision promotion).
+                std::vector<int> chain_ids;
+                std::unordered_set<int> visited{rowid};
+                {
+                    std::vector<int> up;
+                    int cur = rowid;
+                    while (true) {
+                        Stmt p(db, "SELECT supersedes FROM knowledge WHERE knowledge_id = ?");
+                        p.bind(1, cur);
+                        if (!p.step() || p.is_null(0)) break;
+                        int parent = p.column_int(0);
+                        if (visited.count(parent)) break;
+                        visited.insert(parent);
+                        up.push_back(parent);
+                        cur = parent;
+                    }
+                    std::reverse(up.begin(), up.end());
+                    chain_ids = std::move(up);
+                    chain_ids.push_back(rowid);
+                }
+                {
+                    std::vector<int> queue{rowid};
+                    while (!queue.empty()) {
+                        std::vector<int> next;
+                        for (int cur : queue) {
+                            Stmt c(db, "SELECT knowledge_id FROM knowledge WHERE supersedes = ? "
+                                       "ORDER BY knowledge_id");
+                            c.bind(1, cur);
+                            while (c.step()) {
+                                int child = c.column_int(0);
+                                if (visited.count(child)) continue;
+                                visited.insert(child);
+                                chain_ids.push_back(child);
+                                next.push_back(child);
+                            }
+                        }
+                        queue = std::move(next);
+                    }
+                }
+                json expanded = json::array();
+                for (int id : chain_ids)
+                    expanded.push_back(fetch_agent_row(db, layer, id));
+                item["expanded"] = std::move(expanded);
+            }
+
+            items.push_back(std::move(item));
+        }
+        return json{{"items", std::move(items)}};
+    }
+
+    // ---- mode 2: paged conversation history for one session --------------
+    // "current" is NOT resolved here — the HTTP/MCP layer passes a real GUID.
+    const int limit = std::clamp(q.limit, 1, 100);
+    std::string sql =
+        "SELECT t.turn_id, t.user_text, t.assistant_text, "
+        "       datetime(t.created_at,'unixepoch','localtime'), "
+        "       (SELECT text FROM turn_summaries ts "
+        "         WHERE ts.turn_id = t.turn_id AND ts.text != '' LIMIT 1), "
+        // LR S79 (P10) + S80 (D2): the hierarchy above each turn, so a reader
+        // can fill evidence[] with episode:<id> handles.
+        "       (SELECT ts.turn_summary_id FROM turn_summaries ts "
+        "         WHERE ts.turn_id = t.turn_id AND ts.text != '' LIMIT 1), "
+        "       (SELECT ts.episode_id FROM turn_summaries ts "
+        "         WHERE ts.turn_id = t.turn_id AND ts.text != '' LIMIT 1) "
+        "FROM turns t JOIN sessions s ON s.session_id = t.session_id "
+        "WHERE s.guid = ?";
+    if (q.after_turn  > 0) sql += " AND t.turn_id > ?";
+    if (q.before_turn > 0) sql += " AND t.turn_id < ?";
+    sql += " ORDER BY t.turn_id ASC LIMIT ?";
+
+    Stmt s(db, sql);
+    int bind = 1;
+    s.bind(bind++, q.session);
+    if (q.after_turn  > 0) s.bind(bind++, q.after_turn);
+    if (q.before_turn > 0) s.bind(bind++, q.before_turn);
+    s.bind(bind, limit + 1);   // one extra row tells us whether more exist
+
+    json turns = json::array();
+    int last_turn_id = 0;
+    bool more = false;
+    int rows = 0;
+    while (s.step()) {
+        ++rows;
+        if (rows > limit) { more = true; break; }   // the probe row exists
+        json t = {
+            {"id",        std::format("turn:{}", s.column_int(0))},
+            {"user",      s.column_text(1)},
+            {"assistant", s.is_null(2) ? json(nullptr) : json(s.column_text(2))},
+            {"created",   s.column_text(3)},
+            {"summary",   s.is_null(4) ? json(nullptr) : json(s.column_text(4))},
+            {"turn_summary_id", s.is_null(5) ? json(nullptr) : json(s.column_int(5))},
+            {"episode_id",      s.is_null(6) ? json(nullptr) : json(s.column_int(6))},
+        };
+        last_turn_id = s.column_int(0);
+        turns.push_back(std::move(t));
+    }
+
+    return json{
+        {"session",    q.session},
+        {"turns",      std::move(turns)},
+        {"next_after", more ? json(last_turn_id) : json(nullptr)},
+    };
+}
+
+
+} // namespace ragger::sqlite

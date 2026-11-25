@@ -36,7 +36,7 @@ void set_ragger_base_override(const std::string& path);
 
 /// The Ragger base directory: the `--ragger-base` override if set, else
 /// `$HOME/.ragger`. This is the ONE place every other Ragger path (DB,
-/// settings.ini, logs, models, recipes, formats, socket, token) is rooted
+/// logs, models, recipes, formats, socket, token) is rooted
 /// from — so pointing this at a throwaway directory relocates the entire
 /// on-disk footprint for testing, with nothing else to configure.
 std::string ragger_base_dir();
@@ -44,7 +44,7 @@ std::string ragger_base_dir();
 /// Archive one or more SQLite DBs' file(s) (each DB's main file, plus its
 /// -wal/-shm siblings if present) into ONE
 /// "<primary-stem>_BACKUP_<YYYYMMDD-HHMMSS>.tar.gz" next to the primary DB --
-/// same naming convention sqlite::Backend::maybe_backup_before_migration()
+/// same naming convention as the pre-migration backup in schema.cpp
 /// uses for pre-migration snapshots. `extra_db_paths` are bundled into the
 /// same archive (e.g. stats.db alongside memories.db) -- entries that don't
 /// exist are silently skipped, so an optional/never-created sibling DB is
@@ -56,5 +56,13 @@ std::string ragger_base_dir();
 /// std::runtime_error if every method fails.
 std::string archive_db_files(const std::string& db_path,
                               const std::vector<std::string>& extra_db_paths = {});
+
+/// Validate a HuggingFace "provider/model" repo id for use as a filesystem
+/// path segment (POST /models/download). Rejects anything that could escape
+/// the models directory or smuggle separators: requires exactly one '/',
+/// both parts non-empty, each part only [A-Za-z0-9._-] and not "." or "..",
+/// no backslash, no embedded NUL, total length <= 200. Pure — no filesystem
+/// access. (C §1.6)
+bool is_safe_model_repo(std::string_view repo);
 
 } // namespace ragger

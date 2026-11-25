@@ -7,6 +7,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <optional>
 #include <utility>
 
@@ -69,5 +70,23 @@ std::string issue_token(UserStore& db, const std::string& user);
 /// Verify a bearer token. Hashes the presented value and looks it up in
 /// the DB. Returns ok=true with username if found; no time window applied.
 AuthResult verify_token(UserStore& db, const std::string& token);
+
+/// Cross-origin write guard (C §1.8). Safe methods (GET/HEAD/OPTIONS) are
+/// always allowed; a request with no Origin header (curl, CLI, plugin, MCP)
+/// is allowed; otherwise the Origin's authority (scheme stripped) must equal
+/// the Host header exactly, case-insensitively — a page on another site
+/// always sends its own origin, so this blocks cross-site POST/PUT/DELETE.
+bool request_origin_allowed(std::string_view method,
+                            std::string_view origin,
+                            std::string_view host);
+
+/// True if a Host-header authority names the loopback interface: exactly
+/// "localhost", "127.0.0.1" or "::1" (case-insensitive), with an optional
+/// ":port" and bracketed IPv6 ("[::1]:7777") accepted. Nothing else counts —
+/// not 127.0.0.2, not 0.0.0.0, not any prefix/suffix match, not an empty or
+/// malformed value. Guards the loopback auth bypass against DNS rebinding:
+/// a page on an attacker domain that resolves to 127.0.0.1 sends its own
+/// Host, so it is no longer pre-authenticated.
+bool host_is_loopback(std::string_view host_header);
 
 } // namespace ragger

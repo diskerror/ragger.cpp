@@ -54,6 +54,10 @@ public:
     /// Set or replace a settings value.
     void set_setting(const std::string& key, const std::string& value);
 
+    /// Read / write a row of `semqlite_config` (SemanticSQLite's key names).
+    std::optional<std::string> get_semqlite_config(const std::string& key);
+    void set_semqlite_config(const std::string& key, const std::string& value);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> pImpl;

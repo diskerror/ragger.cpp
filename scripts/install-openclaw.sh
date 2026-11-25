@@ -55,6 +55,27 @@ for f in openclaw.plugin.json index.ts; do
     fi
 done
 
+# --- Agent usage instructions (idempotent; preserves the user's edits) ---
+# The plugin / MCP server load ~/.ragger/agent-memory-instructions.md at run
+# time. Install it if missing. If an edited copy differs from the shipped one,
+# keep it and write the shipped version beside it as .new so the user can diff.
+INSTR_SRC="$SRC/docs/agent-memory-instructions.md"
+INSTR_DST="$HOME/.ragger/agent-memory-instructions.md"
+mkdir -p "$HOME/.ragger"
+if [ ! -f "$INSTR_SRC" ]; then
+    warn "Instructions source missing at $INSTR_SRC — skipping."
+elif [ ! -f "$INSTR_DST" ]; then
+    cp "$INSTR_SRC" "$INSTR_DST"
+    info "  installed $INSTR_DST"
+elif cmp -s "$INSTR_SRC" "$INSTR_DST"; then
+    info "  $INSTR_DST is up to date"
+else
+    cp "$INSTR_SRC" "$INSTR_DST.new"
+    warn "  kept your $INSTR_DST (it differs from the shipped version)."
+    warn "  Shipped copy written to $INSTR_DST.new — diff it, merge, or"
+    warn "  adopt it with: mv \"$INSTR_DST.new\" \"$INSTR_DST\""
+fi
+
 # Ensure openclaw.json wires the ragger memory plugin. We merge conservatively:
 # only set keys that are missing, never clobber user-set values.
 if [ ! -f "$OPENCLAW_CFG" ]; then

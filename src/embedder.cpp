@@ -3,7 +3,9 @@
  */
 #include "embedder.h"
 #include "config.h"
+#include "util/fs.h"
 #include "lang.h"
+#include "Logger.h"
 #include "tokenizer_wrapper.h"
 #include <onnxruntime_cxx_api.h>
 #include <cmath>
@@ -194,7 +196,7 @@ struct Embedder::Impl {
 
         std::vector<std::string> headers{"Content-Type: application/json"};
         if (!ext_api_key.empty()) {
-            headers.push_back("Authorization: *** " + ext_api_key);
+            headers.push_back(util::bearer_header(ext_api_key));
         }
 
         util::HttpClient http;
@@ -262,7 +264,7 @@ struct Embedder::Impl {
 
         std::vector<std::string> headers;
         if (!ext_api_key.empty()) {
-            headers.push_back("Authorization: *** " + ext_api_key);
+            headers.push_back(util::bearer_header(ext_api_key));
         }
 
         util::HttpClient http;
@@ -290,7 +292,11 @@ struct Embedder::Impl {
             auto vec = encode_external("dimension probe");
             last_probe_sane = is_plausible_embedding(vec);
             return static_cast<int>(vec.size());
+        } catch (const std::exception& e) {   // S27 (C §4): never silent
+            Diskerror::Logger::debug(std::format("probe_dimensions: {}", e.what()));
+            return 0;
         } catch (...) {
+            Diskerror::Logger::debug("probe_dimensions: unknown exception");
             return 0;
         }
     }
@@ -358,6 +364,30 @@ Embedder::embed_batch(const std::vector<std::string>& texts) const {
     out.reserve(texts.size());
     for (const auto& t : texts) out.push_back(embed(t));
     return out;
+}
+
+std::unique_ptr<Embedder> make_embedder_from_config(
+    const Config& cfg,
+    const std::string& engine_override,
+    const std::string& model_override,
+    std::optional<int> dims_override) {
+    const std::string engine =
+        engine_override.empty() ? cfg.embedding_engine : engine_override;
+    if (engine == "external") {
+        return std::make_unique<Embedder>(
+            cfg.embedding_external_host,
+            cfg.embedding_external_port,
+            cfg.embedding_external_model,
+            cfg.embedding_external_api_key,
+            dims_override.value_or(cfg.embedding_dimensions));
+    }
+    // Internal (ONNX): every managed model lives at <base>/models/<provider>/
+    // <model>, so an override resolves exactly the way resolved_model_dir()
+    // does for the configured name.
+    const std::string model_dir = model_override.empty()
+        ? cfg.resolved_model_dir()
+        : ragger_base_dir() + "/models/" + model_override;
+    return std::make_unique<Embedder>(model_dir);
 }
 
 } // namespace ragger
