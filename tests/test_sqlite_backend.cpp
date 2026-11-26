@@ -4219,6 +4219,17 @@ void p1t_test_import_probes(ragger::Embedder& emb) {
     CHECK(!db.turn_exists_fuzzy("Slow probe question", "2026-04-15 09:30:00", 90, 90));
     // ...but not a same-text message sent the next day.
     CHECK(!db.turn_exists_fuzzy("Slow probe question", "2026-04-16 09:30:00", 90, 3600));
+    // Mid-turn steering: the captured turn is the prompt plus the steering
+    // message, so the imported Telegram message is only a PREFIX of it.
+    int tp = db.store_turn("Check the last 22 turns when sorted by date, please do it now"
+                           "\n\n[steering] and also check the episodes table",
+                           "Prefix probe answer", "test-model",
+                           false, "", "2026-04-15 10:05:00");
+    CHECK(tp > 0);
+    CHECK(db.turn_exists_fuzzy("Check the last 22 turns when sorted by date, please do it now",
+                               "2026-04-15 10:04:00", 90, 3600));
+    // A short message must NOT prefix-match an unrelated turn.
+    CHECK(!db.turn_exists_fuzzy("Check the last", "2026-04-15 10:04:00", 90, 3600));
 
     // update_turn_meta must write an INTEGER epoch, agreeing with a store
     // that used the same source_timestamp.

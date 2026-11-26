@@ -2102,9 +2102,15 @@ static std::string tags_from_metadata(const json& metadata) {
         // bounds (the old datetime(?,?) form compared TEXT to INTEGER and
         // never matched).
         const int64_t ep = resolve_epoch(ts);
+        // Prefix match, not just equality: when the user steers mid-turn, the
+        // captured user_text is the original prompt with the steering message
+        // appended, so it only STARTS with the imported message. Exact match
+        // alone re-imported every steered turn. Guarded by a length floor so
+        // short texts ("ok", "yes") can't prefix-match an unrelated turn.
         Stmt s(db,
-            "SELECT 1 FROM turns WHERE user_text = ? "
-            "AND created_at BETWEEN ? AND ? LIMIT 1");
+            "SELECT 1 FROM turns WHERE (user_text = ?1 OR "
+            "(length(?1) >= 40 AND substr(user_text, 1, length(?1)) = ?1)) "
+            "AND created_at BETWEEN ?2 AND ?3 LIMIT 1");
         s.bind(1, user_text);
         s.bind(2, ep - back_seconds);
         s.bind(3, ep + forward_seconds);
