@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import http.client
 import socket
@@ -1044,11 +1045,47 @@ class RaggerMemoryProvider(MemoryProvider):
             logger.debug("Ragger: session title lookup failed for %s: %s", session_id, exc)
             return ""
 
+    # Hermes wraps a mid-turn steering message before handing the turn to a
+    # memory provider: the user's addition arrives labelled and carrying the
+    # gateway's own routing envelope. None of that is conversation — stored
+    # verbatim it pollutes the remembered prompt and stops an imported copy
+    # of the same exchange from matching it. Strip the scaffolding and join
+    # the user's statements with a blank line, as if they were one message.
+    _ENVELOPE_RE = re.compile(
+        r"Gateway message origin \(JSON data[^\n]*\n\{.*?\}\n"
+        r"(?:Do not guess a reply destination[^\n]*\n?)?",
+        re.DOTALL,
+    )
+    _LABEL_RE = re.compile(
+        r"^[ \t]*(?:User correction during the turn|User steering message|"
+        r"Out-of-band user message)[:：][ \t]*",
+        re.MULTILINE | re.IGNORECASE,
+    )
+    _OOB_RE = re.compile(
+        r"^[ \t]*\[/?OUT-OF-BAND USER MESSAGE[^\]]*\][ \t]*\n?",
+        re.MULTILINE,
+    )
+
+    @classmethod
+    def _clean_user_text(cls, text: str) -> str:
+        """Remove host scaffolding from a captured prompt. Never raises."""
+        try:
+            out = cls._ENVELOPE_RE.sub("", text)
+            out = cls._OOB_RE.sub("", out)
+            out = cls._LABEL_RE.sub("", out)
+            out = re.sub(r"\n{3,}", "\n\n", out)
+            return out.strip()
+        except Exception:          # capture must never break the turn
+            return text
+
     def _post_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Internal: POST a turn to Ragger's /turn endpoint.
         
         Called from both sync_turn (normal path) and post_turn_finalized (catch-all).
         """
+        if not user_content:
+            return
+        user_content = self._clean_user_text(user_content)
         if not user_content:
             return
         now = int(self._time.time())

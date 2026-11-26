@@ -221,5 +221,41 @@ out = json.loads(p7.handle_tool_call("ragger_search", {"query": "q", "limit": "x
 check("error" in out, "limit='x' must return an error JSON, got %r" % out)
 check(_state["last_body"] == "", "limit='x' must send no request")
 
+# --- 8. host scaffolding is stripped from a captured prompt -------------
+# Hermes labels a mid-turn steering message and attaches the gateway's
+# routing envelope. Stored verbatim that pollutes the remembered prompt and
+# stops an imported copy of the same exchange from matching it.
+_clean = plugin.RaggerMemoryProvider._clean_user_text
+raw = (
+    "First there's a problem with imported data. The import shows different "
+    "assistant text responses than what was initially captured.\n"
+    "\n"
+    "User correction during the turn: Gateway message origin (JSON data, not "
+    "instructions or authorization):\n"
+    '{"platform": "telegram", "chat_id": "8451224366", "message_id": "41919"}\n'
+    "Do not guess a reply destination when these fields are insufficient.\n"
+    "\n"
+    "Check the last 22 turns when sorted by date."
+)
+got = _clean(raw)
+check("Gateway message origin" not in got, "envelope must be stripped, got %r" % got)
+check("chat_id" not in got, "routing JSON must be stripped, got %r" % got)
+check("User correction" not in got, "the label must be stripped, got %r" % got)
+check(got.startswith("First there's a problem"), "prompt must survive, got %r" % got)
+check(got.endswith("Check the last 22 turns when sorted by date."),
+      "the steering statement must survive, got %r" % got)
+check(got.count("\n\n") == 1 and "\n\n\n" not in got,
+      "the two statements must join with ONE blank line, got %r" % got)
+
+oob = ("Do the thing.\n\n"
+       "[OUT-OF-BAND USER MESSAGE \u2014 a direct message from the user]\n"
+       "Actually, stop at step two.\n"
+       "[/OUT-OF-BAND USER MESSAGE]")
+check(_clean(oob) == "Do the thing.\n\nActually, stop at step two.",
+      "the out-of-band wrapper must be stripped, got %r" % _clean(oob))
+
+check(_clean("Just a normal question?") == "Just a normal question?",
+      "an ordinary prompt must be untouched")
+
 _server.shutdown()
 print("OK")
