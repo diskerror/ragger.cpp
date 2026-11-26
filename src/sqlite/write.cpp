@@ -2107,9 +2107,18 @@ static std::string tags_from_metadata(const json& metadata) {
         // appended, so it only STARTS with the imported message. Exact match
         // alone re-imported every steered turn. Guarded by a length floor so
         // short texts ("ok", "yes") can't prefix-match an unrelated turn.
+        // Three ways to recognise the same exchange:
+        //   1. identical text;
+        //   2. the captured text STARTS with the imported message (the user
+        //      steered mid-turn, so capture appended the steering message);
+        //   3. the first 120 characters agree (same as 2, but the host also
+        //      spliced its own envelope into the middle of the captured text,
+        //      so neither string is a prefix of the other).
         Stmt s(db,
             "SELECT 1 FROM turns WHERE (user_text = ?1 OR "
-            "(length(?1) >= 40 AND substr(user_text, 1, length(?1)) = ?1)) "
+            "(length(?1) >= 40 AND substr(user_text, 1, length(?1)) = ?1) OR "
+            "(length(?1) >= 120 AND length(user_text) >= 120 AND "
+            " substr(user_text, 1, 120) = substr(?1, 1, 120))) "
             "AND created_at BETWEEN ?2 AND ?3 LIMIT 1");
         s.bind(1, user_text);
         s.bind(2, ep - back_seconds);

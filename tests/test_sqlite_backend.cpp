@@ -4230,6 +4230,17 @@ void p1t_test_import_probes(ragger::Embedder& emb) {
                                "2026-04-15 10:04:00", 90, 3600));
     // A short message must NOT prefix-match an unrelated turn.
     CHECK(!db.turn_exists_fuzzy("Check the last", "2026-04-15 10:04:00", 90, 3600));
+    // Host envelope spliced into the middle: neither string is a prefix of
+    // the other, but the first 120 characters agree.
+    const std::string prompt120 =
+        "This prompt is deliberately long enough to exceed the hundred and twenty "
+        "character floor used by the shared-prefix dedup rule, yes.";
+    int te = db.store_turn(prompt120 + "\n[gateway envelope]\nand the steering text",
+                           "Envelope probe answer", "test-model",
+                           false, "", "2026-04-15 10:20:00");
+    CHECK(te > 0);
+    CHECK(db.turn_exists_fuzzy(prompt120 + "\nand the steering text",
+                               "2026-04-15 10:19:00", 90, 3600));
 
     // update_turn_meta must write an INTEGER epoch, agreeing with a store
     // that used the same source_timestamp.
