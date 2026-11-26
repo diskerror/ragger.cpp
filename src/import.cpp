@@ -770,29 +770,66 @@ std::string extract_telegram_text(const json& text_field) {
     return trim(out);
 }
 
-/// True for a Hermes tool-progress bubble: the short status messages the
-/// gateway posts while a turn is still running ("\xF0\x9F\x93\x84 Reading https://...",
-/// "\xF0\x9F\x92\xBB terminal ...", "\xF0\x9F\xA7\xA0 Updating memory..."). They are separate Telegram
-/// messages from the same sender as the reply, so the same-sender merge
-/// below would otherwise glue them onto the front of the assistant text —
-/// which is why imported replies did not match the live-captured ones.
-/// Shape test, not a fixed emoji list (new tools get new icons): a bubble
-/// that opens with a pictograph, is short, and is a single paragraph.
-bool is_tool_progress_bubble(const std::string& text) {
-    if (text.empty() || text.size() > 300) return false;
-    if (text.find("\n\n") != std::string::npos) return false;   // real prose, not a status line
-    // Leading codepoint must be a pictograph (U+1F300.. or U+2600..U+27BF).
-    const auto b0 = static_cast<unsigned char>(text[0]);
+/// Strip the Hermes status preamble from an assistant bubble.
+///
+/// The gateway EDITS one Telegram message while a turn runs, so the exported
+/// bubble is the accumulated tool-progress lines ("\xF0\x9F\x93\x84 Reading https://...",
+/// "\xF0\x9F\x92\xBB terminal", "\xF0\x9F\xA7\xA0 Updating memory...") and provider warnings, followed by
+/// the actual reply. Importing the bubble whole is why imported assistant
+/// text did not match what live capture stored.
+///
+/// Only the LEADING lines are removed, and only while they look like status:
+/// a line opening with a pictograph (the tool icons — a shape test, so new
+/// tools need no list), a blank line, or a short truncated continuation line
+/// ("cd ~/.hermes/cache/we...") following one. The first line that looks
+/// like prose ends the strip, so reply text is never touched.
+bool starts_with_pictograph(const std::string& line) {
+    if (line.empty()) return false;
+    const auto b0 = static_cast<unsigned char>(line[0]);
     if (b0 < 0x80) return false;
     unsigned cp = 0;
-    if ((b0 & 0xF8) == 0xF0 && text.size() >= 4)
-        cp = ((b0 & 0x07u) << 18) | ((static_cast<unsigned char>(text[1]) & 0x3Fu) << 12) |
-             ((static_cast<unsigned char>(text[2]) & 0x3Fu) << 6) | (static_cast<unsigned char>(text[3]) & 0x3Fu);
-    else if ((b0 & 0xF0) == 0xE0 && text.size() >= 3)
-        cp = ((b0 & 0x0Fu) << 12) | ((static_cast<unsigned char>(text[1]) & 0x3Fu) << 6) |
-             (static_cast<unsigned char>(text[2]) & 0x3Fu);
+    if ((b0 & 0xF8) == 0xF0 && line.size() >= 4)
+        cp = ((b0 & 0x07u) << 18) | ((static_cast<unsigned char>(line[1]) & 0x3Fu) << 12) |
+             ((static_cast<unsigned char>(line[2]) & 0x3Fu) << 6) |
+             (static_cast<unsigned char>(line[3]) & 0x3Fu);
+    else if ((b0 & 0xF0) == 0xE0 && line.size() >= 3)
+        cp = ((b0 & 0x0Fu) << 12) | ((static_cast<unsigned char>(line[1]) & 0x3Fu) << 6) |
+             (static_cast<unsigned char>(line[2]) & 0x3Fu);
     else return false;
     return (cp >= 0x1F300 && cp <= 0x1FAFF) || (cp >= 0x2600 && cp <= 0x27BF);
+}
+
+std::string strip_tool_preamble(const std::string& text) {
+    std::vector<std::string> lines;
+    std::string cur;
+    for (const char c : text) {
+        if (c == '\n') { lines.push_back(cur); cur.clear(); }
+        else cur += c;
+    }
+    lines.push_back(cur);
+
+    const auto ends_truncated = [](const std::string& l) {
+        return l.size() >= 3 && (l.compare(l.size() - 3, 3, "...") == 0 ||
+                                 l.compare(l.size() - 3, 3, "\xE2\x80\xA6") == 0);
+    };
+
+    size_t i = 0;
+    bool stripped = false;
+    while (i < lines.size()) {
+        const std::string line = trim(lines[i]);
+        if (starts_with_pictograph(line))                { ++i; stripped = true; continue; }
+        if (stripped && line.empty())                    { ++i; continue; }
+        if (stripped && line.size() <= 200 && ends_truncated(line)) { ++i; continue; }
+        break;
+    }
+    if (!stripped) return text;
+
+    std::string out;
+    for (size_t j = i; j < lines.size(); ++j) {
+        if (j > i) out += "\n";
+        out += lines[j];
+    }
+    return trim(out);
 }
 
 /// True if `text` is a bare control command that should never be stored as
@@ -861,8 +898,12 @@ void parse_telegram_chat(const json& chat, const std::string& self_name,
         if (!is_self && drop_bot_reply) continue;
         if (is_self) drop_bot_reply = false;
 
-        // Tool-progress bubbles are not reply content.
-        if (!is_self && is_tool_progress_bubble(text)) continue;
+        // Status preamble (tool progress, provider warnings) is not reply
+        // content — the gateway edits it into the same bubble as the reply.
+        if (!is_self) {
+            text = strip_tool_preamble(text);
+            if (text.empty()) continue;
+        }
 
         // Merge consecutive same-sender bubbles — but never across a
         // session boundary (sid mismatch breaks the merge naturally).

@@ -274,7 +274,7 @@ void test_telegram_reply_fidelity() {
         f << R"JSON({"name":"Hal","messages":[
           {"type":"message","date":"2026-11-26T09:00:00","from":"Reid","text":"What is the version?"},
           {"type":"message","date":"2026-11-26T09:00:05","from":"Hal","text":"\ud83d\udcc4 Reading https://example.com/a-very-long-url-th\u2026"},
-          {"type":"message","date":"2026-11-26T09:00:06","from":"Hal","text":"\ud83d\udcbb terminal"},
+          {"type":"message","date":"2026-11-26T09:00:06","from":"Hal","text":"\ud83d\udcbb terminal\ncd ~/.hermes/cache/we..."},
           {"type":"message","date":"2026-11-26T09:00:30","from":"Hal","text":[
              "The version is ",
              {"type":"code","text":"0.17.0.1"},
@@ -284,7 +284,7 @@ void test_telegram_reply_fidelity() {
           {"type":"message","date":"2026-11-26T09:01:00","from":"Reid","text":"/memory pending"},
           {"type":"message","date":"2026-11-26T09:01:01","from":"Hal","text":"Nothing is pending."},
           {"type":"message","date":"2026-11-26T09:02:00","from":"Reid","text":"Thanks."},
-          {"type":"message","date":"2026-11-26T09:02:10","from":"Hal","text":"You're welcome."}
+          {"type":"message","date":"2026-11-26T09:02:10","from":"Hal","text":"\ud83e\udde0 Updating memory\u2026\n\u26a0 Memory provider reports unavailable.\n\nYou're welcome."}
         ]})JSON";
     }
     const auto turns = ragger::parse_telegram(path.string(), "Reid");
