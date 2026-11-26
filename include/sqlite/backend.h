@@ -102,6 +102,7 @@ public:
                            const std::string& created_at) override;
     bool decision_exists_exact(const std::string& text,
                                const std::string& created_at) override;
+    std::string session_guid_at(const std::string& ts) override;
     bool turn_exists_fuzzy(const std::string& user_text,
                            const std::string& ts,
                            int back_seconds,

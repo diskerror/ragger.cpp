@@ -1165,10 +1165,17 @@ int main(int argc, char **argv) {
                         continue;
                     }
                 }
+                // File the turn under the real session that was current when
+                // it happened; the synthetic import guid is only a fallback.
+                std::string sid = t.session_id;
+                if (!ts.empty() && ragger::is_synthetic_session_guid(sid)) {
+                    if (std::string real = memory.session_guid_at(ts); !real.empty())
+                        sid = real;
+                }
                 int new_id = memory.store_turn(t.user_text, t.assistant_text,
                                   /*model_name=*/t.source + "-import",
                                   /*defer_embedding=*/false,
-                                  /*session_guid=*/t.session_id,
+                                  /*session_guid=*/sid,
                                   /*source_timestamp=*/ts);
                 if (is_telegram) inserted.emplace_back(new_id, t.user_text);
                 if (++n % 25 == 0) {

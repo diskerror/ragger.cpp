@@ -730,6 +730,7 @@ struct Backend::Impl {
     // within ±window_seconds. Catches import overlap with turns Ragger
     // captured live (identical content, a few seconds of clock skew —
     // message send time vs. capture time, plus any tz-conversion rounding).
+    std::string session_guid_at(const std::string& ts);
     bool turn_exists_fuzzy(const std::string& user_text, const std::string& ts,
                            int back_seconds, int forward_seconds);
 

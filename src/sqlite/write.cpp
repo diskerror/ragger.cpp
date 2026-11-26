@@ -2092,6 +2092,39 @@ static std::string tags_from_metadata(const json& metadata) {
     }
 
 
+    // Which real session was current at `ts`? "" when none fits.
+    //
+    // A session's effective start is the EARLIER of started_on and the
+    // timestamp encoded in its guid (YYYYMMDD_HHMMSS_hex): started_on is
+    // derived from the turns actually stored, so a session whose opening
+    // turns were never captured looks like it began far too late — exactly
+    // the gap an import is filling.
+    //
+    // The session with the greatest start at or before `ts` wins. Synthetic
+    // import guids are excluded (they are what we are trying to replace),
+    // and a session that ended more than a day before `ts` is not a match —
+    // otherwise a years-old history import gets filed under whatever session
+    // happened to be open last.
+    std::string Backend::Impl::session_guid_at(const std::string& ts) {
+        const int64_t ep = resolve_epoch(ts);
+        Stmt s(db,
+            "WITH s AS ("
+            "  SELECT guid, ended_on,"
+            "         MIN(COALESCE(started_on, 1e18),"
+            "             COALESCE(unixepoch("
+            "               substr(guid,1,4)||'-'||substr(guid,5,2)||'-'||substr(guid,7,2)||' '||"
+            "               substr(guid,10,2)||':'||substr(guid,12,2)||':'||substr(guid,14,2),"
+            "               'utc'), 1e18)) AS start_at"
+            "    FROM sessions"
+            "   WHERE guid NOT LIKE 'telegram-import%' AND guid NOT LIKE 'import-%')"
+            "SELECT guid FROM s "
+            " WHERE start_at <= ?1 AND (ended_on IS NULL OR ended_on >= ?1 - 86400) "
+            " ORDER BY start_at DESC LIMIT 1");
+        s.bind(1, ep);
+        return s.step() ? s.column_text(0) : std::string();
+    }
+
+
     // Fuzzy dedup against live-captured turns: exact user_text, timestamp
     // within ±window_seconds. Catches import overlap with turns Ragger
     // captured live (identical content, a few seconds of clock skew —

@@ -85,6 +85,11 @@ bool Backend::decision_exists_exact(const std::string& text, const std::string& 
     return pImpl->decision_exists_exact(text, created_at);
 }
 
+std::string Backend::session_guid_at(const std::string& ts) {
+    std::lock_guard<std::mutex> lk(pImpl->mu);
+    return pImpl->session_guid_at(ts);
+}
+
 bool Backend::turn_exists_fuzzy(const std::string& user_text, const std::string& ts,
                                       int back_seconds, int forward_seconds) {
     std::lock_guard<std::mutex> lk(pImpl->mu);

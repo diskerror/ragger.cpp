@@ -4230,6 +4230,22 @@ void p1t_test_import_probes(ragger::Embedder& emb) {
                                "2026-04-15 10:04:00", 90, 3600));
     // A short message must NOT prefix-match an unrelated turn.
     CHECK(!db.turn_exists_fuzzy("Check the last", "2026-04-15 10:04:00", 90, 3600));
+    // session_guid_at: a turn Ragger missed belongs to the session that was
+    // current at the time, not to a synthetic import session.
+    db.store_turn("Session span opener", "a", "test-model", false,
+                  "20260415_080000_aaaaaaaa", "2026-04-15 11:00:00");
+    db.store_turn("Later session opener", "a", "test-model", false,
+                  "20260415_140000_bbbbbbbb", "2026-04-15 14:30:00");
+    // 12:00 is after the first session's guid start (08:00) and before the
+    // second's (14:00) — even though the first session's stored turns only
+    // begin at 11:00 and its span "ends" there.
+    CHECK(db.session_guid_at("2026-04-15 12:00:00") == "20260415_080000_aaaaaaaa");
+    CHECK(db.session_guid_at("2026-04-15 15:00:00") == "20260415_140000_bbbbbbbb");
+    // Before any session: no match.
+    CHECK(db.session_guid_at("2026-04-15 07:00:00").empty());
+    // Years later: the long-closed session must not swallow it.
+    CHECK(db.session_guid_at("2029-04-15 12:00:00").empty());
+
     // Host envelope spliced into the middle: neither string is a prefix of
     // the other, but the first 120 characters agree.
     const std::string prompt120 =

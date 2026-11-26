@@ -240,6 +240,15 @@ public:
     /// while a live-captured turn is stamped when the reply FINISHED, which
     /// can be many minutes later. A symmetric few-second window missed every
     /// such pair and re-imported turns Ragger already had.
+    /// Which real (non-synthetic) session was current at `ts`? Returns its
+    /// guid, or "" when none fits. Used by the conversation importers so a
+    /// turn that Ragger missed is filed under the session it actually
+    /// belonged to instead of a synthetic import session. A session's start
+    /// is the earlier of started_on and the timestamp in its guid — a
+    /// session whose first turns were never captured has a started_on that
+    /// begins too late.
+    virtual std::string session_guid_at(const std::string& ts) = 0;
+
     virtual bool turn_exists_fuzzy(const std::string& user_text,
                                    const std::string& ts,
                                    int back_seconds,

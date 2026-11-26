@@ -298,6 +298,10 @@ bool RaggerMemory::decision_exists_exact(const std::string& text, const std::str
     return backend_->decision_exists_exact(text, created_at);
 }
 
+std::string RaggerMemory::session_guid_at(const std::string& ts) {
+    return backend_->session_guid_at(ts);
+}
+
 bool RaggerMemory::turn_exists_fuzzy(const std::string& user_text, const std::string& ts,
                                      int back_seconds, int forward_seconds) {
     return backend_->turn_exists_fuzzy(user_text, ts, back_seconds, forward_seconds);

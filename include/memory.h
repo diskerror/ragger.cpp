@@ -129,6 +129,10 @@ public:
     /// note_exists_exact.
     bool decision_exists_exact(const std::string& text, const std::string& created_at);
 
+    /// Guid of the real session current at `ts` ("" if none) — see
+    /// StorageBackend::session_guid_at.
+    std::string session_guid_at(const std::string& ts);
+
     /// Fuzzy overlap check for conversation importers: does a live-captured
     /// turn already exist with this exact user_text in the window
     /// [ts - back_seconds, ts + forward_seconds]? See StorageBackend.

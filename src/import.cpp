@@ -911,9 +911,13 @@ void parse_telegram_chat(const json& chat, const std::string& self_name,
 
         // Merge consecutive same-sender bubbles — but never across a
         // session boundary (sid mismatch breaks the merge naturally).
+        // Consecutive bubbles from the same sender are one statement: the
+        // user adding to a prompt the agent has not answered yet (steering),
+        // or the agent continuing a long reply. Joined with a blank line so
+        // the result reads as one message, matching what capture stores.
         if (!blocks.empty() && blocks.back().is_self == is_self &&
             blocks.back().sid == session_guid()) {
-            blocks.back().text += "\n" + text;
+            blocks.back().text += "\n\n" + text;
         } else {
             blocks.push_back({is_self, ts, text, session_guid()});
         }
