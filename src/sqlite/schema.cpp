@@ -502,6 +502,10 @@ std::string setting_or(Impl& self, const char* key, const char* fallback);
         // (like the evidence tables) so it never takes part in a rebuild
         // dance; the 0.16->0.17 leg creates and populates it itself (§2).
         exec(ddl::if_not_exists(ddl::episodes()));
+        // A DB migrated by a pre-release 0.17 dev build is stamped 0.17 with
+        // an older episodes shape (supersedes, created_at). Rebuild it into
+        // the released shape before anything below names its columns.
+        reconcile_episodes_shape();
         // X31: episodes.locked. A DB migrated by a pre-X31 dev build is stamped
         // 0.17 but its episodes table lacks the column, and the summarizer's
         // selections reference it (`no such column: e.locked`). Guarded ALTER
@@ -830,6 +834,90 @@ std::string setting_or(Impl& self, const char* key, const char* fallback);
     /// DROP TABLE would wipe the index) and legacy_alter_table ON (keeps the
     /// RENAME from repointing other tables' REFERENCES at "decisions_rebuild").
     /// Both must be set OUTSIDE the transaction.
+    void Backend::Impl::reconcile_episodes_shape() {
+        if (!table_exists("episodes")) return;
+        const bool has_supersedes = column_exists("episodes", "supersedes");
+        const bool has_modified   = column_exists("episodes", "modified_on");
+        if (!has_supersedes && has_modified) return;
+
+        Diskerror::Logger::info("Reconciling episodes table to the released 0.17 shape...");
+        const bool fk_was_on = pragma_bool(*this, "foreign_keys");
+        exec("PRAGMA foreign_keys = OFF");
+        exec("PRAGMA legacy_alter_table = ON");
+        try {
+            exec("BEGIN");
+            // Released 0.17 has no episode supersede chain (episodes are
+            // derived and replaced in place). Refuse rather than drop a value.
+            if (has_supersedes) {
+                Stmt c(db, "SELECT COUNT(*) FROM episodes WHERE supersedes IS NOT NULL");
+                c.step();
+                if (const int n = c.column_int(0); n > 0)
+                    throw std::runtime_error(std::format(
+                        "episodes: {} row(s) have a supersedes value, which 0.17 does not "
+                        "keep. Nothing was changed; back up the DB and ask for a fix.", n));
+            }
+            {
+                Stmt d(db, "SELECT session_id, span_start, COUNT(*) FROM episodes "
+                           "GROUP BY 1, 2 HAVING COUNT(*) > 1 LIMIT 1");
+                if (d.step())
+                    throw std::runtime_error(std::format(
+                        "episodes: {} rows share (session {}, span_start {}); the key must be "
+                        "unique. Nothing was changed.",
+                        d.column_int(2), d.column_int64(0), d.column_int64(1)));
+            }
+            auto fk_violations = [this]() {
+                std::multiset<std::string> out;
+                Stmt s(db, "PRAGMA foreign_key_check");
+                while (s.step())
+                    out.insert(std::format("{}|{}|{}|{}", s.column_text(0),
+                                           s.column_int64(1), s.column_text(2),
+                                           s.column_int64(3)));
+                return out;
+            };
+            const auto fk_before = fk_violations();
+            int64_t seq = 0;
+            {
+                Stmt q(db, "SELECT seq FROM sqlite_sequence WHERE name = 'episodes'");
+                if (q.step()) seq = q.column_int64(0);
+            }
+            exec("DROP VIEW IF EXISTS episodes_view");  // create_views() recreates it
+            std::string ddl_new = ddl::episodes();
+            ddl_new.replace(ddl_new.find("CREATE TABLE episodes"), 21,
+                            "CREATE TABLE episodes_rebuild");
+            exec(ddl_new);
+            const std::string modified = has_modified ? "modified_on" : "created_at";
+            const std::string locked   = column_exists("episodes", "locked") ? "locked" : "0";
+            exec("INSERT INTO episodes_rebuild (episode_id, text, tags, session_id, model_id, "
+                 "span_start, span_end, modified_on, locked, unigram_count, bigram_count, "
+                 "embedding_version, embedding) "
+                 "SELECT episode_id, text, tags, session_id, model_id, span_start, span_end, "
+                 + modified + ", " + locked + ", unigram_count, bigram_count, "
+                 "embedding_version, embedding FROM episodes");
+            const int moved = sqlite3_changes(db);
+            exec("DROP TABLE episodes");
+            exec("ALTER TABLE episodes_rebuild RENAME TO episodes");
+            {
+                Stmt u(db, "UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'episodes'");
+                u.bind(1, seq);
+                u.step();
+            }
+            exec(ddl::episodes_indexes());
+            const auto fk_after = fk_violations();
+            if (fk_after != fk_before)
+                throw std::runtime_error(
+                    "episodes reconcile would leave new foreign-key violations; nothing was changed.");
+            exec("COMMIT");
+            exec("PRAGMA legacy_alter_table = OFF");
+            if (fk_was_on) exec("PRAGMA foreign_keys = ON");
+            Diskerror::Logger::info(std::format("  episodes rebuilt ({} rows)", moved));
+        } catch (...) {
+            try { exec("ROLLBACK"); } catch (...) {}
+            exec("PRAGMA legacy_alter_table = OFF");
+            if (fk_was_on) exec("PRAGMA foreign_keys = ON");
+            throw;
+        }
+    }
+
     void Backend::Impl::migrate_0_16_to_0_17() {
         Diskerror::Logger::info("Migrating DB 0.16 -> 0.17 (sessions span, episodes, knowledge)...");
 

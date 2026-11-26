@@ -227,6 +227,10 @@ struct Backend::Impl {
     /// the orphan-protection trigger are recreated by create_schema()
     /// afterward.
     void migrate_0_16_to_0_17();
+    /// Rebuild a pre-release-0.17 episodes table (supersedes column,
+    /// created_at instead of modified_on, partial unique index) into the
+    /// released shape. Shape-gated, one transaction, no-op when correct.
+    void reconcile_episodes_shape();
 
     /// PHASE9: the migration chain, declared after the leg methods it names.
     static constexpr Leg kLegs[] = {
