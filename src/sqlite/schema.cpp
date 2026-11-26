@@ -502,6 +502,12 @@ std::string setting_or(Impl& self, const char* key, const char* fallback);
         // (like the evidence tables) so it never takes part in a rebuild
         // dance; the 0.16->0.17 leg creates and populates it itself (§2).
         exec(ddl::if_not_exists(ddl::episodes()));
+        // X31: episodes.locked. A DB migrated by a pre-X31 dev build is stamped
+        // 0.17 but its episodes table lacks the column, and the summarizer's
+        // selections reference it (`no such column: e.locked`). Guarded ALTER
+        // (appends; every query names its columns). Fresh DBs have it already.
+        if (!column_exists("episodes", "locked"))
+            exec("ALTER TABLE episodes ADD COLUMN locked INTEGER NOT NULL DEFAULT 0");
         exec(ddl::if_not_exists(ddl::episodes_indexes()));
 
         // turn_summaries indexes + the orphan-protection trigger. An orphaned
