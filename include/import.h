@@ -221,7 +221,15 @@ std::vector<ImportTurn> parse_claude_web(const std::string& path);
 /// and the /new message itself is dropped.
 std::vector<ImportTurn> parse_telegram(const std::string& path, const std::string& self_name);
 
-/// Apply the filter in-place (returns the kept turns).
+/// Normalise a --since/--until value to YYYY-MM-DD. Accepts YYYY-MM-DD or
+/// YYYYMMDD (digits must form a real calendar date); empty stays empty.
+/// Throws std::invalid_argument on anything else, so a malformed bound can
+/// never silently match nothing (the old lexical compare dropped every turn
+/// for `--since=20261125`).
+std::string normalize_date_arg(const std::string& s);
+
+/// Apply the filter in-place (returns the kept turns). since/until are run
+/// through normalize_date_arg() (throws std::invalid_argument).
 std::vector<ImportTurn> filter_turns(const std::vector<ImportTurn>& turns,
                                      const TurnFilter& f);
 

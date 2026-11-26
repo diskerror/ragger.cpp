@@ -1120,7 +1120,12 @@ int main(int argc, char **argv) {
                 }
                 turns = ragger::parse_telegram(conv_path, self_name);
             }
-            turns = ragger::filter_turns(turns, f);
+            try {
+                turns = ragger::filter_turns(turns, f);
+            } catch (const std::invalid_argument& e) {
+                Diskerror::Logger::error(std::string("import-conversations: --since/--until: ") + e.what());
+                return 1;
+            }
             if (turns.empty() && memories_path.empty() && project_paths.empty()) {
                 std::println("No turns matched.");
                 audit.done( "no turns matched");

@@ -12,6 +12,7 @@
 #include "Logger.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -19,6 +20,7 @@
 #include <print>
 #include <regex>
 #include <sstream>
+#include <stdexcept>
 
 namespace ragger {
 
@@ -859,8 +861,35 @@ std::vector<ImportTurn> parse_telegram(const std::string& path_str, const std::s
     return out;
 }
 
+std::string normalize_date_arg(const std::string& s) {
+    if (s.empty()) return s;
+    std::string y, m, d;
+    auto digits = [](const std::string& x) {
+        return !x.empty() && std::all_of(x.begin(), x.end(),
+            [](unsigned char c) { return std::isdigit(c) != 0; });
+    };
+    if (s.size() == 10 && s[4] == '-' && s[7] == '-') {
+        y = s.substr(0, 4); m = s.substr(5, 2); d = s.substr(8, 2);
+    } else if (s.size() == 8) {
+        y = s.substr(0, 4); m = s.substr(4, 2); d = s.substr(6, 2);
+    } else {
+        throw std::invalid_argument("date must be YYYY-MM-DD or YYYYMMDD: " + s);
+    }
+    if (!digits(y) || !digits(m) || !digits(d))
+        throw std::invalid_argument("date must be YYYY-MM-DD or YYYYMMDD: " + s);
+    int mi = std::stoi(m), di = std::stoi(d), yi = std::stoi(y);
+    static const int dim[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    bool leap = (yi % 4 == 0 && yi % 100 != 0) || yi % 400 == 0;
+    if (mi < 1 || mi > 12 || di < 1 || di > dim[mi-1] + ((mi == 2 && leap) ? 1 : 0))
+        throw std::invalid_argument("not a calendar date: " + s);
+    return y + "-" + m + "-" + d;
+}
+
 std::vector<ImportTurn> filter_turns(const std::vector<ImportTurn>& turns,
-                                     const TurnFilter& f) {
+                                     const TurnFilter& f_in) {
+    TurnFilter f = f_in;
+    f.since = normalize_date_arg(f.since);
+    f.until = normalize_date_arg(f.until);
     std::vector<ImportTurn> out;
     out.reserve(turns.size());
     for (const auto& t : turns) {

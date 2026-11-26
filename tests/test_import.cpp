@@ -232,6 +232,35 @@ void p9b_test_do_import_embeds_in_process() {
     std::println(" OK");
 }
 
+// --since/--until accept YYYYMMDD as well as YYYY-MM-DD. Regression: the
+// compact form used to be compared lexically against "2026-11-25" and
+// silently dropped every turn ("No turns matched.").
+void test_since_until_date_forms() {
+    using ragger::normalize_date_arg;
+    CHECK(normalize_date_arg("") == "");
+    CHECK(normalize_date_arg("20261125") == "2026-11-25");
+    CHECK(normalize_date_arg("2026-11-25") == "2026-11-25");
+    CHECK(normalize_date_arg("20240229") == "2024-02-29");   // leap day
+    for (const char* bad : {"2026-1-5", "202611", "20261325", "20230229", "2026/11/25", "abcdefgh"}) {
+        bool threw = false;
+        try { normalize_date_arg(bad); } catch (const std::invalid_argument&) { threw = true; }
+        CHECK(threw);
+    }
+    std::vector<ragger::ImportTurn> turns = {
+        {"2026-11-24T10:00:00", "a", "b", "s", "telegram"},
+        {"2026-11-25T00:00:01", "c", "d", "s", "telegram"},
+        {"2026-11-26T11:47:30", "e", "f", "s", "telegram"},
+    };
+    ragger::TurnFilter f; f.since = "20261125";
+    CHECK(ragger::filter_turns(turns, f).size() == 2);
+    f.until = "2026-11-26";
+    CHECK(ragger::filter_turns(turns, f).size() == 1);
+    f.since = "bogus";
+    bool threw = false;
+    try { ragger::filter_turns(turns, f); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+}
+
 int main() {
     TestEnv env("import");   // must be first: isolates from ~/.ragger
     test_heading_levels();
@@ -249,6 +278,7 @@ int main() {
     p10_chunk_markdown_exact();
     test_tiny_file();
     test_clean_document_text();
+    test_since_until_date_forms();
 
     const std::string model_dir = env.model_dir();
     if (!std::filesystem::exists(model_dir + "/model.onnx") &&
