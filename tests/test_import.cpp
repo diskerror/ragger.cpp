@@ -241,7 +241,8 @@ void test_since_until_date_forms() {
     CHECK(normalize_date_arg("20261125") == "2026-11-25");
     CHECK(normalize_date_arg("2026-11-25") == "2026-11-25");
     CHECK(normalize_date_arg("20240229") == "2024-02-29");   // leap day
-    for (const char* bad : {"2026-1-5", "202611", "20261325", "20230229", "2026/11/25", "abcdefgh"}) {
+    CHECK(normalize_date_arg("261125") == "2026-11-25");     // YYMMDD (--date short form)
+    for (const char* bad : {"2026-1-5", "20261", "20261325", "20230229", "2026/11/25", "abcdefgh"}) {
         bool threw = false;
         try { normalize_date_arg(bad); } catch (const std::invalid_argument&) { threw = true; }
         CHECK(threw);

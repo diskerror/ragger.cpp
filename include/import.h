@@ -221,8 +221,8 @@ std::vector<ImportTurn> parse_claude_web(const std::string& path);
 /// and the /new message itself is dropped.
 std::vector<ImportTurn> parse_telegram(const std::string& path, const std::string& self_name);
 
-/// Normalise a --since/--until value to YYYY-MM-DD. Accepts YYYY-MM-DD or
-/// YYYYMMDD (digits must form a real calendar date); empty stays empty.
+/// Normalise a --since/--until value to YYYY-MM-DD. Accepts YYYY-MM-DD,
+/// YYYYMMDD or YYMMDD (century 20) (digits must form a real calendar date); empty stays empty.
 /// Throws std::invalid_argument on anything else, so a malformed bound can
 /// never silently match nothing (the old lexical compare dropped every turn
 /// for `--since=20261125`).

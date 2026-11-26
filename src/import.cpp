@@ -872,11 +872,14 @@ std::string normalize_date_arg(const std::string& s) {
         y = s.substr(0, 4); m = s.substr(5, 2); d = s.substr(8, 2);
     } else if (s.size() == 8) {
         y = s.substr(0, 4); m = s.substr(4, 2); d = s.substr(6, 2);
+    } else if (s.size() == 6) {
+        // YYMMDD (the documented --date=[CC]YYMMDD short form): century 20.
+        y = "20" + s.substr(0, 2); m = s.substr(2, 2); d = s.substr(4, 2);
     } else {
-        throw std::invalid_argument("date must be YYYY-MM-DD or YYYYMMDD: " + s);
+        throw std::invalid_argument("date must be YYYY-MM-DD, YYYYMMDD or YYMMDD: " + s);
     }
     if (!digits(y) || !digits(m) || !digits(d))
-        throw std::invalid_argument("date must be YYYY-MM-DD or YYYYMMDD: " + s);
+        throw std::invalid_argument("date must be YYYY-MM-DD, YYYYMMDD or YYMMDD: " + s);
     int mi = std::stoi(m), di = std::stoi(d), yi = std::stoi(y);
     static const int dim[] = {31,28,31,30,31,30,31,31,30,31,30,31};
     bool leap = (yi % 4 == 0 && yi % 100 != 0) || yi % 400 == 0;

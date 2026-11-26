@@ -970,6 +970,12 @@ int main(int argc, char **argv) {
             if (!is_dir && fs::path(raw_src).filename() == "memories.json") {
                 bool fdate = opts.count("fdate") > 0;
                 std::string date_override = opts["date"].as<std::string>();
+                try {
+                    date_override = ragger::normalize_date_arg(date_override);
+                } catch (const std::invalid_argument& e) {
+                    Diskerror::Logger::error(std::string("import-conversations: --date: ") + e.what());
+                    return 1;
+                }
                 std::string mem_ts;
                 if (!date_override.empty()) {
                     mem_ts = to_db_ts(date_override);
@@ -1221,6 +1227,12 @@ int main(int argc, char **argv) {
             if (!memories_path.empty()) {
                 bool fdate = opts.count("fdate") > 0;
                 std::string date_override = opts["date"].as<std::string>();
+                try {
+                    date_override = ragger::normalize_date_arg(date_override);
+                } catch (const std::invalid_argument& e) {
+                    Diskerror::Logger::error(std::string("import-conversations: --date: ") + e.what());
+                    return 1;
+                }
                 std::string mem_ts;
                 if (!date_override.empty()) {
                     mem_ts = to_db_ts(date_override);
