@@ -283,6 +283,8 @@ void test_telegram_reply_fidelity() {
              "."]},
           {"type":"message","date":"2026-11-26T09:01:00","from":"Reid","text":"/memory pending"},
           {"type":"message","date":"2026-11-26T09:01:01","from":"Hal","text":"Nothing is pending."},
+          {"type":"message","date":"2026-11-26T09:01:30","from":"Reid","text":"And this one?"},
+          {"type":"message","date":"2026-11-26T09:01:40","from":"Hal","text":"\u21aa Redirected current run.\n\u2139\ufe0f Context compression deferred.\n\nIt is fine."},
           {"type":"message","date":"2026-11-26T09:02:00","from":"Reid","text":"Thanks."},
           {"type":"message","date":"2026-11-26T09:02:10","from":"Hal","text":"\ud83e\udde0 Updating memory\u2026\n\u26a0 Memory provider reports unavailable.\n\nYou're welcome."}
         ]})JSON";
@@ -290,15 +292,18 @@ void test_telegram_reply_fidelity() {
     const auto turns = ragger::parse_telegram(path.string(), "Reid");
     std::filesystem::remove(path);
 
-    assert(turns.size() == 2);
+    assert(turns.size() == 3);
     // Progress bubbles dropped; entities rebuilt as Markdown.
     assert(turns[0].user_text == "What is the version?");
     assert(turns[0].assistant_text ==
            "The version is `0.17.0.1` \xe2\x80\x94 see [the changelog](https://example.com/c).");
     // The reply to the dropped /memory command is not glued onto any turn.
     assert(turns[0].assistant_text.find("Nothing is pending") == std::string::npos);
-    assert(turns[1].user_text == "Thanks.");
-    assert(turns[1].assistant_text == "You're welcome.");
+    // Arrow/info status lines count as preamble too.
+    assert(turns[1].user_text == "And this one?");
+    assert(turns[1].assistant_text == "It is fine.");
+    assert(turns[2].user_text == "Thanks.");
+    assert(turns[2].assistant_text == "You're welcome.");
 }
 
 int main() {

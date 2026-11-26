@@ -796,7 +796,11 @@ bool starts_with_pictograph(const std::string& line) {
         cp = ((b0 & 0x0Fu) << 12) | ((static_cast<unsigned char>(line[1]) & 0x3Fu) << 6) |
              (static_cast<unsigned char>(line[2]) & 0x3Fu);
     else return false;
-    return (cp >= 0x1F300 && cp <= 0x1FAFF) || (cp >= 0x2600 && cp <= 0x27BF);
+    // Emoji and the dingbat/arrow/technical symbols the gateway uses for
+    // status lines: â¹ (info), âª (redirected), â³, â , ð§  ...
+    return (cp >= 0x1F300 && cp <= 0x1FAFF) || (cp >= 0x2600 && cp <= 0x27BF) ||
+           (cp >= 0x2190 && cp <= 0x21FF) || (cp >= 0x2300 && cp <= 0x23FF) ||
+           (cp >= 0x2B00 && cp <= 0x2BFF) || cp == 0x2139;
 }
 
 std::string strip_tool_preamble(const std::string& text) {
