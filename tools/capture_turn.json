@@ -6,6 +6,13 @@
         "description": "The assistant reply of the turn.",
         "type": "string"
       },
+      "ended_at": {
+        "description": "When the turn finished (stored as its time): epoch seconds or a 'YYYY-MM-DD HH:MM:SS' local timestamp. Optional; default now. For replaying turns that could not be delivered while the daemon was down.",
+        "type": [
+          "integer",
+          "string"
+        ]
+      },
       "metadata": {
         "description": "Optional metadata (source, hook, etc.). Accepted and ignored \u2014 nothing reads it.",
         "type": "object"

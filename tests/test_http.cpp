@@ -1191,6 +1191,35 @@ void x32_test_turn_started_at(HttpFixture& fx) {
     std::println(" ok");
 }
 
+// POST /turn ended_at: stored as created_at (spool replay); started_at is
+// validated against it; bad values are 400s.
+void t_turn_ended_at(HttpFixture& fx) {
+    std::println("  t_turn_ended_at...");
+    RawDb db((fx.env.base() + "/http_test.db").c_str());
+    const auto now = ragger::db_epoch();
+    const auto r1 = post_json(fx, "/turn",
+        {{"user", "ended_at replay one"}, {"assistant", "reply"},
+         {"session_id", "ended-at"}, {"started_at", now - 7200}, {"ended_at", now - 3600}});
+    CHECK(r1.value("status", "") == "captured");
+    const int id = r1["turn_id"].get<int>();
+    CHECK(db.scalar("SELECT created_at FROM turns WHERE turn_id = " + std::to_string(id)) == now - 3600);
+    CHECK(db.scalar("SELECT started_on FROM turns WHERE turn_id = " + std::to_string(id)) == now - 7200);
+
+    const auto e1 = post_json(fx, "/turn",
+        {{"user", "ended_at bad order"}, {"assistant", "x"}, {"session_id", "ended-at"},
+         {"started_at", now - 60}, {"ended_at", now - 3600}});
+    CHECK(e1["_raw"] == "ERROR: started_at is after the turn time");
+    const auto e2 = post_json(fx, "/turn",
+        {{"user", "ended_at future"}, {"assistant", "x"}, {"session_id", "ended-at"},
+         {"ended_at", now + 2 * 86400}});
+    CHECK(e2["_raw"] == "ERROR: ended_at is in the future");
+    const auto e3 = post_json(fx, "/turn",
+        {{"user", "ended_at type"}, {"assistant", "x"}, {"session_id", "ended-at"},
+         {"ended_at", 1.5}});
+    CHECK(e3["_raw"] == "ERROR: ended_at must be an integer epoch or a timestamp string");
+    std::println(" ok");
+}
+
 int main() {
     HttpFixture fx("http");
     CHECK(fx.ready);
@@ -1221,6 +1250,7 @@ int main() {
     x22_test_turn_merge_enqueues_whole_reply(fx);
     x32_pin_turn_default_started_on_null(fx);
     x32_test_turn_started_at(fx);
+    t_turn_ended_at(fx);
 
     std::println("test_http: all passed");
     return 0;

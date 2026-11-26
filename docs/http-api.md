@@ -427,7 +427,10 @@ accepted by the `capture_turn` MCP tool. Requires `[server] capture_turns
 `YYYY-MM-DD HH:MM:SS` local timestamp, the same format `source_timestamp`
 accepts; stored as `turns.started_on`, NULL when omitted; episode gap timing
 measures from the end of one turn to this start of the next, falling back to
-the turn time when unknown).
+the turn time when unknown), `ended_at` (optional, same formats: the turn's
+own time, stored as `turns.created_at`; default now. A client replaying turns
+it spooled while the daemon was down sends each turn's real finish time; a
+value slightly ahead of now is clamped to now).
 
 **Response:** `{ "status": "captured" | "disabled", "turn_id": <int> }`
 
@@ -437,7 +440,9 @@ to the daemon's summarizer queue (the request never waits for inference).
 **Status codes:** `400 {"error":"missing required field: user"}` (JSON
 envelope). A bad `started_at` is a 400 too: `started_at must be an integer
 epoch or a timestamp string` (wrong type / unparseable), `started_at is in
-the future` (more than a day ahead), `started_at is after the turn time`.
+the future` (more than a day ahead), `started_at is after the turn time`
+(after `ended_at` when given, else after now). `ended_at` has the same type
+error and `ended_at is in the future`.
 
 ```bash
 curl -X POST http://localhost:8432/turn \

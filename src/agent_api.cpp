@@ -299,24 +299,29 @@ CaptureResult agent_capture_turn(RaggerMemory& mem, const nlohmann::json& args) 
     // absent = not given. A capture turn's created_at is "now", so a value
     // more than a day ahead is a clock/typo error, and any value after "now"
     // would start the turn after it ended.
-    int64_t started_at = 0;
-    if (args.contains("started_at") && !args["started_at"].is_null()) {
-        const auto& jv = args["started_at"];
-        if (jv.is_number_integer()) {
-            started_at = jv.get<int64_t>();
-        } else if (jv.is_string()) {
+    auto parse_time = [&](const char* key) -> int64_t {
+        if (!args.contains(key) || args[key].is_null()) return 0;
+        const auto& jv = args[key];
+        const std::string bad = std::string(key) + " must be an integer epoch or a timestamp string";
+        if (jv.is_number_integer()) return jv.get<int64_t>();
+        if (jv.is_string()) {
             const auto parsed = parse_db_timestamp(jv.get<std::string>());
-            if (!parsed)
-                throw std::invalid_argument(
-                    "started_at must be an integer epoch or a timestamp string");
-            started_at = db_epoch(*parsed);
-        } else {
-            throw std::invalid_argument(
-                "started_at must be an integer epoch or a timestamp string");
+            if (!parsed) throw std::invalid_argument(bad);
+            return db_epoch(*parsed);
         }
+        throw std::invalid_argument(bad);
+    };
+    // ended_at: the turn's own time (default now). A client replaying turns
+    // spooled while the daemon was down sends the real finish time.
+    const int64_t ended_at = parse_time("ended_at");
+    if (ended_at > db_epoch() + 86400)
+        throw std::invalid_argument("ended_at is in the future");
+    const int64_t turn_time = ended_at ? std::min(ended_at, db_epoch()) : db_epoch();
+    const int64_t started_at = parse_time("started_at");
+    if (started_at) {
         if (started_at > db_epoch() + 86400)
             throw std::invalid_argument("started_at is in the future");
-        if (started_at > db_epoch())
+        if (started_at > turn_time)
             throw std::invalid_argument("started_at is after the turn time");
     }
 
@@ -326,7 +331,7 @@ CaptureResult agent_capture_turn(RaggerMemory& mem, const nlohmann::json& args) 
                         args.value("session_id", std::string()),
                         args.value("session_name", std::string()),
                         args.value("name_source", std::string()),
-                        started_at);
+                        started_at, ended_at ? turn_time : 0);
 }
 
 nlohmann::json capture_summarizer_flags(const Config& cfg, const InferenceClient& inference) {

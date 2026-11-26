@@ -297,6 +297,9 @@ struct CaptureResult {
 /// this; the gate and storage policy live here, once.
 /// `started_at` (X32; 0 = not given) is the time the user prompt arrived
 /// (epoch seconds), stored as turns.started_on.
+/// `ended_at` (0 = now) is the turn's own time (epoch seconds), stored as
+/// turns.created_at: a client replaying turns it could not deliver while the
+/// daemon was down sends the time each turn really finished.
 CaptureResult capture_turn(RaggerMemory& memory,
                            const std::string& user,
                            const std::string& assistant,
@@ -304,7 +307,8 @@ CaptureResult capture_turn(RaggerMemory& memory,
                            const std::string& session_id,
                            const std::string& session_name = "",
                            const std::string& name_source = "",
-                           int64_t started_at = 0);
+                           int64_t started_at = 0,
+                           int64_t ended_at = 0);
 
 /// One assembled chunk in a recipe-built context, ordered oldest-first
 /// (chronological) when emitted so an agent can inject them as-is. `kind`

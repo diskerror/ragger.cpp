@@ -7,6 +7,7 @@
 #include "embedder.h"
 #include "config.h"
 #include "util/fs.h"
+#include "util/time.h"
 #include "Logger.h"
 #include "lang.h"
 #include "recipe.h"
@@ -732,7 +733,8 @@ CaptureResult capture_turn(RaggerMemory& memory,
                            const std::string& session_id,
                            const std::string& session_name,
                            const std::string& name_source,
-                           int64_t started_at) {
+                           int64_t started_at,
+                           int64_t ended_at) {
     // Gate: turn capture is opt-in. Agent-driven store/search are unaffected.
     if (!config().capture_turns) return {false, -1, {}};
 
@@ -751,7 +753,7 @@ CaptureResult capture_turn(RaggerMemory& memory,
 
     int turn_id = memory.store_turn(clean_user, assistant, model,
                                     /*defer_embedding=*/false, session_id,
-                                    /*source_timestamp=*/"",
+                                    /*source_timestamp=*/ended_at ? db_timestamp(static_cast<std::time_t>(ended_at)) : std::string(),
                                     session_name, name_source, started_at);
     return {true, turn_id, clean_user};
 }

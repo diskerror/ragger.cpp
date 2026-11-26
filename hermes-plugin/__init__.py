@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 
 _CIRCUIT_THRESHOLD = 5
 _CIRCUIT_COOLDOWN = 120.0   # seconds before auto-reset
+# Turns that could not be delivered (daemon down / breaker open) are appended
+# here as JSON lines and replayed, oldest first, after the next successful
+# POST. Each line carries ended_at, so a replayed turn keeps its real time.
+_SPOOL_PATH = Path.home() / ".ragger" / "spool" / "hermes-turns.jsonl"
 
 
 def _int_or_error(value, name):
@@ -624,6 +628,8 @@ class RaggerMemoryProvider(MemoryProvider):
         self._prefetch_result = ""
         self._model = ""
         self._session_id = ""   # Hermes session id; provenance for memory_decision
+        self._turn_started = 0  # epoch when the current user prompt arrived (started_at)
+        self._spool_lock = threading.Lock()
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
         # Circuit breaker. Touched from the gateway thread, the prefetch
@@ -790,7 +796,23 @@ class RaggerMemoryProvider(MemoryProvider):
     # ------------------------------------------------------------------
 
     def is_available(self) -> bool:
-        """Return True if the Ragger daemon is reachable."""
+        """Return True when Ragger is installed, reachable or not.
+
+        Hermes asks once per session and disables the provider for the WHOLE
+        session on False. A daemon that is restarting or briefly down must not
+        cost a session of capture: turns are spooled while it is unreachable
+        (see _spool_turn) and the circuit breaker keeps recall cheap. Only a
+        machine with no ~/.ragger at all reports unavailable.
+        """
+        if not (Path.home() / ".ragger").is_dir():
+            return False
+        if not self._daemon_reachable():
+            logger.warning("Ragger daemon is not reachable; turns will be spooled to %s "
+                           "and replayed when it is back.", _SPOOL_PATH)
+        return True
+
+    def _daemon_reachable(self) -> bool:
+        """True if GET /health answers status ok."""
         cfg = _load_ragger_config()
         if cfg["socket_enable"]:
             conn = _UnixSocketHTTPConnection(cfg["socket_path"], timeout=2.0)
@@ -840,6 +862,7 @@ class RaggerMemoryProvider(MemoryProvider):
         Ragger's /turn endpoint, which stores it on the turn + its turn summary
         (the row that records *who the user was talking to*).
         """
+        self._turn_started = int(self._time.time())
         model = kwargs.get("model")
         if model:
             self._model = model
@@ -943,7 +966,7 @@ class RaggerMemoryProvider(MemoryProvider):
         no-op. session_id groups turns into episodes. Agent-driven
         ragger_store remains the path for explicitly-curated memories.
         """
-        if self._breaker_open() or not user_content:
+        if not user_content:
             return
         self._post_turn(user_content, assistant_content, session_id=session_id)
 
@@ -1026,24 +1049,92 @@ class RaggerMemoryProvider(MemoryProvider):
         
         Called from both sync_turn (normal path) and post_turn_finalized (catch-all).
         """
-        if self._breaker_open() or not user_content:
+        if not user_content:
             return
+        now = int(self._time.time())
         payload = {
             "user": user_content,
             "assistant": assistant_content,
             "model": self._model,
             "session_id": session_id,
+            # The turn's own time, so a spooled copy replays with it.
+            "ended_at": now,
         }
+        if self._turn_started and self._turn_started <= now:
+            payload["started_at"] = self._turn_started
         title = self._get_session_title(session_id)
         if title:
             payload["session_name"] = title
             payload["name_source"] = "hermes_title"
+        if self._breaker_open():
+            self._spool_turn(payload)
+            return
         # PHASE9B step 9: transport failure counts; an HTTP 4xx (the daemon
         # rejected this turn) does not, and is only worth a debug line — turn
         # capture must never raise into the caller.
-        ok, detail = self._classify(self._post_status("/turn", payload, timeout=4.0))
+        got = self._post_status("/turn", payload, timeout=4.0)
+        ok, detail = self._classify(got)
+        if got is None:
+            self._spool_turn(payload)
+            return
         if not ok:
             logger.debug("Ragger turn capture: %s", detail)
+        if _SPOOL_PATH.exists():
+            threading.Thread(target=self._replay_spool, daemon=True,
+                             name="ragger-spool-replay").start()
+
+    # ------------------------------------------------------------------
+    # Spool: turns the daemon could not take
+    # ------------------------------------------------------------------
+
+    def _spool_turn(self, payload: dict) -> None:
+        """Append an undelivered turn to the spool file. Never raises."""
+        try:
+            with self._spool_lock:
+                _SPOOL_PATH.parent.mkdir(parents=True, exist_ok=True)
+                with open(_SPOOL_PATH, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            logger.info("Ragger unreachable: turn spooled to %s", _SPOOL_PATH)
+        except Exception as exc:
+            logger.warning("Ragger: could not spool turn (%s); it is lost.", exc)
+
+    def _replay_spool(self) -> None:
+        """Send spooled turns oldest first. Stops at the first transport
+        failure and keeps the rest; a turn the daemon rejects (4xx) is logged
+        and dropped, since resending cannot fix it. Never raises."""
+        try:
+            with self._spool_lock:
+                if not _SPOOL_PATH.exists():
+                    return
+                lines = _SPOOL_PATH.read_text(encoding="utf-8").splitlines()
+                sent = 0
+                for line in lines:
+                    if not line.strip():
+                        sent += 1
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except ValueError:
+                        logger.warning("Ragger spool: dropping unreadable line")
+                        sent += 1
+                        continue
+                    got = self._post_status("/turn", item, timeout=4.0)
+                    if got is None:
+                        self._record_fail()
+                        break
+                    if got[0] >= 400:
+                        logger.warning("Ragger spool: daemon rejected a turn (%s): %s",
+                                       got[0], got[1][:200])
+                    sent += 1
+                rest = lines[sent:]
+                if rest:
+                    _SPOOL_PATH.write_text("\n".join(rest) + "\n", encoding="utf-8")
+                else:
+                    _SPOOL_PATH.unlink()
+                if sent:
+                    logger.info("Ragger spool: replayed %d turn(s), %d left", sent, len(rest))
+        except Exception as exc:
+            logger.warning("Ragger spool replay failed: %s", exc)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [SEARCH_SCHEMA, STORE_SCHEMA, DECISION_SCHEMA,
