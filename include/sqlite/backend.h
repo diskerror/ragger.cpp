@@ -104,7 +104,8 @@ public:
                                const std::string& created_at) override;
     bool turn_exists_fuzzy(const std::string& user_text,
                            const std::string& ts,
-                           int window_seconds) override;
+                           int back_seconds,
+                           int forward_seconds) override;
     std::optional<TurnRecord> find_turn_by_text(
         const std::string& user_text) override;
     bool update_turn_meta(int turn_id,

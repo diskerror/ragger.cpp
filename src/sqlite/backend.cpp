@@ -86,9 +86,9 @@ bool Backend::decision_exists_exact(const std::string& text, const std::string& 
 }
 
 bool Backend::turn_exists_fuzzy(const std::string& user_text, const std::string& ts,
-                                      int window_seconds) {
+                                      int back_seconds, int forward_seconds) {
     std::lock_guard<std::mutex> lk(pImpl->mu);
-    return pImpl->turn_exists_fuzzy(user_text, ts, window_seconds);
+    return pImpl->turn_exists_fuzzy(user_text, ts, back_seconds, forward_seconds);
 }
 
 std::optional<TurnRecord> Backend::find_turn_by_text(const std::string& user_text) {

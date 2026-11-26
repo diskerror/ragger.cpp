@@ -731,7 +731,7 @@ struct Backend::Impl {
     // captured live (identical content, a few seconds of clock skew —
     // message send time vs. capture time, plus any tz-conversion rounding).
     bool turn_exists_fuzzy(const std::string& user_text, const std::string& ts,
-                           int window_seconds);
+                           int back_seconds, int forward_seconds);
 
     // Collapse whitespace, drop zero-width/variation-selector/control
     // characters, and case-fold so the same exchange pasted through two

@@ -299,8 +299,8 @@ bool RaggerMemory::decision_exists_exact(const std::string& text, const std::str
 }
 
 bool RaggerMemory::turn_exists_fuzzy(const std::string& user_text, const std::string& ts,
-                                     int window_seconds) {
-    return backend_->turn_exists_fuzzy(user_text, ts, window_seconds);
+                                     int back_seconds, int forward_seconds) {
+    return backend_->turn_exists_fuzzy(user_text, ts, back_seconds, forward_seconds);
 }
 
 std::optional<TurnRecord> RaggerMemory::find_turn_by_text(const std::string& user_text) {

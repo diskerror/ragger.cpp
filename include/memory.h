@@ -130,9 +130,10 @@ public:
     bool decision_exists_exact(const std::string& text, const std::string& created_at);
 
     /// Fuzzy overlap check for conversation importers: does a live-captured
-    /// turn already exist with this exact user_text within ±window_seconds?
+    /// turn already exist with this exact user_text in the window
+    /// [ts - back_seconds, ts + forward_seconds]? See StorageBackend.
     bool turn_exists_fuzzy(const std::string& user_text, const std::string& ts,
-                           int window_seconds);
+                           int back_seconds, int forward_seconds);
 
     /// Cross-source overlap lookup (ignores timestamp) — see
     /// StorageBackend::find_turn_by_text.

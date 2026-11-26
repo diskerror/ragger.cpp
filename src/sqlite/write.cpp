@@ -2097,7 +2097,7 @@ static std::string tags_from_metadata(const json& metadata) {
     // captured live (identical content, a few seconds of clock skew —
     // message send time vs. capture time, plus any tz-conversion rounding).
     bool Backend::Impl::turn_exists_fuzzy(const std::string& user_text, const std::string& ts,
-                           int window_seconds) {
+                           int back_seconds, int forward_seconds) {
         // created_at is an INTEGER epoch — compare against resolved integer
         // bounds (the old datetime(?,?) form compared TEXT to INTEGER and
         // never matched).
@@ -2106,8 +2106,8 @@ static std::string tags_from_metadata(const json& metadata) {
             "SELECT 1 FROM turns WHERE user_text = ? "
             "AND created_at BETWEEN ? AND ? LIMIT 1");
         s.bind(1, user_text);
-        s.bind(2, ep - window_seconds);
-        s.bind(3, ep + window_seconds);
+        s.bind(2, ep - back_seconds);
+        s.bind(3, ep + forward_seconds);
         return s.step();
     }
 

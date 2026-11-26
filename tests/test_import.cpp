@@ -262,6 +262,45 @@ void test_since_until_date_forms() {
     CHECK(threw);
 }
 
+// -----------------------------------------------------------------------
+// Telegram parse: an imported reply must match what live capture stored —
+// no tool-progress bubbles, no replies to dropped commands, Markdown intact.
+// -----------------------------------------------------------------------
+
+void test_telegram_reply_fidelity() {
+    const auto path = std::filesystem::temp_directory_path() / "ragger_tg_fidelity.json";
+    {
+        std::ofstream f(path);
+        f << R"JSON({"name":"Hal","messages":[
+          {"type":"message","date":"2026-11-26T09:00:00","from":"Reid","text":"What is the version?"},
+          {"type":"message","date":"2026-11-26T09:00:05","from":"Hal","text":"\ud83d\udcc4 Reading https://example.com/a-very-long-url-th\u2026"},
+          {"type":"message","date":"2026-11-26T09:00:06","from":"Hal","text":"\ud83d\udcbb terminal"},
+          {"type":"message","date":"2026-11-26T09:00:30","from":"Hal","text":[
+             "The version is ",
+             {"type":"code","text":"0.17.0.1"},
+             " — see ",
+             {"type":"text_link","text":"the changelog","href":"https://example.com/c"},
+             "."]},
+          {"type":"message","date":"2026-11-26T09:01:00","from":"Reid","text":"/memory pending"},
+          {"type":"message","date":"2026-11-26T09:01:01","from":"Hal","text":"Nothing is pending."},
+          {"type":"message","date":"2026-11-26T09:02:00","from":"Reid","text":"Thanks."},
+          {"type":"message","date":"2026-11-26T09:02:10","from":"Hal","text":"You're welcome."}
+        ]})JSON";
+    }
+    const auto turns = ragger::parse_telegram(path.string(), "Reid");
+    std::filesystem::remove(path);
+
+    assert(turns.size() == 2);
+    // Progress bubbles dropped; entities rebuilt as Markdown.
+    assert(turns[0].user_text == "What is the version?");
+    assert(turns[0].assistant_text ==
+           "The version is `0.17.0.1` \xe2\x80\x94 see [the changelog](https://example.com/c).");
+    // The reply to the dropped /memory command is not glued onto any turn.
+    assert(turns[0].assistant_text.find("Nothing is pending") == std::string::npos);
+    assert(turns[1].user_text == "Thanks.");
+    assert(turns[1].assistant_text == "You're welcome.");
+}
+
 int main() {
     TestEnv env("import");   // must be first: isolates from ~/.ragger
     test_heading_levels();
@@ -280,6 +319,7 @@ int main() {
     test_tiny_file();
     test_clean_document_text();
     test_since_until_date_forms();
+    test_telegram_reply_fidelity();
 
     const std::string model_dir = env.model_dir();
     if (!std::filesystem::exists(model_dir + "/model.onnx") &&

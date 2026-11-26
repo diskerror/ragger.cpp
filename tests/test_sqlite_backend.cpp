@@ -4200,13 +4200,25 @@ void p1t_test_import_probes(ragger::Embedder& emb) {
     CHECK(db.decision_exists_exact("Probe decision text.", "2026-04-15 09:30:00"));
     CHECK(!db.decision_exists_exact("Probe decision text.", "2026-04-15 09:30:01"));
 
-    // turn fuzzy window: ±5s around the probe instant.
+    // turn fuzzy window, asymmetric: the probe timestamp is when the user
+    // SENT the message; the stored turn is stamped when the reply finished,
+    // so the window reaches back a little and forward a lot.
     int t = db.store_turn("Fuzzy probe question", "Fuzzy probe answer", "test-model",
                           false, "", "2026-04-15 09:30:00");
     CHECK(t > 0);
-    CHECK(db.turn_exists_fuzzy("Fuzzy probe question", "2026-04-15 09:30:03", 5));
-    CHECK(!db.turn_exists_fuzzy("Fuzzy probe question", "2026-04-15 09:30:10", 5));
-    CHECK(!db.turn_exists_fuzzy("Different question text", "2026-04-15 09:30:00", 5));
+    CHECK(db.turn_exists_fuzzy("Fuzzy probe question", "2026-04-15 09:30:03", 5, 600));
+    CHECK(!db.turn_exists_fuzzy("Fuzzy probe question", "2026-04-15 09:30:10", 5, 600));
+    CHECK(!db.turn_exists_fuzzy("Different question text", "2026-04-15 09:30:00", 5, 600));
+    // A reply that took 8 minutes: the turn is stamped 09:38, the user's
+    // message is 09:30. A symmetric 90s window missed this and the turn was
+    // imported a second time.
+    int tl = db.store_turn("Slow probe question", "Slow probe answer", "test-model",
+                           false, "", "2026-04-15 09:38:00");
+    CHECK(tl > 0);
+    CHECK(db.turn_exists_fuzzy("Slow probe question", "2026-04-15 09:30:00", 90, 3600));
+    CHECK(!db.turn_exists_fuzzy("Slow probe question", "2026-04-15 09:30:00", 90, 90));
+    // ...but not a same-text message sent the next day.
+    CHECK(!db.turn_exists_fuzzy("Slow probe question", "2026-04-16 09:30:00", 90, 3600));
 
     // update_turn_meta must write an INTEGER epoch, agreeing with a store
     // that used the same source_timestamp.

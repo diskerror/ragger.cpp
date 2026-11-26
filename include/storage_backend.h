@@ -236,9 +236,14 @@ public:
     /// skip exchanges Ragger already captured live — the text content is
     /// identical but timestamps skew by a few seconds (message send time
     /// vs. capture time) so an exact timestamp match would miss them.
+    /// The window is asymmetric: `ts` is when the user's message was sent,
+    /// while a live-captured turn is stamped when the reply FINISHED, which
+    /// can be many minutes later. A symmetric few-second window missed every
+    /// such pair and re-imported turns Ragger already had.
     virtual bool turn_exists_fuzzy(const std::string& user_text,
                                    const std::string& ts,
-                                   int window_seconds) = 0;
+                                   int back_seconds,
+                                   int forward_seconds) = 0;
 
     /// Cross-source overlap lookup: does a turn already exist whose
     /// user_text normalizes-equal to `user_text` (whitespace collapsed,

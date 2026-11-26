@@ -1145,7 +1145,9 @@ int main(int argc, char **argv) {
             for (const auto& t : turns) {
                 std::string ts = to_db_ts(t.timestamp);
                 if (!ts.empty() && !t.user_text.empty() &&
-                    memory.turn_exists_fuzzy(t.user_text, ts, 90)) {
+                    // Forward window: a captured turn is stamped when the
+                    // reply finished — minutes after the user's message.
+                    memory.turn_exists_fuzzy(t.user_text, ts, 90, 3600)) {
                     ++n_skip;
                     continue;
                 }

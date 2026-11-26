@@ -728,9 +728,13 @@ std::vector<ImportTurn> parse_claude_web(const std::string& path_str) {
 
 namespace {
 
-/// Flatten a Telegram "text" field. It's either a plain string or an array
-/// mixing plain strings with `{"type":..,"text":..}` entity objects (bold,
-/// link, code, etc.) — we just want the concatenated text content.
+/// Flatten a Telegram "text" field back into Markdown. The field is either
+/// a plain string or an array mixing plain strings with entity objects
+/// (`{"type":"bold","text":".."}`). Telegram stores the *rendered* text plus
+/// entity spans, so the Markdown the agent sent is only recoverable by
+/// re-wrapping each entity — without this a reply's code spans, fences and
+/// links come back as bare text and no longer match what was captured live.
+/// Unknown entity types fall back to their plain text.
 std::string extract_telegram_text(const json& text_field) {
     if (text_field.is_string()) return trim(text_field.get<std::string>());
     if (!text_field.is_array()) return "";
@@ -738,11 +742,57 @@ std::string extract_telegram_text(const json& text_field) {
     for (const auto& piece : text_field) {
         if (piece.is_string()) {
             out += piece.get<std::string>();
-        } else if (piece.is_object()) {
-            out += piece.value("text", "");
+            continue;
         }
+        if (!piece.is_object()) continue;
+        const std::string type = piece.value("type", "");
+        const std::string text = piece.value("text", "");
+        if (type == "bold")                 out += "**" + text + "**";
+        else if (type == "italic")          out += "*" + text + "*";
+        else if (type == "strikethrough")   out += "~~" + text + "~~";
+        else if (type == "spoiler")         out += "||" + text + "||";
+        else if (type == "code")            out += "`" + text + "`";
+        else if (type == "pre") {
+            const std::string lang = piece.value("language", "");
+            out += "```" + lang + "\n" + text;
+            if (!text.empty() && text.back() != '\n') out += "\n";
+            out += "```";
+        }
+        else if (type == "text_link")       out += "[" + text + "](" + piece.value("href", "") + ")";
+        else if (type == "blockquote") {
+            std::string q = text;
+            std::string acc = "> ";
+            for (const char c : q) { acc += c; if (c == '\n') acc += "> "; }
+            out += acc;
+        }
+        else                                out += text;   // plain, link, mention, ...
     }
     return trim(out);
+}
+
+/// True for a Hermes tool-progress bubble: the short status messages the
+/// gateway posts while a turn is still running ("\xF0\x9F\x93\x84 Reading https://...",
+/// "\xF0\x9F\x92\xBB terminal ...", "\xF0\x9F\xA7\xA0 Updating memory..."). They are separate Telegram
+/// messages from the same sender as the reply, so the same-sender merge
+/// below would otherwise glue them onto the front of the assistant text —
+/// which is why imported replies did not match the live-captured ones.
+/// Shape test, not a fixed emoji list (new tools get new icons): a bubble
+/// that opens with a pictograph, is short, and is a single paragraph.
+bool is_tool_progress_bubble(const std::string& text) {
+    if (text.empty() || text.size() > 300) return false;
+    if (text.find("\n\n") != std::string::npos) return false;   // real prose, not a status line
+    // Leading codepoint must be a pictograph (U+1F300.. or U+2600..U+27BF).
+    const auto b0 = static_cast<unsigned char>(text[0]);
+    if (b0 < 0x80) return false;
+    unsigned cp = 0;
+    if ((b0 & 0xF8) == 0xF0 && text.size() >= 4)
+        cp = ((b0 & 0x07u) << 18) | ((static_cast<unsigned char>(text[1]) & 0x3Fu) << 12) |
+             ((static_cast<unsigned char>(text[2]) & 0x3Fu) << 6) | (static_cast<unsigned char>(text[3]) & 0x3Fu);
+    else if ((b0 & 0xF0) == 0xE0 && text.size() >= 3)
+        cp = ((b0 & 0x0Fu) << 12) | ((static_cast<unsigned char>(text[1]) & 0x3Fu) << 6) |
+             (static_cast<unsigned char>(text[2]) & 0x3Fu);
+    else return false;
+    return (cp >= 0x1F300 && cp <= 0x1FAFF) || (cp >= 0x2600 && cp <= 0x27BF);
 }
 
 /// True if `text` is a bare control command that should never be stored as
@@ -779,6 +829,9 @@ void parse_telegram_chat(const json& chat, const std::string& self_name,
 
     struct Block { bool is_self; std::string ts; std::string text; std::string sid; };
     std::vector<Block> blocks;
+    // Set when a user bubble was dropped as a command: the agent's reply to
+    // it must be dropped too (see below), until the next real user message.
+    bool drop_bot_reply = false;
 
     for (const auto& m : chat["messages"]) {
         if (!m.is_object()) continue;
@@ -792,13 +845,24 @@ void parse_telegram_chat(const json& chat, const std::string& self_name,
         // Session boundary: a user message that is the /new command.
         if (is_self && (text == "/new" || text.rfind("/new ", 0) == 0)) {
             ++session_no;
+            drop_bot_reply = true;   // "new session" confirmation isn't content
             continue;  // command, not conversation
         }
 
         // Other bare commands (/stop, /model, /reset, plain "stop"/"wait",
         // etc.) are control chatter, not conversation content — drop them
         // without touching session numbering.
-        if (is_self && is_bare_command(text)) continue;
+        if (is_self && is_bare_command(text)) { drop_bot_reply = true; continue; }
+
+        // The agent's answer to a dropped command (the /memory listing, the
+        // /model confirmation, ...) is control chatter too, and it is NOT
+        // part of the previous turn's reply — merging it there is what made
+        // imported assistant text differ from what was captured live.
+        if (!is_self && drop_bot_reply) continue;
+        if (is_self) drop_bot_reply = false;
+
+        // Tool-progress bubbles are not reply content.
+        if (!is_self && is_tool_progress_bubble(text)) continue;
 
         // Merge consecutive same-sender bubbles — but never across a
         // session boundary (sid mismatch breaks the merge naturally).
