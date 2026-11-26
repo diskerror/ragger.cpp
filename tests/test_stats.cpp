@@ -245,7 +245,9 @@ int main() {
     }
     // Active signals round-trip as their stored values.
     CHECK(std::abs(scalar_real("SELECT vec_score  FROM hits WHERE memory_id=201") - 0.9) < 1e-6);
-    CHECK(std::abs(scalar_real("SELECT fts_score FROM hits WHERE memory_id=201") - 0.5) < 1e-6);
+    // The stats.db column keeps the name bm25_score (existing files); only
+    // the in-memory field was renamed to fts_score by the FTS rename.
+    CHECK(std::abs(scalar_real("SELECT bm25_score FROM hits WHERE memory_id=201") - 0.5) < 1e-6);
     CHECK(std::abs(scalar_real("SELECT phon_score FROM hits WHERE memory_id=201") - 0.2) < 1e-6);
     CHECK(std::abs(scalar_real("SELECT blended    FROM hits WHERE memory_id=201") - 8.9) < 1e-6);
     // Inactive phon (-1) is stored as NULL, not -1.
