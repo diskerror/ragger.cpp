@@ -959,17 +959,84 @@ class RaggerMemoryProvider(MemoryProvider):
             return ""
         return f"## Ragger Memory\n{result}"
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+    def sync_turn(self, user_content: str, assistant_content: str, *,
+                  session_id: str = "",
+                  messages: Optional[List[Dict[str, Any]]] = None,
+                  turn_author: Optional[Dict[str, Any]] = None) -> None:
         """Push the completed turn to Ragger's capture_turn (HTTP POST /turn).
 
         The daemon stores the raw turn — and later summarizes it — only when
         [server] capture_turns is enabled; otherwise this is a server-side
         no-op. session_id groups turns into episodes. Agent-driven
         ragger_store remains the path for explicitly-curated memories.
+
+        `messages` must stay in the signature: Hermes forwards the transcript
+        only to providers whose sync_turn accepts it (memory_manager.py,
+        _provider_sync_accepts). Without the parameter the argument is silently
+        dropped and every multi-part answer is captured truncated.
+
+        `turn_author` is accepted to match the base signature and currently
+        unused; Ragger has no per-author column.
         """
         if not user_content:
             return
+        assistant_content = self._assistant_text_for_turn(messages, assistant_content)
         self._post_turn(user_content, assistant_content, session_id=session_id)
+
+    @staticmethod
+    def _message_text(content) -> str:
+        """Plain text of one message's content; tool_use/tool_result blocks dropped."""
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+        out = []
+        for part in content:
+            if isinstance(part, str):
+                out.append(part)
+            elif isinstance(part, dict) and part.get("type") in (None, "text"):
+                text = part.get("text")
+                if isinstance(text, str):
+                    out.append(text)
+        return "\n".join(p for p in out if p)
+
+    @classmethod
+    def _assistant_text_for_turn(cls, messages, final_text: str) -> str:
+        """Every assistant text block of the CURRENT turn, oldest first.
+
+        Hermes passes `final_response` — the LAST assistant message only
+        (run_agent.py, _sync_external_memory_for_turn). An answer that speaks,
+        calls tools, then speaks again therefore reached Ragger with everything
+        before the final block missing.
+
+        `messages` is the agent's whole working list, not a per-turn slice, so
+        scan back to the most recent user message and keep only what follows.
+        Never raises: capture must not break a turn.
+        """
+        try:
+            if not isinstance(messages, list) or not messages:
+                return final_text
+            start = 0
+            for i in range(len(messages) - 1, -1, -1):
+                msg = messages[i]
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    start = i + 1
+                    break
+            parts = []
+            for msg in messages[start:]:
+                if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                    continue
+                text = cls._message_text(msg.get("content")).strip()
+                if text:
+                    parts.append(text)
+            # The final response is usually the last block already; only append
+            # it when the transcript does not end with it (held/rewritten turns).
+            if final_text and final_text.strip():
+                if not parts or parts[-1] != final_text.strip():
+                    parts.append(final_text.strip())
+            return "\n\n".join(parts) if parts else final_text
+        except Exception:          # capture must never break the turn
+            return final_text
 
     def post_turn_finalized(self, turn_data: dict, **kwargs) -> None:
         """Hook called after *every* turn finalization, including interrupted ones.

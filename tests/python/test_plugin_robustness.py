@@ -257,5 +257,50 @@ check(_clean(oob) == "Do the thing.\n\nActually, stop at step two.",
 check(_clean("Just a normal question?") == "Just a normal question?",
       "an ordinary prompt must be untouched")
 
+# --- 9. a multi-part answer is captured whole --------------------------
+# Hermes hands a provider `final_response`, which is the LAST assistant
+# message only. An answer that speaks, calls a tool, then speaks again used
+# to reach Ragger with everything before the final block missing. The
+# provider rebuilds the turn from the `messages` transcript instead.
+_join = plugin.RaggerMemoryProvider._assistant_text_for_turn
+
+convo = [
+    {"role": "user", "content": "older question"},
+    {"role": "assistant", "content": "older answer"},
+    {"role": "user", "content": "Can we do both?"},
+    {"role": "assistant", "content": "Both, yes — and the good news is this needs no new code."},
+    {"role": "assistant", "content": [{"type": "tool_use", "name": "patch", "input": {}}]},
+    {"role": "tool", "content": "patched"},
+    {"role": "assistant", "content": [{"type": "text", "text": "Added as compaction_full."}]},
+]
+got = _join(convo, "Added as compaction_full.")
+check(got == "Both, yes — and the good news is this needs no new code.\n\nAdded as compaction_full.",
+      "both assistant blocks of THIS turn must be captured, got %r" % got)
+check("older answer" not in got, "the previous turn must not leak in, got %r" % got)
+check("patched" not in got, "tool results must not be captured, got %r" % got)
+check("tool_use" not in got, "tool_use blocks must not be captured, got %r" % got)
+
+# Single-block turn: unchanged behaviour, no duplication.
+simple = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+check(_join(simple, "hello") == "hello", "a single-block answer must not be duplicated")
+
+# A final_response the transcript does not end with (held/rewritten turn).
+held = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "draft"}]
+check(_join(held, "final") == "draft\n\nfinal", "a rewritten final response must be appended")
+
+# Degenerate input falls back to the final text and never raises.
+check(_join(None, "only this") == "only this", "messages=None must fall back")
+check(_join([], "only this") == "only this", "an empty transcript must fall back")
+check(_join(["not a dict", 7], "only this") == "only this", "junk entries must fall back")
+check(_join([{"role": "user", "content": "q"}], "") == "", "no assistant text is empty, not a crash")
+
+# The signature must keep `messages`: Hermes only forwards the transcript to
+# providers whose sync_turn accepts it, so losing the parameter silently
+# reintroduces the truncation bug.
+import inspect
+_params = inspect.signature(plugin.RaggerMemoryProvider.sync_turn).parameters
+check("messages" in _params, "sync_turn must accept `messages` or Hermes drops it")
+check("turn_author" in _params, "sync_turn must match the base signature")
+
 _server.shutdown()
 print("OK")
