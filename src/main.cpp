@@ -214,7 +214,7 @@ int main(int argc, char **argv) {
             // admin flags removed — sudo is the admin gate
             ("yes,y", CLI_YES)
             ("json,j", "config get: format output as JSON")
-            ("dry-run", "reindex/re-embed/housekeeping/backfill: report what the run would do, write nothing")
+            ("dry-run", "reindex/re-embed/housekeeping/backfill/import-conversations: report what the run would do, write nothing")
             ("model", Diskerror::po::value<std::string>(),
                 "backfill turn-summary-regenerate: only rows whose turn or summary model has this name")
             ("ids", Diskerror::po::value<std::string>(),
@@ -1139,17 +1139,40 @@ int main(int argc, char **argv) {
             }
 
             ragger::RaggerMemory memory(db_path);
-            int n = 0, n_skip = 0, n_merged = 0;
+            const bool dry_run = opts.count("dry-run") > 0;
+            int n = 0, n_skip = 0, n_merged = 0, n_grown = 0, n_grown_bytes = 0;
             std::vector<std::pair<int, std::string>> inserted;  // telegram backfill scope
             bool is_telegram = (fmt == "telegram");
             for (const auto& t : turns) {
                 std::string ts = to_db_ts(t.timestamp);
-                if (!ts.empty() && !t.user_text.empty() &&
+                if (!ts.empty() && !t.user_text.empty()) {
                     // Forward window: a captured turn is stamped when the
                     // reply finished — minutes after the user's message.
-                    memory.turn_exists_fuzzy(t.user_text, ts, 90, 3600)) {
-                    ++n_skip;
-                    continue;
+                    if (auto hit = memory.find_turn_fuzzy(t.user_text, ts, 90, 3600)) {
+                        // Already captured — but the stored copy may be SHORT.
+                        // Before 0.17.0.3 the Hermes plugin kept only the last
+                        // assistant block of a turn, so the export can hold
+                        // text the row is missing. Grow it rather than skip it;
+                        // splice_turn_text adds only what is absent and never
+                        // rewrites stored text, so a row that is already
+                        // complete is left untouched.
+                        const auto sp = memory.splice_turn_text(
+                            hit->turn_id, t.user_text, t.assistant_text, dry_run);
+                        if (sp) {
+                            ++n_grown;
+                            n_grown_bytes += sp.added_bytes;
+                            if (dry_run)
+                                std::println(std::cerr,
+                                    "  would grow turn {} by {} bytes ({}{}{})",
+                                    hit->turn_id, sp.added_bytes,
+                                    sp.grew_user ? "user" : "",
+                                    (sp.grew_user && sp.grew_assistant) ? "+" : "",
+                                    sp.grew_assistant ? "assistant" : "");
+                        } else {
+                            ++n_skip;
+                        }
+                        continue;
+                    }
                 }
                 if (!is_telegram && !t.user_text.empty()) {
                     auto existing = memory.find_turn_by_text(t.user_text);
@@ -1171,6 +1194,10 @@ int main(int argc, char **argv) {
                 if (!ts.empty() && ragger::is_synthetic_session_guid(sid)) {
                     if (std::string real = memory.session_guid_at(ts); !real.empty())
                         sid = real;
+                }
+                if (dry_run) {   // report only: no insert, no embed, no session write
+                    ++n;
+                    continue;
                 }
                 int new_id = memory.store_turn(t.user_text, t.assistant_text,
                                   /*model_name=*/t.source + "-import",
@@ -1197,8 +1224,10 @@ int main(int argc, char **argv) {
                     }
                 }
             }
-            std::println("Imported {} conversation turns ({} duplicates skipped, {} session ids merged, {} backfilled).",
-                         n, n_skip, n_merged, n_backfilled);
+            std::println("{} {} conversation turns ({} duplicates skipped, {} grown by {} bytes, "
+                         "{} session ids merged, {} backfilled).",
+                         dry_run ? "Would import" : "Imported",
+                         n, n_skip, n_grown, n_grown_bytes, n_merged, n_backfilled);
             const std::string turns_detail = std::format(
                 "{} turns imported, {} duplicates skipped, {} session ids merged, {} backfilled",
                 n, n_skip, n_merged, n_backfilled);

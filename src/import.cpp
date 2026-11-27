@@ -770,6 +770,24 @@ std::string extract_telegram_text(const json& text_field) {
     return trim(out);
 }
 
+/// Pick the richest text representation a Telegram message offers.
+///
+/// Exports come in two shapes. Older ones put the formatting inline: "text"
+/// is an array mixing plain strings with entity objects. Newer ones (and the
+/// full-account export) put a RENDERED plain string in "text" and the spans in
+/// a parallel "text_entities" array. Reading "text" alone in the second shape
+/// silently drops every code span, fence and link target, so an imported reply
+/// no longer matches what live capture stored — measured on a real export,
+/// similarity fell to 0.90 and the two texts shared no common substring.
+/// "text_entities" carries the same {type, text} objects the array form uses,
+/// so it feeds the same flattener.
+std::string telegram_message_text(const json& m) {
+    const json& entities = m.contains("text_entities") ? m["text_entities"] : json();
+    if (entities.is_array() && !entities.empty())
+        return extract_telegram_text(entities);
+    return extract_telegram_text(m.value("text", json("")));
+}
+
 /// Strip the Hermes status preamble from an assistant bubble.
 ///
 /// The gateway EDITS one Telegram message while a turn runs, so the exported
@@ -877,7 +895,7 @@ void parse_telegram_chat(const json& chat, const std::string& self_name,
     for (const auto& m : chat["messages"]) {
         if (!m.is_object()) continue;
         if (m.value("type", "") != "message") continue;  // skip service events
-        std::string text = extract_telegram_text(m.value("text", json("")));
+        std::string text = telegram_message_text(m);
         if (text.empty()) continue;
         std::string from = m.value("from", "");
         bool is_self = (from == self_name);

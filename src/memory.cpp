@@ -311,6 +311,17 @@ std::optional<TurnRecord> RaggerMemory::find_turn_by_text(const std::string& use
     return backend_->find_turn_by_text(user_text);
 }
 
+std::optional<TurnRecord> RaggerMemory::find_turn_fuzzy(const std::string& user_text,
+                                                        const std::string& ts,
+                                                        int back_seconds, int forward_seconds) {
+    return backend_->find_turn_fuzzy(user_text, ts, back_seconds, forward_seconds);
+}
+
+SpliceResult RaggerMemory::splice_turn_text(int turn_id, const std::string& user_text,
+                                            const std::string& assistant_text, bool dry_run) {
+    return backend_->splice_turn_text(turn_id, user_text, assistant_text, dry_run);
+}
+
 bool RaggerMemory::update_turn_meta(int turn_id, const std::string& timestamp,
                                     const std::string& session_guid) {
     return backend_->update_turn_meta(turn_id, timestamp, session_guid);

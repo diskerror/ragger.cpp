@@ -145,6 +145,13 @@ public:
 
     /// Upgrade an existing turn's timestamp/session_guid in place — see
     /// StorageBackend::update_turn_meta.
+    /// Import repair: find the turn a duplicate-looking import matches, and
+    /// grow it from the richer copy. See StorageBackend::splice_turn_text.
+    std::optional<TurnRecord> find_turn_fuzzy(const std::string& user_text,
+                                              const std::string& ts,
+                                              int back_seconds, int forward_seconds);
+    SpliceResult splice_turn_text(int turn_id, const std::string& user_text,
+                                  const std::string& assistant_text, bool dry_run);
     bool update_turn_meta(int turn_id,
                           const std::string& timestamp = "",
                           const std::string& session_guid = "");

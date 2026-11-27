@@ -2129,6 +2129,83 @@ static std::string tags_from_metadata(const json& metadata) {
     // within ±window_seconds. Catches import overlap with turns Ragger
     // captured live (identical content, a few seconds of clock skew —
     // message send time vs. capture time, plus any tz-conversion rounding).
+    // --- splice support -------------------------------------------------
+    //
+    // Normalize for the splice comparison: drop the bold/italic markers and
+    // collapse whitespace, but KEEP backticks. Code spans and fences are the
+    // one kind of formatting that carries meaning — losing the boundary turns
+    // a stored command into prose — so they must agree on both sides rather
+    // than being normalized away. Bold and italic are cosmetic and are the
+    // markers most likely to differ between a captured reply and the same
+    // reply rebuilt from Telegram entity spans.
+    //
+    // `raw_at` receives, for each byte of the result, the index of the byte it
+    // came from in `s`, so a match found in normalized space can be mapped
+    // back to raw offsets.
+    std::string normalize_for_splice(const std::string& s,
+                                     std::vector<size_t>* raw_at) {
+        std::string out;
+        out.reserve(s.size());
+        bool prev_space = false;
+        for (size_t i = 0; i < s.size(); ++i) {
+            const char c = s[i];
+            if (c == '*') continue;                       // ** bold, * italic
+            if (c == '\n' || c == '\t' || c == ' ' || c == '\r') {
+                if (prev_space || out.empty()) continue;
+                out.push_back(' ');
+                if (raw_at) raw_at->push_back(i);
+                prev_space = true;
+                continue;
+            }
+            prev_space = false;
+            out.push_back(c);
+            if (raw_at) raw_at->push_back(i);
+        }
+        while (!out.empty() && out.back() == ' ') {
+            out.pop_back();
+            if (raw_at) raw_at->pop_back();
+        }
+        return out;
+    }
+
+    /// Splice `stored` into `imported`, returning the grown text.
+    ///
+    /// The capture bug kept only the LAST assistant block, so a stored reply
+    /// is typically a *suffix* of the full one — a prefix test would reject
+    /// exactly the rows this repairs. The rule is therefore containment in
+    /// either direction, and the stored bytes are never rewritten: only the
+    /// text lying OUTSIDE the match is recovered, so correctly captured
+    /// formatting survives and recovered text is appended around it.
+    ///
+    /// Returns nullopt when there is nothing to do: no containment (never
+    /// guess), or the stored text already holds everything.
+    std::optional<std::string> splice_text(const std::string& stored,
+                                           const std::string& imported) {
+        if (imported.empty()) return std::nullopt;
+        if (stored.empty())   return imported;
+        // Exact containment first — with entity-rebuilt imports this is the
+        // normal case and needs no mapping. LAST occurrence: the stored text
+        // is the tail of the reply, so the last match recovers the most.
+        if (const size_t p = imported.rfind(stored); p != std::string::npos) {
+            if (imported.size() == stored.size()) return std::nullopt;
+            return imported.substr(0, p) + stored + imported.substr(p + stored.size());
+        }
+        std::vector<size_t> imap;
+        const std::string ni = normalize_for_splice(imported, &imap);
+        const std::string ns = normalize_for_splice(stored, nullptr);
+        if (ns.empty() || ni.empty()) return std::nullopt;
+        if (ni.find(ns) == std::string::npos) return std::nullopt;   // no guessing
+        const size_t np = ni.rfind(ns);
+        if (ns.size() == ni.size()) return std::nullopt;             // same content
+        // Map the normalized match back to raw byte offsets in `imported`.
+        const size_t raw_begin = imap[np];
+        const size_t last      = np + ns.size() - 1;
+        const size_t raw_end   = imap[last] + 1;   // one past the match's last byte
+        std::string out = imported.substr(0, raw_begin) + stored;
+        if (raw_end < imported.size()) out += imported.substr(raw_end);
+        return out == stored ? std::nullopt : std::optional<std::string>(out);
+    }
+
     bool Backend::Impl::turn_exists_fuzzy(const std::string& user_text, const std::string& ts,
                            int back_seconds, int forward_seconds) {
         // created_at is an INTEGER epoch — compare against resolved integer
@@ -2157,6 +2234,116 @@ static std::string tags_from_metadata(const json& metadata) {
         s.bind(2, ep - back_seconds);
         s.bind(3, ep + forward_seconds);
         return s.step();
+    }
+
+    // Same predicate as turn_exists_fuzzy, but returns the row so the caller
+    // can try to grow it instead of skipping it.
+    std::optional<TurnRecord> Backend::Impl::find_turn_fuzzy(
+            const std::string& user_text, const std::string& ts,
+            int back_seconds, int forward_seconds) {
+        const int64_t ep = resolve_epoch(ts);
+        Stmt s(db,
+            "SELECT turn_id, user_text, COALESCE(assistant_text, '') FROM turns "
+            "WHERE (user_text = ?1 OR "
+            "(length(?1) >= 40 AND substr(user_text, 1, length(?1)) = ?1) OR "
+            "(length(?1) >= 120 AND length(user_text) >= 120 AND "
+            " substr(user_text, 1, 120) = substr(?1, 1, 120))) "
+            "AND created_at BETWEEN ?2 AND ?3 LIMIT 1");
+        s.bind(1, user_text);
+        s.bind(2, ep - back_seconds);
+        s.bind(3, ep + forward_seconds);
+        if (!s.step()) return std::nullopt;
+        TurnRecord r;
+        r.turn_id        = s.column_int(0);
+        r.user_text      = s.column_text(1);
+        r.assistant_text = s.column_text(2);
+        return r;
+    }
+
+    // Grow an existing turn from a richer copy of the same exchange.
+    //
+    // Only ever ADDS text: each side is spliced independently, and a side
+    // whose stored text is not contained in the incoming one is left alone
+    // (the user side normally stores MORE than an export — the host splices
+    // its routing envelope and steering labels in — so that side usually has
+    // nothing to do, which is the correct outcome rather than a failure).
+    //
+    // What moves and what does not: created_at and started_on are the
+    // exchange's own identity and never change. The turn is re-embedded
+    // because its text changed. The turn summary is flagged stale so the
+    // catch-up regenerates it (that is what moves summarized_on), and the
+    // episode holding the turn gets a fresh modified_on while its span_*
+    // stay put — the span is which turns belong to it, which this does not
+    // alter.
+    SpliceResult Backend::Impl::splice_turn_text(int turn_id,
+                                                 const std::string& user_text,
+                                                 const std::string& assistant_text,
+                                                 bool dry_run) {
+        SpliceResult out;
+        Stmt q(db, "SELECT user_text, COALESCE(assistant_text, '') FROM turns WHERE turn_id = ?");
+        q.bind(1, turn_id);
+        if (!q.step()) return out;
+        const std::string cur_u = q.column_text(0);
+        const std::string cur_a = q.column_text(1);
+
+        const auto new_u = splice_text(cur_u, user_text);
+        const auto new_a = splice_text(cur_a, assistant_text);
+        if (!new_u && !new_a) return out;
+
+        const std::string final_u = new_u ? *new_u : cur_u;
+        const std::string final_a = new_a ? *new_a : cur_a;
+        out.grew_user      = new_u.has_value();
+        out.grew_assistant = new_a.has_value();
+        out.added_bytes    = static_cast<int>((final_u.size() + final_a.size()) -
+                                              (cur_u.size() + cur_a.size()));
+        if (dry_run) return out;
+
+        // Embed outside the write (ORDER contract: validate -> embed -> write).
+        std::vector<float> emb;
+        bool have_emb = false;
+        try {
+            emb = require_embedder().encode(turn_embed_text(final_u, final_a));
+            have_emb = true;
+        } catch (const std::exception&) {
+            have_emb = false;   // leave the old vector; the backfill will catch it
+        }
+
+        Transaction tx(db);
+        Stmt up(db, have_emb
+            ? "UPDATE turns SET user_text = ?, assistant_text = ?, "
+              "embedding_version = ?, embedding = ? WHERE turn_id = ?"
+            : "UPDATE turns SET user_text = ?, assistant_text = ? WHERE turn_id = ?");
+        up.bind(1, final_u);
+        up.bind(2, final_a);
+        if (have_emb) {
+            bind_embedding_version(up.raw(), 3, emb);
+            bind_embedding(up.raw(), 4, emb);
+            up.bind(5, turn_id);
+        } else {
+            up.bind(3, turn_id);
+        }
+        if (!up.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+
+        Stmt st(db, "UPDATE turn_summaries SET stale = stale + 1 "
+                    "WHERE turn_id = ? AND text IS NOT NULL AND text <> ''");
+        st.bind(1, turn_id);
+        if (!st.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+
+        // span_start/span_end are untouched: membership did not change.
+        Stmt ep(db, "UPDATE episodes SET modified_on = unixepoch() WHERE episode_id IN "
+                    "(SELECT episode_id FROM turn_summaries "
+                    " WHERE turn_id = ? AND episode_id IS NOT NULL)");
+        ep.bind(1, turn_id);
+        if (!ep.exec())
+            throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+
+        text_index_->index_record("turns", turn_id, final_u + "\n" + final_a);
+        tx.commit();
+        invalidate_raw_turn_cache();
+        invalidate_turn_cache();
+        return out;
     }
 
 

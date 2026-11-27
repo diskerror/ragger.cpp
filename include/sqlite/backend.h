@@ -109,6 +109,13 @@ public:
                            int forward_seconds) override;
     std::optional<TurnRecord> find_turn_by_text(
         const std::string& user_text) override;
+    std::optional<TurnRecord> find_turn_fuzzy(const std::string& user_text,
+                                              const std::string& ts,
+                                              int back_seconds,
+                                              int forward_seconds) override;
+    SpliceResult splice_turn_text(int turn_id, const std::string& user_text,
+                                  const std::string& assistant_text,
+                                  bool dry_run) override;
     bool update_turn_meta(int turn_id,
                           const std::string& timestamp = "",
                           const std::string& session_guid = "") override;

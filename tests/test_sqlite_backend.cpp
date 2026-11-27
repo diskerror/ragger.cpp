@@ -565,6 +565,82 @@ void test_store_document(ragger::Embedder& emb) {
     cleanup();
 }
 
+// Import repair (v0.17.0.4): splice_turn_text grows a stored turn from a
+// richer copy of the same exchange without rewriting what is already there.
+//
+// The motivating bug kept only the LAST assistant block of a turn, so the
+// stored reply is a SUFFIX of the full one — a prefix test would reject
+// exactly the rows this repairs.
+void test_splice_turn_text(ragger::Embedder& emb) {
+    cleanup();
+    ragger::sqlite::Backend db(emb, TEMP_DB);
+
+    // A turn whose stored reply lost its opening block.
+    const std::string truncated = "Added as `compaction_full` — five built-ins now.";
+    const std::string full      = "Both, yes — the same ladder.\n\n" + truncated;
+    const int t = db.store_turn("Can we do both?", truncated, "test-model");
+    CHECK(t > 0);
+
+    // Dry run reports the growth and writes nothing.
+    const auto dry = db.splice_turn_text(t, "Can we do both?", full, /*dry_run=*/true);
+    CHECK(dry);
+    CHECK(dry.grew_assistant && !dry.grew_user);
+    CHECK(dry.added_bytes == static_cast<int>(full.size() - truncated.size()));
+    CHECK(db.turn_assistant_text(t).value_or("") == truncated);   // untouched
+
+    // Real run grows it, and the stored bytes survive verbatim inside.
+    const auto wet = db.splice_turn_text(t, "Can we do both?", full, /*dry_run=*/false);
+    CHECK(wet);
+    const std::string got = db.turn_assistant_text(t).value_or("");
+    CHECK(got == full);
+    CHECK(got.find(truncated) != std::string::npos);
+
+    // Idempotent: nothing left to add, so no second write.
+    CHECK(!db.splice_turn_text(t, "Can we do both?", full, false));
+
+    // Never shrinks: the captured user side normally holds MORE than an
+    // export (the host splices in its routing envelope and steering text),
+    // so an incoming shorter user text must be ignored.
+    const int t2 = db.store_turn("Do it.\n[envelope]\nAlso: be brief.",
+                                 "Done.", "test-model");
+    CHECK(!db.splice_turn_text(t2, "Do it.", "Done.", false));
+
+    // No containment -> no guessing, no write.
+    const int t3 = db.store_turn("Unrelated?", "Stored answer.", "test-model");
+    CHECK(!db.splice_turn_text(t3, "Unrelated?", "A completely different answer.", false));
+    CHECK(db.turn_assistant_text(t3).value_or("") == "Stored answer.");
+
+    // Bold/italic markers may differ between capture and a rebuilt export, so
+    // they are normalized away; backticks are NOT, because a code span's
+    // boundary is meaning rather than decoration (Reid, 2026-11-27).
+    const int t4 = db.store_turn("Q4?", "run **now** with `--flag`", "test-model");
+    const auto s4 = db.splice_turn_text(t4, "Q4?",
+                                        "Preamble. run now with `--flag`", false);
+    CHECK(s4 && s4.grew_assistant);
+    const std::string g4 = db.turn_assistant_text(t4).value_or("");
+    CHECK(g4 == "Preamble. run **now** with `--flag`");   // stored bytes kept
+
+    // A differing backtick is a real difference, so no splice happens.
+    const int t5 = db.store_turn("Q5?", "use `x` here", "test-model");
+    CHECK(!db.splice_turn_text(t5, "Q5?", "Preamble. use x here", false));
+
+    // Growing a turn does not move its own timestamps.
+    sqlite3* raw = nullptr;
+    CHECK(sqlite3_open(TEMP_DB.c_str(), &raw) == SQLITE_OK);
+    sqlite3_stmt* st = nullptr;
+    sqlite3_prepare_v2(raw, "SELECT created_at, started_on FROM turns WHERE turn_id = ?",
+                       -1, &st, nullptr);
+    sqlite3_bind_int(st, 1, t);
+    CHECK(sqlite3_step(st) == SQLITE_ROW);
+    const sqlite3_int64 created = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+    CHECK(created > 0);
+    sqlite3_close(raw);
+
+    db.close();
+    std::println("  test_splice_turn_text: ok");
+}
+
 // Uniform turn capture (issue #41): store_turn writes a raw exchange into
 // the `turns` table with a model reference; the partial/finalize flow embeds
 // the exchange once the assistant reply arrives.
@@ -9369,6 +9445,8 @@ int main() {
     x16_t2_reindexing_flag_lifecycle(emb);
     x16_t3_cancel_keeps_committed_batches(emb);
     x16_t4_startup_warns_on_stale_flag(emb);
+
+    test_splice_turn_text(emb);   // import repair: grow, never rewrite
 
     cleanup();  // X14: remove the DB and its -wal/-shm siblings on the way out
 

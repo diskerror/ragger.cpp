@@ -39,6 +39,15 @@ class Embedder;
 /// One raw turn as read back from the `turns` table. `model_name` is
 /// empty when the turn recorded no model; `session_guid` is empty when the
 /// turn was captured outside a session (turns.session_id IS NULL).
+/// What a splice changed (or would change, under --dry-run). A turn can
+/// grow on one side only: the two texts are spliced independently.
+struct SpliceResult {
+    bool grew_user      = false;
+    bool grew_assistant = false;
+    int  added_bytes    = 0;
+    explicit operator bool() const { return grew_user || grew_assistant; }
+};
+
 struct TurnRecord {
     int         turn_id;
     std::string user_text;
@@ -265,6 +274,27 @@ public:
     /// decide whether to upgrade its metadata via update_turn_meta().
     virtual std::optional<TurnRecord> find_turn_by_text(
         const std::string& user_text) = 0;
+
+    /// Locate the turn an import would otherwise skip as a duplicate, so
+    /// the caller can try to GROW it (see splice_turn_text) instead.
+    /// Same predicate and window as turn_exists_fuzzy.
+    virtual std::optional<TurnRecord> find_turn_fuzzy(
+        const std::string& user_text, const std::string& ts,
+        int back_seconds, int forward_seconds) {
+        (void)user_text; (void)ts; (void)back_seconds; (void)forward_seconds;
+        return std::nullopt;
+    }
+
+    /// Grow a stored turn from a richer copy of the same exchange, adding
+    /// only text that is missing and never rewriting text already stored.
+    /// `dry_run` reports what would change and writes nothing.
+    virtual SpliceResult splice_turn_text(int turn_id,
+                                          const std::string& user_text,
+                                          const std::string& assistant_text,
+                                          bool dry_run) {
+        (void)turn_id; (void)user_text; (void)assistant_text; (void)dry_run;
+        return {};
+    }
 
     /// Upgrade an existing turn's timestamp and/or session_guid in place
     /// (e.g. a Telegram-import row gets corrected to the authoritative
