@@ -294,6 +294,28 @@ check(_join([], "only this") == "only this", "an empty transcript must fall back
 check(_join(["not a dict", 7], "only this") == "only this", "junk entries must fall back")
 check(_join([{"role": "user", "content": "q"}], "") == "", "no assistant text is empty, not a crash")
 
+# Thinking is NEVER captured (Reid, 2026-11-27: no thinking, no tool calls,
+# every final response). Hermes carries reasoning two ways and both must be
+# ignored: content parts typed thinking/redacted_thinking
+# (anthropic_message_convert.py _THINKING_TYPES), and top-level message keys
+# reasoning / reasoning_content / reasoning_details (turn_finalizer.py).
+thinking_convo = [
+    {"role": "user", "content": "Can we do both?"},
+    {"role": "assistant", "content": [
+        {"type": "thinking", "thinking": "SECRET deliberation the user never saw"},
+        {"type": "text", "text": "Both, yes."},
+    ]},
+    {"role": "assistant", "content": [{"type": "redacted_thinking", "data": "SECRETblob"}]},
+    {"role": "assistant",
+     "reasoning": "SECRET top-level reasoning",
+     "reasoning_content": "SECRET reasoning_content",
+     "content": "Added as compaction_full."},
+]
+got = _join(thinking_convo, "Added as compaction_full.")
+check("SECRET" not in got, "no form of thinking may be captured, got %r" % got)
+check(got == "Both, yes.\n\nAdded as compaction_full.",
+      "both visible responses must survive intact, got %r" % got)
+
 # The signature must keep `messages`: Hermes only forwards the transcript to
 # providers whose sync_turn accepts it, so losing the parameter silently
 # reintroduces the truncation bug.
