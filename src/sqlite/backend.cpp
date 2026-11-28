@@ -107,6 +107,12 @@ std::optional<TurnRecord> Backend::find_turn_fuzzy(const std::string& user_text,
     return pImpl->find_turn_fuzzy(user_text, ts, back_seconds, forward_seconds);
 }
 
+std::optional<TurnRecord> Backend::find_turn_by_assistant(const std::string& assistant_text,
+                                                          const std::string& ts,
+                                                          int back_seconds, int forward_seconds) {
+    return pImpl->find_turn_by_assistant(assistant_text, ts, back_seconds, forward_seconds);
+}
+
 SpliceResult Backend::splice_turn_text(int turn_id, const std::string& user_text,
                                        const std::string& assistant_text,
                                        const std::string& started_ts, bool dry_run) {

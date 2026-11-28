@@ -752,6 +752,9 @@ struct Backend::Impl {
     std::optional<TurnRecord> find_turn_fuzzy(const std::string& user_text,
                                               const std::string& ts,
                                               int back_seconds, int forward_seconds);
+    std::optional<TurnRecord> find_turn_by_assistant(const std::string& assistant_text,
+                                                     const std::string& ts,
+                                                     int back_seconds, int forward_seconds);
     SpliceResult splice_turn_text(int turn_id, const std::string& user_text,
                                   const std::string& assistant_text,
                                   const std::string& started_ts, bool dry_run);

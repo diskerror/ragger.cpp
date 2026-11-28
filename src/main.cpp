@@ -1140,7 +1140,7 @@ int main(int argc, char **argv) {
 
             ragger::RaggerMemory memory(db_path);
             const bool dry_run = opts.count("dry-run") > 0;
-            int n = 0, n_skip = 0, n_merged = 0, n_grown = 0, n_grown_bytes = 0, n_started = 0;
+            int n = 0, n_skip = 0, n_merged = 0, n_grown = 0, n_grown_bytes = 0, n_frag = 0;
             std::vector<std::pair<int, std::string>> inserted;  // telegram backfill scope
             bool is_telegram = (fmt == "telegram");
             for (const auto& t : turns) {
@@ -1160,29 +1160,45 @@ int main(int argc, char **argv) {
                         // started_on wants, and one capture rarely recorded.
                         const auto sp = memory.splice_turn_text(
                             hit->turn_id, t.user_text, t.assistant_text, ts, dry_run);
-                        if (sp) {
-                            // A started_on-only fill is not a grown turn:
-                            // counting it as one would overstate how much
-                            // text the run recovered.
-                            if (sp.grew_user || sp.grew_assistant) {
-                                ++n_grown;
-                                n_grown_bytes += sp.added_bytes;
-                            }
-                            if (sp.filled_started) ++n_started;
+                        // Only a text change is worth reporting. Filling a
+                        // missing started_on is routine bookkeeping that
+                        // happens on most matched turns, so counting it would
+                        // swamp the number that matters: recovered text.
+                        if (sp.grew_user || sp.grew_assistant) {
+                            ++n_grown;
+                            n_grown_bytes += sp.added_bytes;
                             if (dry_run)
                                 std::println(std::cerr,
-                                    "  would grow turn {} by {} bytes ({}{}{}{})",
+                                    "  would grow turn {} by {} bytes ({}{}{})",
                                     hit->turn_id, sp.added_bytes,
                                     sp.grew_user ? "user" : "",
                                     (sp.grew_user && sp.grew_assistant) ? "+" : "",
-                                    sp.grew_assistant ? "assistant" : "",
-                                    sp.filled_started
-                                        ? ((sp.grew_user || sp.grew_assistant)
-                                               ? ", +started_on" : "started_on only")
-                                        : "");
+                                    sp.grew_assistant ? "assistant" : "");
                         } else {
                             ++n_skip;
                         }
+                        continue;
+                    }
+
+                    // The user side did not match. Before treating this as a
+                    // new exchange, check the assistant side: a host that
+                    // merged several consecutive user messages into one turn
+                    // leaves the export's later fragments matching no stored
+                    // user_text, and inserting one duplicates a reply that is
+                    // already stored. Fold the fragment in instead.
+                    if (auto by_a = memory.find_turn_by_assistant(
+                            t.assistant_text, ts, 90, 3600)) {
+                        const auto sp = memory.splice_turn_text(
+                            by_a->turn_id, t.user_text, t.assistant_text, ts, dry_run);
+                        ++n_frag;
+                        if (sp.grew_user || sp.grew_assistant) {
+                            ++n_grown;
+                            n_grown_bytes += sp.added_bytes;
+                        }
+                        if (dry_run)
+                            std::println(std::cerr,
+                                "  would fold fragment into turn {} (+{} bytes)",
+                                by_a->turn_id, sp.added_bytes);
                         continue;
                     }
                 }
@@ -1237,9 +1253,9 @@ int main(int argc, char **argv) {
                 }
             }
             std::println("{} {} conversation turns ({} duplicates skipped, {} grown by {} bytes, "
-                         "{} started_on filled, {} session ids merged, {} backfilled).",
+                         "{} fragments folded, {} session ids merged, {} backfilled).",
                          dry_run ? "Would import" : "Imported",
-                         n, n_skip, n_grown, n_grown_bytes, n_started, n_merged, n_backfilled);
+                         n, n_skip, n_grown, n_grown_bytes, n_frag, n_merged, n_backfilled);
             const std::string turns_detail = std::format(
                 "{} turns imported, {} duplicates skipped, {} session ids merged, {} backfilled",
                 n, n_skip, n_merged, n_backfilled);

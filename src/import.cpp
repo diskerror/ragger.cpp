@@ -835,6 +835,21 @@ std::string strip_tool_preamble(const std::string& text) {
                                  l.compare(l.size() - 3, 3, "\xE2\x80\xA6") == 0);
     };
 
+    // A fenced block belongs to the preamble too: the gateway renders the
+    // command it is about to run as ```shell ...``` BEFORE the status line
+    // ("💻 terminal"), so the bubble's first line is a fence, not a
+    // pictograph, and a pictograph-only scan stops before it ever sees one.
+    const auto fence_at = [&](size_t k) {
+        return k < lines.size() && trim(lines[k]).starts_with("```");
+    };
+    // Index just past the fenced block opening at `k`; k itself if unclosed,
+    // so an unterminated fence can never swallow the rest of the reply.
+    const auto skip_fence = [&](size_t k) {
+        for (size_t j = k + 1; j < lines.size(); ++j)
+            if (trim(lines[j]).starts_with("```")) return j + 1;
+        return k;
+    };
+
     size_t i = 0;
     bool stripped = false;
     while (i < lines.size()) {
@@ -842,6 +857,22 @@ std::string strip_tool_preamble(const std::string& text) {
         if (starts_with_pictograph(line))                { ++i; stripped = true; continue; }
         if (stripped && line.empty())                    { ++i; continue; }
         if (stripped && line.size() <= 200 && ends_truncated(line)) { ++i; continue; }
+        if (fence_at(i)) {
+            // Consume it only if it is really status scaffolding — that is,
+            // if a status line has already been seen, or one follows this
+            // block. A reply may legitimately OPEN with a code block, and
+            // that must survive untouched.
+            const size_t after = skip_fence(i);
+            if (after == i) break;                       // unclosed fence: leave it
+            size_t k = after;
+            while (k < lines.size() && trim(lines[k]).empty()) ++k;
+            if (stripped || starts_with_pictograph(trim(lines[k < lines.size() ? k : i]))) {
+                i = after;
+                stripped = true;
+                continue;
+            }
+            break;
+        }
         break;
     }
     if (!stripped) return text;

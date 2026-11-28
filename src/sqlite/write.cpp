@@ -2198,9 +2198,18 @@ static std::string tags_from_metadata(const json& metadata) {
         const size_t np = ni.rfind(ns);
         if (ns.size() == ni.size()) return std::nullopt;             // same content
         // Map the normalized match back to raw byte offsets in `imported`.
-        const size_t raw_begin = imap[np];
-        const size_t last      = np + ns.size() - 1;
-        const size_t raw_end   = imap[last] + 1;   // one past the match's last byte
+        //
+        // Then widen the match over the markers normalization made invisible.
+        // Without this the boundary doubles them: the stored text opens with
+        // "**bold**", the match begins at the 'b', and the imported "**" just
+        // before it stays behind in the recovered prefix — producing
+        // "****bold**". The markers immediately flanking the match belong to
+        // the matched region, not to the text being recovered around it.
+        size_t raw_begin = imap[np];
+        const size_t last = np + ns.size() - 1;
+        size_t raw_end    = imap[last] + 1;   // one past the match's last byte
+        while (raw_begin > 0 && imported[raw_begin - 1] == '*') --raw_begin;
+        while (raw_end < imported.size() && imported[raw_end] == '*') ++raw_end;
         std::string out = imported.substr(0, raw_begin) + stored;
         if (raw_end < imported.size()) out += imported.substr(raw_end);
         return out == stored ? std::nullopt : std::optional<std::string>(out);
@@ -2250,6 +2259,39 @@ static std::string tags_from_metadata(const json& metadata) {
             " substr(user_text, 1, 120) = substr(?1, 1, 120))) "
             "AND created_at BETWEEN ?2 AND ?3 LIMIT 1");
         s.bind(1, user_text);
+        s.bind(2, ep - back_seconds);
+        s.bind(3, ep + forward_seconds);
+        if (!s.step()) return std::nullopt;
+        TurnRecord r;
+        r.turn_id        = s.column_int(0);
+        r.user_text      = s.column_text(1);
+        r.assistant_text = s.column_text(2);
+        return r;
+    }
+
+    // Anchor on the ASSISTANT side instead of the user side.
+    //
+    // A host can merge several consecutive user messages into one turn while
+    // the export still lists them separately. The fragment then matches no
+    // stored user_text and looks like a new exchange, so the importer inserts
+    // a duplicate turn carrying a verbatim copy of a reply already stored
+    // (observed: live turn 4465 merged two messages; the import made 4490 out
+    // of the second one with a byte-identical 2043-char reply).
+    //
+    // An exactly equal reply inside the window is the same exchange whatever
+    // the user side looks like. The length floor keeps short boilerplate
+    // ("Done.", "Yes.") from colliding across unrelated turns; a reply of
+    // this size repeating verbatim by chance is not a realistic worry.
+    std::optional<TurnRecord> Backend::Impl::find_turn_by_assistant(
+            const std::string& assistant_text, const std::string& ts,
+            int back_seconds, int forward_seconds) {
+        constexpr size_t kMinAssistantAnchor = 80;
+        if (assistant_text.size() < kMinAssistantAnchor) return std::nullopt;
+        const int64_t ep = resolve_epoch(ts);
+        Stmt s(db,
+            "SELECT turn_id, user_text, COALESCE(assistant_text, '') FROM turns "
+            "WHERE assistant_text = ?1 AND created_at BETWEEN ?2 AND ?3 LIMIT 1");
+        s.bind(1, assistant_text);
         s.bind(2, ep - back_seconds);
         s.bind(3, ep + forward_seconds);
         if (!s.step()) return std::nullopt;

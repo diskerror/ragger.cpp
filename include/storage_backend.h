@@ -288,6 +288,17 @@ public:
         return std::nullopt;
     }
 
+    /// Find a turn by its assistant text — the anchor for a user message the
+    /// host merged into a turn but the export lists separately. An exactly
+    /// equal reply of real length within the window is the same exchange,
+    /// whatever the user side looks like.
+    virtual std::optional<TurnRecord> find_turn_by_assistant(
+        const std::string& assistant_text, const std::string& ts,
+        int back_seconds, int forward_seconds) {
+        (void)assistant_text; (void)ts; (void)back_seconds; (void)forward_seconds;
+        return std::nullopt;
+    }
+
     /// Grow a stored turn from a richer copy of the same exchange, adding
     /// only text that is missing and never rewriting text already stored.
     /// `dry_run` reports what would change and writes nothing.

@@ -620,6 +620,19 @@ void test_splice_turn_text(ragger::Embedder& emb) {
     const std::string g4 = db.turn_assistant_text(t4).value_or("");
     CHECK(g4 == "Preamble. run **now** with `--flag`");   // stored bytes kept
 
+    // Splice boundary must not double a formatting marker. Normalization
+    // hides asterisks, so a match starting at a bold run's first letter used
+    // to leave the imported "**" behind in the prefix, yielding "****bold**".
+    // (Seen live on turn 4377: "****hermes-agent re-checked**".)
+    const int tb = db.store_turn("Qb?", "**hermes-agent re-checked** and fine.",
+                                 "test-model");
+    const auto sb = db.splice_turn_text(
+        tb, "Qb?", "Preamble line.\n\n**hermes-agent re-checked** and fine.", "", false);
+    CHECK(sb.grew_assistant);
+    const std::string gb = db.turn_assistant_text(tb).value_or("");
+    CHECK(gb == "Preamble line.\n\n**hermes-agent re-checked** and fine.");
+    CHECK(gb.find("****") == std::string::npos);
+
     // A differing backtick is a real difference, so no splice happens.
     const int t5 = db.store_turn("Q5?", "use `x` here", "test-model");
     CHECK(!db.splice_turn_text(t5, "Q5?", "Preamble. use x here", "", false));
@@ -675,6 +688,34 @@ void test_splice_turn_text(ragger::Embedder& emb) {
         sqlite3_close(r7);
     }
     CHECK(!db.splice_turn_text(t7, "Q7?", "A7.", "2033-05-18 03:33:00", false));
+
+    // Assistant-side anchor: a user message the host merged into a turn but
+    // the export lists separately must fold in, not insert a duplicate.
+    // (Live case: turn 4465 merged two consecutive messages; the import made
+    // 4490 from the second one carrying a byte-identical 2043-char reply.)
+    const std::string reply =
+        "Real issue, and it breaks something I proposed twenty minutes ago. "
+        "The concurrency binding order is what gives way here, and the fix is "
+        "to bind per session rather than per process.";
+    CHECK(reply.size() >= 80);
+    const int t8 = db.store_turn("A possible big issue to mention.\n\nRunning steps "
+                                 "from the terminal.", reply, "test-model");
+    // The fragment alone matches no stored user_text...
+    CHECK(!db.find_turn_fuzzy("Running steps from the terminal.", "", 90, 3600));
+    // ...but the reply identifies the exchange.
+    const auto anchor = db.find_turn_by_assistant(reply, "", 90, 3600);
+    CHECK(anchor.has_value());
+    CHECK(anchor->turn_id == t8);
+    // Folding it in changes nothing: the turn already holds the fragment.
+    const auto s8 = db.splice_turn_text(t8, "Running steps from the terminal.",
+                                        reply, "", false);
+    CHECK(!s8.grew_user && !s8.grew_assistant);
+    CHECK(s8.added_bytes == 0);
+
+    // The length floor keeps short boilerplate from colliding across turns.
+    const int t9 = db.store_turn("Q9?", "Done.", "test-model");
+    CHECK(t9 > 0);
+    CHECK(!db.find_turn_by_assistant("Done.", "", 90, 3600));
 
     // Growing a turn does not move its own timestamps.
     sqlite3* raw = nullptr;
