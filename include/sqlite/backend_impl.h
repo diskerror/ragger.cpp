@@ -753,7 +753,8 @@ struct Backend::Impl {
                                               const std::string& ts,
                                               int back_seconds, int forward_seconds);
     SpliceResult splice_turn_text(int turn_id, const std::string& user_text,
-                                  const std::string& assistant_text, bool dry_run);
+                                  const std::string& assistant_text,
+                                  const std::string& started_ts, bool dry_run);
     bool update_turn_meta(int turn_id, const std::string& timestamp,
                           const std::string& session_guid);
     // X22: the turn's current assistant_text (see storage_backend.h).

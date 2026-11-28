@@ -108,8 +108,9 @@ std::optional<TurnRecord> Backend::find_turn_fuzzy(const std::string& user_text,
 }
 
 SpliceResult Backend::splice_turn_text(int turn_id, const std::string& user_text,
-                                       const std::string& assistant_text, bool dry_run) {
-    return pImpl->splice_turn_text(turn_id, user_text, assistant_text, dry_run);
+                                       const std::string& assistant_text,
+                                       const std::string& started_ts, bool dry_run) {
+    return pImpl->splice_turn_text(turn_id, user_text, assistant_text, started_ts, dry_run);
 }
 
 bool Backend::update_turn_meta(int turn_id, const std::string& timestamp,

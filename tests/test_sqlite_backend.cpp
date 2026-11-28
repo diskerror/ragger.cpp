@@ -582,32 +582,32 @@ void test_splice_turn_text(ragger::Embedder& emb) {
     CHECK(t > 0);
 
     // Dry run reports the growth and writes nothing.
-    const auto dry = db.splice_turn_text(t, "Can we do both?", full, /*dry_run=*/true);
+    const auto dry = db.splice_turn_text(t, "Can we do both?", full, /*started_ts=*/"", /*dry_run=*/true);
     CHECK(dry);
     CHECK(dry.grew_assistant && !dry.grew_user);
     CHECK(dry.added_bytes == static_cast<int>(full.size() - truncated.size()));
     CHECK(db.turn_assistant_text(t).value_or("") == truncated);   // untouched
 
     // Real run grows it, and the stored bytes survive verbatim inside.
-    const auto wet = db.splice_turn_text(t, "Can we do both?", full, /*dry_run=*/false);
+    const auto wet = db.splice_turn_text(t, "Can we do both?", full, /*started_ts=*/"", /*dry_run=*/false);
     CHECK(wet);
     const std::string got = db.turn_assistant_text(t).value_or("");
     CHECK(got == full);
     CHECK(got.find(truncated) != std::string::npos);
 
     // Idempotent: nothing left to add, so no second write.
-    CHECK(!db.splice_turn_text(t, "Can we do both?", full, false));
+    CHECK(!db.splice_turn_text(t, "Can we do both?", full, "", false));
 
     // Never shrinks: the captured user side normally holds MORE than an
     // export (the host splices in its routing envelope and steering text),
     // so an incoming shorter user text must be ignored.
     const int t2 = db.store_turn("Do it.\n[envelope]\nAlso: be brief.",
                                  "Done.", "test-model");
-    CHECK(!db.splice_turn_text(t2, "Do it.", "Done.", false));
+    CHECK(!db.splice_turn_text(t2, "Do it.", "Done.", "", false));
 
     // No containment -> no guessing, no write.
     const int t3 = db.store_turn("Unrelated?", "Stored answer.", "test-model");
-    CHECK(!db.splice_turn_text(t3, "Unrelated?", "A completely different answer.", false));
+    CHECK(!db.splice_turn_text(t3, "Unrelated?", "A completely different answer.", "", false));
     CHECK(db.turn_assistant_text(t3).value_or("") == "Stored answer.");
 
     // Bold/italic markers may differ between capture and a rebuilt export, so
@@ -615,14 +615,66 @@ void test_splice_turn_text(ragger::Embedder& emb) {
     // boundary is meaning rather than decoration (Reid, 2026-11-27).
     const int t4 = db.store_turn("Q4?", "run **now** with `--flag`", "test-model");
     const auto s4 = db.splice_turn_text(t4, "Q4?",
-                                        "Preamble. run now with `--flag`", false);
+                                        "Preamble. run now with `--flag`", "", false);
     CHECK(s4 && s4.grew_assistant);
     const std::string g4 = db.turn_assistant_text(t4).value_or("");
     CHECK(g4 == "Preamble. run **now** with `--flag`");   // stored bytes kept
 
     // A differing backtick is a real difference, so no splice happens.
     const int t5 = db.store_turn("Q5?", "use `x` here", "test-model");
-    CHECK(!db.splice_turn_text(t5, "Q5?", "Preamble. use x here", false));
+    CHECK(!db.splice_turn_text(t5, "Q5?", "Preamble. use x here", "", false));
+
+    // started_on: supplied into a NULL, never over a stored value, and only
+    // when it precedes created_at (a start after the reply finished means the
+    // match is wrong). A fill on its own is NOT a text change, so it must not
+    // flag the summary stale.
+    const int t6 = db.store_turn("Q6?", "A6.", "test-model");
+    {
+        sqlite3* r6 = nullptr;
+        CHECK(sqlite3_open(TEMP_DB.c_str(), &r6) == SQLITE_OK);
+        // Give the row a known created_at and a NULL started_on.
+        CHECK(sqlite3_exec(r6, std::format(
+            "UPDATE turns SET created_at = 2000000000, started_on = NULL WHERE turn_id = {}; "
+            "UPDATE turn_summaries SET text = 'x', stale = 0 WHERE turn_id = {};",
+            t6, t6).c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(r6);
+    }
+    // Identical text: nothing to splice, but the NULL start is filled.
+    const auto s6 = db.splice_turn_text(t6, "Q6?", "A6.", "2033-05-17 00:00:00", false);
+    CHECK(s6);                      // truthy via filled_started alone
+    CHECK(s6.filled_started);
+    CHECK(!s6.grew_user && !s6.grew_assistant);
+    CHECK(s6.added_bytes == 0);
+    {
+        sqlite3* r6 = nullptr;
+        CHECK(sqlite3_open(TEMP_DB.c_str(), &r6) == SQLITE_OK);
+        sqlite3_stmt* q6 = nullptr;
+        sqlite3_prepare_v2(r6, std::format(
+            "SELECT t.started_on, t.created_at, s.stale FROM turns t "
+            "LEFT JOIN turn_summaries s ON s.turn_id = t.turn_id WHERE t.turn_id = {}",
+            t6).c_str(), -1, &q6, nullptr);
+        CHECK(sqlite3_step(q6) == SQLITE_ROW);
+        const sqlite3_int64 started = sqlite3_column_int64(q6, 0);
+        const sqlite3_int64 created = sqlite3_column_int64(q6, 1);
+        const int stale             = sqlite3_column_int(q6, 2);
+        CHECK(started > 0 && started < created);
+        CHECK(stale == 0);          // a timestamp fill is not a content change
+        sqlite3_finalize(q6);
+        sqlite3_close(r6);
+    }
+    // Second pass: no longer NULL, so nothing happens.
+    CHECK(!db.splice_turn_text(t6, "Q6?", "A6.", "2033-05-17 00:00:00", false));
+    // A candidate start AFTER created_at is refused.
+    const int t7 = db.store_turn("Q7?", "A7.", "test-model");
+    {
+        sqlite3* r7 = nullptr;
+        CHECK(sqlite3_open(TEMP_DB.c_str(), &r7) == SQLITE_OK);
+        CHECK(sqlite3_exec(r7, std::format(
+            "UPDATE turns SET created_at = 1000000000, started_on = NULL WHERE turn_id = {}",
+            t7).c_str(), nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(r7);
+    }
+    CHECK(!db.splice_turn_text(t7, "Q7?", "A7.", "2033-05-18 03:33:00", false));
 
     // Growing a turn does not move its own timestamps.
     sqlite3* raw = nullptr;

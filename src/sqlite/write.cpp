@@ -2278,25 +2278,52 @@ static std::string tags_from_metadata(const json& metadata) {
     SpliceResult Backend::Impl::splice_turn_text(int turn_id,
                                                  const std::string& user_text,
                                                  const std::string& assistant_text,
+                                                 const std::string& started_ts,
                                                  bool dry_run) {
         SpliceResult out;
-        Stmt q(db, "SELECT user_text, COALESCE(assistant_text, '') FROM turns WHERE turn_id = ?");
+        Stmt q(db, "SELECT user_text, COALESCE(assistant_text, ''), created_at, started_on "
+                   "FROM turns WHERE turn_id = ?");
         q.bind(1, turn_id);
         if (!q.step()) return out;
-        const std::string cur_u = q.column_text(0);
-        const std::string cur_a = q.column_text(1);
+        const std::string cur_u    = q.column_text(0);
+        const std::string cur_a    = q.column_text(1);
+        const int64_t     created  = q.column_int64(2);
+        const bool        no_start = q.is_null(3);
 
         const auto new_u = splice_text(cur_u, user_text);
         const auto new_a = splice_text(cur_a, assistant_text);
-        if (!new_u && !new_a) return out;
+
+        // started_on is the time the user's message arrived — exactly what a
+        // Telegram export stamps a turn with, and a column almost no captured
+        // row has. Supply it ONLY into a NULL (never correct a stored value:
+        // Reid's rule is that a turn's own timestamps do not move), and only
+        // when it precedes created_at, since a start after the reply finished
+        // means the match is wrong and the row should be left alone.
+        const int64_t start_ep = started_ts.empty() ? 0 : resolve_epoch(started_ts);
+        const bool fill_started = no_start && start_ep > 0 && created > 0 &&
+                                  start_ep < created;
+
+        if (!new_u && !new_a && !fill_started) return out;
 
         const std::string final_u = new_u ? *new_u : cur_u;
         const std::string final_a = new_a ? *new_a : cur_a;
         out.grew_user      = new_u.has_value();
         out.grew_assistant = new_a.has_value();
+        out.filled_started = fill_started;
         out.added_bytes    = static_cast<int>((final_u.size() + final_a.size()) -
                                               (cur_u.size() + cur_a.size()));
         if (dry_run) return out;
+
+        // A timestamp fill alone changes no text: no re-embed, no stale flag,
+        // no episode touch, no reindex. Those belong to a content change.
+        if (!new_u && !new_a) {
+            Stmt su(db, "UPDATE turns SET started_on = ? WHERE turn_id = ? AND started_on IS NULL");
+            su.bind(1, start_ep);
+            su.bind(2, turn_id);
+            if (!su.exec())
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+            return out;
+        }
 
         // Embed outside the write (ORDER contract: validate -> embed -> write).
         std::vector<float> emb;
@@ -2324,6 +2351,14 @@ static std::string tags_from_metadata(const json& metadata) {
         }
         if (!up.exec())
             throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+
+        if (fill_started) {
+            Stmt su(db, "UPDATE turns SET started_on = ? WHERE turn_id = ? AND started_on IS NULL");
+            su.bind(1, start_ep);
+            su.bind(2, turn_id);
+            if (!su.exec())
+                throw std::runtime_error(std::format(lang::ERR_STORE_FAILED, sqlite3_errmsg(db)));
+        }
 
         Stmt st(db, "UPDATE turn_summaries SET stale = stale + 1 "
                     "WHERE turn_id = ? AND text IS NOT NULL AND text <> ''");

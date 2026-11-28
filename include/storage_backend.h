@@ -44,8 +44,11 @@ class Embedder;
 struct SpliceResult {
     bool grew_user      = false;
     bool grew_assistant = false;
+    bool filled_started = false;   // a NULL started_on was supplied
     int  added_bytes    = 0;
-    explicit operator bool() const { return grew_user || grew_assistant; }
+    explicit operator bool() const {
+        return grew_user || grew_assistant || filled_started;
+    }
 };
 
 struct TurnRecord {
@@ -288,11 +291,16 @@ public:
     /// Grow a stored turn from a richer copy of the same exchange, adding
     /// only text that is missing and never rewriting text already stored.
     /// `dry_run` reports what would change and writes nothing.
+    /// `started_ts` (db format, may be empty) is the time the user's message
+    /// arrived, which is what started_on means. It is written ONLY into a
+    /// NULL, and only when it precedes the row's created_at.
     virtual SpliceResult splice_turn_text(int turn_id,
                                           const std::string& user_text,
                                           const std::string& assistant_text,
+                                          const std::string& started_ts,
                                           bool dry_run) {
-        (void)turn_id; (void)user_text; (void)assistant_text; (void)dry_run;
+        (void)turn_id; (void)user_text; (void)assistant_text;
+        (void)started_ts; (void)dry_run;
         return {};
     }
 

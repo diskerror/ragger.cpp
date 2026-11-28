@@ -115,6 +115,7 @@ public:
                                               int forward_seconds) override;
     SpliceResult splice_turn_text(int turn_id, const std::string& user_text,
                                   const std::string& assistant_text,
+                                  const std::string& started_ts,
                                   bool dry_run) override;
     bool update_turn_meta(int turn_id,
                           const std::string& timestamp = "",
